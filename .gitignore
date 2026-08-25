@@ -1,6 +1,5 @@
 /*
 !/.gitignore
-!/.cargo/
 !/.github/
 !/Cargo.toml
 !/Cargo.lock
