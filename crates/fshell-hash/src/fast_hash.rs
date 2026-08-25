@@ -102,7 +102,8 @@ impl Hasher for MapHasher {
             let mut h3 = self.hash ^ SEED3;
             let mut h4 = self.hash ^ SEED4;
 
-            for chunk in bytes.chunks_exact(64) {
+            let (chunks64, rem64) = bytes.as_chunks::<64>();
+            for chunk in chunks64 {
                 let a = read_u64(&chunk[0..8]);
                 let b = read_u64(&chunk[8..16]);
                 let c = read_u64(&chunk[16..24]);
@@ -123,8 +124,8 @@ impl Hasher for MapHasher {
             }
 
             // Process remaining 16-byte chunks
-            let remaining = &bytes[(len & !63)..];
-            for chunk in remaining.chunks_exact(16) {
+            let (chunks16, _) = rem64.as_chunks::<16>();
+            for chunk in chunks16 {
                 let a = read_u64(&chunk[0..8]);
                 let b = read_u64(&chunk[8..16]);
                 h1 = hash_word(h1, a);
