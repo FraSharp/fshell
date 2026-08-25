@@ -119,21 +119,21 @@ pub fn apply_landlock_sandbox(profile: &SandboxProfile, cwd: &Path) -> Result<()
             .any(|deny| path.starts_with(deny) || deny.starts_with(path))
     };
     let mut allowed_paths = Vec::new();
-    if !is_denied(Path::new("/tmp")) {
-        if let Ok(c) = CString::new("/tmp") {
-            allowed_paths.push(c);
-        }
+    if !is_denied(Path::new("/tmp"))
+        && let Ok(c) = CString::new("/tmp")
+    {
+        allowed_paths.push(c);
     }
-    if !is_denied(Path::new("/var/tmp")) {
-        if let Ok(c) = CString::new("/var/tmp") {
-            allowed_paths.push(c);
-        }
+    if !is_denied(Path::new("/var/tmp"))
+        && let Ok(c) = CString::new("/var/tmp")
+    {
+        allowed_paths.push(c);
     }
 
-    if !is_denied(cwd) {
-        if let Ok(c_cwd) = CString::new(cwd.to_string_lossy().into_owned()) {
-            allowed_paths.push(c_cwd);
-        }
+    if !is_denied(cwd)
+        && let Ok(c_cwd) = CString::new(cwd.to_string_lossy().into_owned())
+    {
+        allowed_paths.push(c_cwd);
     }
 
     for p in &profile.allow_write_paths {
