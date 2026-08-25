@@ -47,15 +47,15 @@ impl Session {
         }
         crossterm::terminal::enable_raw_mode()?;
         let mut out = std::io::stdout();
+        // Reset any progressive keyboard enhancement flags (CSI = 0 u) that may
+        // have lingered from a previous program or crash, ensuring standard C0 control codes.
+        let _ = out.write_all(b"\x1b[=0u");
         crossterm::execute!(
             out,
             crossterm::cursor::DisableBlinking,
             crossterm::event::EnableBracketedPaste,
             crossterm::event::EnableFocusChange,
             crossterm::event::EnableMouseCapture,
-            crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-            ),
         )?;
         out.flush()?;
         Ok(Self { _private: () })
@@ -69,11 +69,11 @@ impl Session {
         // `tcsetattr(TCSAFLUSH)` sees a clean queue.
         let mut out = std::io::stdout();
         out.flush()?;
+        let _ = out.write_all(b"\x1b[=0u");
         // These three are no-ops if the terminal doesn't support them, but
         // leaving them on leaks mouse escapes into the child's stdin.
         let _ = crossterm::execute!(
             out,
-            crossterm::event::PopKeyboardEnhancementFlags,
             crossterm::event::DisableBracketedPaste,
             crossterm::event::DisableFocusChange,
             crossterm::event::DisableMouseCapture,
@@ -92,17 +92,16 @@ impl Session {
     /// the kernel may have reset termios behind us. Idempotent.
     pub(crate) fn reenter_raw(&self) {
         let _ = crossterm::terminal::enable_raw_mode();
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[=0u");
         let _ = crossterm::execute!(
-            std::io::stdout(),
+            out,
             crossterm::cursor::DisableBlinking,
             crossterm::event::EnableBracketedPaste,
             crossterm::event::EnableFocusChange,
             crossterm::event::EnableMouseCapture,
-            crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-            ),
         );
-        let _ = std::io::stdout().flush();
+        let _ = out.flush();
     }
 }
 
@@ -111,17 +110,18 @@ impl Drop for Session {
         // Best-effort even during panic unwind. Order mirrors `TuiGuard`
         // but with a final flush so the shell that regains the tty isn't
         // left with pending escape sequences.
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[=0u");
         let _ = crossterm::execute!(
-            std::io::stdout(),
+            out,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
-            crossterm::event::PopKeyboardEnhancementFlags,
             crossterm::event::DisableBracketedPaste,
             crossterm::event::DisableFocusChange,
             crossterm::event::DisableMouseCapture,
             crossterm::cursor::Show,
             crossterm::cursor::EnableBlinking,
         );
-        let _ = std::io::stdout().flush();
+        let _ = out.flush();
         let _ = crossterm::terminal::disable_raw_mode();
     }
 }

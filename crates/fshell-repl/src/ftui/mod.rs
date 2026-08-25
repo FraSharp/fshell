@@ -922,33 +922,34 @@ pub async fn run_ftui_repl(
                     let mut relative_cursor_y = 0u16;
 
                     if term.draw(|f| {
-                        let constraints;
-                        let prompt_area_idx;
-                        let popup_area_idx;
                         let prompt_h = if multi_line_count > 1 {
                             multi_line_count + 2
                         } else {
                             1
                         };
-                        if !output_lines.is_empty() {
+                        let (constraints, prompt_area_idx, popup_area_idx) = if !output_lines.is_empty() {
                             let output_h = output_lines.len().min(
                                 f.area().height.saturating_sub(prompt_h) as usize
                             );
-                            constraints = vec![
-                                Constraint::Length(output_h as u16), // Output lines at top
-                                Constraint::Length(prompt_h),        // Prompt line(s)
-                                Constraint::Min(0),                  // Popup overlays
-                            ];
-                            prompt_area_idx = 1usize;
-                            popup_area_idx = 2usize;
+                            (
+                                vec![
+                                    Constraint::Length(output_h as u16), // Output lines at top
+                                    Constraint::Length(prompt_h),        // Prompt line(s)
+                                    Constraint::Min(0),                  // Popup overlays
+                                ],
+                                1usize,
+                                2usize,
+                            )
                         } else {
-                            constraints = vec![
-                                Constraint::Length(prompt_h), // Prompt line(s) at top
-                                Constraint::Min(0),           // Popup list / overlays below
-                            ];
-                            prompt_area_idx = 0;
-                            popup_area_idx = 1;
-                        }
+                            (
+                                vec![
+                                    Constraint::Length(prompt_h), // Prompt line(s) at top
+                                    Constraint::Min(0),           // Popup list / overlays below
+                                ],
+                                0usize,
+                                1usize,
+                            )
+                        };
 
                         let chunks = Layout::default()
                             .direction(Direction::Vertical)

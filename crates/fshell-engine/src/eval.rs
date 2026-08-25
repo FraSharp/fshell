@@ -1315,89 +1315,6 @@ pub(crate) fn check_sigint(env: &Env) -> Result<(), EngineError> {
     }
 }
 
-/// Raw-mode aware Ctrl-C check — handles kitty keyboard protocol (`CSI 99;5u` / `CSI 99:5u`)
-/// and plain `0x03` when the terminal is in raw mode with `DISAMBIGUATE_ESCAPE_CODES`.
-/// Falls back to `sigint_pending` when not in raw mode.
-/// Also handles direct `0x03` and the raw escape sequence via `libc::read` as a
-/// fallback when `crossterm` is not decoding the kitty sequence (seen as
-/// `^[[99;5u` being echoed).
-fn poll_crossterm_ctrl_c() -> bool {
-    // First, try the normal SIGINT flag (cooked mode).
-    // This is checked in `check_sigint_or_ctrl_c`, but we keep a fast path here
-    // for when crossterm poll is not needed.
-    // Then try crossterm's decoded events.
-    if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false)
-        && let Ok(true) = crossterm::event::poll(std::time::Duration::from_millis(0))
-        && let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read()
-        && key
-            .modifiers
-            .contains(crossterm::event::KeyModifiers::CONTROL)
-        && matches!(
-            key.code,
-            crossterm::event::KeyCode::Char('c') | crossterm::event::KeyCode::Char('C')
-        )
-    {
-        return true;
-    }
-    if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
-        // Fallback: raw bytes on stdin (handles `0x03` and kitty `ESC[99;5u` not decoded).
-        // Use `poll` + `read` on fd 0 with O_NONBLOCK to avoid hanging.
-        unsafe {
-            let mut pfd = libc::pollfd {
-                fd: 0,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            if libc::poll(&mut pfd, 1, 0) > 0 && (pfd.revents & libc::POLLIN) != 0 {
-                let mut buf = [0u8; 32];
-                let n = libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
-                if n > 0 {
-                    let slice = &buf[..n as usize];
-                    // Plain Ctrl-C
-                    if slice.contains(&3) {
-                        return true;
-                    }
-                    // Kitty: ESC [ 9 9 ; 5 u  or ESC [ 9 9 : 5 u  (and variants)
-                    // Look for the byte sequence that `^[[99;5u` represents.
-                    // `^[[` is ESC '['
-                    if slice.windows(2).any(|w| w == [27, b'[']) {
-                        // If we see CSI and 'u' terminator, and it contains "99" and "5", treat as Ctrl-C.
-                        // This is broad but safe for the `every` interrupt path.
-                        let s = String::from_utf8_lossy(slice);
-                        if s.contains("99") && s.contains('5') && s.contains('u') {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        return false;
-    }
-    false
-}
-
-async fn check_sigint_or_ctrl_c(env: &Env) -> bool {
-    if env.job_control.sigint_pending.load(Ordering::Acquire) {
-        env.job_control
-            .sigint_pending
-            .store(false, Ordering::SeqCst);
-        return true;
-    }
-    // Check raw-mode Ctrl-C via crossterm without blocking the async runtime.
-    let is_ctrl_c = tokio::task::spawn_blocking(poll_crossterm_ctrl_c)
-        .await
-        .unwrap_or(false);
-    if is_ctrl_c {
-        // Mirror the SIGINT path for other waiters.
-        env.job_control.sigint_pending.store(true, Ordering::SeqCst);
-        env.job_control
-            .sigint_pending
-            .store(false, Ordering::SeqCst);
-        return true;
-    }
-    false
-}
-
 /// Evaluate a list of statements as a loop body iteration.
 /// Returns `Ok(true)` to continue the outer loop, `Ok(false)` to break,
 /// or `Err(e)` to propagate.
@@ -2295,9 +2212,7 @@ pub fn eval_stmt<'a>(
                 };
 
                 loop {
-                    if check_sigint_or_ctrl_c(env).await {
-                        return Err(EngineError::from("Interrupted by Ctrl+C"));
-                    }
+                    check_sigint(env)?;
 
                     // Header for each tick — makes the stream scannable and
                     // distinguishes ticks when the underlying data hasn't changed.
@@ -2311,9 +2226,7 @@ pub fn eval_stmt<'a>(
                     );
 
                     for stmt in body {
-                        if check_sigint_or_ctrl_c(env).await {
-                            return Err(EngineError::from("Interrupted by Ctrl+C"));
-                        }
+                        check_sigint(env)?;
 
                         match stmt.unpack() {
                             Stmt::Expr(expr) => {
@@ -2350,16 +2263,11 @@ pub fn eval_stmt<'a>(
                     }
 
                     // Wait for next tick, polling cancellation every 100ms.
-                    // Also polls raw-mode Ctrl-C (kitty `CSI 99;5u` / 0x03) so that
-                    // `every` can be interrupted even when the session is in raw
-                    // + kitty keyboard protocol where SIGINT is not generated.
                     loop {
                         tokio::select! {
                             _ = interval.tick() => { break; }
                             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                                if check_sigint_or_ctrl_c(env).await {
-                                    return Err(EngineError::from("Interrupted by Ctrl+C"));
-                                }
+                                check_sigint(env)?;
                             }
                         }
                     }

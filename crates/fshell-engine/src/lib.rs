@@ -2687,6 +2687,7 @@ pub(crate) fn pipeline_finalize(
 
 /// Send a pipeline payload with try_send first for backpressure visibility.
 /// Logs a warning (rate-limited) and bumps the backpressure counter when the channel is full.
+#[allow(clippy::result_unit_err)]
 pub async fn send_with_backpressure(
     env: &Env,
     tx: &PipeSender,

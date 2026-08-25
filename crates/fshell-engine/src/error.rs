@@ -299,9 +299,7 @@ impl DiagnosticExt for EngineError {
                 )]
             }
             EngineError::TypeMismatch { .. } => {
-                vec![format!(
-                    "Try a type conversion like `to_text()` or `to_int()`."
-                )]
+                vec!["Try a type conversion like `to_text()` or `to_int()`.".into()]
             }
             EngineError::CapabilityDenied { action, .. } => {
                 vec![format!(
