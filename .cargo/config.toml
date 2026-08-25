@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# fshell .cargo config — macOS native CPU optimization
+# See AGENTS.md: macOS builds get -C target-cpu=native
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]
+
+# x86_64 on Apple Silicon: native would be apple-m1 (aarch64), invalid for x86_64
+# Use a generic x86_64 baseline so `cargo build --target x86_64-apple-darwin` works on M1/M2/M3
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=x86-64"]

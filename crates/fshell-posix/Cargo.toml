@@ -1,0 +1,25 @@
+[package]
+name = "fshell-posix"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "POSIX compatibility engine for fshell — polyglot substrate with dual-stream execution"
+repository.workspace = true
+
+[dependencies]
+libc = { workspace = true }
+fshell-core = { path = "../fshell-core" }
+fshell-engine = { path = "../fshell-engine" }
+tokio = { workspace = true }
+brush-parser = { workspace = true }
+glob = { workspace = true }
+walkdir.workspace = true
+ustr.workspace = true
+async-recursion = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }

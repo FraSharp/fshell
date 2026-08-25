@@ -1,0 +1,56 @@
+[package]
+name = "fshell-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Evaluator and pipeline executor for fshell"
+repository.workspace = true
+
+[dependencies]
+fshell-core = { path = "../fshell-core" }
+fshell-capabilities = { path = "../fshell-capabilities" }
+fshell-render = { path = "../fshell-render" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+rmp-serde = { workspace = true }
+notify = { workspace = true }
+miette = { workspace = true }
+thiserror = { workspace = true }
+toml_edit = { workspace = true }
+indexmap = { workspace = true }
+ustr = { workspace = true }
+libc = { workspace = true }
+globset = { workspace = true }
+fshell-hash = { workspace = true }
+csv = { workspace = true }
+tempfile = { workspace = true }
+terminal_size = { workspace = true }
+ureq = { workspace = true }
+rand = { workspace = true }
+hostname = { workspace = true }
+regex = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+crossterm = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1"
+criterion = { workspace = true }
+fshell-builtins = { path = "../fshell-builtins" }
+fshell-bridge = { path = "../fshell-bridge" }
+
+[[bench]]
+name = "eval"
+harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+

@@ -1,0 +1,48 @@
+[package]
+name = "fshell-fuzz"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fshell-core = { path = "../crates/fshell-core" }
+fshell-posix = { path = "../crates/fshell-posix" }
+fshell-hash = { path = "../crates/fshell-hash" }
+fshell-panes = { path = "../crates/fshell-panes" }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+rmp-serde = { workspace = true }
+
+[[bin]]
+name = "parser"
+path = "fuzz_targets/parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "posix_parser"
+path = "fuzz_targets/posix_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "codecs"
+path = "fuzz_targets/codecs.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "terminal_grid"
+path = "fuzz_targets/terminal_grid.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sponge_hash"
+path = "fuzz_targets/sponge_hash.rs"
+test = false
+doc = false

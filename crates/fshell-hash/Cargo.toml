@@ -1,0 +1,33 @@
+[package]
+name = "fshell-hash"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Universal sponge-based hash provider for fshell"
+repository.workspace = true
+
+[features]
+default = ["std", "fast", "digest"]
+std = []
+fast = []
+digest = ["dep:digest"]
+
+[dependencies]
+digest = { version = "0.11.3", optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+fhash = { path = ".", package = "fshell-hash" }
+criterion = { workspace = true }
+fxhash = "0.2.1"
+
+[[bench]]
+name = "hash_benchmarks"
+harness = false
+
+[[bench]]
+name = "hasher_comparison"
+harness = false

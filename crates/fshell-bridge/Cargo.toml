@@ -1,0 +1,35 @@
+[package]
+name = "fshell-bridge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "External process fallback and glob for fshell"
+repository.workspace = true
+
+[dependencies]
+fshell-core = { path = "../fshell-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+fshell-engine = { path = "../fshell-engine" }
+fshell-sandbox = { path = "../fshell-sandbox" }
+indexmap = { workspace = true }
+fshell-hash = { path = "../fshell-hash", features = ["std"] }
+ustr = { workspace = true }
+libc = { workspace = true }
+crossterm = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+fshell-builtins = { path = "../fshell-builtins" }
+
+[[bench]]
+name = "bridge"
+harness = false
+
+

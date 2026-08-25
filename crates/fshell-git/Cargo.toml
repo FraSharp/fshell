@@ -1,0 +1,26 @@
+[package]
+name = "fshell-git"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Git integration for fshell — native index inspection without git subprocess"
+repository.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+flate2 = { workspace = true }
+hex = { workspace = true }
+fshell-hash = { path = "../fshell-hash", features = ["std"] }
+memmap2 = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "git_benchmarks"
+harness = false

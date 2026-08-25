@@ -1,0 +1,55 @@
+[package]
+name = "fshell-repl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Reedline + ratatui REPL for fshell"
+repository.workspace = true
+
+[features]
+ai = []
+
+[dependencies]
+fshell-core = { path = "../fshell-core" }
+fshell-engine = { path = "../fshell-engine" }
+fshell-builtins = { path = "../fshell-builtins" }
+fshell-bridge = { path = "../fshell-bridge" }
+fshell-render = { path = "../fshell-render" }
+fshell-git = { path = "../fshell-git" }
+fshell-hash = { workspace = true }
+reedline = { workspace = true }
+nucleo-matcher = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+miette = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+serde_json = { workspace = true }
+ustr = { workspace = true }
+nu-ansi-term = { workspace = true }
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+chrono = { workspace = true }
+libc = { workspace = true }
+toml_edit = { workspace = true }
+dirs = { workspace = true }
+hex = { workspace = true }
+lscolors = { workspace = true }
+futures = { workspace = true }
+arboard = { workspace = true }
+base64 = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "interactive"
+harness = false
+

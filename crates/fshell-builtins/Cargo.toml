@@ -1,0 +1,68 @@
+[package]
+name = "fshell-builtins"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Builtins for fshell (~117 commands)"
+repository.workspace = true
+
+[features]
+sandbox = ["fshell-sandbox"]
+vault = []
+ai = ["ureq"]
+http = ["ureq"]
+sql = []
+chart = []
+config-tui = ["fshell-config-tui"]
+notify = []
+ff = []
+replace = []
+extract = []
+
+[dependencies]
+fshell-core = { path = "../fshell-core" }
+fshell-capabilities = { path = "../fshell-capabilities" }
+fshell-engine = { path = "../fshell-engine" }
+fshell-render = { path = "../fshell-render" }
+tokio = { workspace = true }
+serde = { workspace = true }
+miette = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+indexmap = { workspace = true }
+ustr = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+crossterm = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }
+fshell-ls = { path = "../fshell-ls" }
+fshell-panes = { path = "../fshell-panes" }
+fshell-hash = { workspace = true }
+toml_edit = { workspace = true }
+walkdir = { workspace = true }
+nu-ansi-term = { workspace = true }
+ratatui = { workspace = true }
+nucleo-matcher = { workspace = true }
+getrandom = { workspace = true }
+
+# gated deps
+fshell-sandbox = { path = "../fshell-sandbox", optional = true }
+fshell-config-tui = { path = "../fshell-config-tui", optional = true }
+ureq = { workspace = true, optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+fshell-bridge = { path = "../fshell-bridge" }
+fshell-render = { path = "../fshell-render" }
+
+[[bench]]
+name = "builtins"
+harness = false
+

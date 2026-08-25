@@ -1,0 +1,20 @@
+[package]
+name = "fshell-render"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Miette-based error rendering for fshell"
+repository.workspace = true
+
+[dependencies]
+fshell-core = { path = "../fshell-core" }
+miette = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+thiserror = { workspace = true }
