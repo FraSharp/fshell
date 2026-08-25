@@ -129,7 +129,7 @@ terminal_size = "0.4"
 globset = "0.4"
 walkdir = "2"
 csv = "1.4"
-ureq = { version = "3.3.0", default-features = false, features = ["native-tls", "gzip"] }
+ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzip"] }
 tempfile = "3"
 criterion = { version = "0.8.2", features = ["async_tokio", "html_reports"] }
 cc = "1.2"

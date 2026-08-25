@@ -71,7 +71,6 @@ ok "clippy native"
 
 say "2b/7 clippy x86_64-unknown-linux-gnu (Linux mode_t trap)"
 # This catches unnecessary_cast on libc::S_* that only fires on Linux (mode_t u32 vs macOS u16).
-# On macOS this needs a Linux sysroot (openssl-sys fails) — use `cross` or CI for exact parity.
 if [[ "$(uname)" == "Darwin" ]]; then
   if command -v cross >/dev/null 2>&1; then
     say "  Darwin → using cross for Linux clippy"
