@@ -53,7 +53,7 @@ pub fn render(
     match effective_format {
         RenderFormat::Auto => unreachable!(),
         RenderFormat::Graphical => render_graphical(diag, source, source_name, config.color),
-        RenderFormat::Compact => render_compact(diag, source, config.color),
+        RenderFormat::Compact => render_compact(diag, source, source_name, config.color),
         RenderFormat::Explain => render_explain(diag, source, source_name, config.color),
         RenderFormat::Json => render_json(diag),
     }
@@ -122,7 +122,7 @@ fn calculate_line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
-fn render_compact(diag: FshDiag, source: Option<&str>, color: bool) -> String {
+fn render_compact(diag: FshDiag, source: Option<&str>, source_name: &str, color: bool) -> String {
     let diag_ref = diag.report.as_ref();
     let code = diag
         .code
@@ -135,6 +135,9 @@ fn render_compact(diag: FshDiag, source: Option<&str>, color: bool) -> String {
     let effective_source = source
         .map(|s| s.to_string())
         .or_else(|| diag.source.as_ref().map(|s| (**s).clone()));
+    let _effective_name = source
+        .map(|_| source_name.to_string())
+        .or_else(|| diag.source_name.clone());
     let location =
         if let (Some(src), Some(labels)) = (effective_source.as_deref(), diag_ref.labels()) {
             labels
@@ -182,11 +185,13 @@ fn render_compact(diag: FshDiag, source: Option<&str>, color: bool) -> String {
 }
 
 fn render_explain(diag: FshDiag, source: Option<&str>, source_name: &str, color: bool) -> String {
-    let diag_ref = diag.report.as_ref();
+    let help = diag.report.as_ref().help().map(|h| h.to_string());
+    let report_code = diag.report.as_ref().code().map(|c| c.to_string());
+    let diag_message = diag.report.as_ref().to_string();
     let code_str = diag
         .code
         .map(|c| c.code_str().to_string())
-        .or_else(|| diag_ref.code().map(|c| c.to_string()))
+        .or_else(|| report_code.clone())
         .unwrap_or_else(|| "FSH-GEN-001".into());
 
     let name = diag.code.map(|c| c.name()).unwrap_or(diag.category);
@@ -197,6 +202,8 @@ fn render_explain(diag: FshDiag, source: Option<&str>, source_name: &str, color:
         .unwrap_or("A shell evaluation or execution failure occurred.");
 
     let docs_url = diag.code.and_then(|c| c.docs_url());
+    let fix = diag.fix.clone();
+    let suggestions = diag.suggestions.clone();
 
     let (c_cyan, c_dim, c_bold, c_yellow, c_green, c_reset) = if color {
         (
@@ -219,7 +226,7 @@ fn render_explain(diag: FshDiag, source: Option<&str>, source_name: &str, color:
         pad = "─".repeat(pad_len)
     ));
     out.push_str(&format!("{c_dim}{desc}{c_reset}\n\n"));
-    out.push_str(&format!("{c_bold}Message:{c_reset} {diag_ref}\n"));
+    out.push_str(&format!("{c_bold}Message:{c_reset} {diag_message}\n"));
 
     let effective_source = source
         .map(|s| (s.to_string(), source_name.to_string()))
@@ -230,7 +237,7 @@ fn render_explain(diag: FshDiag, source: Option<&str>, source_name: &str, color:
                 .map(|(s, n)| ((**s).clone(), n.clone()))
         });
     if let Some((src, name)) = effective_source {
-        let mut snippet_report = diag.clone().into_inner();
+        let mut snippet_report = diag.into_inner();
         snippet_report = snippet_report.with_source_code(miette::NamedSource::new(name, src));
         let mut snippet_out = String::new();
         let theme = if color {
@@ -244,18 +251,21 @@ fn render_explain(diag: FshDiag, source: Option<&str>, source_name: &str, color:
         for line in snippet_out.lines() {
             out.push_str(&format!("  {line}\n"));
         }
+    } else {
+        // diag was not consumed above when effective_source is None; drop it
+        drop(diag);
     }
 
-    if let Some(help) = diag_ref.help() {
+    if let Some(help) = help {
         out.push_str(&format!("\n  {c_dim}↳ help:{c_reset} {help}\n"));
     }
-    if let Some(ref fix) = diag.fix {
+    if let Some(fix) = fix {
         out.push_str(&format!("  {c_green}↳ fix:{c_reset}  {fix}\n"));
     }
-    if !diag.suggestions.is_empty() {
+    if !suggestions.is_empty() {
         out.push_str(&format!(
             "  {c_yellow}↳ did you mean:{c_reset} {}\n",
-            diag.suggestions.join(", ")
+            suggestions.join(", ")
         ));
     }
     if let Some(url) = docs_url {

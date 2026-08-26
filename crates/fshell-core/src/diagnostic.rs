@@ -512,7 +512,25 @@ impl FshDiag {
             Ok(report) => report,
             Err(arc) => {
                 let msg = format!("{arc}");
-                crate::ShellError::from(msg).into()
+                let code = self.code.unwrap_or(ErrorCode::General);
+                let span = arc
+                    .labels()
+                    .and_then(|mut it| it.next())
+                    .map(|l| miette::SourceSpan::new(l.offset().into(), l.len()));
+                let mut err = crate::ShellError::new(code, msg);
+                if let Some(s) = span {
+                    err = err.with_span(s);
+                }
+                if let Some(help) = arc.help().map(|h| h.to_string()) {
+                    err = err.with_help(help);
+                }
+                if let Some(fix) = self.fix.clone() {
+                    err = err.with_fix(fix);
+                }
+                if !self.suggestions.is_empty() {
+                    err = err.with_suggestions(self.suggestions.clone());
+                }
+                err.into()
             }
         }
     }
