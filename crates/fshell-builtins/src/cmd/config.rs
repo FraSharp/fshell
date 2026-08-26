@@ -8,6 +8,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload, ShellOptions};
+use miette::SourceSpan;
 use nu_ansi_term::Color;
 use std::sync::Arc;
 
@@ -34,6 +35,7 @@ pub fn setopt_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         let opts = env.options.read();
@@ -88,12 +90,13 @@ pub fn unsetopt_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err(ShellError::new(
-            ErrorCode::MissingArgument,
-            "unsetopt: missing option names",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::MissingArgument, "unsetopt: missing option names")
+                .maybe_with_span(span),
+        );
     }
     setopt_impl(&args, env, false)
 }
@@ -103,12 +106,14 @@ pub fn unset_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err(ShellError::new(
             ErrorCode::InvalidArgument,
             "unset: expected variable or function name",
-        ));
+        )
+        .maybe_with_span(span));
     }
 
     env.ensure_env_populated();
@@ -131,7 +136,7 @@ pub fn unset_builtin(
                 return Err(BuiltinError::InvalidArgument {
                     cmd: "unset".into(),
                     arg: format!("{:?}", arg),
-                    span: None,
+                    span,
                 }
                 .into());
             }
@@ -158,6 +163,7 @@ pub fn set_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return set_list(env, tx);
@@ -177,7 +183,8 @@ pub fn set_builtin(
                     return Err(ShellError::new(
                         ErrorCode::InvalidArgument,
                         "set: key must be a string",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
             };
             set_show(key, env, tx)
@@ -189,7 +196,8 @@ pub fn set_builtin(
                     return Err(ShellError::new(
                         ErrorCode::InvalidArgument,
                         "set: key must be a string",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
             };
             set_apply(key, &args[1..], env)
@@ -765,6 +773,7 @@ pub fn config_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return config_list(env, tx);
@@ -796,10 +805,10 @@ pub fn config_builtin(
         "list" => config_list(env, tx),
         "get" => {
             if args.len() < 2 {
-                return Err(ShellError::new(
-                    ErrorCode::MissingArgument,
-                    "config get: missing key",
-                ));
+                return Err(
+                    ShellError::new(ErrorCode::MissingArgument, "config get: missing key")
+                        .maybe_with_span(span),
+                );
             }
             let key = match &args[1] {
                 Val::String(s) => s.as_str(),
@@ -807,7 +816,8 @@ pub fn config_builtin(
                     return Err(ShellError::new(
                         ErrorCode::InvalidArgument,
                         "config get: key must be a string",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
             };
             config_get(env, key, tx)
@@ -817,7 +827,8 @@ pub fn config_builtin(
                 return Err(ShellError::new(
                     ErrorCode::MissingArgument,
                     "config set: missing key or value",
-                ));
+                )
+                .maybe_with_span(span));
             }
             let key = match &args[1] {
                 Val::String(s) => s.as_str(),
@@ -825,14 +836,15 @@ pub fn config_builtin(
                     return Err(ShellError::new(
                         ErrorCode::InvalidArgument,
                         "config set: key must be a string",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
             };
             let val = &args[2];
             config_set(env, key, val)
         }
         "reload" => config_reload_sync(env),
-        _ => Err(ShellError::invalid_argument("config", cmd, None)
+        _ => Err(ShellError::invalid_argument("config", cmd, span)
             .with_help("Expected one of: list/get/set/reload")),
     }
 }
@@ -842,6 +854,7 @@ pub fn alias_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let str_args: Vec<String> = args
         .iter()
@@ -906,7 +919,8 @@ pub fn alias_builtin(
                 ErrorCode::NotFound,
                 format!("alias: {}: not found", name),
             )
-            .with_help(format!("Define with `alias {name}=\"<expansion>\"`")));
+            .with_help(format!("Define with `alias {name}=\"<expansion>\"`"))
+            .maybe_with_span(span));
         }
     }
 
@@ -1043,6 +1057,7 @@ pub fn hook_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let str_args: Vec<String> = args
         .iter()
@@ -1530,7 +1545,9 @@ pub fn format_pipeline(p: &fshell_core::Pipeline) -> String {
     let mut stages = Vec::new();
     for stage in &p.stages {
         let s = match stage {
-            fshell_core::PipelineStage::CommandCall { name, args, env } => {
+            fshell_core::PipelineStage::CommandCall {
+                name, args, env, ..
+            } => {
                 let mut cmd = String::new();
                 for (k, v) in env {
                     cmd.push_str(&format!("{k}={} ", format_expr(v)));
@@ -1596,25 +1613,27 @@ pub fn funced_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err(ShellError::new(
-            ErrorCode::InvalidArgument,
-            "funced: expected function name",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::InvalidArgument, "funced: expected function name")
+                .maybe_with_span(span),
+        );
     }
     let Val::String(name) = &args[0] else {
         return Err(ShellError::new(
             ErrorCode::InvalidArgument,
             "funced: function name must be a string",
-        ));
+        )
+        .maybe_with_span(span));
     };
 
     // 1. Retrieve function from memory
     let (params, ret_type, body) = {
         let fns = env.fns.read();
         let Some(f) = fns.get(name) else {
-            return Err(ShellError::function_not_found(name, None));
+            return Err(ShellError::function_not_found(name, span));
         };
         f.clone()
     };
@@ -1757,7 +1776,8 @@ pub fn funced_builtin(
             ErrorCode::InvalidArgument,
             format!("funced: cannot rename function from '{name}' to '{parsed_name}'"),
         )
-        .with_help(format!("Keep the function name as '{name}' when editing")));
+        .with_help(format!("Keep the function name as '{name}' when editing"))
+        .maybe_with_span(span));
     }
 
     // 8. Update in memory
@@ -1783,12 +1803,14 @@ pub fn funcsave_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err(ShellError::new(
             ErrorCode::InvalidArgument,
             "funcsave: expected function name",
-        ));
+        )
+        .maybe_with_span(span));
     }
     let Val::String(name) = &args[0] else {
         return Err("funcsave: function name must be a string"
@@ -1800,7 +1822,7 @@ pub fn funcsave_builtin(
     let (params, ret_type, body) = {
         let fns = env.fns.read();
         let Some(f) = fns.get(name) else {
-            return Err(ShellError::function_not_found(name, None));
+            return Err(ShellError::function_not_found(name, span));
         };
         f.clone()
     };

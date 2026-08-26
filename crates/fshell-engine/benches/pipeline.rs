@@ -4,6 +4,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use fshell_core::{Expr, Pipeline, PipelineStage, StringPart, Val};
 use fshell_engine::{Env, PipelinePayload, execute_pipeline};
+use miette::SourceSpan;
 use std::hint::black_box;
 
 fn make_env_with_items(count: usize) -> (tokio::runtime::Runtime, Env) {
@@ -47,6 +48,7 @@ fn pipeline_filter(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Filter {
                 condition: Expr::BinaryOp {
@@ -87,6 +89,7 @@ fn pipeline_sort(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Sort {
                 column: "value".to_string(),
@@ -124,6 +127,7 @@ fn pipeline_map(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Map {
                 projections: vec![Expr::Ident("name".to_string())],
@@ -160,6 +164,7 @@ fn pipeline_multi_stage(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Filter {
                 condition: Expr::BinaryOp {
@@ -208,6 +213,7 @@ fn pipeline_grep_10k(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Grep {
                 pattern: Expr::String(vec![StringPart::Lit("item_5".to_string())]),
@@ -243,6 +249,7 @@ fn pipeline_count_10k(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Count,
         ],
@@ -276,6 +283,7 @@ fn pipeline_limit_10k_100(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Limit {
                 amount: Expr::Int(100),
@@ -311,6 +319,7 @@ fn pipeline_sort_desc_10k(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Sort {
                 column: "value".to_string(),
@@ -347,6 +356,7 @@ fn pipeline_filter_string_10k(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Filter {
                 condition: Expr::BinaryOp {
@@ -386,6 +396,7 @@ fn pipeline_multi_stage_all_10k(c: &mut Criterion) {
                 name: "items".to_string(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Filter {
                 condition: Expr::BinaryOp {

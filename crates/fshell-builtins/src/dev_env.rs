@@ -5,12 +5,14 @@ use crate::error::BuiltinError;
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream};
+use miette::SourceSpan;
 
 pub fn eval_direnv_builtin(
     _in_rx: Option<PipeStream>,
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     // Check process spawn capability
     env.enforce_capability("eval_direnv", CapAction::ProcessSpawn)?;
@@ -93,6 +95,7 @@ pub fn load_env_file_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     load_env_file_internal(env, tx)
 }

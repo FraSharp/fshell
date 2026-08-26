@@ -6,6 +6,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::handoff::HandoffState;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::os::unix::process::CommandExt;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ pub fn session_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let subcmd = args.first().map(|v| v.to_text()).unwrap_or_default();
 
@@ -42,7 +44,7 @@ pub fn session_builtin(
         other => Err(BuiltinError::InvalidArgument {
             cmd: CMD.into(),
             arg: other.into(),
-            span: None,
+            span,
         }
         .into()),
     }
@@ -575,7 +577,8 @@ mod tests {
     async fn test_session_unknown_subcommand() {
         let env = init_env();
         let (tx, _rx) = mpsc::channel(100);
-        let err = session_builtin(None, vec![Val::String("blargh".into())], &env, tx).unwrap_err();
+        let err =
+            session_builtin(None, vec![Val::String("blargh".into())], &env, tx, None).unwrap_err();
         assert!(err.message.contains("invalid argument"), "got: {err}");
         assert!(err.message.contains("blargh"), "got: {err}");
     }

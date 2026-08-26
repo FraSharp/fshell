@@ -35,10 +35,11 @@ all builtins implement the `BuiltinHandler` signature (`crates/fshell-engine/src
 
 ```rust
 Arc<dyn Fn(
-    Option<PipeStream>, // Upstream input stream (if piped)
-    Vec<Val>,           // Evaluated argument list
-    &Env,               // Runtime environment reference
-    PipeSender,         // Downstream output channel
+    Option<PipeStream>,      // Upstream input stream (if piped)
+    Vec<Val>,                // Evaluated argument list
+    &Env,                    // Runtime environment reference
+    PipeSender,              // Downstream output channel
+    Option<SourceSpan>,      // Call-site span for diagnostics
 ) -> Result<(), ShellError> + Send + Sync>
 ```
 

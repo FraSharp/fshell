@@ -520,7 +520,7 @@ async fn run_ls_utility(args: &[String]) -> i32 {
         }
     });
 
-    match fshell_builtins::ls_builtin(None, converted, &env, tx) {
+    match fshell_builtins::ls_builtin(None, converted, &env, tx, None) {
         Ok(_) => {
             consumer.await.ok();
             0

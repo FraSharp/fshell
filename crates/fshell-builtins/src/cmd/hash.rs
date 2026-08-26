@@ -5,6 +5,7 @@ use crate::error::BuiltinError;
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ pub fn hash_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut algo = "256".to_string();
     let mut xof_len = 32;
@@ -51,7 +53,7 @@ pub fn hash_builtin(
                                     return Err(BuiltinError::InvalidArgument {
                                         cmd: "hash".into(),
                                         arg: format!("invalid -o value: {}", n_str),
-                                        span: None,
+                                        span,
                                     }
                                     .into());
                                 }
@@ -60,7 +62,7 @@ pub fn hash_builtin(
                                 return Err(BuiltinError::InvalidArgument {
                                     cmd: "hash".into(),
                                     arg: format!("invalid -o value: {:?}", other),
-                                    span: None,
+                                    span,
                                 }
                                 .into());
                             }
@@ -72,7 +74,7 @@ pub fn hash_builtin(
                     return Err(BuiltinError::InvalidArgument {
                         cmd: "hash".into(),
                         arg: format!("unknown option '{}'", s),
-                        span: None,
+                        span,
                     }
                     .into());
                 } else {
@@ -97,7 +99,7 @@ pub fn hash_builtin(
         return Err(BuiltinError::InvalidArgument {
             cmd: "hash".into(),
             arg: format!("unknown algorithm '{}'", algo),
-            span: None,
+            span,
         }
         .into());
     }

@@ -8,6 +8,7 @@ use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::keybindings::{KeyAction, KeyMapMode};
 use fshell_engine::{Env, PipeSender, PipeStream};
+use miette::SourceSpan;
 
 /// `bind` / `bindkey` builtin command.
 ///
@@ -25,6 +26,7 @@ pub fn builtin_bind(
     args: Vec<Val>,
     env: &Env,
     _out: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let arg_strs: Vec<String> = args
         .iter()
@@ -66,10 +68,11 @@ pub fn builtin_bind(
                         return Err(ShellError::new(
                             ErrorCode::InvalidArgument,
                             format!("unknown keymap mode: {}", mode_str),
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 } else {
-                    return Err(ShellError::missing_argument("bind", "-M/--mode", None));
+                    return Err(ShellError::missing_argument("bind", "-M/--mode", span));
                 }
             }
             "-s" | "--macro" => macro_mode = true,

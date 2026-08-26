@@ -5,6 +5,7 @@ use crate::error::BuiltinError;
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 use ustr::ustr;
 
@@ -13,6 +14,7 @@ pub fn replace_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let (old_text, new_text, globs, dry_run) = parse_args(&args)?;
 

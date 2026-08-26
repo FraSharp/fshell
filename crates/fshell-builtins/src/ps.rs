@@ -5,6 +5,7 @@ use crate::error::BuiltinError;
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::io::BufRead;
 use std::sync::Arc;
 use ustr::ustr;
@@ -14,6 +15,7 @@ pub fn ps_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     // Check process spawn capability (we delegate to ps command)
     env.enforce_capability("ps", fshell_engine::CapAction::ProcessSpawn)?;

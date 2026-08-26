@@ -4,6 +4,7 @@
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 use ustr::ustr;
 
@@ -12,6 +13,7 @@ pub fn files_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let path_str = match args.first() {
         Some(Val::String(s)) => s.clone(),

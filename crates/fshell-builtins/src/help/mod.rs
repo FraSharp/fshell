@@ -4,6 +4,7 @@
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
@@ -547,6 +548,7 @@ pub fn help_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let color = env.options.read().error_color;
 

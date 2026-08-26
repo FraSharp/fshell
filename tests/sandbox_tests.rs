@@ -322,6 +322,7 @@ async fn test_destructive_rm_root_blocked_in_non_interactive() {
         &env,
         tx,
         false,
+        None,
     );
 
     assert!(
@@ -354,6 +355,7 @@ async fn test_safe_rm_target_allowed() {
         &env,
         tx,
         false,
+        None,
     );
 
     assert!(
@@ -386,6 +388,7 @@ async fn test_unsetopt_confirm_destructive_allows_rm() {
         &env,
         tx,
         false,
+        None,
     );
 
     assert!(

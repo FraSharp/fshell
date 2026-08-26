@@ -381,6 +381,7 @@ pub async fn execute_pipeline(
                 name,
                 args,
                 env: inline_env,
+                span,
             } => {
                 let is_var = if args.is_empty() {
                     let has_var = {
@@ -1001,6 +1002,7 @@ pub async fn execute_pipeline(
                                 restore_inline_env(&env_clone, saved_env_values, saved_top_values);
                             });
                         } else if let Some(handler) = env_clone.get_builtin(&name) {
+                            let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();
                             let cancel = cancel_tx.clone();
                             tokio::task::spawn_blocking(move || {
@@ -1012,6 +1014,7 @@ pub async fn execute_pipeline(
                                     evaluated_args,
                                     &env_clone,
                                     out_tx.clone(),
+                                    handler_span,
                                 ) {
                                     Ok(()) => {
                                         if env_clone.is_last_stage {
@@ -1034,6 +1037,7 @@ pub async fn execute_pipeline(
                                 restore_inline_env(&env_clone, saved_env_values, saved_top_values);
                             });
                         } else if let Some(fallback) = env_clone.get_fallback_handler() {
+                            let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();
                             tokio::task::spawn_blocking(move || {
                                 if *stage_cancel.borrow() {
@@ -1047,6 +1051,7 @@ pub async fn execute_pipeline(
                                     &env_clone,
                                     out_tx.clone(),
                                     has_next,
+                                    handler_span,
                                 ) {
                                     let code = if e.code == fshell_core::ErrorCode::CommandNotFound
                                     {

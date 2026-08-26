@@ -11,6 +11,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -446,6 +447,7 @@ pub fn ls_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     fshell_core::debug_log!(
         "ls_builtin called, is_captured={}, is_last_stage={}",
@@ -670,6 +672,7 @@ pub fn cd_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let raw_path = if !args.is_empty() {
         match &args[0] {
@@ -695,7 +698,8 @@ pub fn cd_builtin(
                 return Err(ShellError::new(
                     ErrorCode::InvalidArgument,
                     "cd argument must be a string path",
-                ));
+                )
+                .maybe_with_span(span));
             }
         }
     } else {
@@ -752,7 +756,7 @@ pub fn cd_builtin(
                 return Err(BuiltinError::IoError {
                     cmd: "cd".into(),
                     message: format!("invalid path {raw_path:?}: {e}"),
-                    span: None,
+                    span,
                 }
                 .into());
             }
@@ -769,6 +773,7 @@ pub fn pushd_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut vars = env.vars.write();
 
@@ -790,7 +795,8 @@ pub fn pushd_builtin(
                 return Err(ShellError::new(
                     ErrorCode::InvalidArgument,
                     "pushd: invalid entry in stack",
-                ));
+                )
+                .maybe_with_span(span));
             }
         };
         let target = std::path::PathBuf::from(top_str);
@@ -808,7 +814,8 @@ pub fn pushd_builtin(
                 return Err(ShellError::new(
                     ErrorCode::InvalidArgument,
                     "pushd: argument must be a string path",
-                ));
+                )
+                .maybe_with_span(span));
             }
         };
         let target = std::fs::canonicalize(expand_tilde(&target_arg))
@@ -832,6 +839,7 @@ pub fn popd_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut vars = env.vars.write();
 
@@ -851,7 +859,8 @@ pub fn popd_builtin(
             return Err(ShellError::new(
                 ErrorCode::InvalidArgument,
                 "popd: invalid entry in stack",
-            ));
+            )
+            .maybe_with_span(span));
         }
     };
     let target = std::path::PathBuf::from(top_str);
@@ -872,6 +881,7 @@ pub fn dirs_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut verbose = false;
     for arg in args {
@@ -947,6 +957,7 @@ pub fn extract_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err("extract requires at least one archive file path"
@@ -960,7 +971,8 @@ pub fn extract_builtin(
             return Err(ShellError::new(
                 ErrorCode::InvalidArgument,
                 "extract argument must be a string path",
-            ));
+            )
+            .maybe_with_span(span));
         }
     };
 
@@ -1077,6 +1089,7 @@ pub fn extract_builtin(
                             ErrorCode::IoError,
                             format!("Failed to spawn extraction command: {}", e),
                         )
+                        .maybe_with_span(span)
                         .into(),
                     ))
                     .await;
@@ -1180,6 +1193,7 @@ pub fn head_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let (n, paths) = parse_head_tail_args(&args)?;
 
@@ -1221,6 +1235,7 @@ pub fn head_builtin(
                                 ErrorCode::IoError,
                                 format!("Failed to open file {path:?}: {e}"),
                             )
+                            .maybe_with_span(span)
                             .into(),
                         ))
                         .await;
@@ -1243,6 +1258,7 @@ pub fn head_builtin(
                                     ErrorCode::IoError,
                                     format!("Error reading {path:?}: {e}"),
                                 )
+                                .maybe_with_span(span)
                                 .into(),
                             ))
                             .await;
@@ -1261,6 +1277,7 @@ pub fn tail_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let (n, paths) = parse_head_tail_args(&args)?;
 
@@ -1301,6 +1318,7 @@ pub fn tail_builtin(
                                 ErrorCode::IoError,
                                 format!("Failed to open file {path:?}: {e}"),
                             )
+                            .maybe_with_span(span)
                             .into(),
                         ))
                         .await;
@@ -1325,6 +1343,7 @@ pub fn tail_builtin(
                                     ErrorCode::IoError,
                                     format!("Error reading {path:?}: {e}"),
                                 )
+                                .maybe_with_span(span)
                                 .into(),
                             ))
                             .await;
@@ -1349,6 +1368,7 @@ pub fn uniq_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut paths = Vec::new();
     for arg in args {
@@ -1360,7 +1380,8 @@ pub fn uniq_builtin(
                 return Err(ShellError::new(
                     ErrorCode::InvalidArgument,
                     "Unexpected non-string argument to uniq",
-                ));
+                )
+                .maybe_with_span(span));
             }
         }
     }
@@ -1418,6 +1439,7 @@ pub fn uniq_builtin(
                                 ErrorCode::IoError,
                                 format!("Failed to read file {:?}: {}", path, e),
                             )
+                            .maybe_with_span(span)
                             .into(),
                         ))
                         .await;
@@ -1435,6 +1457,7 @@ pub fn echo_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut no_newline = false;
     let mut interpret_escapes = false;
@@ -1490,6 +1513,7 @@ pub fn clear_builtin(
     _args: Vec<Val>,
     _env: &Env,
     _tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     print!("\x1B[2J\x1B[3J\x1B[1;1H");
     let _ = std::io::stdout().flush();
@@ -1501,6 +1525,7 @@ pub fn wrap_builtin(
     _args: Vec<Val>,
     _env: &Env,
     _tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let (_, h) = crossterm::terminal::size().unwrap_or((80, 24));
     print!("{}", "\n".repeat(h as usize));
@@ -1514,6 +1539,7 @@ pub fn type_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let names: Vec<String> = args
         .into_iter()
@@ -1524,10 +1550,10 @@ pub fn type_builtin(
         .collect::<Result<Vec<_>, _>>()?;
 
     if names.is_empty() {
-        return Err(ShellError::new(
-            ErrorCode::MissingArgument,
-            "type: missing operand",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::MissingArgument, "type: missing operand")
+                .maybe_with_span(span),
+        );
     }
 
     for name in names {
@@ -1626,6 +1652,7 @@ pub fn pwd_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let current_dir =
         std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
@@ -1647,6 +1674,7 @@ pub fn watch_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut path_args = Vec::new();
     for arg in &args {
@@ -1656,7 +1684,8 @@ pub fn watch_builtin(
             return Err(ShellError::new(
                 ErrorCode::InvalidArgument,
                 "watch argument must be a string path",
-            ));
+            )
+            .maybe_with_span(span));
         }
     }
 
@@ -1745,12 +1774,13 @@ pub fn mkdir_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err(ShellError::new(
-            ErrorCode::MissingArgument,
-            "mkdir: missing operand",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::MissingArgument, "mkdir: missing operand")
+                .maybe_with_span(span),
+        );
     }
 
     let mut make_parents = false;
@@ -1767,10 +1797,10 @@ pub fn mkdir_builtin(
     }
 
     if paths.is_empty() {
-        return Err(ShellError::new(
-            ErrorCode::MissingArgument,
-            "mkdir: missing operand",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::MissingArgument, "mkdir: missing operand")
+                .maybe_with_span(span),
+        );
     }
 
     for path_str in paths {
@@ -1815,12 +1845,13 @@ pub fn touch_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err(ShellError::new(
-            ErrorCode::MissingArgument,
-            "touch: missing file operand",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::MissingArgument, "touch: missing file operand")
+                .maybe_with_span(span),
+        );
     }
 
     for arg in args {
@@ -1828,7 +1859,8 @@ pub fn touch_builtin(
             return Err(ShellError::new(
                 ErrorCode::InvalidArgument,
                 "touch: argument must be a string",
-            ));
+            )
+            .maybe_with_span(span));
         };
         let path = expand_tilde(&s);
         env.enforce_capability("touch", CapAction::WriteFile(path.clone()))?;
@@ -1855,6 +1887,7 @@ pub fn cat_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         if let Some(mut stream) = in_rx {

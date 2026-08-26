@@ -7,6 +7,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -230,6 +231,7 @@ pub fn z_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         let db_path = match get_frecency_db_path() {
@@ -317,7 +319,8 @@ pub fn z_builtin(
                 return Err(ShellError::new(
                     ErrorCode::InvalidArgument,
                     "z arguments must be strings",
-                ));
+                )
+                .maybe_with_span(span));
             }
         }
     }
@@ -345,6 +348,7 @@ pub fn zi_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut fragments = Vec::new();
     let mut subdirectory_only = false;
@@ -361,7 +365,8 @@ pub fn zi_builtin(
                 return Err(ShellError::new(
                     ErrorCode::InvalidArgument,
                     "zi arguments must be strings",
-                ));
+                )
+                .maybe_with_span(span));
             }
         }
     }
@@ -417,7 +422,7 @@ pub fn zi_builtin(
         return Err(BuiltinError::NotFound {
             cmd: "cd".into(),
             what: format!("directory matching {:?}", fragments),
-            span: None,
+            span,
         }
         .into());
     }
@@ -457,14 +462,16 @@ pub fn zi_builtin(
                             return Err(ShellError::new(
                                 ErrorCode::Cancelled,
                                 "Interactive selection cancelled",
-                            ));
+                            )
+                            .maybe_with_span(span));
                         }
                         selected
                     } else {
                         return Err(ShellError::new(
                             ErrorCode::Cancelled,
                             "Interactive selection cancelled",
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 }
                 Err(_) => {
@@ -502,24 +509,26 @@ pub fn zi_builtin(
         }
 
         if read_res.is_err() {
-            return Err(ShellError::new(ErrorCode::IoError, "Failed to read input"));
+            return Err(
+                ShellError::new(ErrorCode::IoError, "Failed to read input").maybe_with_span(span)
+            );
         }
 
         let input_trimmed = input.trim();
         if input_trimmed.eq_ignore_ascii_case("q") {
-            return Err(ShellError::new(
-                ErrorCode::Cancelled,
-                "Interactive selection cancelled",
-            ));
+            return Err(
+                ShellError::new(ErrorCode::Cancelled, "Interactive selection cancelled")
+                    .maybe_with_span(span),
+            );
         }
 
         match input_trimmed.parse::<usize>() {
             Ok(idx) if idx > 0 && idx <= displayed_count => candidates[idx - 1].clone(),
             _ => {
-                return Err(ShellError::new(
-                    ErrorCode::InvalidArgument,
-                    "Invalid selection",
-                ));
+                return Err(
+                    ShellError::new(ErrorCode::InvalidArgument, "Invalid selection")
+                        .maybe_with_span(span),
+                );
             }
         }
     } else {

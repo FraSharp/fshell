@@ -6,6 +6,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -14,6 +15,7 @@ pub fn sort_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut reverse = false;
     let mut key = None;
@@ -38,7 +40,7 @@ pub fn sort_builtin(
                                 "value for -k/--key must be a string, got: {:?}",
                                 args[idx + 1]
                             ),
-                            span: None,
+                            span,
                         }
                         .into());
                     }
@@ -46,7 +48,7 @@ pub fn sort_builtin(
                     return Err(BuiltinError::MissingArgument {
                         cmd: "sort".into(),
                         description: "key field name after -k/--key".into(),
-                        span: None,
+                        span,
                     }
                     .into());
                 }
@@ -57,7 +59,7 @@ pub fn sort_builtin(
                     return Err(BuiltinError::InvalidArgument {
                         cmd: "sort".into(),
                         arg: s.clone(),
-                        span: None,
+                        span,
                     }
                     .into());
                 }
@@ -70,7 +72,7 @@ pub fn sort_builtin(
                 return Err(BuiltinError::InvalidArgument {
                     cmd: "sort".into(),
                     arg: s.clone(),
-                    span: None,
+                    span,
                 }
                 .into());
             }
@@ -79,7 +81,7 @@ pub fn sort_builtin(
                     return Err(BuiltinError::InvalidArgument {
                         cmd: "sort".into(),
                         arg: "multiple list arguments".into(),
-                        span: None,
+                        span,
                     }
                     .into());
                 }
@@ -89,7 +91,7 @@ pub fn sort_builtin(
                 return Err(BuiltinError::InvalidArgument {
                     cmd: "sort".into(),
                     arg: format!("{:?}", other),
-                    span: None,
+                    span,
                 }
                 .into());
             }
@@ -148,6 +150,7 @@ pub fn sort_builtin(
                             "Reduce input size or increase limit with `sort --max-items {}`",
                             sort_max_items
                         ))
+                        .maybe_with_span(span)
                         .into(),
                     ))
                     .await;

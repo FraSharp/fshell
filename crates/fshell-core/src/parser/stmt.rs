@@ -4,6 +4,7 @@
 use crate::ast::*;
 use crate::expand_braces;
 use crate::{ParseError, Parser};
+use miette::SourceSpan;
 
 impl Parser {
     /// Primary entry point: parse a block of statements.
@@ -1403,6 +1404,7 @@ impl Parser {
         inline_env: Vec<(String, Expr)>,
     ) -> Result<PipelineStage, ParseError> {
         self.skip_whitespace();
+        let start = self.pos;
         let name = self.parse_command_name()?;
         self.skip_horizontal_whitespace();
         let has_flag = {
@@ -1412,7 +1414,11 @@ impl Parser {
             }
             p < self.input.len() && self.input[p] == '-'
         };
-        self.parse_stage_inner(name, has_flag, inline_env)
+        let mut stage = self.parse_stage_inner(name, has_flag, inline_env)?;
+        if let PipelineStage::CommandCall { span, .. } = &mut stage {
+            *span = SourceSpan::new(start.into(), self.pos - start);
+        }
+        Ok(stage)
     }
 
     fn parse_stage_inner(
@@ -1586,6 +1592,7 @@ impl Parser {
                     name,
                     args,
                     env: inline_env,
+                    span: SourceSpan::new(0.into(), 0),
                 })
             }
         }

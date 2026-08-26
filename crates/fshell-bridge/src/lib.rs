@@ -8,6 +8,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload, resolve_cached_command_path};
+use miette::SourceSpan;
 use std::io::Write;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
@@ -159,7 +160,12 @@ impl Drop for InteractiveTerminalGuard {
 }
 
 /// Checks if a command matches catastrophic destructive patterns (e.g. `rm -rf /` or raw disk writes).
-fn check_destructive_command(name: &str, args: &[Val], env: &Env) -> Result<(), ShellError> {
+fn check_destructive_command(
+    name: &str,
+    args: &[Val],
+    env: &Env,
+    span: Option<SourceSpan>,
+) -> Result<(), ShellError> {
     let confirm_destructive = env.options.read().confirm_destructive;
 
     if !confirm_destructive {
@@ -283,7 +289,8 @@ fn check_destructive_command(name: &str, args: &[Val], env: &Env) -> Result<(), 
                     "Cancelled dangerous operation: {name} {}",
                     arg_strs.join(" ")
                 ),
-            ))
+            )
+            .maybe_with_span(span))
         }
     } else {
         Err(ShellError::new(
@@ -292,7 +299,8 @@ fn check_destructive_command(name: &str, args: &[Val], env: &Env) -> Result<(), 
                 "Dangerous operation '{name} {}' ({warning_detail}) blocked by default safety guard. Run with 'unsafe <cmd>' or unsetopt confirm_destructive to bypass.",
                 arg_strs.join(" ")
             ),
-        ))
+        )
+        .maybe_with_span(span))
     }
 }
 
@@ -304,6 +312,7 @@ pub fn run_external(
     env: &Env,
     tx: PipeSender,
     has_next: bool,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let cnf_debug = std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1");
     let ext_start = std::time::Instant::now();
@@ -317,7 +326,7 @@ pub fn run_external(
     }
 
     // 0. Pre-flight footgun protection for catastrophic commands
-    check_destructive_command(name, &args, env)?;
+    check_destructive_command(name, &args, env, span)?;
 
     // 1. Verify Tier 2 process spawn capability
     env.enforce_capability(name, fshell_engine::CapAction::ProcessSpawn)?;
@@ -666,7 +675,8 @@ pub fn run_external(
                         "Hint: size literals must not have a space — use 100KB not 100 KB. Valid units: B, KB (1000), MB, GB, TB, PB, EB and KiB (1024), MiB, GiB, TiB, PiB, EiB, or shorthand K/M/G/T/P/E (1024-based). Example: ls | filter size > 10KB",
                     )
                     .with_fix(format!("remove the space: 100{name}"))
-                    .with_suggestion(format!("remove the space: 100{name}")));
+                    .with_suggestion(format!("remove the space: 100{name}"))
+                    .maybe_with_span(span));
                 }
                 let cache_start = std::time::Instant::now();
                 if let Some(suggestion) = lookup_cached(name) {
@@ -684,7 +694,8 @@ pub fn run_external(
                         format!("Command not found: {name}"),
                     )
                     .with_suggestion(suggestion)
-                    .with_help("Check the command spelling or install the package."));
+                    .with_help("Check the command spelling or install the package.")
+                    .maybe_with_span(span));
                 }
                 if cnf_debug {
                     eprintln!(
@@ -710,12 +721,14 @@ pub fn run_external(
                 )
                 .with_help(
                     "Check the command name, PATH variable, or type `help` for available builtins.",
-                ));
+                )
+                .maybe_with_span(span));
             }
             return Err(ShellError::new(
                 ErrorCode::CommandFailed,
                 format!("Failed to spawn {name}: {e}"),
-            ));
+            )
+            .maybe_with_span(span));
         }
     };
 
@@ -958,8 +971,8 @@ fn parse_json_value(json: serde_json::Value) -> Val {
 }
 
 pub fn init(env: &Env) {
-    env.set_fallback_handler(Arc::new(|name, args, in_rx, env, tx, has_next| {
-        run_external(name, args, in_rx, env, tx, has_next)
+    env.set_fallback_handler(Arc::new(|name, args, in_rx, env, tx, has_next, span| {
+        run_external(name, args, in_rx, env, tx, has_next, span)
     }));
 }
 

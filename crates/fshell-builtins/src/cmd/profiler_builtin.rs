@@ -5,6 +5,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::profiler::{ProfilerCategory, ProfilerEdge, ProfilerEntry};
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +14,7 @@ pub fn profile_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let strings: Vec<String> = args
         .iter()

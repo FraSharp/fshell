@@ -6,6 +6,7 @@ use fshell_core::ShellError;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_core::{ResourceHandle, Val};
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ pub fn fs_readwrite_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let path_str = if !args.is_empty() {
         match &args[0] {
@@ -28,7 +30,8 @@ pub fn fs_readwrite_builtin(
         return Err(ShellError::new(
             ErrorCode::MissingArgument,
             "fs-readwrite: missing path operand",
-        ));
+        )
+        .maybe_with_span(span));
     };
     let path = crate::utils::expand_tilde(&path_str);
     let path2 = path.clone();
@@ -52,6 +55,7 @@ pub fn net_all_builtin(
     _args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     tokio::spawn(async move {
         let _ = tx
@@ -68,6 +72,7 @@ pub fn process_spawn_builtin(
     _args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     tokio::spawn(async move {
         let _ = tx
@@ -101,6 +106,7 @@ pub fn caps_audit_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let action = match args.first() {
         Some(Val::String(s)) => s.as_str(),
@@ -150,7 +156,7 @@ pub fn caps_audit_builtin(
                     "revoke: index must be between 1 and {}",
                     sorted_handles.len()
                 ),
-                span: None,
+                span,
             }
             .into());
         }
@@ -227,6 +233,7 @@ pub fn strict_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let action = match args.first() {
         Some(Val::String(s)) => s.as_str(),
@@ -254,7 +261,8 @@ pub fn strict_builtin(
             return Err(ShellError::new(
                 ErrorCode::InvalidArgument,
                 "strict: command name must be a string",
-            ));
+            )
+            .maybe_with_span(span));
         }
     };
     let cmd_args: Vec<Val> = args[1..].to_vec();
@@ -264,11 +272,11 @@ pub fn strict_builtin(
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     let result = if let Some(handler) = env.get_builtin(&name) {
-        handler(in_rx, cmd_args, env, tx)
+        handler(in_rx, cmd_args, env, tx, span)
     } else if let Some(fallback) = env.get_fallback_handler() {
-        fallback(&name, cmd_args, in_rx, env, tx, false)
+        fallback(&name, cmd_args, in_rx, env, tx, false, span)
     } else {
-        Err(ShellError::command_not_found(&name, None))
+        Err(ShellError::command_not_found(&name, span))
     };
 
     env.caps
@@ -278,14 +286,21 @@ pub fn strict_builtin(
     result
 }
 
+#[allow(clippy::type_complexity)]
 pub fn make_path_cap_builtin(
     name: &'static str,
     variant: fn(PathBuf) -> ResourceHandle,
-) -> impl Fn(Option<PipeStream>, Vec<Val>, &Env, PipeSender) -> Result<(), ShellError>
+) -> impl Fn(
+    Option<PipeStream>,
+    Vec<Val>,
+    &Env,
+    PipeSender,
+    Option<SourceSpan>,
+) -> Result<(), ShellError>
 + Send
 + Sync
 + 'static {
-    move |_in_rx, args, _env, tx| {
+    move |_in_rx, args, _env, tx, _span| {
         let val = if !args.is_empty() {
             match &args[0] {
                 Val::String(s) => s.clone(),
@@ -318,14 +333,21 @@ pub fn make_path_cap_builtin(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub fn make_str_cap_builtin(
     name: &'static str,
     variant: fn(String) -> ResourceHandle,
-) -> impl Fn(Option<PipeStream>, Vec<Val>, &Env, PipeSender) -> Result<(), ShellError>
+) -> impl Fn(
+    Option<PipeStream>,
+    Vec<Val>,
+    &Env,
+    PipeSender,
+    Option<SourceSpan>,
+) -> Result<(), ShellError>
 + Send
 + Sync
 + 'static {
-    move |_in_rx, args, _env, tx| {
+    move |_in_rx, args, _env, tx, _span| {
         let val = if !args.is_empty() {
             match &args[0] {
                 Val::String(s) => s.clone(),

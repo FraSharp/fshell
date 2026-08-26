@@ -8,6 +8,7 @@ use fshell_core::val::FxIndexMap;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use fshell_hash::FxBuildHasher;
 use fshell_render::{RenderConfig, RenderFormat};
+use miette::SourceSpan;
 use std::str::FromStr;
 use std::sync::Arc;
 use ustr::ustr;
@@ -17,6 +18,7 @@ pub fn explain_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let opts = env.options.read();
     let color = opts.error_color;
@@ -142,7 +144,9 @@ EXAMPLES:
                     code.default_description().to_string()
                 };
                 let diag = FshDiag::from(
-                    ShellError::new(code, code.default_description()).with_help(help),
+                    ShellError::new(code, code.default_description())
+                        .with_help(help)
+                        .maybe_with_span(span),
                 );
                 let rendered = fshell_render::render(diag, None, "explain", &config);
                 let payload = Arc::new(Val::String(rendered));
@@ -153,7 +157,7 @@ EXAMPLES:
             }
             Err(_) => {
                 return Err(
-                    ShellError::invalid_argument("explain", target_code_str, None).with_help(
+                    ShellError::invalid_argument("explain", target_code_str, span).with_help(
                         "Provide a valid error code (e.g. FSH-TYPE-001) or run `explain --list`.",
                     ),
                 );

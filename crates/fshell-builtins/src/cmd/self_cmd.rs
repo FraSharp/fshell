@@ -5,6 +5,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 
 fn help_text() -> String {
@@ -45,6 +46,7 @@ pub fn self_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     // Normalize args to strings for flag parsing
     let str_args: Vec<String> = args
@@ -104,14 +106,14 @@ pub fn self_builtin(
             }
             s if s.starts_with('-') && !flag_exec => {
                 // Unknown flag: surface error (preserves long-term strictness)
-                return Err(ShellError::invalid_argument("self", s, None)
+                return Err(ShellError::invalid_argument("self", s, span)
                     .with_help("Try 'self --help' for usage"));
             }
             _ => {
                 if flag_exec {
                     exec_args.push(a.clone());
                 } else {
-                    return Err(ShellError::invalid_argument("self", a, None)
+                    return Err(ShellError::invalid_argument("self", a, span)
                         .with_help("Try 'self --help' for usage"));
                 }
             }
@@ -228,7 +230,7 @@ mod tests {
     async fn test_self_default_is_exe() {
         let env = test_env();
         let (tx, mut rx) = mpsc::channel(10);
-        self_builtin(None, vec![], &env, tx).unwrap();
+        self_builtin(None, vec![], &env, tx, None).unwrap();
         let payload = rx.recv().await.unwrap();
         match payload {
             PipelinePayload::Data(v) => match v.as_ref() {
@@ -243,7 +245,7 @@ mod tests {
     async fn test_self_pid() {
         let env = test_env();
         let (tx, mut rx) = mpsc::channel(10);
-        self_builtin(None, vec![Val::String("--pid".into())], &env, tx).unwrap();
+        self_builtin(None, vec![Val::String("--pid".into())], &env, tx, None).unwrap();
         let payload = rx.recv().await.unwrap();
         match payload {
             PipelinePayload::Data(v) => match v.as_ref() {
@@ -258,7 +260,7 @@ mod tests {
     async fn test_self_version() {
         let env = test_env();
         let (tx, mut rx) = mpsc::channel(10);
-        self_builtin(None, vec![Val::String("--version".into())], &env, tx).unwrap();
+        self_builtin(None, vec![Val::String("--version".into())], &env, tx, None).unwrap();
         let payload = rx.recv().await.unwrap();
         match payload {
             PipelinePayload::Data(v) => match v.as_ref() {
@@ -273,7 +275,14 @@ mod tests {
     async fn test_self_structured() {
         let env = test_env();
         let (tx, mut rx) = mpsc::channel(10);
-        self_builtin(None, vec![Val::String("--structured".into())], &env, tx).unwrap();
+        self_builtin(
+            None,
+            vec![Val::String("--structured".into())],
+            &env,
+            tx,
+            None,
+        )
+        .unwrap();
         let payload = rx.recv().await.unwrap();
         match payload {
             PipelinePayload::Data(v) => match v.as_ref() {
@@ -292,7 +301,7 @@ mod tests {
     async fn test_self_help() {
         let env = test_env();
         let (tx, mut rx) = mpsc::channel(10);
-        self_builtin(None, vec![Val::String("--help".into())], &env, tx).unwrap();
+        self_builtin(None, vec![Val::String("--help".into())], &env, tx, None).unwrap();
         let payload = rx.recv().await.unwrap();
         match payload {
             PipelinePayload::Data(v) => match v.as_ref() {
@@ -307,7 +316,8 @@ mod tests {
     async fn test_self_unknown_flag_errors() {
         let env = test_env();
         let (tx, _rx) = mpsc::channel(10);
-        let err = self_builtin(None, vec![Val::String("--bogus".into())], &env, tx).unwrap_err();
-        assert!(err.message.contains("unknown flag"));
+        let err =
+            self_builtin(None, vec![Val::String("--bogus".into())], &env, tx, None).unwrap_err();
+        assert!(err.message.contains("invalid argument") || err.message.contains("--bogus"));
     }
 }

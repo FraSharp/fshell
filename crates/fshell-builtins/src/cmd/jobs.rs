@@ -5,6 +5,7 @@ use crate::error::BuiltinError;
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 
 pub fn jobs_builtin(
@@ -12,6 +13,7 @@ pub fn jobs_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let jobs = env.job_control.jobs.read().clone();
     tokio::spawn(async move {
@@ -73,6 +75,7 @@ pub fn fg_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let (job_id, pgid, cmd) = resolve_job(&args, env, "fg")?;
 
@@ -170,6 +173,7 @@ pub fn bg_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let (job_id, pgid, cmd) = resolve_job(&args, env, "bg")?;
 
@@ -195,6 +199,7 @@ pub fn kill_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err("kill: expected at least one PID or job ID"
@@ -262,7 +267,7 @@ pub fn kill_builtin(
                     return Err(BuiltinError::InvalidArgument {
                         cmd: "kill".into(),
                         arg: format!("invalid PID or job ID: {}", s),
-                        span: None,
+                        span,
                     }
                     .into());
                 }
@@ -284,6 +289,7 @@ pub fn wait_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let env = env.clone();
     let tx = tx.clone();
@@ -309,6 +315,7 @@ pub fn disown_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let (job_id, pgid, cmd) = resolve_job(&args, env, "disown")?;
     let mut jobs = env.job_control.jobs.write();

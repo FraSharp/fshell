@@ -898,21 +898,21 @@ async fn test_native_cli_integrations() {
     let (tx, _rx) = tokio::sync::mpsc::channel(100);
 
     // 1. Direnv init
-    fshell_builtins::direnv_init_builtin(None, vec![], &env, tx.clone()).unwrap();
+    fshell_builtins::direnv_init_builtin(None, vec![], &env, tx.clone(), None).unwrap();
     assert!(fshell_engine::get_hooks("chpwd", &env).contains(&"eval_direnv".to_string()));
     assert!(fshell_engine::get_hooks("precmd", &env).contains(&"eval_direnv".to_string()));
 
     // 2. Zoxide init
-    fshell_builtins::zoxide_init_builtin(None, vec![], &env, tx.clone()).unwrap();
+    fshell_builtins::zoxide_init_builtin(None, vec![], &env, tx.clone(), None).unwrap();
     assert!(fshell_engine::get_hooks("chpwd", &env).contains(&"zoxide_hook".to_string()));
 
     // 3. Starship init
-    fshell_builtins::starship_init_builtin(None, vec![], &env, tx.clone()).unwrap();
+    fshell_builtins::starship_init_builtin(None, vec![], &env, tx.clone(), None).unwrap();
     assert!(fshell_engine::get_hooks("precmd", &env).contains(&"starship_precmd".to_string()));
     assert!(fshell_engine::get_hooks("preexec", &env).contains(&"starship_preexec".to_string()));
 
     // 4. FZF init
-    fshell_builtins::fzf_init_builtin(None, vec![], &env, tx.clone()).unwrap();
+    fshell_builtins::fzf_init_builtin(None, vec![], &env, tx.clone(), None).unwrap();
     let chord = fshell_engine::keybindings::KeyChord::parse("ctrl-t").unwrap();
     assert_eq!(
         env.keybindings

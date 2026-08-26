@@ -302,7 +302,8 @@ async fn test_e2e_config_reload_resets_and_resources() {
     }
 
     // Run config reload
-    fshell_builtins::config_builtin(None, vec![Val::String("reload".into())], &env, tx).unwrap();
+    fshell_builtins::config_builtin(None, vec![Val::String("reload".into())], &env, tx, None)
+        .unwrap();
 
     // Should have reset to defaults then re-sourced init.fsh
     let opts = env.options.read();
@@ -320,7 +321,7 @@ async fn test_e2e_config_reload_resets_and_resources() {
 async fn test_config_list_after_tui_crate_added() {
     let env = setup_test_env();
     let (tx, _rx) = tokio::sync::mpsc::channel(100);
-    let result = fshell_builtins::config_builtin(None, vec![], &env, tx);
+    let result = fshell_builtins::config_builtin(None, vec![], &env, tx, None);
     assert!(result.is_ok());
 }
 
@@ -565,6 +566,7 @@ async fn test_unified_config_get_set_apply() {
         vec![Val::String("get".into()), Val::String("autocd".into())],
         &env,
         tx,
+        None,
     )
     .unwrap();
     if let Some(fshell_engine::PipelinePayload::Data(val)) = rx.recv().await {

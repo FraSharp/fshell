@@ -6,6 +6,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +18,7 @@ pub fn read_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut prompt_str = None;
     let mut timeout_secs = None;
@@ -41,7 +43,8 @@ pub fn read_builtin(
                 return Err(ShellError::new(
                     ErrorCode::InvalidArgument,
                     "read: expected prompt string after -p",
-                ));
+                )
+                .maybe_with_span(span));
             }
         } else if s == "-t" {
             if idx + 1 < args.len() {
@@ -58,7 +61,8 @@ pub fn read_builtin(
                 return Err(ShellError::new(
                     ErrorCode::InvalidArgument,
                     "read: expected timeout value after -t",
-                ));
+                )
+                .maybe_with_span(span));
             }
         } else if s == "-s" {
             silent = true;

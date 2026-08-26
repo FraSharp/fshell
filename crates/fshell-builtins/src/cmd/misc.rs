@@ -7,6 +7,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use nu_ansi_term::Color;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,6 +87,7 @@ pub fn reload_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let is_build_debug = args.iter().any(|arg| match arg {
         Val::String(s) => s == "--build-debug" || s == "-bd",
@@ -177,7 +179,7 @@ pub fn reload_builtin(
                 return Err(BuiltinError::InternalError {
                     cmd: "reload".into(),
                     message: e.to_string(),
-                    span: None,
+                    span,
                 }
                 .into());
             }
@@ -273,7 +275,8 @@ pub fn reload_builtin(
     Err(ShellError::new(
         ErrorCode::CommandFailed,
         format!("execvp failed: {}", std::io::Error::last_os_error()),
-    ))
+    )
+    .maybe_with_span(span))
 }
 
 pub fn which_builtin(
@@ -281,12 +284,13 @@ pub fn which_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err(ShellError::new(
-            ErrorCode::MissingArgument,
-            "which: missing argument",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::MissingArgument, "which: missing argument")
+                .maybe_with_span(span),
+        );
     }
 
     let mut paths = Vec::new();
@@ -336,7 +340,7 @@ pub fn which_builtin(
             return Err(BuiltinError::NotFound {
                 cmd: "which".into(),
                 what: name.to_string(),
-                span: None,
+                span,
             }
             .into());
         }
@@ -358,6 +362,7 @@ pub fn caps_profile_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut curr =
         std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?;
@@ -424,7 +429,8 @@ pub fn caps_profile_builtin(
             return Err(ShellError::new(
                 ErrorCode::InvalidArgument,
                 "caps: profile name must be a string",
-            ));
+            )
+            .maybe_with_span(span));
         }
     };
 
@@ -694,6 +700,7 @@ pub fn test_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         tokio::spawn(async move {
@@ -711,7 +718,7 @@ pub fn test_builtin(
         return Err(BuiltinError::UnexpectedArgument {
             cmd: "test".into(),
             arg: val_to_display_string(&args[parser.pos]),
-            span: None,
+            span,
         }
         .into());
     }
@@ -734,16 +741,18 @@ pub fn bracket_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.last().is_none_or(|a| val_to_display_string(a) != "]") {
         return Err(ShellError::new(
             ErrorCode::InvalidArgument,
             "[: expected ']' to close bracket test",
-        ));
+        )
+        .maybe_with_span(span));
     }
     let len = args.len();
     let inner_args: Vec<Val> = args.into_iter().take(len - 1).collect();
-    test_builtin(input, inner_args, env, tx)
+    test_builtin(input, inner_args, env, tx, span)
 }
 
 fn format_printf(format: &str, args: &[Val]) -> Result<String, String> {
@@ -1048,12 +1057,13 @@ pub fn printf_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err(ShellError::new(
-            ErrorCode::MissingArgument,
-            "printf: missing format string",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::MissingArgument, "printf: missing format string")
+                .maybe_with_span(span),
+        );
     }
 
     let format_str = val_to_display_string(&args[0]);
@@ -1076,6 +1086,7 @@ pub fn true_builtin(
     _args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     tokio::spawn(async move {
         let _ = tx
@@ -1090,6 +1101,7 @@ pub fn false_builtin(
     _args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     tokio::spawn(async move {
         let _ = tx
@@ -1134,12 +1146,13 @@ pub fn sleep_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err(ShellError::new(
-            ErrorCode::MissingArgument,
-            "sleep: missing duration",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::MissingArgument, "sleep: missing duration")
+                .maybe_with_span(span),
+        );
     }
 
     let duration_str = val_to_display_string(&args[0]);
@@ -1167,6 +1180,7 @@ pub fn lint_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let source = if args.is_empty() {
         return Err("lint: requires a file path or inline source".into());
@@ -1184,7 +1198,8 @@ pub fn lint_builtin(
                 return Err(ShellError::new(
                     ErrorCode::InvalidArgument,
                     "lint: argument must be a string",
-                ));
+                )
+                .maybe_with_span(span));
             }
         }
     };
@@ -1243,6 +1258,7 @@ pub fn prompt_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let cmd = args.first().and_then(|v| match v {
         Val::String(s) if !s.is_empty() => Some(s.as_str()),
@@ -1402,7 +1418,7 @@ pub fn prompt_builtin(
                 "separator" => fshell_core::SegmentType::Separator,
                 "newline" => fshell_core::SegmentType::Newline,
                 "custom" => fshell_core::SegmentType::Custom,
-                _ => return Err(ShellError::invalid_argument("prompt add", type_name, None)
+                _ => return Err(ShellError::invalid_argument("prompt add", type_name, span)
                     .with_help("Run 'prompt show' to list configured segments and their types.")),
             };
 
@@ -1447,7 +1463,7 @@ pub fn prompt_builtin(
                     return Err(ShellError::new(
                         ErrorCode::InvalidArgument,
                         format!("prompt remove: index {} out of range (1-{})", idx, segs.len()),
-                    ).with_help("Check the segment index with 'prompt show'"));
+                    ).with_help("Check the segment index with 'prompt show'").maybe_with_span(span));
                 }
                 let removed = segs.remove(idx - 1);
                 let msg = format!("Removed {} (index {}) from {} side", removed.r#type.display_name(), idx, side);
@@ -1470,7 +1486,7 @@ pub fn prompt_builtin(
                 None => Err(ShellError::new(
                     ErrorCode::NotFound,
                     format!("prompt remove: no segment named '{}' found on {} side", target, side),
-                ).with_help("Run 'prompt show' to list available segments")),
+                ).with_help("Run 'prompt show' to list available segments").maybe_with_span(span)),
             }
         }
         Some("reset") => {
@@ -1513,6 +1529,7 @@ pub fn exec_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         // `exec` with no arguments is a no-op (handles fd manipulation in bash).
@@ -1526,8 +1543,17 @@ pub fn exec_builtin(
     let env_clone = env.clone();
     let tx_clone = tx.clone();
     if let Some(handler) = env.get_fallback_handler() {
+        let handler_span = span;
         tokio::spawn(async move {
-            if let Err(e) = handler(&cmd_name, cmd_args, in_rx, &env_clone, tx_clone, false) {
+            if let Err(e) = handler(
+                &cmd_name,
+                cmd_args,
+                in_rx,
+                &env_clone,
+                tx_clone,
+                false,
+                handler_span,
+            ) {
                 let _ = tx
                     .send(PipelinePayload::Structured(e.to_string().into()))
                     .await;

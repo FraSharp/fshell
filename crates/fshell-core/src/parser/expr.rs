@@ -1531,6 +1531,7 @@ impl Parser {
             name: "echo".to_string(),
             args: vec![value],
             env: Vec::new(),
+            span: miette::SourceSpan::new(0.into(), 0),
         };
         Ok(Expr::Pipeline(Pipeline {
             stages: vec![echo_stage],

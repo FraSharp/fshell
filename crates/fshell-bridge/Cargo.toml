@@ -19,6 +19,7 @@ fshell-hash = { path = "../fshell-hash", features = ["std"] }
 ustr = { workspace = true }
 libc = { workspace = true }
 crossterm = { workspace = true }
+miette = { workspace = true }
 
 [lints]
 workspace = true

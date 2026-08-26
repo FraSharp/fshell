@@ -303,7 +303,7 @@ async fn test_integration_z_builtin() {
     // Call z_builtin with a fragment of the directory name
     let fragment = target.file_name().unwrap().to_string_lossy().to_string();
     let (tx, _rx) = tokio::sync::mpsc::channel(100);
-    fshell_builtins::z_builtin(None, vec![Val::String(fragment)], &env, tx).unwrap();
+    fshell_builtins::z_builtin(None, vec![Val::String(fragment)], &env, tx, None).unwrap();
 
     // Verify PWD is changed to the target path
     let current = std::env::current_dir().unwrap();
@@ -336,6 +336,7 @@ async fn test_integration_extract_builtin_capabilities() {
         vec![Val::String(archive.to_string_lossy().to_string())],
         &env,
         tx,
+        None,
     );
     assert!(
         res.is_err(),
@@ -354,6 +355,7 @@ async fn test_integration_extract_builtin_capabilities() {
         vec![Val::String(archive.to_string_lossy().to_string())],
         &env,
         tx,
+        None,
     );
     assert!(
         res.is_err(),
@@ -373,6 +375,7 @@ async fn test_integration_extract_builtin_capabilities() {
         vec![Val::String(archive.to_string_lossy().to_string())],
         &env,
         tx,
+        None,
     );
     match res {
         Ok(_) => panic!("should fail due to missing process-spawn capability"),
@@ -654,6 +657,7 @@ async fn test_integration_pushd_popd_dirs() {
         vec![Val::String(dir1.to_string_lossy().to_string())],
         &env,
         tx1,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -668,6 +672,7 @@ async fn test_integration_pushd_popd_dirs() {
         vec![Val::String(dir2.to_string_lossy().to_string())],
         &env,
         tx2,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -677,7 +682,7 @@ async fn test_integration_pushd_popd_dirs() {
 
     // 3. popd
     let (tx3, _rx3) = tokio::sync::mpsc::channel(100);
-    fshell_builtins::popd_builtin(None, vec![], &env, tx3).unwrap();
+    fshell_builtins::popd_builtin(None, vec![], &env, tx3, None).unwrap();
     assert_eq!(
         std::env::current_dir().unwrap().canonicalize().unwrap(),
         dir1.canonicalize().unwrap()
@@ -685,7 +690,7 @@ async fn test_integration_pushd_popd_dirs() {
 
     // 4. popd
     let (tx4, _rx4) = tokio::sync::mpsc::channel(100);
-    fshell_builtins::popd_builtin(None, vec![], &env, tx4).unwrap();
+    fshell_builtins::popd_builtin(None, vec![], &env, tx4, None).unwrap();
     assert_eq!(
         std::env::current_dir().unwrap().canonicalize().unwrap(),
         initial_dir.canonicalize().unwrap()
@@ -712,6 +717,7 @@ async fn test_integration_read_builtin_timeout() {
         ],
         &env,
         tx,
+        None,
     )
     .unwrap();
 
@@ -1164,7 +1170,7 @@ async fn test_profile_builtin_basic() {
     let env = setup_test_env();
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
-    fshell_builtins::profile_builtin(None, vec![Val::String("on".into())], &env, tx.clone())
+    fshell_builtins::profile_builtin(None, vec![Val::String("on".into())], &env, tx.clone(), None)
         .unwrap();
     let payload = rx.recv().await.unwrap();
     if let PipelinePayload::Data(val) = payload {
@@ -1174,7 +1180,7 @@ async fn test_profile_builtin_basic() {
     }
 
     let (tx2, mut rx2) = tokio::sync::mpsc::channel(32);
-    fshell_builtins::profile_builtin(None, vec![], &env, tx2.clone()).unwrap();
+    fshell_builtins::profile_builtin(None, vec![], &env, tx2.clone(), None).unwrap();
     let payload = rx2.recv().await.unwrap();
     if let PipelinePayload::Data(val) = payload {
         let text = val.to_text();
@@ -1292,15 +1298,27 @@ async fn test_bind_and_keybindings_architecture() {
 
     // 1. Switch to vi mode and back to emacs
     let (tx, _rx) = tokio::sync::mpsc::channel(100);
-    fshell_builtins::builtin_bind(None, vec![Val::String("-v".to_string())], &env, tx.clone())
-        .unwrap();
+    fshell_builtins::builtin_bind(
+        None,
+        vec![Val::String("-v".to_string())],
+        &env,
+        tx.clone(),
+        None,
+    )
+    .unwrap();
     assert_eq!(
         env.keybindings.read().active_mode,
         fshell_engine::keybindings::KeyMapMode::ViInsert
     );
 
-    fshell_builtins::builtin_bind(None, vec![Val::String("-e".to_string())], &env, tx.clone())
-        .unwrap();
+    fshell_builtins::builtin_bind(
+        None,
+        vec![Val::String("-e".to_string())],
+        &env,
+        tx.clone(),
+        None,
+    )
+    .unwrap();
     assert_eq!(
         env.keybindings.read().active_mode,
         fshell_engine::keybindings::KeyMapMode::Emacs
@@ -1315,6 +1333,7 @@ async fn test_bind_and_keybindings_architecture() {
         ],
         &env,
         tx.clone(),
+        None,
     )
     .unwrap();
 
@@ -1338,6 +1357,7 @@ async fn test_bind_and_keybindings_architecture() {
         ],
         &env,
         tx.clone(),
+        None,
     )
     .unwrap();
 
@@ -1360,6 +1380,7 @@ async fn test_bind_and_keybindings_architecture() {
         ],
         &env,
         tx.clone(),
+        None,
     )
     .unwrap();
 
@@ -1371,9 +1392,15 @@ async fn test_bind_and_keybindings_architecture() {
     );
 
     // 5. Query and list
-    fshell_builtins::builtin_bind(None, vec![Val::String("-l".to_string())], &env, tx.clone())
-        .unwrap();
-    fshell_builtins::builtin_bind(None, vec![], &env, tx.clone()).unwrap();
+    fshell_builtins::builtin_bind(
+        None,
+        vec![Val::String("-l".to_string())],
+        &env,
+        tx.clone(),
+        None,
+    )
+    .unwrap();
+    fshell_builtins::builtin_bind(None, vec![], &env, tx.clone(), None).unwrap();
 }
 
 #[tokio::test]
@@ -1391,6 +1418,7 @@ async fn test_compgen_builtin() {
         ],
         &env,
         tx,
+        None,
     )
     .unwrap();
 
@@ -1409,6 +1437,7 @@ async fn test_compgen_builtin() {
         vec![Val::String("-b".to_string()), Val::String("wh".to_string())],
         &env,
         tx2,
+        None,
     )
     .unwrap();
 

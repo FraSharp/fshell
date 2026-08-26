@@ -5,6 +5,7 @@ use crate::ai_provider::*;
 use fshell_core::ShellError;
 use fshell_core::{Expr, Parser, PipelineStage, Stmt, Val};
 use fshell_engine::{ChatConfig, Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,6 +42,7 @@ pub fn ai_main(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let raw: Vec<String> = args
         .iter()

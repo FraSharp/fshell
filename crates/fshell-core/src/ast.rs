@@ -109,6 +109,8 @@ pub enum PipelineStage {
         name: String,
         args: Vec<Expr>,
         env: Vec<(String, Expr)>,
+        #[serde(skip, default = "default_span")]
+        span: SourceSpan,
     },
     Filter {
         condition: Expr,

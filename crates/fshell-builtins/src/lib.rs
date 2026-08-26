@@ -10,6 +10,8 @@ use fshell_core::{ResourceHandle, Val};
 use fshell_engine::Env;
 #[allow(unused_imports)]
 use fshell_engine::{PipeSender, PipeStream};
+#[allow(unused_imports)]
+use miette::SourceSpan;
 use std::sync::Arc;
 
 #[cfg(feature = "ai")]
@@ -60,6 +62,7 @@ fn http_stub(
     _args: Vec<Val>,
     _env: &Env,
     _tx: fshell_engine::PipeSender,
+    _span: Option<miette::SourceSpan>,
 ) -> Result<(), ShellError> {
     Err("http: not yet implemented (enable with --features http)"
         .to_string()
@@ -71,6 +74,7 @@ fn sql_stub(
     _args: Vec<Val>,
     _env: &Env,
     _tx: fshell_engine::PipeSender,
+    _span: Option<miette::SourceSpan>,
 ) -> Result<(), ShellError> {
     Err("sql: not yet implemented (enable with --features sql)"
         .to_string()
@@ -82,6 +86,7 @@ fn chart_stub(
     _args: Vec<Val>,
     _env: &Env,
     _tx: fshell_engine::PipeSender,
+    _span: Option<miette::SourceSpan>,
 ) -> Result<(), ShellError> {
     Err(ShellError::new(
         ErrorCode::Unsupported,
@@ -230,8 +235,9 @@ pub fn init(env: &Env) {
             args: Vec<Val>,
             env: &Env,
             tx: PipeSender,
+            span: Option<SourceSpan>,
         ) -> Result<(), ShellError> {
-            crate::ai::ai_main(input, args, env, tx)
+            crate::ai::ai_main(input, args, env, tx, span)
         }
         entries.push(("ai".to_string(), Arc::new(ai_builtin)));
     }
@@ -350,6 +356,7 @@ mod tests {
             vec![Val::String("-v".into()), Val::String(".".into())],
             &env,
             tx,
+            None,
         )
         .unwrap();
 
@@ -384,6 +391,7 @@ mod tests {
             vec![Val::String("/fshell_test_nonexistent_dir_abc".into())],
             &env,
             tx,
+            None,
         )
         .unwrap_err();
         assert!(err.message.contains("No such file"), "got: {err}");
@@ -395,7 +403,7 @@ mod tests {
         let env = init_test_env();
         let (tx, _rx) = mpsc::channel(100);
 
-        let err = ls_builtin(None, vec![Val::Int(99)], &env, tx).unwrap_err();
+        let err = ls_builtin(None, vec![Val::Int(99)], &env, tx, None).unwrap_err();
         assert!(err.message.contains("string"), "got: {err}");
     }
 
@@ -416,7 +424,7 @@ mod tests {
         }
 
         let (tx, _rx) = mpsc::channel(100);
-        let err = ls_builtin(None, vec![Val::String(".".into())], &env, tx).unwrap_err();
+        let err = ls_builtin(None, vec![Val::String(".".into())], &env, tx, None).unwrap_err();
         assert!(
             err.message.contains("Permission denied") || err.message.contains("Capability denied"),
             "got: {err}"
@@ -429,7 +437,7 @@ mod tests {
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
-        ls_builtin(None, vec![], &env, tx).unwrap();
+        ls_builtin(None, vec![], &env, tx, None).unwrap();
 
         let payload = rx.recv().await;
         assert!(payload.is_some(), "expected entries from default cwd");
@@ -447,7 +455,7 @@ mod tests {
             .grant(ResourceHandle::ReadDir(PathBuf::from(&home)));
 
         let (tx, mut rx) = mpsc::channel(100);
-        ls_builtin(None, vec![Val::String("~".into())], &env, tx).unwrap();
+        ls_builtin(None, vec![Val::String("~".into())], &env, tx, None).unwrap();
 
         let payload = rx.recv().await;
         assert!(payload.is_some(), "expected entries from ~");
@@ -464,7 +472,7 @@ mod tests {
             .grant(ResourceHandle::ReadDir(PathBuf::from(&home)));
 
         let (tx, mut rx) = mpsc::channel(100);
-        ls_builtin(None, vec![Val::String("~/".into())], &env, tx).unwrap();
+        ls_builtin(None, vec![Val::String("~/".into())], &env, tx, None).unwrap();
 
         let payload = rx.recv().await;
         assert!(payload.is_some(), "expected entries from ~/");
@@ -476,7 +484,7 @@ mod tests {
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
-        ls_builtin(None, vec![Val::String("-v".into())], &env, tx).unwrap();
+        ls_builtin(None, vec![Val::String("-v".into())], &env, tx, None).unwrap();
 
         let payload = rx.recv().await;
         assert!(payload.is_some(), "expected entries with -v flag");
@@ -493,6 +501,7 @@ mod tests {
             vec![Val::String("-v".into()), Val::String(".".into())],
             &env,
             tx,
+            None,
         )
         .unwrap();
 
@@ -521,7 +530,7 @@ mod tests {
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
-        ls_builtin(None, vec![Val::String("-a".into())], &env, tx).unwrap();
+        ls_builtin(None, vec![Val::String("-a".into())], &env, tx, None).unwrap();
 
         let payload = rx.recv().await;
         assert!(payload.is_some(), "expected entries with -a flag");
@@ -533,7 +542,7 @@ mod tests {
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
-        ls_builtin(None, vec![Val::String("-va".into())], &env, tx).unwrap();
+        ls_builtin(None, vec![Val::String("-va".into())], &env, tx, None).unwrap();
 
         let payload = rx.recv().await;
         assert!(payload.is_some(), "expected entries with -va flags");
@@ -551,6 +560,7 @@ mod tests {
             vec![Val::String("--".into()), Val::String(".".into())],
             &env,
             tx,
+            None,
         )
         .unwrap();
 
@@ -570,6 +580,7 @@ mod tests {
             vec![Val::String("-v".into()), Val::String(".".into())],
             &env,
             tx,
+            None,
         )
         .unwrap();
 
@@ -599,6 +610,7 @@ mod tests {
             vec![Val::String(tmp.to_string_lossy().to_string())],
             &env,
             tx,
+            None,
         );
         assert!(result.is_ok(), "cd to valid dir failed: {:?}", result.err());
         assert_eq!(std::env::current_dir().unwrap(), tmp);
@@ -617,6 +629,7 @@ mod tests {
             vec![Val::String("/fshell_test_nonexistent_xyz".into())],
             &env,
             tx,
+            None,
         )
         .unwrap_err();
         assert!(err.message.contains("invalid path"), "got: {err}");
@@ -627,7 +640,7 @@ mod tests {
         let env = init_test_env();
         let (tx, _rx) = mpsc::channel(100);
 
-        let err = cd_builtin(None, vec![Val::Bool(false)], &env, tx).unwrap_err();
+        let err = cd_builtin(None, vec![Val::Bool(false)], &env, tx, None).unwrap_err();
         assert!(err.message.contains("string"), "got: {err}");
     }
 
@@ -646,7 +659,7 @@ mod tests {
         let old_dir = std::env::current_dir().unwrap();
         let (tx, _rx) = mpsc::channel(100);
 
-        let result = cd_builtin(None, vec![], &env, tx);
+        let result = cd_builtin(None, vec![], &env, tx, None);
         assert!(result.is_ok(), "cd with no args failed: {:?}", result.err());
         assert_eq!(
             std::env::current_dir().unwrap(),
@@ -675,7 +688,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(100);
 
-        let err = cd_builtin(None, vec![Val::String(".".into())], &env, tx).unwrap_err();
+        let err = cd_builtin(None, vec![Val::String(".".into())], &env, tx, None).unwrap_err();
         assert!(
             err.message.contains("Permission denied") || err.message.contains("Capability denied"),
             "got: {err}"
@@ -696,7 +709,7 @@ mod tests {
         let old_dir = std::env::current_dir().unwrap();
         let (tx, _rx) = mpsc::channel(100);
 
-        let result = cd_builtin(None, vec![Val::String("~".into())], &env, tx);
+        let result = cd_builtin(None, vec![Val::String("~".into())], &env, tx, None);
         assert!(result.is_ok(), "cd ~ failed: {:?}", result.err());
         assert_eq!(
             std::env::current_dir().unwrap(),
@@ -728,6 +741,7 @@ mod tests {
             vec![Val::String(tmp.to_string_lossy().to_string())],
             &env,
             tx,
+            None,
         )
         .unwrap();
 
@@ -750,7 +764,7 @@ mod tests {
         let ls = env.get_builtin("ls").unwrap();
         let (tx, mut rx) = mpsc::channel(100);
 
-        ls(None, vec![Val::String(".".into())], &env, tx).unwrap();
+        ls(None, vec![Val::String(".".into())], &env, tx, None).unwrap();
 
         let mut count = 0;
         while let Some(_) = rx.recv().await {
@@ -781,6 +795,7 @@ mod tests {
             vec![Val::String(tmp.to_string_lossy().to_string())],
             &env,
             tx,
+            None,
         )
         .unwrap();
 
@@ -857,6 +872,7 @@ mod tests {
             vec![Val::String(target_dir.to_string_lossy().to_string())],
             &env,
             tx,
+            None,
         )
         .unwrap();
 
@@ -879,7 +895,7 @@ mod tests {
 
         // Check CD - back
         let (tx2, _rx2) = mpsc::channel(100);
-        cd_builtin(None, vec![Val::String("-".to_string())], &env, tx2).unwrap();
+        cd_builtin(None, vec![Val::String("-".to_string())], &env, tx2, None).unwrap();
         assert_eq!(std::env::current_dir().unwrap(), old_dir);
 
         // Test Smart CD Fallback
@@ -897,7 +913,14 @@ mod tests {
 
         // Try CD with a fuzzy argument that doesn't exist on disk
         let (tx3, _rx3) = mpsc::channel(100);
-        cd_builtin(None, vec![Val::String("target_dir".to_string())], &env, tx3).unwrap();
+        cd_builtin(
+            None,
+            vec![Val::String("target_dir".to_string())],
+            &env,
+            tx3,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(std::env::current_dir().unwrap(), target_dir);
 
@@ -946,6 +969,7 @@ mod tests {
             vec![Val::String(target_dir.to_string_lossy().to_string())],
             &env,
             tx,
+            None,
         )
         .unwrap();
         assert_eq!(std::env::current_dir().unwrap(), target_dir);
@@ -964,7 +988,14 @@ mod tests {
 
         // Verify z_builtin fuzzy matching works
         let (tx2, _rx2) = mpsc::channel(100);
-        z_builtin(None, vec![Val::String("z_target".to_string())], &env, tx2).unwrap();
+        z_builtin(
+            None,
+            vec![Val::String("z_target".to_string())],
+            &env,
+            tx2,
+            None,
+        )
+        .unwrap();
         assert_eq!(std::env::current_dir().unwrap(), target_dir);
 
         // Change back to dummy_home to test subdirectory matching
@@ -1004,6 +1035,7 @@ mod tests {
             vec![Val::String("foo".to_string()), Val::String("/".to_string())],
             &env,
             tx3,
+            None,
         )
         .unwrap();
         assert_eq!(std::env::current_dir().unwrap(), subdir);
@@ -1022,7 +1054,7 @@ mod tests {
         let mut env = Env::new();
         env.is_last_stage = true;
         let (tx, mut rx) = mpsc::channel(100);
-        let res = help::help_builtin(None, vec![], &env, tx.clone());
+        let res = help::help_builtin(None, vec![], &env, tx.clone(), None);
         assert!(res.is_ok());
         if let Some(PipelinePayload::Data(val_arc)) = rx.recv().await {
             match val_arc.as_ref() {
@@ -1037,7 +1069,13 @@ mod tests {
         let mut env = Env::new();
         env.is_last_stage = true;
         let (tx, mut rx) = mpsc::channel(100);
-        let res = help::help_builtin(None, vec![Val::String("ls".to_string())], &env, tx.clone());
+        let res = help::help_builtin(
+            None,
+            vec![Val::String("ls".to_string())],
+            &env,
+            tx.clone(),
+            None,
+        );
         assert!(res.is_ok());
         if let Some(PipelinePayload::Data(val_arc)) = rx.recv().await {
             match val_arc.as_ref() {
@@ -1055,7 +1093,7 @@ mod tests {
         // 1. Pipe help without args -> auto structured list
         {
             let (tx, mut rx) = mpsc::channel(100);
-            let res = help::help_builtin(None, vec![], &env, tx.clone());
+            let res = help::help_builtin(None, vec![], &env, tx.clone(), None);
             assert!(res.is_ok());
             let payload = rx.recv().await.expect("Should receive payload");
             match payload {
@@ -1077,8 +1115,13 @@ mod tests {
         // 2. Pipe help ls -> auto structured map
         {
             let (tx, mut rx) = mpsc::channel(100);
-            let res =
-                help::help_builtin(None, vec![Val::String("ls".to_string())], &env, tx.clone());
+            let res = help::help_builtin(
+                None,
+                vec![Val::String("ls".to_string())],
+                &env,
+                tx.clone(),
+                None,
+            );
             assert!(res.is_ok());
             let payload = rx.recv().await.expect("Should receive payload");
             match payload {
@@ -1108,6 +1151,7 @@ mod tests {
                 vec![Val::String("--structured".to_string())],
                 &env,
                 tx.clone(),
+                None,
             );
             assert!(res.is_ok());
 
@@ -1149,6 +1193,7 @@ mod tests {
                 ],
                 &env,
                 tx.clone(),
+                None,
             );
             assert!(res.is_ok());
 
@@ -1183,6 +1228,7 @@ mod tests {
                 ],
                 &env,
                 tx.clone(),
+                None,
             );
             assert!(res.is_ok());
 
@@ -1221,6 +1267,7 @@ mod tests {
                 ],
                 &env,
                 tx.clone(),
+                None,
             );
             assert!(res.is_ok());
 
@@ -1316,7 +1363,7 @@ mod tests {
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
-        let result = clear_builtin(None, vec![], &env, tx);
+        let result = clear_builtin(None, vec![], &env, tx, None);
         assert!(result.is_ok(), "clear should succeed");
 
         let payload = rx.recv().await;
@@ -1328,7 +1375,7 @@ mod tests {
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
-        let result = wrap_builtin(None, vec![], &env, tx);
+        let result = wrap_builtin(None, vec![], &env, tx, None);
         assert!(result.is_ok(), "wrap should succeed");
 
         let payload = rx.recv().await;
@@ -1339,7 +1386,7 @@ mod tests {
     async fn test_type_builtin_no_args_errors() {
         let env = init_test_env();
         let (tx, _rx) = mpsc::channel(100);
-        let result = type_builtin(None, vec![], &env, tx);
+        let result = type_builtin(None, vec![], &env, tx, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("missing operand"));
     }
@@ -1349,7 +1396,7 @@ mod tests {
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
-        type_builtin(None, vec![Val::String("ls".to_string())], &env, tx).unwrap();
+        type_builtin(None, vec![Val::String("ls".to_string())], &env, tx, None).unwrap();
 
         let payload = rx.recv().await;
         assert!(payload.is_some());
@@ -1382,6 +1429,7 @@ mod tests {
             vec![Val::String("nonexistent_command_xyzzy".to_string())],
             &env,
             tx,
+            None,
         )
         .unwrap();
 
@@ -1408,7 +1456,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(100);
 
         // "wc" is a standard system binary, not an fshell builtin
-        type_builtin(None, vec![Val::String("wc".to_string())], &env, tx).unwrap();
+        type_builtin(None, vec![Val::String("wc".to_string())], &env, tx, None).unwrap();
 
         let payload = rx.recv().await;
         assert!(payload.is_some());
@@ -1433,7 +1481,7 @@ mod tests {
         let env = fshell_engine::Env::new();
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
-        setopt_builtin(None, vec![], &env, tx).unwrap();
+        setopt_builtin(None, vec![], &env, tx, None).unwrap();
         let payload = rx.try_recv().unwrap();
         let output_str = if let PipelinePayload::Data(val) = payload {
             match val.as_ref() {
@@ -1462,7 +1510,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
 
         // Disable autocd
-        unsetopt_builtin(None, vec![Val::String("autocd".into())], &env, tx).unwrap();
+        unsetopt_builtin(None, vec![Val::String("autocd".into())], &env, tx, None).unwrap();
         {
             let opts = env.options.read();
             assert!(!opts.autocd, "autocd should be off after unsetopt");
@@ -1470,7 +1518,7 @@ mod tests {
 
         // Re-enable it
         let (tx2, _rx2) = tokio::sync::mpsc::channel(100);
-        setopt_builtin(None, vec![Val::String("autocd".into())], &env, tx2).unwrap();
+        setopt_builtin(None, vec![Val::String("autocd".into())], &env, tx2, None).unwrap();
         {
             let opts = env.options.read();
             assert!(opts.autocd, "autocd should be on after setopt");
@@ -1478,7 +1526,14 @@ mod tests {
 
         // Disable json_auto_parse
         let (tx3, _rx3) = tokio::sync::mpsc::channel(100);
-        unsetopt_builtin(None, vec![Val::String("json_auto_parse".into())], &env, tx3).unwrap();
+        unsetopt_builtin(
+            None,
+            vec![Val::String("json_auto_parse".into())],
+            &env,
+            tx3,
+            None,
+        )
+        .unwrap();
         {
             let opts = env.options.read();
             assert!(
@@ -1489,7 +1544,14 @@ mod tests {
 
         // Re-enable json_auto_parse
         let (tx4, _rx4) = tokio::sync::mpsc::channel(100);
-        setopt_builtin(None, vec![Val::String("json_auto_parse".into())], &env, tx4).unwrap();
+        setopt_builtin(
+            None,
+            vec![Val::String("json_auto_parse".into())],
+            &env,
+            tx4,
+            None,
+        )
+        .unwrap();
         {
             let opts = env.options.read();
             assert!(
@@ -1522,6 +1584,7 @@ mod tests {
             vec![Val::String("get".into()), Val::String("autocd".into())],
             &env,
             tx,
+            None,
         )
         .unwrap();
 
@@ -1543,7 +1606,7 @@ mod tests {
         let env = fshell_engine::Env::new();
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
-        config_builtin(None, vec![], &env, tx).unwrap();
+        config_builtin(None, vec![], &env, tx, None).unwrap();
         let payload = rx.try_recv().unwrap();
         if let PipelinePayload::Data(val) = payload {
             match val.as_ref() {
@@ -1604,7 +1667,7 @@ mod tests {
             caps.grant(ResourceHandle::ReadFile(tmp.path().join(".env")));
         }
 
-        dev_env::load_env_file_builtin(None, vec![], &env, tx).unwrap();
+        dev_env::load_env_file_builtin(None, vec![], &env, tx, None).unwrap();
 
         {
             let vars = env.vars.read();
@@ -1637,6 +1700,7 @@ mod tests {
             vec![Val::String("pipefail".into()), Val::String("notify".into())],
             &env,
             tx.clone(),
+            None,
         )
         .unwrap();
 
@@ -1657,7 +1721,7 @@ mod tests {
         );
 
         // Now test unsetopt persistence
-        unsetopt_builtin(None, vec![Val::String("pipefail".into())], &env, tx).unwrap();
+        unsetopt_builtin(None, vec![Val::String("pipefail".into())], &env, tx, None).unwrap();
 
         {
             let opts = env.options.read();
@@ -1696,7 +1760,7 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        setopt_builtin(None, vec![Val::String("pipefail".into())], &env, tx).unwrap();
+        setopt_builtin(None, vec![Val::String("pipefail".into())], &env, tx, None).unwrap();
 
         // Should NOT have created init.fsh
         assert!(

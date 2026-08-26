@@ -4,12 +4,14 @@
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream, Signal};
+use miette::SourceSpan;
 
 pub fn trap_builtin(
     _in_rx: Option<PipeStream>,
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     // trap [options] [action] [signal...]
     // trap -p           — list traps

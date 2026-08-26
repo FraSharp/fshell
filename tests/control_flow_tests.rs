@@ -783,7 +783,7 @@ async fn test_exit_code_tracking() {
     let (tx, _rx) = tokio::sync::mpsc::channel(100);
 
     // Run external command that succeeds
-    fshell_bridge::run_external("true", vec![], None, &env, tx, false).unwrap();
+    fshell_bridge::run_external("true", vec![], None, &env, tx, false, None).unwrap();
 
     // Wait for the background waitpid thread (spawn_job_waiter) to set $?
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -812,6 +812,7 @@ async fn test_exit_code_tracking_failure() {
         &env,
         tx,
         false,
+        None,
     )
     .unwrap();
 
@@ -1181,6 +1182,7 @@ async fn test_integration_exit_code_variables() {
         &env,
         tx.clone(),
         false,
+        None,
     )
     .unwrap();
 
@@ -1203,7 +1205,7 @@ async fn test_integration_exit_code_variables() {
     }
 
     // 2. Run external command that succeeds
-    fshell_bridge::run_external("true", vec![], None, &env, tx, false).unwrap();
+    fshell_bridge::run_external("true", vec![], None, &env, tx, false, None).unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
 
     // Check $? and $status are now 0

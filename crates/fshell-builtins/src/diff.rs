@@ -4,6 +4,7 @@
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 use ustr::ustr;
 
@@ -12,6 +13,7 @@ pub fn diff_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.len() < 2 {
         return Err("diff requires two file paths".to_string().into());

@@ -291,7 +291,7 @@ impl ShellError {
             .maybe_with_span(span)
     }
 
-    fn maybe_with_span(mut self, span: Option<SourceSpan>) -> Self {
+    pub fn maybe_with_span(mut self, span: Option<SourceSpan>) -> Self {
         self.span = span;
         self
     }

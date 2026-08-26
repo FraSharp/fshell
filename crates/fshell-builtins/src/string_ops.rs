@@ -5,6 +5,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 
 pub fn string_builtin(
@@ -12,6 +13,7 @@ pub fn string_builtin(
     args: Vec<Val>,
     _env: &fshell_engine::Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut raw_args: Vec<String> = Vec::new();
     for arg in &args {
@@ -22,7 +24,7 @@ pub fn string_builtin(
         return Err(ShellError::new(
             ErrorCode::InvalidArgument,
             "string: expected a subcommand (split, trim, upper, lower, contains, starts-with, ends-with, substring)",
-        ));
+        ).maybe_with_span(span));
     }
 
     let subcommand = raw_args[0].clone();

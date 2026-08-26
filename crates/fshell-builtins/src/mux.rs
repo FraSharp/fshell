@@ -7,6 +7,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream};
 use futures::{SinkExt, StreamExt};
+use miette::SourceSpan;
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
 
@@ -41,6 +42,7 @@ pub fn mux_builtin(
     args: Vec<Val>,
     _env: &Env,
     _sender: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut args_iter = args.into_iter();
     let subcmd = args_iter

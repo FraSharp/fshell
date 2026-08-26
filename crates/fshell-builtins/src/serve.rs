@@ -4,6 +4,7 @@
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream};
+use miette::SourceSpan;
 use std::path::PathBuf;
 
 pub fn serve_builtin(
@@ -11,6 +12,7 @@ pub fn serve_builtin(
     args: Vec<Val>,
     _env: &Env,
     _tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let port = match args.first() {
         Some(Val::Int(p)) => *p as u16,

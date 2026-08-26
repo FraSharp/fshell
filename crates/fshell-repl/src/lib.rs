@@ -89,6 +89,7 @@ pub fn history_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: fshell_engine::PipeSender,
+    _span: Option<miette::SourceSpan>,
 ) -> Result<(), fshell_core::ShellError> {
     let mut interactive = false;
     let mut stats = false;
@@ -2498,7 +2499,7 @@ fn try_bare_dir_cd(input: &str, env: &Env, tx: fshell_engine::PipeSender) -> boo
 
     // Execute cd
     let path_str = expanded.to_string_lossy().to_string();
-    match fshell_builtins::cd_builtin(None, vec![Val::String(path_str)], env, tx) {
+    match fshell_builtins::cd_builtin(None, vec![Val::String(path_str)], env, tx, None) {
         Ok(()) => true,
         Err(e) => {
             eprintln!("\x1b[1;31merror:\x1b[0m {}", e);

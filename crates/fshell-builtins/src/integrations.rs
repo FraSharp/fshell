@@ -11,6 +11,7 @@
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream, register_hook};
+use miette::SourceSpan;
 
 /// `direnv_init` builtin: registers native chpwd and precmd hooks for direnv.
 pub fn direnv_init_builtin(
@@ -18,6 +19,7 @@ pub fn direnv_init_builtin(
     _args: Vec<Val>,
     env: &Env,
     _out: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     register_hook("chpwd", "eval_direnv", env).map_err(ShellError::from)?;
     register_hook("precmd", "eval_direnv", env).map_err(ShellError::from)?;
@@ -30,6 +32,7 @@ pub fn zoxide_init_builtin(
     _args: Vec<Val>,
     env: &Env,
     _out: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     register_hook("chpwd", "zoxide_hook", env).map_err(ShellError::from)?;
     Ok(())
@@ -41,6 +44,7 @@ pub fn starship_init_builtin(
     _args: Vec<Val>,
     env: &Env,
     _out: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     register_hook("precmd", "starship_precmd", env).map_err(ShellError::from)?;
     register_hook("preexec", "starship_preexec", env).map_err(ShellError::from)?;
@@ -53,6 +57,7 @@ pub fn fzf_init_builtin(
     _args: Vec<Val>,
     env: &Env,
     _out: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut reg = env.keybindings.write();
     reg.bind(

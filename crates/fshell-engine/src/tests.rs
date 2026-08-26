@@ -11,6 +11,7 @@ use fshell_core::{
     FxIndexMap, LiteralPattern, MatchArm, MatchPattern, Param, Parser, Pipeline, PipelineStage,
     ResourceHandle, SerializationFormat, StringPart, TimeUnit, TypeConstraint, Val,
 };
+use miette::SourceSpan;
 use std::sync::atomic::Ordering;
 use ustr::ustr;
 
@@ -117,7 +118,7 @@ mod tests {
         assert_eq!(levenshtein_distance("hello", "world"), 4);
 
         let env = Env::new();
-        env.register_builtin("cd", Arc::new(|_, _, _, _| Ok(())));
+        env.register_builtin("cd", Arc::new(|_, _, _, _, _| Ok(())));
         let suggestion = get_suggested_command("cdd", &env, None);
         assert_eq!(suggestion, Some("cd".to_string()));
 
@@ -133,7 +134,7 @@ mod tests {
     #[test]
     fn test_deferred_dym_stores_pending() {
         let env = Env::new();
-        env.register_builtin("cd", Arc::new(|_, _, _, _| Ok(())));
+        env.register_builtin("cd", Arc::new(|_, _, _, _, _| Ok(())));
         // get_suggested_command should still find suggestions
         let suggestion = get_suggested_command("cdd", &env, None);
         assert_eq!(suggestion, Some("cd".to_string()));
@@ -688,6 +689,7 @@ mod tests {
             name: "$myvar".into(),
             args: vec![],
             env: vec![],
+            span: SourceSpan::new(0.into(), 0),
         };
         assert!(is_query_stage(&stage, &FxHashMap::default()));
     }
@@ -698,6 +700,7 @@ mod tests {
             name: "ls".into(),
             args: vec![],
             env: vec![],
+            span: SourceSpan::new(0.into(), 0),
         };
         assert!(is_query_stage(&stage, &FxHashMap::default()));
     }
@@ -708,10 +711,14 @@ mod tests {
             name: "some_builtin".into(),
             args: vec![],
             env: vec![],
+            span: SourceSpan::new(0.into(), 0),
         };
         let mut registry = FxHashMap::default();
-        let handler: BuiltinHandler =
-            Arc::new(|_: Option<PipeStream>, _: Vec<Val>, _: &Env, _: PipeSender| Ok(()));
+        let handler: BuiltinHandler = Arc::new(
+            |_: Option<PipeStream>, _: Vec<Val>, _: &Env, _: PipeSender, _: Option<SourceSpan>| {
+                Ok(())
+            },
+        );
         registry.insert("some_builtin".into(), handler);
         assert!(!is_query_stage(&stage, &registry));
     }
@@ -722,6 +729,7 @@ mod tests {
             name: "unknown_cmd".into(),
             args: vec![],
             env: vec![],
+            span: SourceSpan::new(0.into(), 0),
         };
         assert!(!is_query_stage(&stage, &FxHashMap::default()));
     }
@@ -1021,6 +1029,7 @@ mod tests {
                 name: "$items".into(),
                 args: vec![],
                 env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             }],
         };
         let expr = Expr::Pipeline(pipeline);
@@ -1227,6 +1236,7 @@ mod tests {
                     name: "rm".into(),
                     args: vec![],
                     env: vec![],
+                    span: SourceSpan::new(0.into(), 0),
                 }],
             },
         };
@@ -1268,6 +1278,7 @@ mod tests {
                         name: "rm".into(),
                         args: vec![],
                         env: vec![],
+                        span: SourceSpan::new(0.into(), 0),
                     }],
                 },
             }],
@@ -1405,6 +1416,7 @@ mod tests {
                             name: "write".into(),
                             args: vec![],
                             env: vec![],
+                            span: SourceSpan::new(0.into(), 0),
                         }],
                     },
                 }],

@@ -14,6 +14,7 @@ use fshell_core::RwLock;
 use fshell_core::ShellError;
 use fshell_core::{FxIndexMap, Val};
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use nu_ansi_term::{Color, Style};
 use ratatui::{
     Terminal,
@@ -1566,6 +1567,7 @@ pub fn vault_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut subcommand = "ui".to_string();
     let mut sub_args = Vec::new();
@@ -1760,7 +1762,7 @@ pub fn vault_builtin(
                 return Err(BuiltinError::NotFound {
                     cmd: "vault".into(),
                     what: format!("entry '{target}'"),
-                    span: None,
+                    span,
                 }
                 .into());
             }
@@ -1843,7 +1845,7 @@ pub fn vault_builtin(
                             return Err(BuiltinError::InvalidArgument {
                                 cmd: "vault".into(),
                                 arg: format!("unknown option '{s}'"),
-                                span: None,
+                                span,
                             }
                             .into());
                         } else {
@@ -2095,7 +2097,7 @@ pub fn vault_builtin(
             return Err(BuiltinError::InvalidArgument {
                 cmd: "vault".into(),
                 arg: format!("unknown subcommand '{other}'"),
-                span: None,
+                span,
             }
             .into());
         }

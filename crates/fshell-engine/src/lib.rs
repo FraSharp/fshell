@@ -7,6 +7,7 @@ use fshell_capabilities::CapsRegistry;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_core::{Expr, FshDiag, FxIndexMap, PromptConfig, ShellError, Stmt, StringPart, Val};
 use fshell_hash::FxHashMap;
+use miette::SourceSpan;
 pub mod ast_cache;
 pub mod error;
 pub mod flow;
@@ -2633,7 +2634,15 @@ pub fn setup_signal_handlers(env: Env) {
 
 #[allow(clippy::result_large_err)]
 pub type BuiltinHandler = Arc<
-    dyn Fn(Option<PipeStream>, Vec<Val>, &Env, PipeSender) -> Result<(), ShellError> + Send + Sync,
+    dyn Fn(
+            Option<PipeStream>,
+            Vec<Val>,
+            &Env,
+            PipeSender,
+            Option<SourceSpan>,
+        ) -> Result<(), ShellError>
+        + Send
+        + Sync,
 >;
 
 // Pipeline channel defaults
@@ -2827,7 +2836,7 @@ pub async fn run_hooks(event: &str, env: &Env) {
             }
         } else if let Some(builtin) = env.get_builtin(&fn_name) {
             let (tx, _rx) = tokio::sync::mpsc::channel(100);
-            if let Err(e) = builtin(None, vec![], env, tx) {
+            if let Err(e) = builtin(None, vec![], env, tx, None) {
                 eprintln!("hook '{}' ({}): {}", event, fn_name, e);
             }
         } else {
@@ -2869,7 +2878,15 @@ pub async fn dispatch_on_signal(
 }
 
 pub type FallbackHandler = Arc<
-    dyn Fn(&str, Vec<Val>, Option<PipeStream>, &Env, PipeSender, bool) -> Result<(), ShellError>
+    dyn Fn(
+            &str,
+            Vec<Val>,
+            Option<PipeStream>,
+            &Env,
+            PipeSender,
+            bool,
+            Option<SourceSpan>,
+        ) -> Result<(), ShellError>
         + Send
         + Sync,
 >;

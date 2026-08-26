@@ -6,6 +6,7 @@ use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_core::theme::Theme;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 
 fn theme_config_dir() -> std::path::PathBuf {
@@ -17,6 +18,7 @@ pub fn theme_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         let theme = env.active_theme();
@@ -30,7 +32,8 @@ pub fn theme_builtin(
             return Err(ShellError::new(
                 ErrorCode::InvalidArgument,
                 "theme: subcommand must be a string",
-            ));
+            )
+            .maybe_with_span(span));
         }
     };
 
@@ -49,7 +52,8 @@ pub fn theme_builtin(
                 return Err(ShellError::new(
                     ErrorCode::MissingArgument,
                     "theme set: missing theme name",
-                ));
+                )
+                .maybe_with_span(span));
             }
             let name = match &args[1] {
                 Val::String(s) => s.as_str(),
@@ -57,7 +61,8 @@ pub fn theme_builtin(
                     return Err(ShellError::new(
                         ErrorCode::InvalidArgument,
                         "theme set: name must be a string",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
             };
             let config_dir = theme_config_dir();
@@ -75,7 +80,8 @@ pub fn theme_builtin(
                 return Err(ShellError::new(
                     ErrorCode::MissingArgument,
                     "theme preview: missing theme name",
-                ));
+                )
+                .maybe_with_span(span));
             }
             let name = match &args[1] {
                 Val::String(s) => s.as_str(),
@@ -83,7 +89,8 @@ pub fn theme_builtin(
                     return Err(ShellError::new(
                         ErrorCode::InvalidArgument,
                         "theme preview: name must be a string",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
             };
             let config_dir = theme_config_dir();
@@ -102,7 +109,8 @@ pub fn theme_builtin(
                         return Err(ShellError::new(
                             ErrorCode::InvalidArgument,
                             "theme export: name must be a string",
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 };
                 let config_dir = theme_config_dir();
@@ -123,7 +131,8 @@ pub fn theme_builtin(
                     return Err(ShellError::new(
                         ErrorCode::InvalidArgument,
                         "theme diff: names must be strings",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
             };
             let name2 = match &args[2] {
@@ -132,7 +141,8 @@ pub fn theme_builtin(
                     return Err(ShellError::new(
                         ErrorCode::InvalidArgument,
                         "theme diff: names must be strings",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
             };
             let config_dir = theme_config_dir();

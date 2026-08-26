@@ -7,12 +7,14 @@ use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream};
 use fshell_sandbox::{SandboxConfig, SandboxMode, run_sandboxed};
+use miette::SourceSpan;
 
 pub fn sandbox_builtin(
     in_rx: Option<PipeStream>,
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err("usage: sandbox [options] <command> [args...]
@@ -77,10 +79,10 @@ Options:
     }
 
     if arg_idx >= args.len() {
-        return Err(ShellError::new(
-            ErrorCode::MissingArgument,
-            "sandbox: missing command",
-        ));
+        return Err(
+            ShellError::new(ErrorCode::MissingArgument, "sandbox: missing command")
+                .maybe_with_span(span),
+        );
     }
 
     let name = match &args[arg_idx] {
@@ -89,7 +91,7 @@ Options:
             return Err(BuiltinError::InvalidArgument {
                 cmd: "sandbox".into(),
                 arg: format!("expected command name, got {other:?}"),
-                span: None,
+                span,
             }
             .into());
         }
@@ -105,6 +107,7 @@ pub fn unsafe_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err("usage: unsafe <command> [args...]".into());
@@ -116,7 +119,7 @@ pub fn unsafe_builtin(
             return Err(BuiltinError::InvalidArgument {
                 cmd: "unsafe".into(),
                 arg: format!("expected command name, got {other:?}"),
-                span: None,
+                span,
             }
             .into());
         }

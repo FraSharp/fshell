@@ -5,6 +5,7 @@ use crate::error::BuiltinError;
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 
 fn show_env_vars(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
@@ -50,6 +51,7 @@ pub fn export_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return show_env_vars(env, tx);
@@ -89,6 +91,7 @@ pub fn env_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     show_env_vars(env, tx)
 }
@@ -98,12 +101,13 @@ pub fn set_universal_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err(BuiltinError::MissingArgument {
             cmd: "set-universal".into(),
             description: "at least one key=value or key value pair".into(),
-            span: None,
+            span,
         }
         .into());
     }
@@ -123,12 +127,13 @@ pub fn unset_universal_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err(BuiltinError::MissingArgument {
             cmd: "unset-universal".into(),
             description: "at least one variable name".into(),
-            span: None,
+            span,
         }
         .into());
     }
@@ -137,7 +142,7 @@ pub fn unset_universal_builtin(
             return Err(BuiltinError::InvalidArgument {
                 cmd: "unset-universal".into(),
                 arg: format!("{:?}", arg),
-                span: None,
+                span,
             }
             .into());
         };

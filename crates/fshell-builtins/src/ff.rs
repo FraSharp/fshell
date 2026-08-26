@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 use std::time::SystemTime;
 use ustr::ustr;
@@ -51,6 +52,7 @@ pub fn ff_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     // 1. Check process / file-read capability on the current dir
     let pwd = std::env::current_dir().map_err(|e| format!("ff: {}", e))?;
@@ -66,7 +68,7 @@ pub fn ff_builtin(
         return Err(BuiltinError::FileNotFound {
             cmd: "ff".into(),
             path: config.path.to_string(),
-            span: None,
+            span,
         }
         .into());
     }

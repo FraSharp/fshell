@@ -6,6 +6,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use miette::SourceSpan;
 use std::sync::Arc;
 
 pub fn complete_builtin(
@@ -13,6 +14,7 @@ pub fn complete_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let mut command_name = None;
     let mut list_all = false;
@@ -32,7 +34,7 @@ pub fn complete_builtin(
                 return Err(BuiltinError::InvalidArgument {
                     cmd: "complete".into(),
                     arg: "arguments must be strings".into(),
-                    span: None,
+                    span,
                 }
                 .into());
             }
@@ -55,7 +57,8 @@ pub fn complete_builtin(
                     return Err(ShellError::new(
                         ErrorCode::MissingArgument,
                         "Missing value for context option",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
                 let ctx_val = match &args[i + 1] {
                     Val::String(s) => s,
@@ -63,7 +66,8 @@ pub fn complete_builtin(
                         return Err(ShellError::new(
                             ErrorCode::InvalidArgument,
                             "Context must be a string",
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 };
                 context_subcmds = ctx_val.split_whitespace().map(|s| s.to_string()).collect();
@@ -74,7 +78,8 @@ pub fn complete_builtin(
                     return Err(ShellError::new(
                         ErrorCode::MissingArgument,
                         "Missing value for short option",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
                 let s_val = match &args[i + 1] {
                     Val::String(s) => s,
@@ -82,7 +87,8 @@ pub fn complete_builtin(
                         return Err(ShellError::new(
                             ErrorCode::InvalidArgument,
                             "Short option must be a string",
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 };
                 short_flag = Some(s_val.clone());
@@ -93,7 +99,8 @@ pub fn complete_builtin(
                     return Err(ShellError::new(
                         ErrorCode::MissingArgument,
                         "Missing value for --long option",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
                 let l_val = match &args[i + 1] {
                     Val::String(s) => s,
@@ -101,7 +108,8 @@ pub fn complete_builtin(
                         return Err(ShellError::new(
                             ErrorCode::InvalidArgument,
                             "Long option must be a string",
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 };
                 long_flag = Some(l_val.clone());
@@ -112,7 +120,8 @@ pub fn complete_builtin(
                     return Err(ShellError::new(
                         ErrorCode::MissingArgument,
                         "Missing value for description option",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
                 let d_val = match &args[i + 1] {
                     Val::String(s) => s,
@@ -120,7 +129,8 @@ pub fn complete_builtin(
                         return Err(ShellError::new(
                             ErrorCode::InvalidArgument,
                             "Description must be a string",
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 };
                 desc = Some(d_val.clone());
@@ -131,7 +141,8 @@ pub fn complete_builtin(
                     return Err(ShellError::new(
                         ErrorCode::MissingArgument,
                         "Missing value for arguments option",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
                 let a_val = match &args[i + 1] {
                     Val::String(s) => s,
@@ -139,7 +150,8 @@ pub fn complete_builtin(
                         return Err(ShellError::new(
                             ErrorCode::InvalidArgument,
                             "Arguments must be a string",
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 };
                 arguments = Some(a_val.clone());
@@ -150,7 +162,8 @@ pub fn complete_builtin(
                     return Err(ShellError::new(
                         ErrorCode::MissingArgument,
                         "Missing value for -F option",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
                 let f_val = match &args[i + 1] {
                     Val::String(s) => s,
@@ -158,7 +171,8 @@ pub fn complete_builtin(
                         return Err(ShellError::new(
                             ErrorCode::InvalidArgument,
                             "-F argument must be a string",
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 };
                 arguments = Some(format!("fn:{}", f_val));
@@ -169,7 +183,8 @@ pub fn complete_builtin(
                     return Err(ShellError::new(
                         ErrorCode::MissingArgument,
                         "Missing value for -C option",
-                    ));
+                    )
+                    .maybe_with_span(span));
                 }
                 let c_val = match &args[i + 1] {
                     Val::String(s) => s,
@@ -177,7 +192,8 @@ pub fn complete_builtin(
                         return Err(ShellError::new(
                             ErrorCode::InvalidArgument,
                             "-C argument must be a string",
-                        ));
+                        )
+                        .maybe_with_span(span));
                     }
                 };
                 arguments = Some(c_val.clone());
@@ -199,7 +215,7 @@ pub fn complete_builtin(
                     return Err(BuiltinError::InvalidArgument {
                         cmd: "complete".into(),
                         arg: format!("unknown option: {other}"),
-                        span: None,
+                        span,
                     }
                     .into());
                 } else {
@@ -209,7 +225,7 @@ pub fn complete_builtin(
                         return Err(BuiltinError::UnexpectedArgument {
                             cmd: "complete".into(),
                             arg: other.to_string(),
-                            span: None,
+                            span,
                         }
                         .into());
                     }
@@ -264,7 +280,8 @@ pub fn complete_builtin(
             return Err(ShellError::new(
                 ErrorCode::MissingArgument,
                 "Missing command name to erase",
-            ));
+            )
+            .maybe_with_span(span));
         }
     }
 
@@ -319,6 +336,7 @@ pub fn compgen_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
+    _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let arg_strs: Vec<String> = args
         .iter()

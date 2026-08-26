@@ -11,6 +11,7 @@ use fshell_core::{
     BinOp, Expr, FxIndexMap, ParamModifier, Pipeline, PipelineStage, ProcessSubstDirection, Stmt,
     TimeUnit, Val,
 };
+use miette::SourceSpan;
 
 struct ErrexitRestoreGuard<'a> {
     env: &'a Env,
@@ -206,6 +207,7 @@ fn setopt_stmt(cmd_name: &str, args: Vec<String>) -> Stmt {
         name: cmd_name.to_string(),
         args: expr_args,
         env: Vec::new(),
+        span: SourceSpan::new(0.into(), 0),
     };
     let pipeline = Pipeline {
         stages: vec![stage],
@@ -267,6 +269,7 @@ async fn try_run_startup_builtin(
         name,
         args: raw_args,
         env: inline_env,
+        span: _,
     } = stage
     else {
         return None;
@@ -285,7 +288,7 @@ async fn try_run_startup_builtin(
 
     let (out_tx, _out_rx) = tokio::sync::mpsc::channel(1);
 
-    match handler(None, evaluated_args, env, out_tx) {
+    match handler(None, evaluated_args, env, out_tx, None) {
         Ok(()) => {
             let last_ec = *Some(env.prompt.last_exit_code.read())?;
             {
