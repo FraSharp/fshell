@@ -4,6 +4,7 @@
 use crate::error::BuiltinError;
 use fshell_core::ShellError;
 use fshell_core::Val;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -139,7 +140,15 @@ pub fn sort_builtin(
                 env_clone.report_stage_error();
                 let _ = tx
                     .send(PipelinePayload::Structured(
-                        format!("sort: too many items (limit {})", sort_max_items).into(),
+                        ShellError::new(
+                            ErrorCode::SortTooManyItems,
+                            format!("sort: too many items (limit {})", sort_max_items),
+                        )
+                        .with_help(format!(
+                            "Reduce input size or increase limit with `sort --max-items {}`",
+                            sort_max_items
+                        ))
+                        .into(),
                     ))
                     .await;
                 return;

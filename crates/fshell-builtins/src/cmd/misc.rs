@@ -270,7 +270,10 @@ pub fn reload_builtin(
         libc::execvp(c_exe.as_ptr(), argv.as_ptr());
     }
 
-    Err(format!("execvp failed: {}", std::io::Error::last_os_error()).into())
+    Err(ShellError::new(
+        ErrorCode::CommandFailed,
+        format!("execvp failed: {}", std::io::Error::last_os_error()),
+    ))
 }
 
 pub fn which_builtin(
@@ -1399,7 +1402,8 @@ pub fn prompt_builtin(
                 "separator" => fshell_core::SegmentType::Separator,
                 "newline" => fshell_core::SegmentType::Newline,
                 "custom" => fshell_core::SegmentType::Custom,
-                _ => return Err(format!("prompt add: unknown segment type '{}'. Run 'prompt show' to list configured segments and their types.", type_name).into()),
+                _ => return Err(ShellError::invalid_argument("prompt add", type_name, None)
+                    .with_help("Run 'prompt show' to list configured segments and their types.")),
             };
 
             let side = args.get(2).and_then(|v| match v {
@@ -1440,7 +1444,10 @@ pub fn prompt_builtin(
 
             if let Ok(idx) = target.parse::<usize>() {
                 if idx == 0 || idx > segs.len() {
-                    return Err(format!("prompt remove: index {} out of range (1-{})", idx, segs.len()).into());
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        format!("prompt remove: index {} out of range (1-{})", idx, segs.len()),
+                    ).with_help("Check the segment index with 'prompt show'"));
                 }
                 let removed = segs.remove(idx - 1);
                 let msg = format!("Removed {} (index {}) from {} side", removed.r#type.display_name(), idx, side);
@@ -1460,7 +1467,10 @@ pub fn prompt_builtin(
                     });
                     Ok(())
                 }
-                None => Err(format!("prompt remove: no segment named '{}' found on {} side", target, side).into()),
+                None => Err(ShellError::new(
+                    ErrorCode::NotFound,
+                    format!("prompt remove: no segment named '{}' found on {} side", target, side),
+                ).with_help("Run 'prompt show' to list available segments")),
             }
         }
         Some("reset") => {

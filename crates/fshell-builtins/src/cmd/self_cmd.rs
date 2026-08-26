@@ -3,6 +3,7 @@
 
 use fshell_core::ShellError;
 use fshell_core::Val;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 
@@ -103,15 +104,15 @@ pub fn self_builtin(
             }
             s if s.starts_with('-') && !flag_exec => {
                 // Unknown flag: surface error (preserves long-term strictness)
-                return Err(format!("self: unknown flag '{s}'. Try 'self --help'").into());
+                return Err(ShellError::invalid_argument("self", s, None)
+                    .with_help("Try 'self --help' for usage"));
             }
             _ => {
                 if flag_exec {
                     exec_args.push(a.clone());
                 } else {
-                    return Err(
-                        format!("self: unexpected argument '{a}'. Try 'self --help'").into(),
-                    );
+                    return Err(ShellError::invalid_argument("self", a, None)
+                        .with_help("Try 'self --help' for usage"));
                 }
             }
         }
@@ -205,7 +206,10 @@ fn do_exec(args: Vec<String>) -> Result<(), ShellError> {
     // On failure we surface the OS error as a builtin error.
     match fshell_engine::exe::exec_self(&args) {
         Ok(()) => unreachable!("exec_self should not return on success"),
-        Err(e) => Err(format!("self exec: {e}").into()),
+        Err(e) => Err(ShellError::new(
+            ErrorCode::CommandFailed,
+            format!("self exec: {e}"),
+        ) .with_help("Check that the executable path and arguments are valid")),
     }
 }
 

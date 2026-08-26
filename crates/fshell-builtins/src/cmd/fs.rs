@@ -1073,7 +1073,11 @@ pub fn extract_builtin(
             Err(e) => {
                 let _ = tx
                     .send(PipelinePayload::Structured(
-                        format!("Failed to spawn extraction command: {}", e).into(),
+                        ShellError::new(
+                            ErrorCode::IoError,
+                            format!("Failed to spawn extraction command: {}", e),
+                        )
+                        .into(),
                     ))
                     .await;
             }
@@ -1213,7 +1217,11 @@ pub fn head_builtin(
                 Err(e) => {
                     let _ = tx
                         .send(PipelinePayload::Structured(
-                            format!("Failed to open file {path:?}: {e}").into(),
+                            ShellError::new(
+                                ErrorCode::IoError,
+                                format!("Failed to open file {path:?}: {e}"),
+                            )
+                            .into(),
                         ))
                         .await;
                     return;
@@ -1231,7 +1239,11 @@ pub fn head_builtin(
                     Err(e) => {
                         let _ = tx
                             .send(PipelinePayload::Structured(
-                                format!("Error reading {path:?}: {e}").into(),
+                                ShellError::new(
+                                    ErrorCode::IoError,
+                                    format!("Error reading {path:?}: {e}"),
+                                )
+                                .into(),
                             ))
                             .await;
                         return;
@@ -1285,7 +1297,11 @@ pub fn tail_builtin(
                 Err(e) => {
                     let _ = tx
                         .send(PipelinePayload::Structured(
-                            format!("Failed to open file {path:?}: {e}").into(),
+                            ShellError::new(
+                                ErrorCode::IoError,
+                                format!("Failed to open file {path:?}: {e}"),
+                            )
+                            .into(),
                         ))
                         .await;
                     return;
@@ -1305,7 +1321,11 @@ pub fn tail_builtin(
                     Err(e) => {
                         let _ = tx
                             .send(PipelinePayload::Structured(
-                                format!("Error reading {path:?}: {e}").into(),
+                                ShellError::new(
+                                    ErrorCode::IoError,
+                                    format!("Error reading {path:?}: {e}"),
+                                )
+                                .into(),
                             ))
                             .await;
                         return;
@@ -1394,7 +1414,11 @@ pub fn uniq_builtin(
                 Err(e) => {
                     let _ = tx
                         .send(PipelinePayload::Structured(
-                            format!("Failed to read file {:?}: {}", path, e).into(),
+                            ShellError::new(
+                                ErrorCode::IoError,
+                                format!("Failed to read file {:?}: {}", path, e),
+                            )
+                            .into(),
                         ))
                         .await;
                     return;

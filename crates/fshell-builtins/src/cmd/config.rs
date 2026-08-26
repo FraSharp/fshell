@@ -251,7 +251,12 @@ fn set_flags_or_positional(args: &[Val], env: &Env, tx: PipeSender) -> Result<()
                     'C' => opts.noclobber = is_set,
                     'f' => opts.nullglob = is_set,
                     _ => {
-                        return Err(format!("set: invalid option -{c}").into());
+                        return Err(ShellError::invalid_argument(
+                            "set",
+                            &format!("-{c}"),
+                            None,
+                        )
+                        .with_help("Valid options: -e (errexit) -x (xtrace) -u (nounset) -v (verbose) -n (noexec) -C (noclobber) -f (nullglob)"));
                     }
                 }
             }
@@ -589,7 +594,8 @@ fn parse_bool(v: &Val) -> Result<bool, ShellError> {
         Val::String(s) => match s.as_str() {
             "true" | "on" | "yes" | "1" => Ok(true),
             "false" | "off" | "no" | "0" => Ok(false),
-            _ => Err(format!("set: invalid bool value '{s}' (expected true/false/on/off)").into()),
+            _ => Err(ShellError::invalid_argument("set", s, None)
+                .with_help("Expected true/false/on/off/yes/no/1/0")),
         },
         _ => Err(ShellError::new(
             ErrorCode::InvalidArgument,
@@ -603,7 +609,9 @@ fn parse_int(v: &Val) -> Result<i64, ShellError> {
         Val::Int(i) => Ok(*i),
         Val::String(s) => s
             .parse::<i64>()
-            .map_err(|_| format!("set: invalid integer '{s}'").into()),
+            .map_err(|_| {
+                ShellError::invalid_argument("set", s, None).with_help("Expected an integer value")
+            }),
         _ => Err(ShellError::new(
             ErrorCode::InvalidArgument,
             "set: expected an integer or string",
@@ -665,7 +673,7 @@ pub(crate) fn persist_settings(env: &Env) -> Result<(), ShellError> {
 
     let lines = fshell_engine::config::collect_settings_lines(&snapshot);
     fshell_engine::config::update_managed_settings(&lines)
-        .map_err(|e| format!("Failed to persist settings: {e}").into())
+        .map_err(|e| ShellError::io_error(format!("Failed to persist settings: {e}"), None))
 }
 
 fn config_list(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
@@ -827,7 +835,8 @@ pub fn config_builtin(
         }
         "reload" => config_reload_sync(env),
         _ => {
-            Err(format!("config: unknown subcommand '{cmd}' (expected list/get/set/reload)").into())
+            Err(ShellError::invalid_argument("config", cmd, None)
+                .with_help("Expected one of: list/get/set/reload"))
         }
     }
 }
@@ -897,7 +906,11 @@ pub fn alias_builtin(
             drop(tx);
             return Ok(());
         } else {
-            return Err(format!("alias: {}: not found", name).into());
+            return Err(ShellError::new(
+                ErrorCode::NotFound,
+                format!("alias: {}: not found", name),
+            )
+            .with_help(format!("Define with `alias {name}=\"<expansion>\"`")));
         }
     }
 
@@ -1605,7 +1618,7 @@ pub fn funced_builtin(
     let (params, ret_type, body) = {
         let fns = env.fns.read();
         let Some(f) = fns.get(name) else {
-            return Err(format!("funced: function '{name}' not found").into());
+            return Err(ShellError::function_not_found(name, None));
         };
         f.clone()
     };
@@ -1744,9 +1757,11 @@ pub fn funced_builtin(
     };
 
     if parsed_name != name {
-        return Err(
-            format!("funced: cannot rename function from '{name}' to '{parsed_name}'").into(),
-        );
+        return Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            format!("funced: cannot rename function from '{name}' to '{parsed_name}'"),
+        )
+        .with_help(format!("Keep the function name as '{name}' when editing")));
     }
 
     // 8. Update in memory
@@ -1789,7 +1804,7 @@ pub fn funcsave_builtin(
     let (params, ret_type, body) = {
         let fns = env.fns.read();
         let Some(f) = fns.get(name) else {
-            return Err(format!("funcsave: function '{name}' not found").into());
+            return Err(ShellError::function_not_found(name, None));
         };
         f.clone()
     };

@@ -268,7 +268,7 @@ pub fn strict_builtin(
     } else if let Some(fallback) = env.get_fallback_handler() {
         fallback(&name, cmd_args, in_rx, env, tx, false)
     } else {
-        Err(format!("Command not found: {}", name).into())
+        Err(ShellError::command_not_found(&name, None))
     };
 
     env.caps
