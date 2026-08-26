@@ -396,6 +396,158 @@ impl CapsRegistry {
             _ => false,
         })
     }
+
+    /// Atomically check capability and open file as an unforgeable CapFile handle.
+    pub fn open_file(
+        &self,
+        path: &Path,
+        read: bool,
+        write: bool,
+        create: bool,
+        append: bool,
+        truncate: bool,
+    ) -> Result<CapFile, String> {
+        if read && !self.check_read_file(path) {
+            return Err(format!("Capability not held: ReadFile({:?})", path));
+        }
+        if write && !self.check_write_file(path) {
+            return Err(format!("Capability not held: WriteFile({:?})", path));
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(read)
+            .write(write)
+            .create(create)
+            .append(append)
+            .truncate(truncate);
+        let file = opts
+            .open(path)
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        Ok(CapFile {
+            path: path.to_path_buf(),
+            file,
+            readable: read,
+            writable: write,
+        })
+    }
+
+    /// Atomically check capability and acquire directory token CapDir.
+    pub fn acquire_dir(&self, path: &Path, read: bool, write: bool) -> Result<CapDir, String> {
+        if read && !self.check_read_dir(path) {
+            return Err(format!("Capability not held: ReadDir({:?})", path));
+        }
+        if write && !self.check_write_dir(path) {
+            return Err(format!("Capability not held: WriteDir({:?})", path));
+        }
+        if !path.is_dir() {
+            return Err(format!("{}: Not a directory", path.display()));
+        }
+        Ok(CapDir {
+            path: path.to_path_buf(),
+            readable: read,
+            writable: write,
+        })
+    }
+}
+
+/// An unforgeable capability-verified file handle.
+#[derive(Debug)]
+pub struct CapFile {
+    path: PathBuf,
+    file: std::fs::File,
+    readable: bool,
+    writable: bool,
+}
+
+impl CapFile {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn read_to_string(&mut self) -> std::io::Result<String> {
+        if !self.readable {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "CapFile does not have read capability",
+            ));
+        }
+        use std::io::Read;
+        let mut s = String::new();
+        self.file.read_to_string(&mut s)?;
+        Ok(s)
+    }
+
+    pub fn read_bytes(&mut self) -> std::io::Result<Vec<u8>> {
+        if !self.readable {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "CapFile does not have read capability",
+            ));
+        }
+        use std::io::Read;
+        let mut buf = Vec::new();
+        self.file.read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
+    pub fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        if !self.writable {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "CapFile does not have write capability",
+            ));
+        }
+        use std::io::Write;
+        self.file.write_all(data)
+    }
+
+    pub fn metadata(&self) -> std::io::Result<std::fs::Metadata> {
+        self.file.metadata()
+    }
+
+    pub fn into_inner(self) -> std::fs::File {
+        self.file
+    }
+}
+
+/// An unforgeable capability-verified directory handle.
+#[derive(Debug, Clone)]
+pub struct CapDir {
+    path: PathBuf,
+    readable: bool,
+    writable: bool,
+}
+
+impl CapDir {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn open_file(
+        &self,
+        rel_path: &Path,
+        opts: &std::fs::OpenOptions,
+    ) -> Result<CapFile, String> {
+        let full_path = self.path.join(rel_path);
+        let file = opts
+            .open(&full_path)
+            .map_err(|e| format!("{}: {}", full_path.display(), e))?;
+        Ok(CapFile {
+            path: full_path,
+            file,
+            readable: self.readable,
+            writable: self.writable,
+        })
+    }
+
+    pub fn read_dir(&self) -> Result<std::fs::ReadDir, String> {
+        if !self.readable {
+            return Err(format!(
+                "Directory {:?} is not readable under capability",
+                self.path
+            ));
+        }
+        std::fs::read_dir(&self.path).map_err(|e| format!("{}: {}", self.path.display(), e))
+    }
 }
 
 fn glob_match_str(pattern: &str, target: &str) -> bool {
@@ -1209,5 +1361,32 @@ mod parse_tests {
         assert!(reg.check_network("api.github.com"));
         assert!(!reg.check_network("github.com")); // globset '*.github.com' does not match 'github.com'
         assert!(!reg.check_network("google.com"));
+    }
+
+    #[test]
+    fn test_cap_file_and_cap_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = temp.path().join("test_cap.txt");
+        std::fs::write(&file_path, b"hello capability").unwrap();
+
+        let mut reg = CapsRegistry::new();
+        reg.grant(ResourceHandle::ReadFile(temp.path().to_path_buf()));
+        reg.grant(ResourceHandle::ReadDir(temp.path().to_path_buf()));
+
+        let mut cap_file = reg
+            .open_file(&file_path, true, false, false, false, false)
+            .unwrap();
+        let content = cap_file.read_to_string().unwrap();
+        assert_eq!(content, "hello capability");
+
+        let denied_path = PathBuf::from("/etc/shadow");
+        assert!(
+            reg.open_file(&denied_path, true, false, false, false, false)
+                .is_err()
+        );
+
+        let cap_dir = reg.acquire_dir(temp.path(), true, false).unwrap();
+        let entries: Vec<_> = cap_dir.read_dir().unwrap().collect();
+        assert_eq!(entries.len(), 1);
     }
 }

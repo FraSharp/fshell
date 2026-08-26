@@ -1572,6 +1572,65 @@ impl Env {
         })
     }
 
+    /// Atomically acquire an unforgeable CapFile handle under capability validation.
+    pub fn open_cap_file(
+        &self,
+        path: &std::path::Path,
+        read: bool,
+        write: bool,
+        create: bool,
+        append: bool,
+        truncate: bool,
+    ) -> Result<fshell_capabilities::CapFile, EngineError> {
+        let abs_path = if path.is_relative() {
+            self.cwd().join(path)
+        } else {
+            path.to_path_buf()
+        };
+        let clean = clean_path(&abs_path);
+        if read {
+            self.enforce_capability("file_read", CapAction::ReadFile(clean.clone()))?;
+        }
+        if write {
+            self.enforce_capability("file_write", CapAction::WriteFile(clean.clone()))?;
+        }
+        let caps = lock_caps!(self.caps.caps.read());
+        caps.open_file(&clean, read, write, create, append, truncate)
+            .map_err(|e| EngineError::CapabilityDenied {
+                cmd_name: "open_cap_file".to_string(),
+                action: e,
+                span: None,
+            })
+    }
+
+    /// Atomically acquire an unforgeable CapDir directory handle under capability validation.
+    pub fn acquire_cap_dir(
+        &self,
+        path: &std::path::Path,
+        read: bool,
+        write: bool,
+    ) -> Result<fshell_capabilities::CapDir, EngineError> {
+        let abs_path = if path.is_relative() {
+            self.cwd().join(path)
+        } else {
+            path.to_path_buf()
+        };
+        let clean = clean_path(&abs_path);
+        if read {
+            self.enforce_capability("dir_read", CapAction::ReadDir(clean.clone()))?;
+        }
+        if write {
+            self.enforce_capability("dir_write", CapAction::WriteDir(clean.clone()))?;
+        }
+        let caps = lock_caps!(self.caps.caps.read());
+        caps.acquire_dir(&clean, read, write)
+            .map_err(|e| EngineError::CapabilityDenied {
+                cmd_name: "acquire_cap_dir".to_string(),
+                action: e,
+                span: None,
+            })
+    }
+
     /// Persist capabilities atomically with restricted permissions.
     fn persist_caps(&self, caps: &fshell_capabilities::CapsRegistry) {
         let home = match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
