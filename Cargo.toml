@@ -176,6 +176,8 @@ rmp-serde = { workspace = true }
 ustr = { workspace = true }
 fshell-sandbox = { path = "crates/fshell-sandbox" }
 fshell-hash = { workspace = true }
+fshell-panes = { path = "crates/fshell-panes" }
+ratatui = { workspace = true }
 proptest = { workspace = true }
 
 
