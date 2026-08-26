@@ -27,7 +27,10 @@ sh {
     run_script(script, &env).await.unwrap();
 
     let vars = env.vars.read();
-    assert_eq!(vars.get("DIR_A"), Some(&Val::String("core/parser/expr.rs".into())));
+    assert_eq!(
+        vars.get("DIR_A"),
+        Some(&Val::String("core/parser/expr.rs".into()))
+    );
     assert_eq!(vars.get("BASE"), Some(&Val::String("expr.rs".into())));
     assert_eq!(vars.get("NAME_ONLY"), Some(&Val::String("expr".into())));
     assert_eq!(vars.get("TAR_NAME"), Some(&Val::String("archive".into())));
@@ -51,9 +54,18 @@ sh {
 
     let vars = env.vars.read();
     assert_eq!(vars.get("VAL1"), Some(&Val::String("fallback_val".into())));
-    assert_eq!(vars.get("VAL2"), Some(&Val::String("assigned_default".into())));
-    assert_eq!(vars.get("NEW_KEY"), Some(&Val::String("assigned_default".into())));
-    assert_eq!(vars.get("VAL3"), Some(&Val::String("alternative_val".into())));
+    assert_eq!(
+        vars.get("VAL2"),
+        Some(&Val::String("assigned_default".into()))
+    );
+    assert_eq!(
+        vars.get("NEW_KEY"),
+        Some(&Val::String("assigned_default".into()))
+    );
+    assert_eq!(
+        vars.get("VAL3"),
+        Some(&Val::String("alternative_val".into()))
+    );
 }
 
 #[tokio::test]
@@ -71,8 +83,14 @@ sh {
     run_script(script, &env).await.unwrap();
 
     let vars = env.vars.read();
-    assert_eq!(vars.get("FIRST"), Some(&Val::String("qux_bar_foo_baz".into())));
-    assert_eq!(vars.get("ALL"), Some(&Val::String("qux_bar_qux_baz".into())));
+    assert_eq!(
+        vars.get("FIRST"),
+        Some(&Val::String("qux_bar_foo_baz".into()))
+    );
+    assert_eq!(
+        vars.get("ALL"),
+        Some(&Val::String("qux_bar_qux_baz".into()))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -123,5 +141,8 @@ sh {
     let vars = env.vars.read();
     assert_eq!(vars.get("OUT_RS"), Some(&Val::String("rust_file".into())));
     assert_eq!(vars.get("OUT_PY"), Some(&Val::String("python_file".into())));
-    assert_eq!(vars.get("OUT_OTHER"), Some(&Val::String("unknown_file".into())));
+    assert_eq!(
+        vars.get("OUT_OTHER"),
+        Some(&Val::String("unknown_file".into()))
+    );
 }

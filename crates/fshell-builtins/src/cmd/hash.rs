@@ -39,7 +39,9 @@ pub fn hash_builtin(
                                 i += 2;
                             }
                             _ => {
-                                return Err("hash: -a option requires algorithm (256, 512, xof)".into());
+                                return Err(
+                                    "hash: -a option requires algorithm (256, 512, xof)".into()
+                                );
                             }
                         }
                     } else {

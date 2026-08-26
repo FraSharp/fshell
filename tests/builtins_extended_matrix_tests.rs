@@ -19,27 +19,30 @@ async fn test_hash_builtin_sha256_and_sha512() {
     let script = format!("let h256 = (hash \"{file_str}\")");
     run_script(&script, &env).await.unwrap();
 
-    let vars = env.vars.read();
-    if let Some(Val::List(items)) = vars.get("h256") {
-        let line = items[0].to_text();
-        let hash_hex = line.split_whitespace().next().unwrap();
-        assert_eq!(hash_hex.len(), 64); // 256 bits = 64 hex characters
-    } else {
-        panic!("Expected List of hash items");
+    {
+        let vars = env.vars.read();
+        if let Some(Val::List(items)) = vars.get("h256") {
+            let line = items[0].to_text();
+            let hash_hex = line.split_whitespace().next().unwrap();
+            assert_eq!(hash_hex.len(), 64); // 256 bits = 64 hex characters
+        } else {
+            panic!("Expected List of hash items");
+        }
     }
 
     // 512
-    drop(vars);
     let script512 = format!("let h512 = (hash -a 512 \"{file_str}\")");
     run_script(&script512, &env).await.unwrap();
 
-    let vars = env.vars.read();
-    if let Some(Val::List(items)) = vars.get("h512") {
-        let line = items[0].to_text();
-        let hash_hex = line.split_whitespace().next().unwrap();
-        assert_eq!(hash_hex.len(), 128); // 512 bits = 128 hex characters
-    } else {
-        panic!("Expected List of hash items");
+    {
+        let vars = env.vars.read();
+        if let Some(Val::List(items)) = vars.get("h512") {
+            let line = items[0].to_text();
+            let hash_hex = line.split_whitespace().next().unwrap();
+            assert_eq!(hash_hex.len(), 128); // 512 bits = 128 hex characters
+        } else {
+            panic!("Expected List of hash items");
+        }
     }
 }
 
@@ -58,22 +61,25 @@ let which_ls = (which ls)
 "#;
     run_script(script, &env).await.unwrap();
 
-    let vars = env.vars.read();
-    assert!(vars.get("type_cd").is_some());
-    assert!(vars.get("which_ls").is_some());
+    {
+        let vars = env.vars.read();
+        assert!(vars.get("type_cd").is_some());
+        assert!(vars.get("which_ls").is_some());
+    }
 
     // 2. User function resolution
-    drop(vars);
     let script_fn = r#"
 fn custom_tool(x) { $x + 1 }
 let type_tool = (type custom_tool)
 "#;
     run_script(script_fn, &env).await.unwrap();
 
-    let vars = env.vars.read();
-    if let Some(Val::List(items)) = vars.get("type_tool") {
-        let text = items[0].to_text();
-        assert!(text.contains("function") || text.contains("custom_tool"));
+    {
+        let vars = env.vars.read();
+        if let Some(Val::List(items)) = vars.get("type_tool") {
+            let text = items[0].to_text();
+            assert!(text.contains("function") || text.contains("custom_tool"));
+        }
     }
 }
 
@@ -119,7 +125,11 @@ let text_out = $items | @text
 
     let vars = env.vars.read();
     if let Some(Val::List(items)) = vars.get("yaml_out") {
-        let yaml_str = items.iter().map(|v| v.to_text()).collect::<Vec<_>>().join("\n");
+        let yaml_str = items
+            .iter()
+            .map(|v| v.to_text())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(yaml_str.contains("Task 1"));
         assert!(yaml_str.contains("Task 2"));
     } else {

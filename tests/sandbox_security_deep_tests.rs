@@ -22,8 +22,14 @@ fn test_sandbox_profile_matrix_modes() {
         .deny_write(PathBuf::from("/tmp/build/secrets"))
         .with_network(false);
 
-    assert_eq!(p_custom.allow_write_paths, vec![PathBuf::from("/tmp/build")]);
-    assert_eq!(p_custom.deny_write_paths, vec![PathBuf::from("/tmp/build/secrets")]);
+    assert_eq!(
+        p_custom.allow_write_paths,
+        vec![PathBuf::from("/tmp/build")]
+    );
+    assert_eq!(
+        p_custom.deny_write_paths,
+        vec![PathBuf::from("/tmp/build/secrets")]
+    );
     assert!(!p_custom.allow_network);
 }
 
@@ -54,7 +60,9 @@ async fn test_destructive_patterns_blocked_in_non_interactive() {
         );
         let err = res.unwrap_err();
         assert!(
-            err.contains("Dangerous operation") || err.contains("destructive") || err.contains("blocked"),
+            err.contains("Dangerous operation")
+                || err.contains("destructive")
+                || err.contains("blocked"),
             "Error should mention destructive/blocked guard: {err}"
         );
     }
@@ -90,7 +98,10 @@ let target = "{symlink_str}"
     run_script(&script, &env).await.unwrap();
 
     // Ensure outside file content wasn't modified
-    assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "original_content");
+    assert_eq!(
+        std::fs::read_to_string(&outside_file).unwrap(),
+        "original_content"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -103,5 +114,8 @@ async fn test_sandbox_isolated_mode_process_execution() {
     let env = setup_test_env();
 
     let res = run_script("sandbox --isolated echo isolated_ok", &env).await;
-    assert!(res.is_ok(), "expected sandbox --isolated to execute cleanly");
+    assert!(
+        res.is_ok(),
+        "expected sandbox --isolated to execute cleanly"
+    );
 }

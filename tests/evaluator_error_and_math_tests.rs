@@ -80,7 +80,10 @@ let user = { name: "Alice" }
 let missing = $user.non_existent_key
 "#;
     let res = run_script(script, &env).await;
-    assert!(res.is_err(), "Accessing non-existent map field should return error");
+    assert!(
+        res.is_err(),
+        "Accessing non-existent map field should return error"
+    );
     let err = res.unwrap_err();
     assert!(err.contains("Map has no field 'non_existent_key'"));
 }
