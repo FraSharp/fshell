@@ -236,6 +236,7 @@ fn render_explain(diag: FshDiag, source: Option<&str>, source_name: &str, color:
                 .zip(diag.source_name.as_ref())
                 .map(|(s, n)| ((**s).clone(), n.clone()))
         });
+    let has_snippet = effective_source.is_some();
     if let Some((src, name)) = effective_source {
         let mut snippet_report = diag.into_inner();
         snippet_report = snippet_report.with_source_code(miette::NamedSource::new(name, src));
@@ -256,7 +257,7 @@ fn render_explain(diag: FshDiag, source: Option<&str>, source_name: &str, color:
         drop(diag);
     }
 
-    if let Some(help) = help {
+    if let Some(help) = help.filter(|_| !has_snippet) {
         out.push_str(&format!("\n  {c_dim}↳ help:{c_reset} {help}\n"));
     }
     if let Some(fix) = fix {
