@@ -18,6 +18,7 @@ pub mod lock_utils;
 pub mod parser;
 pub mod presets;
 pub mod prompt_config;
+pub mod shell_error;
 pub mod theme;
 pub mod val;
 pub mod validator;
@@ -36,6 +37,7 @@ pub use glob_utils::{
 pub use lock_utils::RwLock;
 pub use parser::{ParseError, Parser};
 pub use prompt_config::{ColorSpec, PromptConfig, SegmentConfig, SegmentType, SeparatorStyle};
+pub use shell_error::ShellError;
 pub use val::{EdgeData, FxIndexMap, GraphStorage, NodeData, NodeId, ResourceHandle, Val};
 pub use validator::{
     ValidationResult, compute_indent_depth, compute_indent_depth_at, validate_input,

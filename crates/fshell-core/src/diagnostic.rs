@@ -554,6 +554,13 @@ impl FshDiag {
         if self.code == Some(ErrorCode::ConditionFalse) {
             return true;
         }
+        if self
+            .report
+            .downcast_ref::<crate::ShellError>()
+            .is_some_and(|e| e.is_condition_false())
+        {
+            return true;
+        }
         self.report
             .downcast_ref::<StringError>()
             .is_some_and(|e| e.is_condition_false())

@@ -210,9 +210,6 @@ impl DiagnosticExt for EngineError {
             EngineError::PipelineError { .. } => Some(ErrorCode::PipelineError),
             EngineError::MutationNotAllowed { .. } => Some(ErrorCode::ImmutableVariable),
             EngineError::IoError { .. } => Some(ErrorCode::IoError),
-            EngineError::Generic { message, .. } if message.contains("not found") => {
-                Some(ErrorCode::CommandNotFound)
-            }
             EngineError::Generic { .. } => Some(ErrorCode::General),
             EngineError::Parse(p) => p.code_enum(),
             EngineError::MatchNonExhaustive { .. } => Some(ErrorCode::RuntimeError),
@@ -249,9 +246,6 @@ impl DiagnosticExt for EngineError {
             }
             EngineError::DivisionByZero { .. } => {
                 vec!["Check the divisor before dividing.".into()]
-            }
-            EngineError::Generic { message, .. } if message.contains("not found") => {
-                vec!["Check the command name or path.".into()]
             }
             _ => Vec::new(),
         }

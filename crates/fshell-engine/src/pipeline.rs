@@ -1034,8 +1034,8 @@ pub async fn execute_pipeline(
                                     out_tx.clone(),
                                     has_next,
                                 ) {
-                                    let err_str = e.to_string();
-                                    let code = if err_str.contains("Command not found") {
+                                    let code = if e.code == fshell_core::ErrorCode::CommandNotFound
+                                    {
                                         127
                                     } else {
                                         1
