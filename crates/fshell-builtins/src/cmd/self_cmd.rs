@@ -67,7 +67,7 @@ pub fn self_builtin(
         } else {
             exec_args
         };
-        return do_exec(exec_args);
+        return do_exec(exec_args, span);
     }
 
     let mut flag_exe = false;
@@ -123,13 +123,17 @@ pub fn self_builtin(
     if flag_exec {
         // Flags like --pid/--version are mutually exclusive with --exec
         if flag_pid || flag_version || flag_info || flag_exe {
-            return Err("self: --exec cannot be combined with --pid/--version/--info/--exe".into());
+            return Err(ShellError::new(
+                ErrorCode::InvalidArgument,
+                "self: --exec cannot be combined with --pid/--version/--info/--exe",
+            )
+            .maybe_with_span(span));
         }
         // Strip leading -- leftover
         if exec_args.first().is_some_and(|s| s == "--") {
             exec_args.remove(0);
         }
-        return do_exec(exec_args);
+        return do_exec(exec_args, span);
     }
 
     if flag_help {
@@ -160,7 +164,11 @@ pub fn self_builtin(
         .filter(|&&b| b)
         .count();
     if selector_count > 1 {
-        return Err("self: --exe/--pid/--version are mutually exclusive".into());
+        return Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            "self: --exe/--pid/--version are mutually exclusive",
+        )
+        .maybe_with_span(span));
     }
 
     if flag_pid {
@@ -203,14 +211,15 @@ pub fn self_builtin(
     Ok(())
 }
 
-fn do_exec(args: Vec<String>) -> Result<(), ShellError> {
+fn do_exec(args: Vec<String>, span: Option<SourceSpan>) -> Result<(), ShellError> {
     // This replaces the current process. On success it never returns.
     // On failure we surface the OS error as a builtin error.
     match fshell_engine::exe::exec_self(&args) {
         Ok(()) => unreachable!("exec_self should not return on success"),
         Err(e) => Err(
             ShellError::new(ErrorCode::CommandFailed, format!("self exec: {e}"))
-                .with_help("Check that the executable path and arguments are valid"),
+                .with_help("Check that the executable path and arguments are valid")
+                .maybe_with_span(span),
         ),
     }
 }
