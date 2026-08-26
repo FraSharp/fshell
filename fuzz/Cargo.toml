@@ -10,12 +10,19 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 fshell-core = { path = "../crates/fshell-core" }
+fshell-capabilities = { path = "../crates/fshell-capabilities" }
+fshell-engine = { path = "../crates/fshell-engine" }
+fshell-builtins = { path = "../crates/fshell-builtins" }
 fshell-posix = { path = "../crates/fshell-posix" }
 fshell-hash = { path = "../crates/fshell-hash" }
 fshell-panes = { path = "../crates/fshell-panes" }
+brush-parser = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 rmp-serde = { workspace = true }
+ustr = { workspace = true }
+regex = { workspace = true }
 
 [[bin]]
 name = "parser"
@@ -26,6 +33,42 @@ doc = false
 [[bin]]
 name = "posix_parser"
 path = "fuzz_targets/posix_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "posix_arithmetic"
+path = "fuzz_targets/posix_arithmetic.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "posix_expand"
+path = "fuzz_targets/posix_expand.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "posix_eval"
+path = "fuzz_targets/posix_eval.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "engine_eval"
+path = "fuzz_targets/engine_eval.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "extended_glob"
+path = "fuzz_targets/extended_glob.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pipeline_formatters"
+path = "fuzz_targets/pipeline_formatters.rs"
 test = false
 doc = false
 
