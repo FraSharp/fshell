@@ -936,10 +936,9 @@ pub async fn execute_pipeline(
                                             Ok(v) => last_val = Some(v),
                                             Err(e) => {
                                                 env_clone.report_stage_error();
+                                                let diag = fshell_core::diagnostic::FshDiag::from(e);
                                                 let _ = out_tx
-                                                    .send(PipelinePayload::Structured(
-                                                        e.to_string().into(),
-                                                    ))
+                                                    .send(PipelinePayload::Structured(diag))
                                                     .await;
                                                 return;
                                             }
@@ -950,27 +949,40 @@ pub async fn execute_pipeline(
                                                 last_val = Some(ret);
                                                 break 'fn_body;
                                             }
-                                            Ok(flow) => {
-                                                // Stray `break`/`continue`/logical
-                                                // false inside a function body called
-                                                // from a pipeline stage: report it
-                                                // like any other stage failure.
-                                                env_clone.report_stage_error();
+                                            Ok(Flow::ConditionFalse) => {
+                                                env_clone.report_stage_error_code(1);
+                                                let diag = fshell_core::diagnostic::FshDiag::from(
+                                                    fshell_core::ShellError::condition_false(),
+                                                );
                                                 let _ = out_tx
-                                                    .send(PipelinePayload::Structured(
-                                                        flow.stray_message()
-                                                            .unwrap_or_else(|| "false".to_string())
-                                                            .into(),
-                                                    ))
+                                                    .send(PipelinePayload::Structured(diag))
+                                                    .await;
+                                                return;
+                                            }
+                                            Ok(flow) => {
+                                                // Stray `break`/`continue`/`exit`/`return`
+                                                // inside a function body called from a
+                                                // pipeline stage: report as hard error.
+                                                env_clone.report_stage_error();
+                                                let msg = flow
+                                                    .stray_message()
+                                                    .unwrap_or_else(|| "control flow".to_string());
+                                                let diag = fshell_core::diagnostic::FshDiag::from(
+                                                    fshell_core::ShellError::new(
+                                                        fshell_core::diagnostic::ErrorCode::InternalError,
+                                                        format!("stray `{msg}` in pipeline function"),
+                                                    ),
+                                                );
+                                                let _ = out_tx
+                                                    .send(PipelinePayload::Structured(diag))
                                                     .await;
                                                 return;
                                             }
                                             Err(e) => {
                                                 env_clone.report_stage_error();
+                                                let diag = fshell_core::diagnostic::FshDiag::from(e);
                                                 let _ = out_tx
-                                                    .send(PipelinePayload::Structured(
-                                                        e.to_string().into(),
-                                                    ))
+                                                    .send(PipelinePayload::Structured(diag))
                                                     .await;
                                                 return;
                                             }
