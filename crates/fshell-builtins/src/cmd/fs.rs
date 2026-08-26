@@ -593,7 +593,8 @@ pub fn ls_builtin(
             }
 
             fshell_ls::tree::render_tree(&t_config, &mut buf, |p| {
-                env.caps.caps.read().check_read_dir(p)
+                !env.is_strict_mode()
+                    || env.caps.caps.read().check_read_dir(p)
                     || p.canonicalize()
                         .ok()
                         .as_ref()
@@ -748,7 +749,13 @@ pub fn cd_builtin(
         return Ok(());
     }
 
-    let target_path = match std::fs::canonicalize(&raw_path) {
+    let resolved_raw = if raw_path.is_relative() {
+        env.cwd().join(&raw_path)
+    } else {
+        raw_path.clone()
+    };
+
+    let target_path = match std::fs::canonicalize(&resolved_raw) {
         Ok(target_path) => target_path,
         Err(e) => {
             let mut resolved = None;

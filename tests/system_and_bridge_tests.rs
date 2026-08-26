@@ -191,9 +191,9 @@ async fn test_integration_redirections() {
 #[tokio::test]
 async fn test_integration_redirections_both() {
     let env = setup_test_env();
-    let temp_dir = std::env::temp_dir();
+    let td = tempfile::tempdir().unwrap();
+    let temp_dir = td.path().to_path_buf();
     let out_file = temp_dir.join("fshell_both_out.txt");
-    let _ = std::fs::remove_file(&out_file);
 
     // Grant write permission to temp dir
     {
