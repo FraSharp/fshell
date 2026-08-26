@@ -552,3 +552,197 @@ async fn test_happy_export() {
         panic!("expected env to be a Map, got {env_val:?}");
     }
 }
+
+// =========================================================================
+// Daily Driver Workflows & Structured Pipelines
+// =========================================================================
+
+#[tokio::test]
+async fn test_happy_file_pipeline_filter_and_sort() {
+    let env = setup_test_env();
+    let script = r#"
+let files = [
+    { name: "small.log", size: 10 },
+    { name: "medium.txt", size: 500 },
+    { name: "large.bin", size: 5000 }
+]
+let big_files = $files | filter size > 100 | sort size desc
+"#;
+    fshell_engine::run_script(script, &env).await.unwrap();
+
+    let vars = env.vars.read();
+    if let Some(Val::List(items)) = vars.get("big_files") {
+        assert_eq!(items.len(), 2);
+        if let Val::Map(first) = &items[0] {
+            assert_eq!(
+                first.get(&ustr("name")),
+                Some(&Val::String("large.bin".to_string()))
+            );
+            assert_eq!(first.get(&ustr("size")), Some(&Val::Int(5000)));
+        } else {
+            panic!("Expected Map in big_files");
+        }
+    } else {
+        panic!("Expected List for big_files");
+    }
+}
+
+#[tokio::test]
+async fn test_happy_nested_data_property_access() {
+    let env = setup_test_env();
+    let script = r#"
+let app_config = {
+    server: {
+        host: "localhost",
+        port: 8080,
+        ssl: true
+    },
+    database: {
+        connections: [
+            { name: "primary", pool_size: 20 },
+            { name: "replica", pool_size: 5 }
+        ]
+    }
+}
+let host = $app_config.server.host
+let port = $app_config.server.port
+"#;
+    fshell_engine::run_script(script, &env).await.unwrap();
+
+    let vars = env.vars.read();
+    assert_eq!(
+        vars.get("host"),
+        Some(&Val::String("localhost".to_string()))
+    );
+    assert_eq!(vars.get("port"), Some(&Val::Int(8080)));
+}
+
+#[tokio::test]
+async fn test_happy_data_serialization_json_and_csv() {
+    let env = setup_test_env();
+    let script = r#"
+let users = [
+    { id: 1, name: "Alice", role: "admin" },
+    { id: 2, name: "Bob", role: "developer" }
+]
+let json_str = $users | @json
+let csv_str = $users | @csv
+"#;
+    fshell_engine::run_script(script, &env).await.unwrap();
+
+    let vars = env.vars.read();
+    if let Some(Val::List(items)) = vars.get("json_str") {
+        let json_text = items[0].to_text();
+        assert!(json_text.contains("Alice"));
+        assert!(json_text.contains("admin"));
+    } else {
+        panic!("Expected List of json output");
+    }
+
+    if let Some(Val::List(items)) = vars.get("csv_str") {
+        let csv_text = items
+            .iter()
+            .map(|v| v.to_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(csv_text.contains("Alice"));
+        assert!(csv_text.contains("developer"));
+    } else {
+        panic!("Expected List of csv output");
+    }
+}
+
+#[tokio::test]
+async fn test_happy_string_manipulation_pipeline() {
+    let env = setup_test_env();
+    let script = r#"
+let raw_input = "  frontend, backend, database  "
+let trimmed = (string trim $raw_input)
+let upper = (string upper $trimmed)
+let parts = (string split ", " $upper)
+"#;
+    fshell_engine::run_script(script, &env).await.unwrap();
+
+    let vars = env.vars.read();
+    assert_eq!(
+        vars.get("trimmed"),
+        Some(&Val::List(vec![Val::String(
+            "frontend, backend, database".to_string()
+        )]))
+    );
+    assert_eq!(
+        vars.get("upper"),
+        Some(&Val::List(vec![Val::String(
+            "FRONTEND, BACKEND, DATABASE".to_string()
+        )]))
+    );
+}
+
+#[tokio::test]
+async fn test_happy_directory_stack_pushd_popd() {
+    let env = setup_test_env();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir_a = temp_dir.path().join("dir_a");
+    let dir_b = temp_dir.path().join("dir_b");
+    std::fs::create_dir(&dir_a).unwrap();
+    std::fs::create_dir(&dir_b).unwrap();
+
+    let dir_a_str = dir_a.to_string_lossy();
+    let dir_b_str = dir_b.to_string_lossy();
+
+    let script = format!(
+        r#"
+cd "{dir_a_str}"
+pushd "{dir_b_str}"
+let in_b = (pwd)
+popd
+let in_a = (pwd)
+"#
+    );
+    fshell_engine::run_script(&script, &env).await.unwrap();
+
+    let vars = env.vars.read();
+    assert!(vars.get("in_b").is_some());
+    assert!(vars.get("in_a").is_some());
+}
+
+#[tokio::test]
+async fn test_happy_heredoc_config_generation() {
+    let env = setup_test_env();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_file = temp_dir.path().join("generated_config.yaml");
+    let config_file_str = config_file.to_string_lossy();
+
+    let script = format!(
+        r#"
+let SERVICE_NAME = "auth-service"
+let PORT_NUM = "9090"
+sh {{
+    cat <<EOF > "{config_file_str}"
+service:
+  name: $SERVICE_NAME
+  port: $PORT_NUM
+  active: true
+EOF
+}}
+"#
+    );
+    fshell_engine::run_script(&script, &env).await.unwrap();
+
+    let content = std::fs::read_to_string(&config_file).unwrap();
+    assert!(content.contains("name: auth-service"));
+    assert!(content.contains("port: 9090"));
+    assert!(content.contains("active: true"));
+}
+
+#[tokio::test]
+async fn test_happy_reactive_cell_declaration_and_query() {
+    let env = setup_test_env();
+    let script = r#"
+$= live_stream = echo "event_ok"
+"#;
+    fshell_engine::run_script(script, &env).await.unwrap();
+
+    let reactive = env.reactive.pipelines.read();
+    assert!(reactive.contains_key("live_stream"));
+}
