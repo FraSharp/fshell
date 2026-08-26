@@ -109,6 +109,28 @@ async fn posix_subshell_isolation() {
 }
 
 #[tokio::test]
+async fn posix_subshell_cwd_isolation() {
+    let env = setup_posix_env();
+    let initial_cwd = env.cwd();
+    let parent_dir = initial_cwd.parent().unwrap_or(&initial_cwd);
+
+    // Grant read capability for parent
+    env.caps
+        .caps
+        .write()
+        .grant(fshell_core::ResourceHandle::ReadDir(
+            parent_dir.to_path_buf(),
+        ));
+
+    run_posix("(cd ..; pwd)", &env).await;
+    assert_eq!(
+        env.cwd(),
+        initial_cwd,
+        "subshell cd must not mutate parent cwd"
+    );
+}
+
+#[tokio::test]
 async fn posix_pipeline() {
     let env = setup_posix_env();
     let code = run_posix("echo hello | cat", &env).await;

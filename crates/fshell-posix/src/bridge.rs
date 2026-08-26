@@ -34,11 +34,15 @@ pub fn fork_env_for_subshell(parent: &Env) -> Env {
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    // Clone parent but then replace vars/fns with isolated copies
+    // Clone parent but then replace vars/fns/cwd/traps/options with isolated copies
     let mut child = parent.clone();
     child.scope.vars =
         std::sync::Arc::new(fshell_core::RwLock::new(snap_vars.into_iter().collect()));
     child.scope.fns = std::sync::Arc::new(fshell_core::RwLock::new(snap_fns.into_iter().collect()));
+    child.scope.cwd = std::sync::Arc::new(fshell_core::RwLock::new(parent.cwd()));
+    child.posix_traps =
+        std::sync::Arc::new(fshell_core::RwLock::new(parent.posix_traps.read().clone()));
+    child.options = std::sync::Arc::new(fshell_core::RwLock::new(parent.options.read().clone()));
     child
 }
 
@@ -66,5 +70,15 @@ mod tests {
             child.vars.read().get("X"),
             Some(&Val::String("2".to_string()))
         );
+    }
+
+    #[test]
+    fn test_fork_cwd_isolation() {
+        let parent = Env::for_command();
+        let initial = parent.cwd();
+        let child = fork_env_for_subshell(&parent);
+        child.set_cwd(std::path::PathBuf::from("/tmp"));
+        assert_eq!(parent.cwd(), initial);
+        assert_eq!(child.cwd(), std::path::PathBuf::from("/tmp"));
     }
 }

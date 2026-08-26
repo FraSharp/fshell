@@ -141,7 +141,7 @@ EXAMPLES:
     }
 
     let system_prompt = load_system_prompt();
-    let context = collect_context();
+    let context = collect_context(env);
     let full_prompt = format!(
         "Natural language: {}\n\nCurrent context:\n{}",
         user_prompt, context
@@ -257,10 +257,8 @@ fn is_destructive_cmd(name: &str) -> bool {
     )
 }
 
-pub fn collect_context() -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "unknown".into());
+pub fn collect_context(env: &Env) -> String {
+    let cwd = env.cwd().display().to_string();
     let os = std::env::consts::OS;
     let mut ctx = format!("cwd: {cwd}\nos: {os}");
 

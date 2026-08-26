@@ -602,9 +602,7 @@ mod tests {
             .write()
             .grant(ResourceHandle::ReadDir(tmp.clone()));
 
-        let old_dir = std::env::current_dir().unwrap();
         let (tx, _rx) = mpsc::channel(100);
-
         let result = cd_builtin(
             None,
             vec![Val::String(tmp.to_string_lossy().to_string())],
@@ -613,9 +611,8 @@ mod tests {
             None,
         );
         assert!(result.is_ok(), "cd to valid dir failed: {:?}", result.err());
-        assert_eq!(std::env::current_dir().unwrap(), tmp);
+        assert_eq!(env.cwd(), tmp);
 
-        std::env::set_current_dir(old_dir).unwrap();
         std::fs::remove_dir(&tmp).unwrap();
     }
 
@@ -632,7 +629,11 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(err.message.contains("invalid path"), "got: {err}");
+        assert!(
+            err.message.contains("No such file or directory")
+                || err.message.contains("Failed to change directory"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -645,7 +646,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cd_no_args_goes_to_home() {
+    async fn test_cd_no_args_changes_to_home() {
         let _lock = CD_LOCK.lock().unwrap();
         let _fsh_guard = save_fsh_home();
         let env = init_test_env();
@@ -656,18 +657,11 @@ mod tests {
             .write()
             .grant(ResourceHandle::ReadDir(home_canonical.clone()));
 
-        let old_dir = std::env::current_dir().unwrap();
         let (tx, _rx) = mpsc::channel(100);
 
         let result = cd_builtin(None, vec![], &env, tx, None);
         assert!(result.is_ok(), "cd with no args failed: {:?}", result.err());
-        assert_eq!(
-            std::env::current_dir().unwrap(),
-            home_canonical,
-            "expected to land in HOME"
-        );
-
-        std::env::set_current_dir(old_dir).unwrap();
+        assert_eq!(env.cwd(), home_canonical, "expected to land in HOME");
     }
 
     #[tokio::test]
@@ -706,18 +700,11 @@ mod tests {
             .write()
             .grant(ResourceHandle::ReadDir(home_canonical.clone()));
 
-        let old_dir = std::env::current_dir().unwrap();
         let (tx, _rx) = mpsc::channel(100);
 
         let result = cd_builtin(None, vec![Val::String("~".into())], &env, tx, None);
         assert!(result.is_ok(), "cd ~ failed: {:?}", result.err());
-        assert_eq!(
-            std::env::current_dir().unwrap(),
-            home_canonical,
-            "expected ~ to expand to HOME"
-        );
-
-        std::env::set_current_dir(old_dir).unwrap();
+        assert_eq!(env.cwd(), home_canonical, "expected ~ to expand to HOME");
     }
 
     #[tokio::test]
@@ -779,7 +766,6 @@ mod tests {
         let env = init_test_env();
         let cd = env.get_builtin("cd").unwrap();
 
-        let old_dir = std::env::current_dir().unwrap();
         let tmp = std::fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join("fshell_cd_registry_test");
@@ -799,9 +785,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(std::env::current_dir().unwrap(), tmp);
+        assert_eq!(env.cwd(), tmp);
 
-        std::env::set_current_dir(old_dir).unwrap();
         std::fs::remove_dir(&tmp).unwrap();
     }
 
@@ -839,10 +824,7 @@ mod tests {
             caps.strict_mode = true;
         }
 
-        let old_dir = std::env::current_dir().unwrap();
-        let _guard = CwdGuard {
-            old_dir: old_dir.clone(),
-        };
+        let old_dir = env.cwd();
 
         let tmp_root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         let dummy_home = tmp_root.join("fshell_dummy_home_cd_test");
@@ -896,14 +878,14 @@ mod tests {
         // Check CD - back
         let (tx2, _rx2) = mpsc::channel(100);
         cd_builtin(None, vec![Val::String("-".to_string())], &env, tx2, None).unwrap();
-        assert_eq!(std::env::current_dir().unwrap(), old_dir);
+        assert_eq!(env.cwd(), old_dir);
 
         // Test Smart CD Fallback
         // First log a visit to target_dir so it is in the database
         log_frecency_visit(&target_dir).unwrap();
 
         // Now change back to old_dir
-        std::env::set_current_dir(&old_dir).unwrap();
+        env.set_cwd(old_dir.clone());
 
         // Re-grant capability to target_dir since we just moved away
         env.caps
@@ -922,7 +904,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(std::env::current_dir().unwrap(), target_dir);
+        assert_eq!(env.cwd(), target_dir);
 
         let _ = std::fs::remove_dir_all(&dummy_home);
     }
@@ -936,10 +918,7 @@ mod tests {
             caps.strict_mode = true;
         }
 
-        let old_dir = std::env::current_dir().unwrap();
-        let _guard = CwdGuard {
-            old_dir: old_dir.clone(),
-        };
+        let old_dir = env.cwd();
 
         let tmp_root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         let dummy_home = tmp_root.join("fshell_dummy_home_z_test");
@@ -972,10 +951,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(std::env::current_dir().unwrap(), target_dir);
+        assert_eq!(env.cwd(), target_dir);
 
         // Change back to old_dir
-        std::env::set_current_dir(&old_dir).unwrap();
+        env.set_cwd(old_dir.clone());
 
         // Log visits
         log_frecency_visit(&target_dir).unwrap();
@@ -996,10 +975,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(std::env::current_dir().unwrap(), target_dir);
+        assert_eq!(env.cwd(), target_dir);
 
         // Change back to dummy_home to test subdirectory matching
-        std::env::set_current_dir(&dummy_home).unwrap();
+        env.set_cwd(dummy_home.clone());
 
         // Log a subdirectory visit
         let subdir = target_dir.join("sub_foo");
@@ -1020,7 +999,7 @@ mod tests {
         log_frecency_visit(&unrelated).unwrap();
 
         // Current directory is dummy_home. Let's cd into target_dir first.
-        std::env::set_current_dir(&target_dir).unwrap();
+        env.set_cwd(target_dir.clone());
 
         // Grant capability to subdir
         env.caps
@@ -1038,7 +1017,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(std::env::current_dir().unwrap(), subdir);
+        assert_eq!(env.cwd(), subdir);
 
         let _ = std::fs::remove_dir_all(&dummy_home);
     }

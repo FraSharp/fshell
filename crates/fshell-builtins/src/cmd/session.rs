@@ -70,9 +70,7 @@ fn cmd_resume(id: Option<&str>, env: &Env, tx: PipeSender) -> Result<(), ShellEr
         .stderr(std::process::Stdio::inherit());
 
     // Inherit current working directory
-    if let Ok(pwd) = std::env::current_dir() {
-        cmd.current_dir(pwd);
-    }
+    cmd.current_dir(env.cwd());
 
     // Reset signal mask in child before exec — same pattern as fshell-bridge
     unsafe {

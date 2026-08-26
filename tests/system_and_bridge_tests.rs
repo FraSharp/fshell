@@ -15,7 +15,7 @@ use std::path::PathBuf;
 async fn test_integration_cd_and_paths() {
     let _cwd_guard = ProcessLockGuard::acquire();
     let env = setup_test_env();
-    let old_dir = std::env::current_dir().unwrap();
+    let old_dir = env.cwd();
 
     // Grant capability for the parent directory to allow cd .. in sandbox
     env.caps
@@ -31,13 +31,10 @@ async fn test_integration_cd_and_paths() {
     assert_eq!(stmts.len(), 1);
 
     eval_stmt(&stmts[0], &env, false).await.unwrap();
-    let new_dir = std::env::current_dir().unwrap();
+    let new_dir = env.cwd();
 
     // It should have successfully moved to the parent directory
     assert_eq!(new_dir, old_dir.parent().unwrap());
-
-    // Restore directory to keep test environment stable
-    std::env::set_current_dir(old_dir).unwrap();
 }
 
 #[tokio::test]
@@ -128,8 +125,12 @@ async fn test_integration_bridge_fallthrough_echo() {
 async fn test_integration_redirections() {
     let env = setup_test_env();
     let temp_dir = std::env::temp_dir();
-    let out_file = temp_dir.join("fshell_test_out.txt");
-    let err_file = temp_dir.join("fshell_test_err.txt");
+    let unique_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let out_file = temp_dir.join(format!("fshell_test_out_{}.txt", unique_id));
+    let err_file = temp_dir.join(format!("fshell_test_err_{}.txt", unique_id));
     let _ = std::fs::remove_file(&out_file);
     let _ = std::fs::remove_file(&err_file);
 

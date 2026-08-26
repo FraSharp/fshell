@@ -5,12 +5,11 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream};
 use miette::SourceSpan;
-use std::path::PathBuf;
 
 pub fn serve_builtin(
     _in_rx: Option<PipeStream>,
     args: Vec<Val>,
-    _env: &Env,
+    env: &Env,
     _tx: PipeSender,
     _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
@@ -24,8 +23,9 @@ pub fn serve_builtin(
         .iter()
         .any(|a| matches!(a, Val::String(s) if s == "--live"));
 
+    let cwd = env.cwd();
     tokio::spawn(async move {
-        if let Err(e) = run_server(port, live_reload).await {
+        if let Err(e) = run_server(port, live_reload, cwd).await {
             eprintln!("serve error: {}", e);
         }
     });
@@ -33,7 +33,11 @@ pub fn serve_builtin(
     Ok(())
 }
 
-async fn run_server(port: u16, _live_reload: bool) -> Result<(), ShellError> {
+async fn run_server(
+    port: u16,
+    _live_reload: bool,
+    current_dir: std::path::PathBuf,
+) -> Result<(), ShellError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -42,8 +46,6 @@ async fn run_server(port: u16, _live_reload: bool) -> Result<(), ShellError> {
         .map_err(|e| format!("Failed to bind to port {}: {}", port, e))?;
 
     println!("Serving on http://localhost:{}", port);
-
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     loop {
         let (mut socket, _addr) = listener

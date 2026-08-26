@@ -1245,13 +1245,24 @@ async fn eval_simple_command_inner(
             let path = if target.is_empty() {
                 std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
             } else if target == "-" {
-                std::env::var("OLDPWD").unwrap_or_else(|_| "/".to_string())
+                let vars = env.vars.read();
+                vars.get("OLDPWD")
+                    .map(|v| v.to_text())
+                    .unwrap_or_else(|| "/".to_string())
             } else {
                 target.to_string()
             };
-            let new_cwd = std::path::PathBuf::from(path);
-            let prev_cwd = std::env::current_dir().unwrap_or_default();
-            if let Ok(()) = std::env::set_current_dir(&new_cwd) {
+            let target_path = std::path::PathBuf::from(path);
+            let prev_cwd = env.cwd();
+            let resolved = if target_path.is_absolute() {
+                target_path
+            } else {
+                prev_cwd.join(&target_path)
+            };
+            if let Ok(canon) = resolved.canonicalize()
+                && canon.is_dir()
+            {
+                env.set_cwd(canon.clone());
                 {
                     let mut vars = env.vars.write();
                     vars.insert(
@@ -1260,7 +1271,7 @@ async fn eval_simple_command_inner(
                     );
                     vars.insert(
                         "PWD".to_string(),
-                        Val::String(new_cwd.to_string_lossy().to_string()),
+                        Val::String(canon.to_string_lossy().to_string()),
                     );
                 }
                 return Ok((0, None));
@@ -1270,10 +1281,7 @@ async fn eval_simple_command_inner(
             }
         }
         "pwd" => {
-            let mut text = String::new();
-            if let Ok(cwd) = std::env::current_dir() {
-                text = format!("{}\n", cwd.display());
-            }
+            let text = format!("{}\n", env.cwd().display());
             let out = write_builtin_output(&text, redir, io_cfg.capture_stdout)?;
             return Ok((0, out));
         }

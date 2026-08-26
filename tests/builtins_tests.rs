@@ -306,10 +306,10 @@ async fn test_integration_z_builtin() {
     fshell_builtins::z_builtin(None, vec![Val::String(fragment)], &env, tx, None).unwrap();
 
     // Verify PWD is changed to the target path
-    let current = std::env::current_dir().unwrap();
+    let current = env.cwd();
     assert_eq!(
-        std::fs::canonicalize(current).unwrap(),
-        std::fs::canonicalize(target).unwrap()
+        current.canonicalize().unwrap(),
+        target.canonicalize().unwrap()
     );
 
     // Clean up
@@ -648,7 +648,7 @@ async fn test_integration_pushd_popd_dirs() {
         caps.grant(ResourceHandle::ReadDir(tmp.clone()));
     }
 
-    let initial_dir = std::env::current_dir().unwrap();
+    let initial_dir = env.cwd();
 
     // 1. pushd to dir1
     let (tx1, _rx1) = tokio::sync::mpsc::channel(100);
@@ -661,7 +661,7 @@ async fn test_integration_pushd_popd_dirs() {
     )
     .unwrap();
     assert_eq!(
-        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        env.cwd().canonicalize().unwrap(),
         dir1.canonicalize().unwrap()
     );
 
@@ -676,7 +676,7 @@ async fn test_integration_pushd_popd_dirs() {
     )
     .unwrap();
     assert_eq!(
-        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        env.cwd().canonicalize().unwrap(),
         dir2.canonicalize().unwrap()
     );
 
@@ -684,7 +684,7 @@ async fn test_integration_pushd_popd_dirs() {
     let (tx3, _rx3) = tokio::sync::mpsc::channel(100);
     fshell_builtins::popd_builtin(None, vec![], &env, tx3, None).unwrap();
     assert_eq!(
-        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        env.cwd().canonicalize().unwrap(),
         dir1.canonicalize().unwrap()
     );
 
@@ -692,12 +692,9 @@ async fn test_integration_pushd_popd_dirs() {
     let (tx4, _rx4) = tokio::sync::mpsc::channel(100);
     fshell_builtins::popd_builtin(None, vec![], &env, tx4, None).unwrap();
     assert_eq!(
-        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        env.cwd().canonicalize().unwrap(),
         initial_dir.canonicalize().unwrap()
     );
-
-    // Cleanup
-    let _ = std::env::set_current_dir(&initial_dir);
 }
 
 #[tokio::test]

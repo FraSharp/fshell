@@ -184,7 +184,7 @@ pub fn caps_audit_builtin(
 
     if action == "clean" {
         let mut caps = env.caps.caps.write();
-        let pwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        let pwd = env.cwd();
         caps.held.clear();
         caps.grant(ResourceHandle::ReadDir(pwd.clone()));
         caps.grant(ResourceHandle::WriteDir(pwd.clone()));

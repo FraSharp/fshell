@@ -465,10 +465,8 @@ pub fn run_external(
                 && fshell_engine::is_stdout_a_tty()
         };
 
-    // Set implicitly derived $PWD sandbox current_dir (Tier 2 isolation)
-    if let Ok(pwd) = std::env::current_dir() {
-        cmd.current_dir(pwd);
-    }
+    // Set working directory to the environment's logical cwd
+    cmd.current_dir(env.cwd());
 
     // Inherit environment variables from fshell state "env" variable.
     // Skip entirely when no env modifications have been made — the child

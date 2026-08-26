@@ -76,9 +76,10 @@ impl AgentModeState {
 pub static AGENT_RESULT: Mutex<Option<(usize, Result<String, String>)>> = Mutex::new(None);
 
 #[cfg(feature = "ai")]
-async fn query_ai_backend(prompt: &str, _env: &Env) -> Result<String, String> {
+async fn query_ai_backend(prompt: &str, env: &Env) -> Result<String, String> {
     // Use tokio's spawn_blocking for synchronous AiProvider::generate network calls
     let prompt_owned = prompt.to_string();
+    let env_owned = env.clone();
     tokio::task::spawn_blocking(move || {
         let provider = fshell_builtins::ai::resolve_provider_with_overrides(None, None);
         if !fshell_builtins::ai_provider::is_provider_configured(&*provider) {
@@ -89,7 +90,7 @@ async fn query_ai_backend(prompt: &str, _env: &Env) -> Result<String, String> {
         }
 
         let system_prompt = fshell_builtins::ai::load_system_prompt();
-        let context = fshell_builtins::ai::collect_context();
+        let context = fshell_builtins::ai::collect_context(&env_owned);
         let full_prompt = format!(
             "Natural language command request: {}\n\nContext:\n{}",
             prompt_owned, context

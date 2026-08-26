@@ -17,29 +17,43 @@ pub fn change_dir_and_update_caps(
     target_path: &std::path::Path,
     env: &Env,
 ) -> Result<(), ShellError> {
-    env.enforce_capability("cd", CapAction::ReadDir(target_path.to_path_buf()))?;
+    let old_pwd = env.cwd();
+    let resolved = if target_path.is_absolute() {
+        target_path.to_path_buf()
+    } else {
+        old_pwd.join(target_path)
+    };
 
-    let old_pwd = std::env::current_dir().ok();
+    let canonical = match resolved.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(ShellError::io_error(
+                format!("Failed to change directory to {:?}: {}", target_path, e),
+                None,
+            ));
+        }
+    };
 
-    std::env::set_current_dir(target_path).map_err(|e| {
-        ShellError::io_error(
-            format!("Failed to change directory to {:?}: {}", target_path, e),
+    if !canonical.is_dir() {
+        return Err(ShellError::io_error(
+            format!("Not a directory: {:?}", target_path),
             None,
-        )
-    })?;
+        ));
+    }
+
+    env.enforce_capability("cd", CapAction::ReadDir(canonical.clone()))?;
+    env.set_cwd(canonical.clone());
 
     let mut caps = env.caps.caps.write();
-    if let Some(ref old_path) = old_pwd {
-        caps.held.retain(|h| match h {
-            ResourceHandle::ReadDir(p)
-            | ResourceHandle::WriteDir(p)
-            | ResourceHandle::ReadFile(p)
-            | ResourceHandle::WriteFile(p) => !(p.starts_with(old_path) && p != target_path),
-            _ => true,
-        });
-    }
-    caps.grant(ResourceHandle::ReadDir(target_path.to_path_buf()));
-    caps.grant(ResourceHandle::WriteDir(target_path.to_path_buf()));
+    caps.held.retain(|h| match h {
+        ResourceHandle::ReadDir(p)
+        | ResourceHandle::WriteDir(p)
+        | ResourceHandle::ReadFile(p)
+        | ResourceHandle::WriteFile(p) => !(p.starts_with(&old_pwd) && p != &canonical),
+        _ => true,
+    });
+    caps.grant(ResourceHandle::ReadDir(canonical.clone()));
+    caps.grant(ResourceHandle::WriteDir(canonical.clone()));
 
     const MAX_PATH_CAPS: usize = 100;
     let path_count = caps
@@ -56,7 +70,7 @@ pub fn change_dir_and_update_caps(
         })
         .count();
     if path_count > MAX_PATH_CAPS {
-        let target = target_path.to_path_buf();
+        let target = canonical.clone();
         caps.held.retain(|h| match h {
             ResourceHandle::ReadDir(p)
             | ResourceHandle::WriteDir(p)
@@ -65,30 +79,24 @@ pub fn change_dir_and_update_caps(
             _ => true,
         });
     }
-    let pwd_str = target_path.to_string_lossy().to_string();
-    let old_pwd_str = old_pwd.as_ref().map(|p| p.to_string_lossy().to_string());
+    let pwd_str = canonical.to_string_lossy().to_string();
+    let old_pwd_str = old_pwd.to_string_lossy().to_string();
     drop(caps);
 
     {
         let mut vars = env.vars.write();
         vars.insert("PWD".to_string(), Val::String(pwd_str.clone()));
-        if let Some(ref old_str) = old_pwd_str {
-            vars.insert("OLDPWD".to_string(), Val::String(old_str.clone()));
-        }
+        vars.insert("OLDPWD".to_string(), Val::String(old_pwd_str.clone()));
         if let Some(Val::Map(env_map)) = vars.get("env") {
             let mut new_map = env_map.clone();
             new_map.insert(ustr::ustr("PWD"), Val::String(pwd_str.clone()));
-            if let Some(ref old_str) = old_pwd_str {
-                new_map.insert(ustr::ustr("OLDPWD"), Val::String(old_str.clone()));
-            }
+            new_map.insert(ustr::ustr("OLDPWD"), Val::String(old_pwd_str.clone()));
             vars.insert("env".to_string(), Val::Map(new_map));
         }
     }
 
     set_var("PWD", &pwd_str);
-    if let Some(ref old_str) = old_pwd_str {
-        set_var("OLDPWD", old_str);
-    }
+    set_var("OLDPWD", &old_pwd_str);
 
     Ok(())
 }

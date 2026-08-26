@@ -158,7 +158,11 @@ pub fn log_frecency_visit(path: &std::path::Path) -> Result<(), ShellError> {
 
 /// Helper to find the highest-ranked frecent directory matching a set of query fragments.
 /// If `subdirectory_only` is true, results are restricted to subdirectories of the current directory.
-pub fn resolve_z_match(fragments: &[String], subdirectory_only: bool) -> Result<PathBuf, String> {
+pub fn resolve_z_match(
+    fragments: &[String],
+    subdirectory_only: bool,
+    cwd: Option<&std::path::Path>,
+) -> Result<PathBuf, String> {
     let db_path = match get_frecency_db_path() {
         Some(p) => p,
         None => return Err("HOME not set".to_string()),
@@ -170,7 +174,7 @@ pub fn resolve_z_match(fragments: &[String], subdirectory_only: bool) -> Result<
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let current_dir = std::env::current_dir().ok();
+    let current_dir = cwd.map(|p| p.to_path_buf());
 
     let mut candidates: Vec<(String, f64)> = Vec::new();
     for (path, entry) in &db.paths {
@@ -325,7 +329,7 @@ pub fn z_builtin(
         }
     }
 
-    let target = resolve_z_match(&fragments, subdirectory_only)?;
+    let target = resolve_z_match(&fragments, subdirectory_only, Some(&env.cwd()))?;
 
     // Optional echo matched path if _ZO_ECHO == 1 or Z_ECHO == 1
     let echo_matched = std::env::var("_ZO_ECHO").unwrap_or_default() == "1"
@@ -390,7 +394,7 @@ pub fn zi_builtin(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let current_dir = std::env::current_dir().ok();
+    let current_dir = Some(env.cwd());
 
     let mut scored: Vec<(String, f64)> = Vec::new();
     for (path, entry) in &db.paths {

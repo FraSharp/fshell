@@ -37,6 +37,7 @@ fn format_permissions_from_mode(mode: u32) -> String {
 
 fn parse_ls_args_to_rrls_config(
     args: &[Val],
+    cwd: &std::path::Path,
 ) -> Result<(fshell_ls::Config, Vec<String>, bool), String> {
     let is_tty = fshell_engine::is_stdout_a_tty();
 
@@ -239,7 +240,7 @@ fn parse_ls_args_to_rrls_config(
     let raw_path = if !path_args.is_empty() {
         expand_tilde(&path_args[0])
     } else {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        cwd.to_path_buf()
     };
 
     let config = fshell_ls::Config {
@@ -455,7 +456,7 @@ pub fn ls_builtin(
         env.is_last_stage
     );
     // 1. Parse flags into rrls Config and collect path arguments
-    let (mut config, path_args, verbose) = parse_ls_args_to_rrls_config(&args)?;
+    let (mut config, path_args, verbose) = parse_ls_args_to_rrls_config(&args, &env.cwd())?;
 
     // Set theme colors for fshell-ls
     let theme = env.active_theme();
@@ -480,11 +481,21 @@ pub fn ls_builtin(
         config.recursive = true;
     }
 
-    // Collect all target paths (expand tilde for each)
+    // Collect all target paths (expand tilde for each and resolve relative against env.cwd())
     let targets: Vec<std::path::PathBuf> = if !path_args.is_empty() {
-        path_args.iter().map(|p| expand_tilde(p)).collect()
+        path_args
+            .iter()
+            .map(|p| {
+                let expanded = expand_tilde(p);
+                if expanded.is_relative() {
+                    env.cwd().join(expanded)
+                } else {
+                    expanded
+                }
+            })
+            .collect()
     } else {
-        vec![std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))]
+        vec![env.cwd()]
     };
 
     // Direct output mode:
@@ -507,7 +518,12 @@ pub fn ls_builtin(
                 let mut paths = vec![t_config.path.clone()];
                 let mut is_first = true;
                 while let Some(current_path) = paths.pop() {
-                    let allowed = env.caps.caps.read().check_read_dir(&current_path);
+                    let allowed = env.caps.caps.read().check_read_dir(&current_path)
+                        || current_path
+                            .canonicalize()
+                            .ok()
+                            .as_ref()
+                            .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp));
                     if !allowed {
                         continue;
                     }
@@ -524,6 +540,10 @@ pub fn ls_builtin(
 
                         let _ = fshell_ls::render(&sub_result, &sub_config, |p| {
                             env.caps.caps.read().check_read_dir(p)
+                                || p.canonicalize()
+                                    .ok()
+                                    .as_ref()
+                                    .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
                         });
 
                         let mut subdirs = Vec::new();
@@ -546,6 +566,10 @@ pub fn ls_builtin(
                     .map_err(|e| format!("{}: {}", t_config.path.display(), e))?;
                 fshell_ls::render(&all_entries, &t_config, |p| {
                     env.caps.caps.read().check_read_dir(p)
+                        || p.canonicalize()
+                            .ok()
+                            .as_ref()
+                            .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
                 })
                 .map_err(|e| format!("{}: {}", t_config.path.display(), e))?;
             }
@@ -570,6 +594,10 @@ pub fn ls_builtin(
 
             fshell_ls::tree::render_tree(&t_config, &mut buf, |p| {
                 env.caps.caps.read().check_read_dir(p)
+                    || p.canonicalize()
+                        .ok()
+                        .as_ref()
+                        .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
             })
             .map_err(|e| format!("{}: {}", t_config.path.display(), e))?;
         }
@@ -649,9 +677,7 @@ pub fn ls_builtin(
 }
 
 fn cd_change_dir(target: &std::path::Path, env: &Env) -> Result<(), ShellError> {
-    let prev_dir = std::env::current_dir()
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
+    let prev_dir = Some(env.cwd().to_string_lossy().to_string());
     change_dir_and_update_caps(target, env)?;
     let _ = crate::cmd::frecency::log_frecency_visit(target);
     let autopushd = env.options.read().autopushd;
@@ -740,9 +766,11 @@ pub fn cd_builtin(
                         }
                     }
                 }
-                if let Ok(matched_path) =
-                    crate::cmd::frecency::resolve_z_match(&fragments, subdirectory_only)
-                {
+                if let Ok(matched_path) = crate::cmd::frecency::resolve_z_match(
+                    &fragments,
+                    subdirectory_only,
+                    Some(&env.cwd()),
+                ) {
                     let _ = tx.try_send(PipelinePayload::Data(Arc::new(Val::String(
                         matched_path.display().to_string(),
                     ))));
@@ -782,7 +810,7 @@ pub fn pushd_builtin(
         _ => Vec::new(),
     };
 
-    let current_dir = std::env::current_dir().map_err(|e| format!("pushd: {}", e))?;
+    let current_dir = env.cwd();
 
     if args.is_empty() {
         if stack.is_empty() {
@@ -898,9 +926,7 @@ pub fn dirs_builtin(
         _ => Vec::new(),
     };
 
-    let current_dir = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".to_string());
+    let current_dir = env.cwd().to_string_lossy().to_string();
 
     if verbose {
         let _ = tx.try_send(PipelinePayload::Data(Arc::new(Val::String(format!(
@@ -937,9 +963,7 @@ fn send_dir_stack(env: &Env, tx: &PipeSender) -> Result<(), ShellError> {
         Some(Val::List(list)) => list.clone(),
         _ => Vec::new(),
     };
-    let current_dir = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".to_string());
+    let current_dir = env.cwd().to_string_lossy().to_string();
 
     let mut output = current_dir;
     for item in &stack {
@@ -980,7 +1004,7 @@ pub fn extract_builtin(
     let archive_path = std::fs::canonicalize(&raw_path)
         .map_err(|e| format!("Invalid archive path {:?}: {}", raw_path, e))?;
     env.enforce_capability("extract", CapAction::ReadFile(archive_path.clone()))?;
-    let pwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let pwd = env.cwd();
     env.enforce_capability("extract", CapAction::WriteDir(pwd.clone()))?;
     env.enforce_capability("extract", CapAction::ProcessSpawn)?;
 
@@ -1026,7 +1050,6 @@ pub fn extract_builtin(
         }
     };
 
-    let pwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut cmd = match format {
         "zip" => {
             let mut c = tokio::process::Command::new("unzip");
@@ -1654,9 +1677,7 @@ pub fn pwd_builtin(
     tx: PipeSender,
     _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
-    let current_dir =
-        std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
-
+    let current_dir = env.cwd();
     env.enforce_capability("pwd", CapAction::ReadDir(current_dir.clone()))?;
 
     let path_str = current_dir.to_string_lossy().to_string();
@@ -1692,7 +1713,7 @@ pub fn watch_builtin(
     let raw_path = if !path_args.is_empty() {
         expand_tilde(&path_args[0])
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        env.cwd()
     };
 
     let target_path = std::fs::canonicalize(&raw_path)

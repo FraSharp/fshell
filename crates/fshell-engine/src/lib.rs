@@ -1106,6 +1106,16 @@ fn is_action_allowed(
 }
 
 impl Env {
+    /// Get the logical current working directory for this environment.
+    pub fn cwd(&self) -> PathBuf {
+        self.scope.cwd.read().clone()
+    }
+
+    /// Set the logical current working directory for this environment.
+    pub fn set_cwd(&self, new_cwd: PathBuf) {
+        *self.scope.cwd.write() = new_cwd;
+    }
+
     /// Check if strict capability enforcement mode is active.
     pub fn is_strict_mode(&self) -> bool {
         self.caps.caps.read().strict_mode
@@ -1346,7 +1356,7 @@ impl Env {
                         *p = canonical;
                     } else {
                         let abs_path = if p.is_relative() {
-                            std::env::current_dir().unwrap_or_default().join(&p)
+                            self.cwd().join(&p)
                         } else {
                             p.clone()
                         };
@@ -1623,6 +1633,7 @@ impl Env {
         let (reactive_tx, reactive_rx) = tokio::sync::mpsc::channel(1000);
         let (cap_prompt_tx, cap_prompt_rx) = tokio::sync::mpsc::channel(PIPELINE_CHANNEL_SIZE);
         let exe_path = Arc::new(crate::exe::resolve_exe());
+        let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let env = Env {
             scope: scope::Scope {
                 vars: Arc::new(RwLock::new(FxHashMap::default())),
@@ -1632,6 +1643,7 @@ impl Env {
                 fallback: Arc::new(RwLock::new(None)),
                 builtins_cache: Arc::new(Mutex::new(None)),
                 local_vars: None,
+                cwd: Arc::new(RwLock::new(initial_cwd.clone())),
             },
             job_control: job_control::JobControl {
                 jobs: Arc::new(RwLock::new(FxHashMap::default())),
@@ -1652,7 +1664,7 @@ impl Env {
             },
             caps: caps::Caps {
                 caps: Arc::new(RwLock::new(CapsRegistry::new_with_defaults(
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                    initial_cwd.clone(),
                 ))),
                 strict_mode_temp_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 audit_log: Arc::new(Mutex::new(std::collections::VecDeque::new())),
@@ -1772,6 +1784,7 @@ impl Env {
     /// Uses an empty CapsRegistry — no disk I/O; grants come from the
     /// engine's non-strict bypass rather than held capabilities.
     pub fn for_command() -> Self {
+        let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let env = Env {
             scope: scope::Scope {
                 vars: Arc::new(RwLock::new(FxHashMap::default())),
@@ -1781,6 +1794,7 @@ impl Env {
                 fallback: Arc::new(RwLock::new(None)),
                 builtins_cache: Arc::new(Mutex::new(None)),
                 local_vars: None,
+                cwd: Arc::new(RwLock::new(initial_cwd.clone())),
             },
             job_control: job_control::JobControl {
                 jobs: Arc::new(RwLock::new(FxHashMap::default())),
@@ -1801,9 +1815,7 @@ impl Env {
             },
             caps: {
                 let mut caps = fshell_capabilities::CapsRegistry::new_permissive();
-                caps.grant(fshell_core::ResourceHandle::ReadDir(
-                    std::path::PathBuf::from("/"),
-                ));
+                caps.grant(fshell_core::ResourceHandle::ReadDir(initial_cwd.clone()));
                 caps::Caps {
                     caps: Arc::new(RwLock::new(caps)),
                     strict_mode_temp_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -1854,6 +1866,10 @@ impl Env {
         {
             let mut vars = env.vars.write();
             vars.insert(
+                "PWD".to_string(),
+                Val::String(initial_cwd.to_string_lossy().to_string()),
+            );
+            vars.insert(
                 "FSH_EXE".to_string(),
                 Val::String(env.exe_path.to_string_lossy().to_string()),
             );
@@ -1900,6 +1916,7 @@ impl Env {
                 aliases: self.scope.aliases.clone(),
                 fallback: self.scope.fallback.clone(),
                 builtins_cache: self.scope.builtins_cache.clone(),
+                cwd: self.scope.cwd.clone(),
             },
             job_control: self.job_control.clone(),
             reactive: self.reactive.clone(),

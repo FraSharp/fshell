@@ -55,12 +55,15 @@ pub fn ff_builtin(
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     // 1. Check process / file-read capability on the current dir
-    let pwd = std::env::current_dir().map_err(|e| format!("ff: {}", e))?;
+    let pwd = env.cwd();
     env.enforce_capability("ff", fshell_engine::CapAction::ReadDir(pwd.clone()))?;
-    env.track_read(pwd);
+    env.track_read(pwd.clone());
 
     // 2. Parse args
-    let config = parse_args(&args)?;
+    let mut config = parse_args(&args)?;
+    if config.path == "." {
+        config.path = pwd.to_string_lossy().to_string();
+    }
 
     // 3. Check capability on the search root
     let search_root = std::path::PathBuf::from(&config.path);

@@ -211,9 +211,7 @@ pub fn reload_builtin(
                 }
             })
             .unwrap_or_else(|| "unknown".to_string()),
-        cwd: std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string()),
+        cwd: env.cwd().to_string_lossy().to_string(),
         options: options_guard.clone(),
         hooks: hooks_guard.clone(),
         last_exit_code: *exit_code_guard,
@@ -364,8 +362,7 @@ pub fn caps_profile_builtin(
     tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
-    let mut curr =
-        std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?;
+    let mut curr = env.cwd();
     let mut caps_yaml_path = None;
     let mut base_dir = None;
 

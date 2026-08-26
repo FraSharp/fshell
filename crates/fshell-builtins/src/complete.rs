@@ -420,15 +420,17 @@ pub fn compgen_builtin(
             let path = std::path::Path::new(prefix);
             if let Some(parent) = path.parent() {
                 if parent.as_os_str().is_empty() {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                } else {
+                    env.cwd()
+                } else if parent.is_absolute() {
                     parent.to_path_buf()
+                } else {
+                    env.cwd().join(parent)
                 }
             } else {
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                env.cwd()
             }
         } else {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            env.cwd()
         };
 
         if let Ok(entries) = std::fs::read_dir(&search_dir) {

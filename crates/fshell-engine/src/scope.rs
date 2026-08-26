@@ -19,6 +19,7 @@ pub struct Scope {
     pub fallback: Arc<RwLock<Option<FallbackHandler>>>,
     pub local_vars: Option<Arc<RwLock<FxHashMap<String, Val>>>>,
     pub builtins_cache: Arc<Mutex<Option<Vec<String>>>>,
+    pub cwd: Arc<RwLock<std::path::PathBuf>>,
 }
 
 impl std::fmt::Debug for Scope {
@@ -28,6 +29,7 @@ impl std::fmt::Debug for Scope {
             .field("fns", &self.fns)
             .field("builtins_cache", &self.builtins_cache)
             .field("local_vars", &self.local_vars)
+            .field("cwd", &self.cwd)
             .finish()
     }
 }

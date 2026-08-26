@@ -182,7 +182,7 @@ fn resolve_parameter(param: &Parameter, env: &fshell_engine::Env, positional: &[
 
 /// Minimal glob matcher for POSIX pathname expansion.
 /// Supports `*`, `?`, `[...]`. Uses walkdir for `*` at filesystem level.
-fn expand_glob(pattern: &str) -> Vec<String> {
+fn expand_glob(pattern: &str, cwd: &std::path::Path) -> Vec<String> {
     // Use the fshell glob machinery if available, else fallback.
     // We do a conservative filesystem glob using glob crate semantics.
     // For now, use globset for matching but restrict to current directory expansion.
@@ -190,8 +190,6 @@ fn expand_glob(pattern: &str) -> Vec<String> {
     if !has_glob {
         return vec![pattern.to_string()];
     }
-    // Try filesystem expansion relative to cwd
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // Build glob pattern relative
     let glob = match glob::Pattern::new(pattern) {
         Ok(p) => p,
@@ -203,19 +201,14 @@ fn expand_glob(pattern: &str) -> Vec<String> {
     let mut matches: Vec<String> = Vec::new();
     // Walk up to 1 level deep for simple patterns; full walk for patterns with '/'
     let candidates: Vec<std::path::PathBuf> = if pattern.contains('/') {
-        walkdir::WalkDir::new(&cwd)
+        walkdir::WalkDir::new(cwd)
             .max_depth(6)
             .into_iter()
             .filter_map(|e| e.ok())
-            .map(|e| {
-                e.path()
-                    .strip_prefix(&cwd)
-                    .unwrap_or(e.path())
-                    .to_path_buf()
-            })
+            .map(|e| e.path().strip_prefix(cwd).unwrap_or(e.path()).to_path_buf())
             .collect()
     } else {
-        std::fs::read_dir(&cwd)
+        std::fs::read_dir(cwd)
             .ok()
             .map(|rd| {
                 rd.filter_map(|e| e.ok())
@@ -375,7 +368,7 @@ pub fn expand_word(
             if had_quoted {
                 result.push(field);
             } else {
-                result.extend(expand_glob(&field));
+                result.extend(expand_glob(&field, &env.cwd()));
             }
         }
         result
@@ -785,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_glob_no_match() {
-        let r = expand_glob("no_such_file_zzz_12345");
+        let r = expand_glob("no_such_file_zzz_12345", std::path::Path::new("."));
         assert_eq!(r, vec!["no_such_file_zzz_12345"]);
     }
 

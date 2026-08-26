@@ -17,7 +17,7 @@ pub fn eval_direnv_builtin(
     // Check process spawn capability
     env.enforce_capability("eval_direnv", CapAction::ProcessSpawn)?;
 
-    let current_dir = std::env::current_dir().map_err(|e| format!("direnv: {}", e))?;
+    let current_dir = env.cwd();
 
     // Check if .envrc or .env exists first to avoid spawning process unnecessarily
     let envrc_exists = current_dir.join(".envrc").exists();
@@ -101,7 +101,7 @@ pub fn load_env_file_builtin(
 }
 
 fn load_env_file_internal(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
-    let current_dir = std::env::current_dir().map_err(|e| format!("load_env: {}", e))?;
+    let current_dir = env.cwd();
     let dotenv_path = current_dir.join(".env");
 
     if !dotenv_path.exists() {
