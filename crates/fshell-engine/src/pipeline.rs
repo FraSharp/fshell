@@ -936,7 +936,8 @@ pub async fn execute_pipeline(
                                             Ok(v) => last_val = Some(v),
                                             Err(e) => {
                                                 env_clone.report_stage_error();
-                                                let diag = fshell_core::diagnostic::FshDiag::from(e);
+                                                let diag =
+                                                    fshell_core::diagnostic::FshDiag::from(e);
                                                 let _ = out_tx
                                                     .send(PipelinePayload::Structured(diag))
                                                     .await;
@@ -980,7 +981,8 @@ pub async fn execute_pipeline(
                                             }
                                             Err(e) => {
                                                 env_clone.report_stage_error();
-                                                let diag = fshell_core::diagnostic::FshDiag::from(e);
+                                                let diag =
+                                                    fshell_core::diagnostic::FshDiag::from(e);
                                                 let _ = out_tx
                                                     .send(PipelinePayload::Structured(diag))
                                                     .await;

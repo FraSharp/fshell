@@ -197,8 +197,11 @@ fn parse_split_args(args: &[String]) -> Result<(String, String), ShellError> {
 
 fn parse_two_args(args: &[String], subcmd: &str) -> Result<(String, String), ShellError> {
     match args.len() {
-        0 => Err(ShellError::missing_argument("string", subcmd, None)
-            .with_help(format!("Usage: string {subcmd} <text> <needle> or pipe text | string {subcmd} <needle>"))),
+        0 => Err(
+            ShellError::missing_argument("string", subcmd, None).with_help(format!(
+                "Usage: string {subcmd} <text> <needle> or pipe text | string {subcmd} <needle>"
+            )),
+        ),
         // 1 arg: needle only (text comes from pipe)
         1 => Ok((String::new(), args[0].clone())),
         // 2+ args: text and needle

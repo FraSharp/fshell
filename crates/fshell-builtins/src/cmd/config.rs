@@ -607,11 +607,9 @@ fn parse_bool(v: &Val) -> Result<bool, ShellError> {
 fn parse_int(v: &Val) -> Result<i64, ShellError> {
     match v {
         Val::Int(i) => Ok(*i),
-        Val::String(s) => s
-            .parse::<i64>()
-            .map_err(|_| {
-                ShellError::invalid_argument("set", s, None).with_help("Expected an integer value")
-            }),
+        Val::String(s) => s.parse::<i64>().map_err(|_| {
+            ShellError::invalid_argument("set", s, None).with_help("Expected an integer value")
+        }),
         _ => Err(ShellError::new(
             ErrorCode::InvalidArgument,
             "set: expected an integer or string",
@@ -834,10 +832,8 @@ pub fn config_builtin(
             config_set(env, key, val)
         }
         "reload" => config_reload_sync(env),
-        _ => {
-            Err(ShellError::invalid_argument("config", cmd, None)
-                .with_help("Expected one of: list/get/set/reload"))
-        }
+        _ => Err(ShellError::invalid_argument("config", cmd, None)
+            .with_help("Expected one of: list/get/set/reload")),
     }
 }
 

@@ -206,10 +206,10 @@ fn do_exec(args: Vec<String>) -> Result<(), ShellError> {
     // On failure we surface the OS error as a builtin error.
     match fshell_engine::exe::exec_self(&args) {
         Ok(()) => unreachable!("exec_self should not return on success"),
-        Err(e) => Err(ShellError::new(
-            ErrorCode::CommandFailed,
-            format!("self exec: {e}"),
-        ) .with_help("Check that the executable path and arguments are valid")),
+        Err(e) => Err(
+            ShellError::new(ErrorCode::CommandFailed, format!("self exec: {e}"))
+                .with_help("Check that the executable path and arguments are valid"),
+        ),
     }
 }
 
