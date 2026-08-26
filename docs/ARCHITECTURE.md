@@ -353,7 +353,7 @@ the shell seamlessly switches execution modes:
 ## crate deep dives
 
 ### fshell-core
-contains no dependencies on other workspace crates. defines the AST grammar (`Expr`, `Stmt`, `PipelineStage`), the `Parser` implementation, the `Val` enum, diagnostic structures (`FshDiag`, `ParseError`), and common hashing aliases (`FxIndexMap`).
+contains no dependencies on other workspace crates. defines the AST grammar (`Expr`, `Stmt`, `PipelineStage`), the `Parser` implementation, the `Val` enum, and the unified error system (`ShellError { code: ErrorCode, message, span, help }`, `FshDiag`, `ParseError`) with the `ErrorCode` taxonomy (`FSH-*-###`), and common hashing aliases (`FxIndexMap`).
 
 ### fshell-capabilities
 maintains capability tokens, tracks permission grants, and verifies file path prefixes and socket rules before operations run.
@@ -362,7 +362,7 @@ maintains capability tokens, tracks permission grants, and verifies file path pr
 provides sponge-based hashing algorithms, SHA-2/SHA-3/BLAKE3 primitives, and exports `FxBuildHasher` used throughout the workspace for fast non-cryptographic hash tables.
 
 ### fshell-engine
-the runtime engine. implements `eval_stmt`, `eval_expr`, pipeline orchestration, reactive watch cells, session handoffs, AST caching, and execution profiling.
+the runtime engine. implements `eval_stmt`/`eval_expr` returning `Result<Flow, ShellError>` where `Flow { Normal, ConditionFalse, Break, Continue, Return(Val), Exit(i32) }` separates control flow from errors, pipeline orchestration via `PipelineFailure { ConditionFalse, Hard(FshDiag) }`, reactive watch cells, session handoffs, AST caching, and execution profiling.
 
 ### fshell-builtins
 registers built-in shell utilities (`cd`, `pwd`, `cp`, `mv`, `rm`, `ps`, `df`, `kill`, `curl`, `jq`, `sql`, `vault`, etc.). feature-gated to allow building lightweight or minimal distributions.

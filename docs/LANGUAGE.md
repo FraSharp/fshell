@@ -591,17 +591,17 @@ supported pattern types:
 
 ## error handling (`try` / `catch`)
 
-fshell captures failures using `try` / `catch` blocks. runtime errors populate a structured diagnostic map into the catch binding:
+fshell captures failures as `ShellError { code: ErrorCode, message, span, help, fix }` (unified taxonomy `FSH-*-###` in `fshell-core`). `try` / `catch` blocks populate the catch binding with a structured diagnostic map:
 
 ```fsh
 try {
     rm /nonexistent/file
 } catch |err| {
-    echo "failed with message: {err.message}"
+    echo "failed [{err.code}]: {err.message}"
 }
 ```
 
-the catch variable contains error metadata (e.g. `err.message`, `err.code`). loop control signals (`break`, `continue`, `return`, `exit`) pass through `try` / `catch` transparently.
+the catch variable contains `code`, `name`, `category`, `message`, `help`, `fix`, `suggestions` and `docs_url`. control flow (`Flow { Break, Continue, Return, Exit, ConditionFalse }`) is not an error and passes through `try` / `catch` transparently; logical false (`ConditionFalse`, exit 1) never renders as an error line and drives `&&`/`||` and `$?`.
 
 ---
 
