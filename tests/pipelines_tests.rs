@@ -1247,3 +1247,15 @@ async fn test_integration_binary_stream_piping() {
         "Binary data must be preserved byte-for-byte across pipeline redirections"
     );
 }
+
+#[tokio::test]
+async fn test_external_pipeline_streaming_early_exit() {
+    let env = setup_test_env();
+    let mut parser = fshell_core::Parser::new("yes | head -n 5");
+    let stmts = parser.parse_statements().unwrap();
+    let res = fshell_engine::eval_stmt(&stmts[0], &env, false).await;
+    assert!(
+        res.is_ok(),
+        "Infinite streaming command piped to head must terminate promptly"
+    );
+}

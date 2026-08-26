@@ -96,8 +96,8 @@ pub async fn eval_source_stream(
             env,
             cfg,
             IoStreamConfig {
-                stdin_bytes: None,
                 capture_stdout,
+                ..Default::default()
             },
         )
         .await
@@ -430,6 +430,9 @@ impl RedirectionContext {
 #[derive(Debug, Clone, Default)]
 pub struct IoStreamConfig {
     pub stdin_bytes: Option<Vec<u8>>,
+    pub stdin_stream:
+        Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<bytes::Bytes>>>>,
+    pub stdout_stream: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
     pub capture_stdout: bool,
 }
 
@@ -454,20 +457,75 @@ async fn eval_pipeline_stream(
         last_code = code;
         final_out = out;
     } else {
-        let mut pipe_input: Option<Vec<u8>> = io_cfg.stdin_bytes;
+        let n = pipeline.seq.len();
+        let mut senders: Vec<Option<tokio::sync::mpsc::Sender<bytes::Bytes>>> =
+            Vec::with_capacity(n);
+        let mut receivers: Vec<
+            Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<bytes::Bytes>>>>,
+        > = Vec::with_capacity(n);
+
+        for _ in 0..n - 1 {
+            let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(32);
+            senders.push(Some(tx));
+            receivers.push(Some(std::sync::Arc::new(tokio::sync::Mutex::new(rx))));
+        }
+
+        let mut handles = Vec::with_capacity(n);
         for (idx, cmd) in pipeline.seq.iter().enumerate() {
-            let is_last = idx == pipeline.seq.len() - 1;
+            let is_first = idx == 0;
+            let is_last = idx == n - 1;
             let sub_env = crate::bridge::fork_env_for_subshell(env);
             let stage_io = IoStreamConfig {
-                stdin_bytes: pipe_input.take(),
-                capture_stdout: !is_last || io_cfg.capture_stdout,
+                stdin_bytes: if is_first {
+                    io_cfg.stdin_bytes.clone()
+                } else {
+                    None
+                },
+                stdin_stream: if is_first {
+                    io_cfg.stdin_stream.clone()
+                } else {
+                    receivers[idx - 1].clone()
+                },
+                stdout_stream: if is_last {
+                    io_cfg.stdout_stream.clone()
+                } else {
+                    senders[idx].clone()
+                },
+                capture_stdout: is_last && io_cfg.capture_stdout,
             };
-            let (code, out) = eval_command_stream(cmd, &sub_env, cfg, stage_io).await?;
-            pipe_input = out.clone();
-            last_code = code;
+
+            let cmd_clone = cmd.clone();
+            let cfg_clone = cfg.clone();
+            handles.push(tokio::spawn(async move {
+                eval_command_stream(&cmd_clone, &sub_env, &cfg_clone, stage_io).await
+            }));
+        }
+
+        drop(senders);
+        drop(receivers);
+
+        let mut pipefail_code = None;
+
+        for (idx, handle) in handles.into_iter().enumerate() {
+            let is_last = idx == n - 1;
+            let (code, out) = handle.await.map_err(|e| {
+                PosixError::Engine(EngineError::Generic {
+                    message: format!("pipeline stage failed: {}", e),
+                    span: None,
+                })
+            })??;
+            if code != 0 && pipefail_code.is_none() {
+                pipefail_code = Some(code);
+            }
             if is_last {
+                last_code = code;
                 final_out = out;
             }
+        }
+
+        let pipefail = env.options.read().pipefail;
+        if pipefail && let Some(c) = pipefail_code {
+            last_code = c;
         }
     }
 
@@ -498,6 +556,8 @@ async fn eval_command_stream(
             let capture = io_cfg.capture_stdout || redir.stdout_file.is_some();
             let sub_io = IoStreamConfig {
                 stdin_bytes: redir.stdin_bytes.or(io_cfg.stdin_bytes),
+                stdin_stream: io_cfg.stdin_stream,
+                stdout_stream: io_cfg.stdout_stream,
                 capture_stdout: capture,
             };
             let (code, out) = eval_compound_command_stream(compound, env, cfg, sub_io).await?;
@@ -1145,7 +1205,13 @@ async fn eval_simple_command_inner(
                         rendered.push_str(&format!("export {}={:?}\n", k, v.to_text()));
                     }
                 }
-                let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout)?;
+                let out = write_builtin_output(
+                    &rendered,
+                    redir,
+                    io_cfg.stdout_stream.as_ref(),
+                    io_cfg.capture_stdout,
+                )
+                .await?;
                 return Ok((0, out));
             }
             for arg in &exports {
@@ -1162,7 +1228,17 @@ async fn eval_simple_command_inner(
             return Ok((0, None));
         }
         "read" => {
-            let stdin_str = effective_stdin.map(|b| String::from_utf8_lossy(b).into_owned());
+            let stdin_bytes_val = if let Some(b) = effective_stdin {
+                Some(b.to_vec())
+            } else if let Some(stream_mutex) = &io_cfg.stdin_stream {
+                let mut rx = stream_mutex.lock().await;
+                rx.recv().await.map(|chunk| chunk.to_vec())
+            } else {
+                None
+            };
+            let stdin_str = stdin_bytes_val
+                .as_deref()
+                .map(|b| String::from_utf8_lossy(b).into_owned());
             let (code, remaining_stdin) =
                 crate::posix_builtins::read_cmd::read_posix(args, env, stdin_str.as_deref())
                     .map_err(|e| {
@@ -1184,7 +1260,13 @@ async fn eval_simple_command_inner(
                     span: None,
                 })
             })?;
-            let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout)?;
+            let out = write_builtin_output(
+                &rendered,
+                redir,
+                io_cfg.stdout_stream.as_ref(),
+                io_cfg.capture_stdout,
+            )
+            .await?;
             return Ok((0, out));
         }
         "getopts" => {
@@ -1204,7 +1286,13 @@ async fn eval_simple_command_inner(
                         span: None,
                     })
                 })?;
-            let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout)?;
+            let out = write_builtin_output(
+                &rendered,
+                redir,
+                io_cfg.stdout_stream.as_ref(),
+                io_cfg.capture_stdout,
+            )
+            .await?;
             return Ok((code, out));
         }
         "eval" => {
@@ -1237,7 +1325,13 @@ async fn eval_simple_command_inner(
             if !no_newline {
                 text.push('\n');
             }
-            let out = write_builtin_output(&text, redir, io_cfg.capture_stdout)?;
+            let out = write_builtin_output(
+                &text,
+                redir,
+                io_cfg.stdout_stream.as_ref(),
+                io_cfg.capture_stdout,
+            )
+            .await?;
             return Ok((0, out));
         }
         "cd" => {
@@ -1282,7 +1376,13 @@ async fn eval_simple_command_inner(
         }
         "pwd" => {
             let text = format!("{}\n", env.cwd().display());
-            let out = write_builtin_output(&text, redir, io_cfg.capture_stdout)?;
+            let out = write_builtin_output(
+                &text,
+                redir,
+                io_cfg.stdout_stream.as_ref(),
+                io_cfg.capture_stdout,
+            )
+            .await?;
             return Ok((0, out));
         }
         "exec" => {
@@ -1298,7 +1398,13 @@ async fn eval_simple_command_inner(
         }
         "trap" => {
             let rendered = handle_posix_trap(args, env)?;
-            let out = write_builtin_output(&rendered, redir, capture_stdout)?;
+            let out = write_builtin_output(
+                &rendered,
+                redir,
+                io_cfg.stdout_stream.as_ref(),
+                capture_stdout,
+            )
+            .await?;
             return Ok((0, out));
         }
         "wait" => {
@@ -1359,7 +1465,7 @@ async fn eval_simple_command_inner(
         prefix_assignments,
         redir,
         effective_stdin,
-        capture_stdout,
+        &io_cfg,
         env,
     )
     .await
@@ -1528,9 +1634,10 @@ async fn handle_posix_wait(args: &[String], env: &Env) -> Result<i32, PosixError
     Ok(last_code)
 }
 
-fn write_builtin_output(
+async fn write_builtin_output(
     rendered: &str,
     redir: &RedirectionContext,
+    stdout_stream: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>,
     capture_stdout: bool,
 ) -> Result<Option<Vec<u8>>, PosixError> {
     if let Some((path, append)) = &redir.stdout_file {
@@ -1558,6 +1665,14 @@ fn write_builtin_output(
         } else {
             Ok(None)
         }
+    } else if let Some(tx) = stdout_stream {
+        let chunk = bytes::Bytes::copy_from_slice(rendered.as_bytes());
+        let _ = tx.send(chunk).await;
+        if capture_stdout {
+            Ok(Some(rendered.as_bytes().to_vec()))
+        } else {
+            Ok(None)
+        }
     } else if capture_stdout {
         Ok(Some(rendered.as_bytes().to_vec()))
     } else {
@@ -1574,14 +1689,15 @@ async fn run_external_command(
     prefix_assignments: &[(String, String)],
     redir: &RedirectionContext,
     effective_stdin: Option<&[u8]>,
-    capture_stdout: bool,
+    io_cfg: &IoStreamConfig,
     env: &Env,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
     use std::process::Stdio;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut cmd = tokio::process::Command::new(cmd_name);
     cmd.args(args);
+    cmd.current_dir(env.cwd());
 
     {
         let vars = env.vars.read();
@@ -1613,7 +1729,7 @@ async fn run_external_command(
             })
         })?;
         cmd.stdin(Stdio::from(f));
-    } else if effective_stdin.is_some() {
+    } else if effective_stdin.is_some() || io_cfg.stdin_stream.is_some() {
         cmd.stdin(Stdio::piped());
     }
 
@@ -1631,7 +1747,7 @@ async fn run_external_command(
                 })
             })?;
         cmd.stdout(Stdio::from(f));
-    } else if capture_stdout {
+    } else if io_cfg.stdout_stream.is_some() || io_cfg.capture_stdout {
         cmd.stdout(Stdio::piped());
     }
 
@@ -1665,7 +1781,38 @@ async fn run_external_command(
         tokio::spawn(async move {
             let _ = stdin.write_all(&b).await;
         });
+    } else if let Some(stream_mutex) = io_cfg.stdin_stream.clone()
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        tokio::spawn(async move {
+            let mut rx = stream_mutex.lock().await;
+            while let Some(chunk) = rx.recv().await {
+                if stdin.write_all(&chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
     }
+
+    let stdout_pump = if let Some(tx) = io_cfg.stdout_stream.clone()
+        && let Some(mut stdout) = child.stdout.take()
+    {
+        let handle = tokio::spawn(async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            while let Ok(n) = stdout.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+                if tx.send(chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Some(handle)
+    } else {
+        None
+    };
 
     let output = child.wait_with_output().await.map_err(|e| {
         PosixError::Engine(EngineError::IoError {
@@ -1674,10 +1821,14 @@ async fn run_external_command(
         })
     })?;
 
+    if let Some(handle) = stdout_pump {
+        let _ = handle.await;
+    }
+
     let code = output.status.code().unwrap_or(127);
     env.set_exit_code(code as i64);
 
-    if capture_stdout && redir.stdout_file.is_none() {
+    if io_cfg.capture_stdout && redir.stdout_file.is_none() && io_cfg.stdout_stream.is_none() {
         Ok((code, Some(output.stdout)))
     } else {
         Ok((code, None))

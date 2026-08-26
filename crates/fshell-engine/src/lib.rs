@@ -230,6 +230,28 @@ pub struct SessionLogger {
     stderr_thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Create an OS pipe with CLOEXEC flag set on both read and write ends.
+/// Uses `pipe2(2)` with `O_CLOEXEC` on Linux, and `pipe(2)` + `fcntl(FD_CLOEXEC)` on macOS/BSD.
+pub fn create_cloexec_pipe() -> std::io::Result<(std::os::unix::io::RawFd, std::os::unix::io::RawFd)>
+{
+    let mut fds = [0; 2];
+    #[cfg(target_os = "linux")]
+    unsafe {
+        if libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        if libc::pipe(fds.as_mut_ptr()) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    Ok((fds[0], fds[1]))
+}
+
 impl SessionLogger {
     pub fn new(log_path: std::path::PathBuf) -> Result<Self, std::io::Error> {
         let orig_stdout = unsafe { libc::dup(1) };
@@ -238,26 +260,32 @@ impl SessionLogger {
             return Err(std::io::Error::last_os_error());
         }
 
-        let mut pipe_stdout = [0; 2];
-        let mut pipe_stderr = [0; 2];
-        unsafe {
-            if libc::pipe(pipe_stdout.as_mut_ptr()) < 0 {
-                libc::close(orig_stdout);
-                libc::close(orig_stderr);
-                return Err(std::io::Error::last_os_error());
+        let (pipe_stdout_read, pipe_stdout_write) = match create_cloexec_pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                unsafe {
+                    libc::close(orig_stdout);
+                    libc::close(orig_stderr);
+                }
+                return Err(e);
             }
-            if libc::pipe(pipe_stderr.as_mut_ptr()) < 0 {
-                libc::close(orig_stdout);
-                libc::close(orig_stderr);
-                libc::close(pipe_stdout[0]);
-                libc::close(pipe_stdout[1]);
-                return Err(std::io::Error::last_os_error());
+        };
+
+        let (pipe_stderr_read, pipe_stderr_write) = match create_cloexec_pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                unsafe {
+                    libc::close(orig_stdout);
+                    libc::close(orig_stderr);
+                    libc::close(pipe_stdout_read);
+                    libc::close(pipe_stdout_write);
+                }
+                return Err(e);
             }
-            libc::fcntl(pipe_stdout[0], libc::F_SETFD, libc::FD_CLOEXEC);
-            libc::fcntl(pipe_stdout[1], libc::F_SETFD, libc::FD_CLOEXEC);
-            libc::fcntl(pipe_stderr[0], libc::F_SETFD, libc::FD_CLOEXEC);
-            libc::fcntl(pipe_stderr[1], libc::F_SETFD, libc::FD_CLOEXEC);
-        }
+        };
+
+        let pipe_stdout = [pipe_stdout_read, pipe_stdout_write];
+        let pipe_stderr = [pipe_stderr_read, pipe_stderr_write];
 
         let is_writing_stdout = Arc::new(AtomicBool::new(false));
         let is_writing_stderr = Arc::new(AtomicBool::new(false));

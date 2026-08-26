@@ -793,11 +793,19 @@ pub fn run_external(
         let cmd_name = name.to_string();
         tokio::spawn(async move {
             while let Some(payload) = rx.recv().await {
-                if let PipelinePayload::Data(val_arc) = payload {
-                    let bytes = coerce_val_to_bytes_for_cmd(&val_arc, &cmd_name);
-                    if async_stdin.write_all(&bytes).await.is_err() {
-                        break;
+                match payload {
+                    PipelinePayload::Data(val_arc) => {
+                        let bytes = coerce_val_to_bytes_for_cmd(&val_arc, &cmd_name);
+                        if async_stdin.write_all(&bytes).await.is_err() {
+                            break;
+                        }
                     }
+                    PipelinePayload::Bytes(b) => {
+                        if async_stdin.write_all(&b).await.is_err() {
+                            break;
+                        }
+                    }
+                    PipelinePayload::Structured(_) => {}
                 }
             }
         });

@@ -138,6 +138,16 @@ async fn posix_pipeline() {
 }
 
 #[tokio::test]
+async fn posix_pipeline_streaming_early_exit() {
+    let env = setup_posix_env();
+    let code = run_posix("yes | head -n 5 > /dev/null", &env).await;
+    assert_eq!(
+        code, 0,
+        "yes piped to head -n 5 must terminate with exit code 0"
+    );
+}
+
+#[tokio::test]
 async fn posix_export() {
     let env = setup_posix_env();
     run_posix("export FOO=bar; echo $FOO", &env).await;

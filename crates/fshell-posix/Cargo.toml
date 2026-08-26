@@ -17,6 +17,7 @@ glob = { workspace = true }
 walkdir.workspace = true
 ustr.workspace = true
 async-recursion = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true
