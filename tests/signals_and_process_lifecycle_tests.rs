@@ -1,7 +1,7 @@
 mod common;
 use common::*;
 use fshell_core::Val;
-use fshell_engine::{run_script, Signal};
+use fshell_engine::{Signal, run_script};
 use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
@@ -120,8 +120,14 @@ sh {
     run_script(script, &env).await.unwrap();
 
     let traps = env.posix_traps.read();
-    assert_eq!(traps.get(&Signal::Int), Some(&"echo CLEANUP_CALLED".to_string()));
-    assert_eq!(traps.get(&Signal::Exit), Some(&"echo EXIT_CALLED".to_string()));
+    assert_eq!(
+        traps.get(&Signal::Int),
+        Some(&"echo CLEANUP_CALLED".to_string())
+    );
+    assert_eq!(
+        traps.get(&Signal::Exit),
+        Some(&"echo EXIT_CALLED".to_string())
+    );
 }
 
 #[tokio::test]

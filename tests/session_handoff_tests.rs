@@ -1,7 +1,7 @@
 mod common;
 use common::*;
 use fshell_core::{FxIndexMap, Param, Stmt, Val};
-use fshell_engine::handoff::{load_handoff, HandoffState};
+use fshell_engine::handoff::{HandoffState, load_handoff};
 use fshell_engine::run_script;
 use fshell_hash::{FxBuildHasher, FxHashMap};
 use ustr::ustr;
@@ -14,8 +14,11 @@ use ustr::ustr;
 fn test_handoff_state_json_roundtrip_all_val_types() {
     let mut vars = FxHashMap::default();
     vars.insert("int_val".to_string(), Val::Int(12345));
-    vars.insert("float_val".to_string(), Val::Float(3.14159));
-    vars.insert("str_val".to_string(), Val::String("hello_handoff".to_string()));
+    vars.insert("float_val".to_string(), Val::Float(3.125));
+    vars.insert(
+        "str_val".to_string(),
+        Val::String("hello_handoff".to_string()),
+    );
     vars.insert("bool_val".to_string(), Val::Bool(true));
     vars.insert(
         "list_val".to_string(),
@@ -70,7 +73,10 @@ fn test_handoff_state_json_roundtrip_all_val_types() {
         restored.vars.get("str_val"),
         Some(&Val::String("hello_handoff".to_string()))
     );
-    assert_eq!(restored.hooks.get("precmd"), Some(&vec!["my_precmd_hook".to_string()]));
+    assert_eq!(
+        restored.hooks.get("precmd"),
+        Some(&vec!["my_precmd_hook".to_string()])
+    );
 }
 
 #[test]
@@ -79,7 +85,10 @@ fn test_save_and_load_handoff_file_lifecycle() {
     let handoff_file = temp_dir.path().join("handoff.json");
 
     let mut vars = FxHashMap::default();
-    vars.insert("restored_key".to_string(), Val::String("restored_val".to_string()));
+    vars.insert(
+        "restored_key".to_string(),
+        Val::String("restored_val".to_string()),
+    );
 
     let state = HandoffState {
         vars,

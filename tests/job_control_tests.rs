@@ -1,7 +1,7 @@
 mod common;
 use common::*;
 use fshell_core::Val;
-use fshell_engine::{run_script, Job, JobStatus};
+use fshell_engine::{Job, JobStatus, run_script};
 
 // ---------------------------------------------------------------------------
 // 1. Job Control State & Builtins
@@ -48,8 +48,16 @@ let jobs_output = (jobs)
     let vars = env.vars.read();
     if let Some(Val::List(items)) = vars.get("jobs_output") {
         let texts: Vec<String> = items.iter().map(|v| v.to_text()).collect();
-        assert!(texts.iter().any(|t| t.contains("[  1] Running    sleep 100")));
-        assert!(texts.iter().any(|t| t.contains("[  2] Suspended  compute_task")));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("[  1] Running    sleep 100"))
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("[  2] Suspended  compute_task"))
+        );
     } else {
         panic!("Expected List of jobs output");
     }
@@ -82,7 +90,10 @@ let jobs_output = (jobs)
 
     let vars = env.vars.read();
     if let Some(Val::List(items)) = vars.get("jobs_output") {
-        assert!(items.is_empty(), "Disowned job should not appear in jobs listing");
+        assert!(
+            items.is_empty(),
+            "Disowned job should not appear in jobs listing"
+        );
     }
 }
 

@@ -111,17 +111,17 @@ fn test_cap_dir_relative_file_access_and_scoping() {
     // List directory through capability
     let entries = cap_dir.read_dir().unwrap();
     let mut names = Vec::new();
-    for entry in entries {
-        if let Ok(e) = entry {
-            names.push(e.file_name().to_string_lossy().to_string());
-        }
+    for e in entries.flatten() {
+        names.push(e.file_name().to_string_lossy().to_string());
     }
     assert!(names.contains(&"sub_workspace".to_string()));
 
     // Open file relatively through CapDir
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);
-    let mut cap_file = cap_dir.open_file(std::path::Path::new("sub_workspace/config.json"), &opts).unwrap();
+    let mut cap_file = cap_dir
+        .open_file(std::path::Path::new("sub_workspace/config.json"), &opts)
+        .unwrap();
     assert_eq!(cap_file.read_to_string().unwrap(), "{\"env\": \"test\"}");
 }
 
@@ -152,7 +152,10 @@ let outside_caps = true
 
     let vars = env.vars.read();
     assert_eq!(vars.get("inside_caps"), Some(&fshell_core::Val::Bool(true)));
-    assert_eq!(vars.get("outside_caps"), Some(&fshell_core::Val::Bool(true)));
+    assert_eq!(
+        vars.get("outside_caps"),
+        Some(&fshell_core::Val::Bool(true))
+    );
 
     // After with caps block, NetworkAll capability is not retained
     assert!(!env.caps.caps.read().check_network("example.com"));

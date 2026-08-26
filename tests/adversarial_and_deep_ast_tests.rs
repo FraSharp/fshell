@@ -32,7 +32,9 @@ async fn test_deeply_nested_if_else_chain() {
     let mut script = "let depth_result = 0\n".to_string();
     let depth = 20;
     for i in 0..depth {
-        script.push_str(&format!("if $depth_result == {i} {{\n depth_result = ({i} + 1)\n"));
+        script.push_str(&format!(
+            "if $depth_result == {i} {{\n depth_result = ({i} + 1)\n"
+        ));
     }
     for _ in 0..depth {
         script.push_str("}\n");
@@ -59,7 +61,10 @@ fn test_parser_unclosed_quotes_returns_syntax_error() {
     for input in inputs {
         let mut parser = Parser::new(input);
         let res = parser.parse_statements();
-        assert!(res.is_err(), "Expected parse error on unclosed quote: {input}");
+        assert!(
+            res.is_err(),
+            "Expected parse error on unclosed quote: {input}"
+        );
     }
 }
 
@@ -74,7 +79,10 @@ fn test_parser_unclosed_braces_and_brackets() {
     for input in inputs {
         let mut parser = Parser::new(input);
         let res = parser.parse_statements();
-        assert!(res.is_err(), "Expected parse error on unclosed delimiter: {input}");
+        assert!(
+            res.is_err(),
+            "Expected parse error on unclosed delimiter: {input}"
+        );
     }
 }
 
@@ -84,12 +92,16 @@ async fn test_massive_string_literals_and_buffers() {
 
     // 100KB string payload
     let massive_data = "A".repeat(100_000);
-    let script = format!("let big_str = \"{massive_data}\"\nlet big_len = (string length $big_str)");
+    let script =
+        format!("let big_str = \"{massive_data}\"\nlet big_len = (string length $big_str)");
 
     run_script(&script, &env).await.unwrap();
 
     let vars = env.vars.read();
-    assert_eq!(vars.get("big_len"), Some(&Val::List(vec![Val::Int(100_000)])));
+    assert_eq!(
+        vars.get("big_len"),
+        Some(&Val::List(vec![Val::Int(100_000)]))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +123,10 @@ let combined = ($emoji_str + " " + $greeting_jp)
 
     let vars = env.vars.read();
     assert_eq!(vars.get("emoji_len"), Some(&Val::List(vec![Val::Int(4)])));
-    assert_eq!(vars.get("greeting_len"), Some(&Val::List(vec![Val::Int(7)])));
+    assert_eq!(
+        vars.get("greeting_len"),
+        Some(&Val::List(vec![Val::Int(7)]))
+    );
     assert_eq!(
         vars.get("combined"),
         Some(&Val::String("🦀🚀✨🎉 こんにちは世界".to_string()))

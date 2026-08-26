@@ -1,4 +1,4 @@
-use fshell_panes::grid::{parser::GridParser, Grid};
+use fshell_panes::grid::{Grid, parser::GridParser};
 use fshell_panes::layout::bsp::{BspLayout, Split};
 use fshell_panes::proto::codec::Frame;
 use fshell_panes::proto::message::{ClientMessage, ServerMessage};
