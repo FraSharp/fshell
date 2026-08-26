@@ -29,11 +29,18 @@ pub fn hash_builtin(
                     return Err("Usage: hash [-a 256|512|xof] [-o N] [FILE...]\nOptions:\n  -a <algo>  Algorithm: 256, 512, xof (default: 256)\n  -o <len>   XOF output bytes (default: 32)\n  -h, --help Show help".to_string().into());
                 } else if s == "-a" {
                     if i + 1 < args.len() {
-                        if let Val::String(a) = &args[i + 1] {
-                            algo = a.clone();
-                            i += 2;
-                        } else {
-                            return Err("hash: -a option requires a string argument".into());
+                        match &args[i + 1] {
+                            Val::String(a) => {
+                                algo = a.clone();
+                                i += 2;
+                            }
+                            Val::Int(n) => {
+                                algo = n.to_string();
+                                i += 2;
+                            }
+                            _ => {
+                                return Err("hash: -a option requires algorithm (256, 512, xof)".into());
+                            }
                         }
                     } else {
                         return Err("hash: -a option requires an argument".into());
