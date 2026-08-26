@@ -150,8 +150,21 @@ async fn run_string_op(
             }
             Ok(())
         }
+        "length" | "len" => {
+            let text = if !sub_args.is_empty() {
+                sub_args.join(" ")
+            } else {
+                let lines = process_input_text(in_rx, "").await;
+                lines.join("\n")
+            };
+            let count = text.chars().count();
+            let _ = tx
+                .send(PipelinePayload::Data(Arc::new(Val::Int(count as i64))))
+                .await;
+            Ok(())
+        }
         _ => Err(format!(
-            "string: unknown subcommand '{}'. Expected: split, trim, upper, lower, contains, starts-with, ends-with, substring",
+            "string: unknown subcommand '{}'. Expected: split, trim, upper, lower, contains, starts-with, ends-with, substring, length",
             subcommand
         ).into()),
     }

@@ -836,14 +836,22 @@ impl Parser {
             Some('\'') => {
                 self.next_char();
                 let mut s = String::new();
+                let mut closed = false;
                 while let Some(c) = self.peek() {
                     if c == '\'' {
                         self.next_char();
+                        closed = true;
                         break;
                     }
                     s.push(self.next_char().ok_or_else(|| ParseError::UnexpectedEof {
                         span: self.current_span(),
                     })?);
+                }
+                if !closed {
+                    return Err(ParseError::SyntaxError {
+                        message: "Unterminated single-quoted string literal".to_string(),
+                        span: self.current_span(),
+                    });
                 }
                 Ok(Expr::String(vec![StringPart::Lit(s)]))
             }
