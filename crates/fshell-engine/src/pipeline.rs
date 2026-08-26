@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use crate::PipelineFailure;
 use crate::{
     CapAction, EngineError, Env, PendingSuggestion, PipeSender, PipeStream, PipelinePayload,
     SuggestionMode, cmp_vals, decode_csv_input, eval_expr, eval_stmt, expand_alias_with_args,
     expand_globs, get_suggested_command, is_external_command, pipeline_channel_size,
     render_bar_chart, render_table, run_boundary_operator,
 };
+use crate::{Flow, PipelineFailure};
 use fshell_core::RwLock;
 use fshell_core::diagnostic::StringError;
 use fshell_core::{
@@ -934,10 +934,6 @@ pub async fn execute_pipeline(
                                     match s.unpack() {
                                         Stmt::Expr(expr) => match eval_expr(expr, &fn_env).await {
                                             Ok(v) => last_val = Some(v),
-                                            Err(EngineError::ReturnSignal(ret)) => {
-                                                last_val = Some(ret);
-                                                break 'fn_body;
-                                            }
                                             Err(e) => {
                                                 env_clone.report_stage_error();
                                                 let _ = out_tx
@@ -949,10 +945,25 @@ pub async fn execute_pipeline(
                                             }
                                         },
                                         _ => match eval_stmt(s, &fn_env, false).await {
-                                            Ok(()) => {}
-                                            Err(EngineError::ReturnSignal(ret)) => {
+                                            Ok(Flow::Normal) => {}
+                                            Ok(Flow::Return(ret)) => {
                                                 last_val = Some(ret);
                                                 break 'fn_body;
+                                            }
+                                            Ok(flow) => {
+                                                // Stray `break`/`continue`/logical
+                                                // false inside a function body called
+                                                // from a pipeline stage: report it
+                                                // like any other stage failure.
+                                                env_clone.report_stage_error();
+                                                let _ = out_tx
+                                                    .send(PipelinePayload::Structured(
+                                                        flow.stray_message()
+                                                            .unwrap_or_else(|| "false".to_string())
+                                                            .into(),
+                                                    ))
+                                                    .await;
+                                                return;
                                             }
                                             Err(e) => {
                                                 env_clone.report_stage_error();
@@ -2437,7 +2448,7 @@ pub fn populate_env_from_host(env: &Env) {
 
 /// Parse and evaluate fshell source text (a script or inline command).
 /// Prints results for expression statements in plain text.
-pub async fn run_script(input: &str, env: &Env) -> Result<(), EngineError> {
+pub async fn run_script(input: &str, env: &Env) -> Result<Flow, EngineError> {
     // Early POSIX delegation for `find ... -exec ... {} +` which parses as fsh
     // but fails at execution (type mismatch). Route via bash where it is valid.
     if crate::login::looks_like_posix(input)
@@ -2448,7 +2459,7 @@ pub async fn run_script(input: &str, env: &Env) -> Result<(), EngineError> {
         if input.contains(" -exec ") {
             let (code, _) = handler(input.to_string(), Vec::new(), env.clone(), false).await?;
             env.set_exit_code(code as i64);
-            return Ok(());
+            return Ok(Flow::Normal);
         }
     }
     let mut parser = Parser::new(input);
@@ -2460,7 +2471,7 @@ pub async fn run_script(input: &str, env: &Env) -> Result<(), EngineError> {
             {
                 let (code, _) = handler(input.to_string(), Vec::new(), env.clone(), false).await?;
                 env.set_exit_code(code as i64);
-                return Ok(());
+                return Ok(Flow::Normal);
             }
             return Err(e.into());
         }
@@ -2474,7 +2485,7 @@ pub async fn run_script(input: &str, env: &Env) -> Result<(), EngineError> {
         eprintln!("{}", input);
     }
     if noexec {
-        return Ok(());
+        return Ok(Flow::Normal);
     }
 
     for stmt in stmts {
@@ -2495,22 +2506,31 @@ pub async fn run_script(input: &str, env: &Env) -> Result<(), EngineError> {
                 }
             }
         }
-        if let Err(e) = run_script_stmt(&stmt, env).await {
-            if e.is_condition_false() {
-                env.set_exit_code(1);
-                continue;
+        match run_script_stmt(&stmt, env).await {
+            Err(e) => {
+                env.set_last_error(FshDiag::new(e.clone()));
+                return Err(e);
             }
-            env.set_last_error(FshDiag::new(e.clone()));
-            return Err(e);
+            Ok(Flow::Normal) | Ok(Flow::ConditionFalse) => {}
+            Ok(flow @ Flow::Break) | Ok(flow @ Flow::Continue) | Ok(flow @ Flow::Return(_)) => {
+                let msg = flow
+                    .stray_message()
+                    .unwrap_or_else(|| "control flow".to_string());
+                return Err(EngineError::Generic {
+                    message: format!("stray `{msg}` at top level"),
+                    span: None,
+                });
+            }
+            Ok(Flow::Exit(code)) => return Ok(Flow::Exit(code)),
         }
     }
-    Ok(())
+    Ok(Flow::Normal)
 }
 
 pub(crate) fn run_script_stmt<'a>(
     stmt: &'a Stmt,
     env: &'a Env,
-) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Flow, EngineError>> + Send + 'a>> {
     Box::pin(async move {
         match stmt.unpack() {
             Stmt::And(a, b) => {
@@ -2527,12 +2547,15 @@ pub(crate) fn run_script_stmt<'a>(
                     let mut opts = env.options.write();
                     opts.errexit = true;
                 }
-                res?;
+                let flow = res?;
+                if !flow.is_normal() {
+                    return Ok(flow);
+                }
                 let last_ec = *env.prompt.last_exit_code.read();
                 if last_ec == 0 {
                     run_script_stmt(b, env).await
                 } else {
-                    Ok(())
+                    Ok(Flow::Normal)
                 }
             }
             Stmt::Or(a, b) => {
@@ -2550,15 +2573,16 @@ pub(crate) fn run_script_stmt<'a>(
                     opts.errexit = true;
                 }
                 match res {
-                    Err(_) => run_script_stmt(b, env).await,
-                    Ok(()) => {
+                    Ok(Flow::Normal) => {
                         let last_ec = *env.prompt.last_exit_code.read();
                         if last_ec != 0 {
                             run_script_stmt(b, env).await
                         } else {
-                            Ok(())
+                            Ok(Flow::Normal)
                         }
                     }
+                    Ok(Flow::ConditionFalse) | Err(_) => run_script_stmt(b, env).await,
+                    Ok(flow) => Ok(flow),
                 }
             }
             Stmt::Expr(expr) => {
@@ -2601,14 +2625,17 @@ pub(crate) fn run_script_stmt<'a>(
                         }
                     }
                     let last_ec = *env.prompt.last_exit_code.read();
-                    let (exit_code, maybe_err) =
-                        crate::pipeline_finalize(errors, last_ec, pipefail);
+                    let (exit_code, failure) = crate::pipeline_finalize(errors, last_ec, pipefail);
                     env.set_exit_code(exit_code);
                     if env.options.read().errexit && exit_code != 0 {
-                        return Err(EngineError::ExitSignal(exit_code as i32));
+                        return Ok(Flow::Exit(exit_code as i32));
                     }
-                    if let Some(e) = maybe_err {
-                        return Err(e);
+                    match failure {
+                        Some(PipelineFailure::ConditionFalse) => return Ok(Flow::ConditionFalse),
+                        Some(PipelineFailure::Hard(diag)) => {
+                            return Err(crate::engine_error_from_diag(&diag));
+                        }
+                        None => {}
                     }
                 } else {
                     let val = eval_expr(expr, env).await?;
@@ -2622,29 +2649,27 @@ pub(crate) fn run_script_stmt<'a>(
                     env.set_exit_code(exit_code);
                     let errexit_enabled = env.options.read().errexit;
                     if errexit_enabled && exit_code != 0 {
-                        return Err(EngineError::ExitSignal(exit_code as i32));
+                        return Ok(Flow::Exit(exit_code as i32));
                     }
                 }
-                Ok(())
+                Ok(Flow::Normal)
             }
             _ => {
                 match eval_stmt(stmt, env, false).await {
-                    Ok(()) => {
+                    Ok(Flow::Normal) => {
                         env.set_exit_code(0);
                     }
-                    Err(e) => {
-                        let is_false = e.is_condition_false();
+                    Ok(Flow::ConditionFalse) => {
                         env.set_exit_code(1);
-                        // Preserve typed ConditionFalse so `&&`/`||` and
-                        // callers that check `is_condition_false` work without
-                        // string-matching.
-                        if is_false {
-                            return Err(EngineError::ConditionFalse { span: e.span() });
-                        }
+                        return Ok(Flow::ConditionFalse);
+                    }
+                    Ok(flow) => return Ok(flow),
+                    Err(e) => {
+                        env.set_exit_code(1);
                         return Err(e);
                     }
                 }
-                Ok(())
+                Ok(Flow::Normal)
             }
         }
     })

@@ -4,7 +4,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::panic))]
 #![allow(clippy::result_large_err)]
 use fshell_core::{Expr, FxIndexMap, Parser, Stmt, Val};
-use fshell_engine::{EngineError, Env, PipelinePayload, eval_stmt, is_stdout_a_tty};
+use fshell_engine::{EngineError, Env, Flow, PipelinePayload, eval_stmt, is_stdout_a_tty};
 use nu_ansi_term::Color;
 use std::future::Future;
 use std::io::Write;
@@ -223,11 +223,20 @@ pub fn history_builtin(
             handle.block_on(fshell_engine::run_script(&cmd, env))
         });
         match result {
-            Ok(()) => {}
+            Ok(Flow::Normal) | Ok(Flow::ConditionFalse) => {}
+            Ok(Flow::Exit(code)) => {
+                // History `Execute` requesting an exit — respect it.
+                std::process::exit(code);
+            }
+            Ok(flow) => {
+                let msg = flow
+                    .stray_message()
+                    .unwrap_or_else(|| "control flow".to_string());
+                eprintln!("\x1b[1;31merror:\x1b[0m stray `{msg}` at top level");
+                env.set_exit_code(1);
+            }
             Err(e) => {
-                if !e.is_condition_false() {
-                    eprintln!("\x1b[1;31merror:\x1b[0m {}", e);
-                }
+                eprintln!("\x1b[1;31merror:\x1b[0m {}", e);
                 env.set_exit_code(1);
             }
         }
@@ -2245,7 +2254,8 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
         let mut input = String::new();
         if std::io::stdin().read_to_string(&mut input).is_ok() && !input.trim().is_empty() {
             match fshell_engine::run_script(&input, &env).await {
-                Ok(()) => {
+                Ok(Flow::Exit(code)) => std::process::exit(code),
+                Ok(_) => {
                     let code = *env.prompt.last_exit_code.read() as i32;
                     std::process::exit(code);
                 }
@@ -2847,13 +2857,18 @@ pub(crate) async fn handle_line_generic(
             for stmt in stmts {
                 if let Stmt::Exit(_) = stmt.unpack() {
                     match eval_stmt(&stmt, env, false).await {
-                        Err(EngineError::ExitSignal(code)) => {
+                        Ok(Flow::Exit(code)) => {
                             {
                                 let mut ec = env.prompt.last_exit_code.write();
                                 *ec = code as i64;
                             }
                             fshell_engine::run_hooks("exit", env).await;
                             return Err(());
+                        }
+                        Ok(Flow::Break) | Ok(Flow::Continue) | Ok(Flow::Return(_)) => {
+                            eprintln!("\x1b[1;31merror:\x1b[0m stray control flow at top level");
+                            exit_code = Some(1);
+                            env.set_exit_code(1);
                         }
                         Err(e) => {
                             env.set_last_error(FshDiag::new(e.clone()));
@@ -2867,7 +2882,7 @@ pub(crate) async fn handle_line_generic(
                             eprintln!("{}", err_str);
                             exit_code = Some(1);
                         }
-                        Ok(()) => {}
+                        Ok(_) => {}
                     }
                     continue;
                 }
@@ -3016,13 +3031,18 @@ pub(crate) async fn handle_line_generic(
                     }
                 } else {
                     match repl_display_stmt(&stmt, env, line_trimmed).await {
-                        Err(EngineError::ExitSignal(code)) => {
+                        Ok(Flow::Exit(code)) => {
                             {
                                 let mut ec = env.prompt.last_exit_code.write();
                                 *ec = code as i64;
                             }
                             fshell_engine::run_hooks("exit", env).await;
                             return Err(());
+                        }
+                        Ok(Flow::Break) | Ok(Flow::Continue) | Ok(Flow::Return(_)) => {
+                            eprintln!("\x1b[1;31merror:\x1b[0m stray control flow at top level");
+                            exit_code = Some(1);
+                            env.set_exit_code(1);
                         }
                         Err(e) => {
                             env.set_last_error(FshDiag::new(e.clone()));
@@ -3038,7 +3058,10 @@ pub(crate) async fn handle_line_generic(
                             eprintln!("{}", err_str);
                             exit_code = Some(1);
                         }
-                        Ok(()) => {
+                        Ok(Flow::ConditionFalse) => {
+                            exit_code = Some(1);
+                        }
+                        Ok(Flow::Normal) => {
                             exit_code = Some(0);
                             let remind = {
                                 let vars = env.vars.read();
@@ -3166,41 +3189,38 @@ fn repl_display_stmt<'a>(
     stmt: &'a Stmt,
     env: &'a Env,
     line_trimmed: &'a str,
-) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Flow, EngineError>> + Send + 'a>> {
     Box::pin(async move {
         match stmt.unpack() {
             Stmt::And(a, b) => {
-                repl_display_stmt(a, env, line_trimmed).await?;
+                let flow = repl_display_stmt(a, env, line_trimmed).await?;
+                if !flow.is_normal() {
+                    return Ok(flow);
+                }
                 let last_ec = *env.prompt.last_exit_code.read();
                 if last_ec == 0 {
                     repl_display_stmt(b, env, line_trimmed).await
                 } else {
-                    Ok(())
+                    Ok(Flow::Normal)
                 }
             }
             Stmt::Or(a, b) => {
                 let res = repl_display_stmt(a, env, line_trimmed).await;
                 match res {
-                    Ok(()) => {
+                    Ok(flow @ Flow::Break)
+                    | Ok(flow @ Flow::Continue)
+                    | Ok(flow @ Flow::Return(_))
+                    | Ok(flow @ Flow::Exit(_)) => Ok(flow),
+                    Ok(Flow::Normal) => {
                         let last_ec = *env.prompt.last_exit_code.read();
                         if last_ec != 0 {
                             repl_display_stmt(b, env, line_trimmed).await
                         } else {
-                            Ok(())
+                            Ok(Flow::Normal)
                         }
                     }
-                    Err(e) => {
-                        if matches!(
-                            e,
-                            EngineError::ExitSignal(_)
-                                | EngineError::BreakSignal
-                                | EngineError::ContinueSignal
-                                | EngineError::ReturnSignal(_)
-                        ) {
-                            Err(e)
-                        } else {
-                            repl_display_stmt(b, env, line_trimmed).await
-                        }
+                    Ok(Flow::ConditionFalse) | Err(_) => {
+                        repl_display_stmt(b, env, line_trimmed).await
                     }
                 }
             }
@@ -3274,7 +3294,12 @@ fn repl_display_stmt<'a>(
                         last_ec
                     };
                     env.set_exit_code(exit_code);
-                    Ok(())
+                    if has_errors && !pipefail {
+                        // Preserve logical false vs hard error distinction for callers
+                        // that check exit code — has_errors alone doesn't tell.
+                        // ConditionFalse is already reflected in exit_code == 1.
+                    }
+                    Ok(Flow::Normal)
                 }
                 other_expr => {
                     let val = fshell_engine::eval_expr(other_expr, env).await?;
@@ -3287,16 +3312,28 @@ fn repl_display_stmt<'a>(
                         _ => 0,
                     };
                     env.set_exit_code(exit_code);
-                    Ok(())
+                    if matches!(val, Val::Bool(false)) {
+                        Ok(Flow::ConditionFalse)
+                    } else {
+                        Ok(Flow::Normal)
+                    }
                 }
             },
-            other_stmt => {
-                let res = eval_stmt(other_stmt, env, false).await;
-                if res.is_ok() {
+            other_stmt => match eval_stmt(other_stmt, env, false).await {
+                Ok(Flow::Normal) => {
                     env.set_exit_code(0);
+                    Ok(Flow::Normal)
                 }
-                res
-            }
+                Ok(Flow::ConditionFalse) => {
+                    env.set_exit_code(1);
+                    Ok(Flow::ConditionFalse)
+                }
+                Ok(flow) => Ok(flow),
+                Err(e) => {
+                    env.set_exit_code(1);
+                    Err(e)
+                }
+            },
         }
     })
 }

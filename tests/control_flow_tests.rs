@@ -887,7 +887,7 @@ async fn test_exit_statement_no_code() {
     let stmts = parser.parse_statements().unwrap();
     assert_eq!(stmts.len(), 1);
     let result = eval_stmt(&stmts[0], &env, false).await;
-    assert!(matches!(result, Err(EngineError::ExitSignal(0))));
+    assert!(matches!(result, Ok(fshell_engine::Flow::Exit(0))));
 }
 
 #[tokio::test]
@@ -898,7 +898,7 @@ async fn test_exit_statement_with_code() {
     let stmts = parser.parse_statements().unwrap();
     assert_eq!(stmts.len(), 1);
     let result = eval_stmt(&stmts[0], &env, false).await;
-    assert!(matches!(result, Err(EngineError::ExitSignal(42))));
+    assert!(matches!(result, Ok(fshell_engine::Flow::Exit(42))));
 }
 
 #[tokio::test]
@@ -973,7 +973,7 @@ async fn test_exit_code_stored_in_prompt() {
     let mut parser = Parser::new(script);
     let stmts = parser.parse_statements().unwrap();
     let result = eval_stmt(&stmts[0], &env, false).await;
-    assert!(matches!(result, Err(EngineError::ExitSignal(7))));
+    assert!(matches!(result, Ok(fshell_engine::Flow::Exit(7))));
     let ec = *env.prompt.last_exit_code.read();
     assert_eq!(ec, 7);
 }

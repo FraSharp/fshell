@@ -5,7 +5,7 @@ use clap::Parser;
 use fshell_core::Val;
 use fshell_core::diagnostic::FshDiag;
 use fshell_engine::profiler::{ProfilerCategory, ProfilerState};
-use fshell_engine::{EngineError, PipelinePayload};
+use fshell_engine::{EngineError, Flow, PipelinePayload};
 use std::io::IsTerminal;
 use std::sync::Arc;
 
@@ -203,11 +203,18 @@ pub async fn run() {
             std::process::exit(code);
         }
 
-        if let Err(e) = fshell_engine::run_script(cmd, &env).await {
-            render_and_exit(e, cmd, "command", &env);
+        match fshell_engine::run_script(cmd, &env).await {
+            Ok(Flow::Exit(code)) => std::process::exit(code),
+            Ok(Flow::Break) | Ok(Flow::Continue) | Ok(Flow::Return(_)) => {
+                eprintln!("error: stray control flow at top level");
+                std::process::exit(1);
+            }
+            Ok(_) => {
+                let code = *env.prompt.last_exit_code.read() as i32;
+                std::process::exit(code);
+            }
+            Err(e) => render_and_exit(e, cmd, "command", &env),
         }
-        let code = *env.prompt.last_exit_code.read() as i32;
-        std::process::exit(code);
     }
 
     // Full initialization for REPL and scripts
@@ -328,11 +335,18 @@ pub async fn run() {
                         }
                     }
                 }
-                if let Err(e) = fshell_engine::run_script(&content, &env).await {
-                    render_and_exit(e, &content, script_path, &env);
+                match fshell_engine::run_script(&content, &env).await {
+                    Ok(Flow::Exit(code)) => std::process::exit(code),
+                    Ok(Flow::Break) | Ok(Flow::Continue) | Ok(Flow::Return(_)) => {
+                        eprintln!("error: stray control flow at top level in '{script_path}'");
+                        std::process::exit(1);
+                    }
+                    Ok(_) => {
+                        let code = *env.prompt.last_exit_code.read() as i32;
+                        std::process::exit(code);
+                    }
+                    Err(e) => render_and_exit(e, &content, script_path, &env),
                 }
-                let code = *env.prompt.last_exit_code.read() as i32;
-                std::process::exit(code);
             }
             Err(e) => {
                 eprintln!("Error reading script '{}': {}", script_path, e);
@@ -438,9 +452,6 @@ fn restore_handoff_state(env: &fshell_engine::Env, state: fshell_engine::handoff
 }
 
 fn render_and_exit(e: EngineError, input: &str, src_path: &str, env: &fshell_engine::Env) -> ! {
-    if let EngineError::ExitSignal(code) = e {
-        std::process::exit(code);
-    }
     let config = {
         let opts = env.options.read();
         fshell_render::RenderConfig {

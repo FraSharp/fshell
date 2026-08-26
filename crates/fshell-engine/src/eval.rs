@@ -3,7 +3,7 @@
 
 use crate::profiler::{ProfilerCategory, ProfilerState};
 use crate::{
-    BuiltinHandler, EngineError, Env, IS_TRUSTED_CONTEXT, PipelineFailure, PipelinePayload,
+    BuiltinHandler, EngineError, Env, Flow, IS_TRUSTED_CONTEXT, PipelineFailure, PipelinePayload,
     ReactiveEvent, collect_pipeline, dispatch_on_signal, format_pipeline, spawn_pipeline_stream,
 };
 use fshell_core::diagnostic::FshDiag;
@@ -254,7 +254,7 @@ fn merge_adjacent_setopt(stmts: &mut Vec<Stmt>) {
 async fn try_run_startup_builtin(
     pipeline: &Pipeline,
     env: &Env,
-) -> Option<Result<(), EngineError>> {
+) -> Option<Result<Flow, EngineError>> {
     if !env
         .is_loading_init_script
         .load(std::sync::atomic::Ordering::SeqCst)
@@ -294,9 +294,9 @@ async fn try_run_startup_builtin(
             }
             let errexit = Some(env.options.read())?.errexit;
             if errexit && last_ec != 0 {
-                return Some(Err(EngineError::ExitSignal(last_ec as i32)));
+                return Some(Ok(Flow::Exit(last_ec as i32)));
             }
-            Some(Ok(()))
+            Some(Ok(Flow::Normal))
         }
         Err(e) => {
             let msg = e.to_string();
@@ -1316,9 +1316,10 @@ pub(crate) fn check_sigint(env: &Env) -> Result<(), EngineError> {
 }
 
 /// Evaluate a list of statements as a loop body iteration.
-/// Returns `Ok(true)` to continue the outer loop, `Ok(false)` to break,
-/// or `Err(e)` to propagate.
-pub(crate) async fn eval_loop_body(body: &[Stmt], env: &Env) -> Result<bool, EngineError> {
+/// Returns `Ok(Flow::Normal)` to keep looping, `Ok(Flow::Break)` to stop,
+/// `Ok(Flow::Continue)` to start the next iteration, or any other flow /
+/// error propagates to the loop's caller.
+pub(crate) async fn eval_loop_body(body: &[Stmt], env: &Env) -> Result<Flow, EngineError> {
     check_sigint(env)?;
     for stmt in body {
         let res = if let Some(r) = try_eval_stmt_sync(stmt, env, false) {
@@ -1327,23 +1328,23 @@ pub(crate) async fn eval_loop_body(body: &[Stmt], env: &Env) -> Result<bool, Eng
             eval_stmt(stmt, env, false).await
         };
         match res {
-            Ok(()) => {}
-            Err(EngineError::BreakSignal) => {
+            Ok(Flow::Normal) => {}
+            Ok(Flow::Break) => {
                 check_sigint(env)?;
-                return Ok(false);
+                return Ok(Flow::Break);
             }
-            Err(EngineError::ContinueSignal) => return Ok(true),
+            Ok(flow) => return Ok(flow),
             Err(e) => return Err(e),
         }
     }
-    Ok(true)
+    Ok(Flow::Normal)
 }
 
 pub(crate) fn try_eval_stmt_sync(
     stmt: &Stmt,
     env: &Env,
     _unsafe_context: bool,
-) -> Option<Result<(), EngineError>> {
+) -> Option<Result<Flow, EngineError>> {
     match stmt {
         Stmt::Spanned { stmt: inner, span } => {
             let res = try_eval_stmt_sync(inner, env, _unsafe_context)?;
@@ -1369,7 +1370,7 @@ pub(crate) fn try_eval_stmt_sync(
             } else {
                 env.vars.write().insert(name.clone(), val);
             }
-            Some(Ok(()))
+            Some(Ok(Flow::Normal))
         }
         Stmt::Let { name, expr } => {
             let val_res = try_eval_sync(expr, env)?;
@@ -1381,11 +1382,11 @@ pub(crate) fn try_eval_stmt_sync(
                 let mut map = locals.write();
                 if map.contains_key(name) {
                     map.insert(name.clone(), val);
-                    return Some(Ok(()));
+                    return Some(Ok(Flow::Normal));
                 }
             }
             env.vars.write().insert(name.clone(), val);
-            Some(Ok(()))
+            Some(Ok(Flow::Normal))
         }
         Stmt::Assign { name, expr } => {
             let val_res = try_eval_sync(expr, env)?;
@@ -1397,13 +1398,13 @@ pub(crate) fn try_eval_stmt_sync(
                 let mut map = locals.write();
                 if let Some(entry) = map.get_mut(name) {
                     *entry = val;
-                    return Some(Ok(()));
+                    return Some(Ok(Flow::Normal));
                 }
             }
             let mut vars = env.vars.write();
             if let Some(entry) = vars.get_mut(name) {
                 *entry = val;
-                Some(Ok(()))
+                Some(Ok(Flow::Normal))
             } else {
                 Some(Err(EngineError::VariableNotFound {
                     name: name.clone(),
@@ -1425,7 +1426,7 @@ pub(crate) fn try_eval_stmt_sync(
                         Err(e) => return Some(Err(e)),
                     };
                     *entry = new_val;
-                    return Some(Ok(()));
+                    return Some(Ok(Flow::Normal));
                 }
             }
             let mut vars = env.vars.write();
@@ -1435,7 +1436,7 @@ pub(crate) fn try_eval_stmt_sync(
                     Err(e) => return Some(Err(e)),
                 };
                 *entry = new_val;
-                Some(Ok(()))
+                Some(Ok(Flow::Normal))
             } else {
                 Some(Err(EngineError::VariableNotFound {
                     name: name.clone(),
@@ -1443,15 +1444,15 @@ pub(crate) fn try_eval_stmt_sync(
                 }))
             }
         }
-        Stmt::Break => Some(Err(EngineError::BreakSignal)),
-        Stmt::Continue => Some(Err(EngineError::ContinueSignal)),
+        Stmt::Break => Some(Ok(Flow::Break)),
+        Stmt::Continue => Some(Ok(Flow::Continue)),
         Stmt::Return(expr) => {
             let val_res = try_eval_sync(expr, env)?;
             let val = match val_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Err(EngineError::ReturnSignal(val)))
+            Some(Ok(Flow::Return(val)))
         }
         Stmt::Exit(expr_opt) => {
             let code = if let Some(expr) = expr_opt {
@@ -1478,7 +1479,7 @@ pub(crate) fn try_eval_stmt_sync(
                 let mut ec = env.prompt.last_exit_code.write();
                 *ec = code as i64;
             }
-            Some(Err(EngineError::ExitSignal(code)))
+            Some(Ok(Flow::Exit(code)))
         }
         Stmt::Expr(expr) => {
             if matches!(expr.unpack(), Expr::Pipeline(_) | Expr::InlinePipeline(_)) {
@@ -1499,12 +1500,12 @@ pub(crate) fn try_eval_stmt_sync(
                 *env.prompt.last_exit_code.write() = exit_code;
                 let errexit_enabled = env.options.read().errexit;
                 if errexit_enabled && exit_code != 0 {
-                    return Some(Err(EngineError::ExitSignal(exit_code as i32)));
+                    return Some(Ok(Flow::Exit(exit_code as i32)));
                 }
-                Some(Ok(()))
+                Some(Ok(Flow::Normal))
             }
         }
-        Stmt::Comment(_) => Some(Ok(())),
+        Stmt::Comment(_) => Some(Ok(Flow::Normal)),
         _ => None,
     }
 }
@@ -1542,911 +1543,958 @@ pub fn eval_stmt<'a>(
     stmt: &'a Stmt,
     env: &'a Env,
     unsafe_context: bool,
-) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Flow, EngineError>> + Send + 'a>> {
     if let Some(res) = try_eval_stmt_sync(stmt, env, unsafe_context) {
         return Box::pin(async move { res });
     }
-    Box::pin(async move {
-        match stmt {
-            Stmt::Spanned { stmt: inner, span } => {
-                let res = eval_stmt(inner, env, unsafe_context).await;
-                res.map_err(|mut err| {
-                    if err.span().is_none() {
-                        err.set_span(*span);
-                    }
-                    err
+    Box::pin(async move { eval_stmt_inner(stmt, env, unsafe_context).await })
+}
+
+/// Evaluate a statement sequence, propagating the first non-normal flow or
+/// error. The shared shape of every `{ ... }` body in the evaluator.
+async fn eval_block_flow(
+    stmts: &[Stmt],
+    env: &Env,
+    unsafe_context: bool,
+) -> Result<Flow, EngineError> {
+    for s in stmts {
+        let flow = eval_stmt(s, env, unsafe_context).await?;
+        if !flow.is_normal() {
+            return Ok(flow);
+        }
+    }
+    Ok(Flow::Normal)
+}
+
+async fn eval_stmt_inner(
+    stmt: &Stmt,
+    env: &Env,
+    unsafe_context: bool,
+) -> Result<Flow, EngineError> {
+    match stmt {
+        Stmt::Spanned { stmt: inner, span } => {
+            let res = eval_stmt(inner, env, unsafe_context).await;
+            res.map_err(|mut err| {
+                if err.span().is_none() {
+                    err.set_span(*span);
+                }
+                err
+            })
+        }
+        Stmt::Local { name, expr } => {
+            let val = if let Some(expr) = expr {
+                eval_expr(expr, env).await?
+            } else {
+                Val::Null
+            };
+            if let Some(ref locals) = env.local_vars {
+                let mut map = locals.write();
+                map.insert(name.clone(), val);
+            } else {
+                let mut vars = env.vars.write();
+                vars.insert(name.clone(), val);
+            }
+            Ok(Flow::Normal)
+        }
+        Stmt::Let { name, expr } => {
+            let val = eval_expr(expr, env).await?;
+            if let Some(ref locals) = env.local_vars {
+                let mut map = locals.write();
+                if map.contains_key(name) {
+                    map.insert(name.clone(), val);
+                    return Ok(Flow::Normal);
+                }
+            }
+            env.vars.write().insert(name.clone(), val);
+            Ok(Flow::Normal)
+        }
+        Stmt::Assign { name, expr } => {
+            let val = eval_expr(expr, env).await?;
+            if let Some(ref locals) = env.local_vars {
+                let mut map = locals.write();
+                if let Some(entry) = map.get_mut(name) {
+                    *entry = val;
+                    return Ok(Flow::Normal);
+                }
+            }
+            let mut vars = env.vars.write();
+            if let Some(entry) = vars.get_mut(name) {
+                *entry = val;
+                Ok(Flow::Normal)
+            } else {
+                Err(EngineError::VariableNotFound {
+                    name: name.clone(),
+                    span: None,
                 })
             }
-            Stmt::Local { name, expr } => {
-                let val = if let Some(expr) = expr {
-                    eval_expr(expr, env).await?
-                } else {
-                    Val::Null
-                };
-                if let Some(ref locals) = env.local_vars {
-                    let mut map = locals.write();
-                    map.insert(name.clone(), val);
-                } else {
-                    let mut vars = env.vars.write();
-                    vars.insert(name.clone(), val);
-                }
-                Ok(())
-            }
-            Stmt::Let { name, expr } => {
-                let val = eval_expr(expr, env).await?;
-                if let Some(ref locals) = env.local_vars {
-                    let mut map = locals.write();
-                    if map.contains_key(name) {
-                        map.insert(name.clone(), val);
-                        return Ok(());
-                    }
-                }
-                env.vars.write().insert(name.clone(), val);
-                Ok(())
-            }
-            Stmt::Assign { name, expr } => {
-                let val = eval_expr(expr, env).await?;
-                if let Some(ref locals) = env.local_vars {
-                    let mut map = locals.write();
-                    if let Some(entry) = map.get_mut(name) {
-                        *entry = val;
-                        return Ok(());
-                    }
-                }
-                let mut vars = env.vars.write();
-                if let Some(entry) = vars.get_mut(name) {
-                    *entry = val;
-                    Ok(())
-                } else {
-                    Err(EngineError::VariableNotFound {
-                        name: name.clone(),
-                        span: None,
-                    })
-                }
-            }
-            Stmt::Update { name, op, expr } => {
-                let val = eval_expr(expr, env).await?;
-                if let Some(ref locals) = env.local_vars {
-                    let mut map = locals.write();
-                    if let Some(entry) = map.get_mut(name) {
-                        let new_val = eval_binop(*op, entry.clone(), val)?;
-                        *entry = new_val;
-                        return Ok(());
-                    }
-                }
-                let mut vars = env.vars.write();
-                if let Some(entry) = vars.get_mut(name) {
+        }
+        Stmt::Update { name, op, expr } => {
+            let val = eval_expr(expr, env).await?;
+            if let Some(ref locals) = env.local_vars {
+                let mut map = locals.write();
+                if let Some(entry) = map.get_mut(name) {
                     let new_val = eval_binop(*op, entry.clone(), val)?;
                     *entry = new_val;
-                    Ok(())
-                } else {
-                    Err(EngineError::VariableNotFound {
-                        name: name.clone(),
-                        span: None,
-                    })
+                    return Ok(Flow::Normal);
                 }
             }
-            Stmt::FnDef {
-                name,
-                params,
-                ret_type,
-                body,
-            } => {
-                let mut fns = env.fns.write();
-                fns.insert(
-                    name.clone(),
-                    (params.clone(), ret_type.clone(), body.clone()),
-                );
-                Ok(())
+            let mut vars = env.vars.write();
+            if let Some(entry) = vars.get_mut(name) {
+                let new_val = eval_binop(*op, entry.clone(), val)?;
+                *entry = new_val;
+                Ok(Flow::Normal)
+            } else {
+                Err(EngineError::VariableNotFound {
+                    name: name.clone(),
+                    span: None,
+                })
             }
-            Stmt::And(a, b) => {
-                let _guard = ErrexitRestoreGuard::new(env)?;
-                let res = eval_stmt(a, env, unsafe_context).await;
-                res?;
-                let last_ec = *env.prompt.last_exit_code.read();
-                if last_ec == 0 {
-                    eval_stmt(b, env, unsafe_context).await
-                } else {
-                    Ok(())
+        }
+        Stmt::FnDef {
+            name,
+            params,
+            ret_type,
+            body,
+        } => {
+            let mut fns = env.fns.write();
+            fns.insert(
+                name.clone(),
+                (params.clone(), ret_type.clone(), body.clone()),
+            );
+            Ok(Flow::Normal)
+        }
+        Stmt::And(a, b) => {
+            let _guard = ErrexitRestoreGuard::new(env)?;
+            let res = eval_stmt(a, env, unsafe_context).await;
+            let flow = res?;
+            if !flow.is_normal() {
+                // Logical false, or a control-flow signal: `&&` short-
+                // circuits and the outcome propagates unchanged.
+                return Ok(flow);
+            }
+            let last_ec = *env.prompt.last_exit_code.read();
+            if last_ec == 0 {
+                eval_stmt(b, env, unsafe_context).await
+            } else {
+                Ok(Flow::Normal)
+            }
+        }
+        Stmt::Or(a, b) => {
+            let _guard = ErrexitRestoreGuard::new(env)?;
+            let res = eval_stmt(a, env, unsafe_context).await;
+            match res {
+                // Signals other than logical false propagate untouched.
+                Ok(flow @ (Flow::Break | Flow::Continue | Flow::Return(_) | Flow::Exit(_))) => {
+                    Ok(flow)
                 }
-            }
-            Stmt::Or(a, b) => {
-                let _guard = ErrexitRestoreGuard::new(env)?;
-                let res = eval_stmt(a, env, unsafe_context).await;
-                match res {
-                    Ok(()) => {
-                        let last_ec = *env.prompt.last_exit_code.read();
-                        if last_ec != 0 {
-                            eval_stmt(b, env, unsafe_context).await
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    Err(e) => {
-                        if matches!(
-                            e,
-                            EngineError::ExitSignal(_)
-                                | EngineError::BreakSignal
-                                | EngineError::ContinueSignal
-                                | EngineError::ReturnSignal(_)
-                        ) {
-                            Err(e)
-                        } else {
-                            eval_stmt(b, env, unsafe_context).await
-                        }
-                    }
-                }
-            }
-            Stmt::Comment(_) => Ok(()),
-            Stmt::Expr(expr) => {
-                if let Expr::Pipeline(pipeline) | Expr::InlinePipeline(pipeline) = expr.unpack() {
-                    if let Some(result) = try_run_startup_builtin(pipeline, env).await {
-                        return result;
-                    }
-
-                    // Reset the status register so the finalizer below reads this
-                    // pipeline's own exit status, not a stale value left by a
-                    // prior (possibly errexit-aborted) statement.
-                    {
-                        let mut ec = env.prompt.last_exit_code.write();
-                        *ec = 0;
-                    }
-
-                    // Pipeline expressions must print output (like run_script_stmt does),
-                    // not capture it. collect_pipeline would set is_captured=true and
-                    // silently discard output.
-                    let mut rx = spawn_pipeline_stream(pipeline, env);
-                    let mut errors: Vec<crate::PipelineFailure> = Vec::new();
-                    while let Some(payload) = rx.recv().await {
-                        match payload {
-                            PipelinePayload::Data(v) => {
-                                crate::eval::write_val_stdout(&v);
-                            }
-                            PipelinePayload::Bytes(b) => {
-                                use std::io::Write;
-                                let _ = std::io::stdout().write_all(&b);
-                            }
-                            PipelinePayload::Structured(d) => {
-                                if crate::is_condition_false_diag(&d) {
-                                    // Logical false: exit 1 but don't print an error line.
-                                    errors.push(PipelineFailure::ConditionFalse);
-                                } else {
-                                    errors.push(PipelineFailure::Hard(d));
-                                }
-                            }
-                        }
-                    }
-                    let pipefail = env.options.read().pipefail;
+                // A normal completion consults $?; a hard error or logical
+                // false runs the right side unconditionally.
+                Ok(Flow::Normal) => {
                     let last_ec = *env.prompt.last_exit_code.read();
-                    let (exit_code, maybe_err) =
-                        crate::pipeline_finalize(errors, last_ec, pipefail);
-                    env.set_exit_code(exit_code);
-                    if env.options.read().errexit && exit_code != 0 {
-                        return Err(EngineError::ExitSignal(exit_code as i32));
+                    if last_ec != 0 {
+                        eval_stmt(b, env, unsafe_context).await
+                    } else {
+                        Ok(Flow::Normal)
                     }
-                    if let Some(e) = maybe_err {
-                        return Err(e);
-                    }
-                } else {
-                    let val = eval_expr(expr, env).await?;
-                    let exit_code = match &val {
-                        Val::Bool(false) => 1,
-                        _ => 0,
-                    };
-                    env.set_exit_code(exit_code);
-                    let errexit_enabled = env.options.read().errexit;
-                    if errexit_enabled {
-                        let last_ec = *env.prompt.last_exit_code.read();
-                        if last_ec != 0 {
-                            return Err(EngineError::ExitSignal(last_ec as i32));
+                }
+                Ok(Flow::ConditionFalse) | Err(_) => eval_stmt(b, env, unsafe_context).await,
+            }
+        }
+        Stmt::Comment(_) => Ok(Flow::Normal),
+        Stmt::Expr(expr) => {
+            if let Expr::Pipeline(pipeline) | Expr::InlinePipeline(pipeline) = expr.unpack() {
+                if let Some(result) = try_run_startup_builtin(pipeline, env).await {
+                    return result;
+                }
+
+                // Reset the status register so the finalizer below reads this
+                // pipeline's own exit status, not a stale value left by a
+                // prior (possibly errexit-aborted) statement.
+                {
+                    let mut ec = env.prompt.last_exit_code.write();
+                    *ec = 0;
+                }
+
+                // Pipeline expressions must print output (like run_script_stmt does),
+                // not capture it. collect_pipeline would set is_captured=true and
+                // silently discard output.
+                let mut rx = spawn_pipeline_stream(pipeline, env);
+                let mut errors: Vec<crate::PipelineFailure> = Vec::new();
+                while let Some(payload) = rx.recv().await {
+                    match payload {
+                        PipelinePayload::Data(v) => {
+                            crate::eval::write_val_stdout(&v);
+                        }
+                        PipelinePayload::Bytes(b) => {
+                            use std::io::Write;
+                            let _ = std::io::stdout().write_all(&b);
+                        }
+                        PipelinePayload::Structured(d) => {
+                            if crate::is_condition_false_diag(&d) {
+                                // Logical false: exit 1 but don't print an error line.
+                                errors.push(PipelineFailure::ConditionFalse);
+                            } else {
+                                errors.push(PipelineFailure::Hard(d));
+                            }
                         }
                     }
                 }
-                Ok(())
+                let pipefail = env.options.read().pipefail;
+                let last_ec = *env.prompt.last_exit_code.read();
+                let (exit_code, failure) = crate::pipeline_finalize(errors, last_ec, pipefail);
+                env.set_exit_code(exit_code);
+                if env.options.read().errexit && exit_code != 0 {
+                    return Ok(Flow::Exit(exit_code as i32));
+                }
+                match failure {
+                    Some(PipelineFailure::ConditionFalse) => {
+                        return Ok(Flow::ConditionFalse);
+                    }
+                    Some(PipelineFailure::Hard(diag)) => {
+                        return Err(crate::engine_error_from_diag(&diag));
+                    }
+                    None => {}
+                }
+            } else {
+                let val = eval_expr(expr, env).await?;
+                let exit_code = match &val {
+                    Val::Bool(false) => 1,
+                    _ => 0,
+                };
+                env.set_exit_code(exit_code);
+                let errexit_enabled = env.options.read().errexit;
+                if errexit_enabled {
+                    let last_ec = *env.prompt.last_exit_code.read();
+                    if last_ec != 0 {
+                        return Ok(Flow::Exit(last_ec as i32));
+                    }
+                }
             }
-            Stmt::TryCatch {
-                try_body,
-                catch_var,
-                catch_body,
-            } => {
-                let mut caught_err: Option<EngineError> = None;
-                for s in try_body {
-                    if let Err(e) = eval_stmt(s, env, false).await {
-                        // Control-flow signals propagate through try/catch
-                        match &e {
-                            EngineError::BreakSignal
-                            | EngineError::ContinueSignal
-                            | EngineError::ReturnSignal(_)
-                            | EngineError::ExitSignal(_) => return Err(e),
-                            _ => {}
-                        }
+            Ok(Flow::Normal)
+        }
+        Stmt::TryCatch {
+            try_body,
+            catch_var,
+            catch_body,
+        } => {
+            let mut caught_err: Option<EngineError> = None;
+            for s in try_body {
+                // Control-flow signals propagate through try/catch — only
+                // real errors are caught.
+                match eval_stmt(s, env, false).await {
+                    Ok(Flow::Normal) => {}
+                    Ok(flow) => return Ok(flow),
+                    Err(e) => {
                         caught_err = Some(e);
                         break;
                     }
                 }
-                if let Some(e) = caught_err {
-                    let diag = FshDiag::new(e);
-                    env.set_last_error(diag.clone());
-                    let err_val = diag.to_val();
-                    {
-                        let mut vars = env.vars.write();
-                        vars.insert(catch_var.clone(), err_val);
-                    }
-                    for s in catch_body {
-                        eval_stmt(s, env, false).await?;
-                    }
-                }
-                Ok(())
             }
-            Stmt::WithCaps { caps, body } => {
-                // Temporarily grant capabilities for this execution scope
-                let old_caps = env.caps.caps.read().clone();
-                for cap_expr in caps {
-                    let val = eval_expr(cap_expr, env).await?;
-                    // Map Val to ResourceHandle and grant it
-                    match val {
-                        Val::Capability(handle) => {
-                            let mut caps = lock_caps!(env.caps.caps.write());
-                            caps.grant(handle);
-                        }
-                        Val::List(list) => {
-                            for item in list {
-                                if let Val::Capability(handle) = item {
-                                    let mut caps = lock_caps!(env.caps.caps.write());
-                                    caps.grant(handle);
-                                }
+            if let Some(e) = caught_err {
+                let diag = FshDiag::new(e);
+                env.set_last_error(diag.clone());
+                let err_val = diag.to_val();
+                {
+                    let mut vars = env.vars.write();
+                    vars.insert(catch_var.clone(), err_val);
+                }
+                eval_block_flow(catch_body, env, false).await?;
+            }
+            Ok(Flow::Normal)
+        }
+        Stmt::WithCaps { caps, body } => {
+            // Temporarily grant capabilities for this execution scope
+            let old_caps = env.caps.caps.read().clone();
+            for cap_expr in caps {
+                let val = eval_expr(cap_expr, env).await?;
+                // Map Val to ResourceHandle and grant it
+                match val {
+                    Val::Capability(handle) => {
+                        let mut caps = lock_caps!(env.caps.caps.write());
+                        caps.grant(handle);
+                    }
+                    Val::List(list) => {
+                        for item in list {
+                            if let Val::Capability(handle) = item {
+                                let mut caps = lock_caps!(env.caps.caps.write());
+                                caps.grant(handle);
                             }
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
-                let mut res = Ok(());
-                for s in body {
-                    if let Err(e) = eval_stmt(s, env, false).await {
-                        res = Err(e);
+            }
+            let mut flow_out = Flow::Normal;
+            let mut hard_err: Option<EngineError> = None;
+            for s in body {
+                match eval_stmt(s, env, false).await {
+                    Ok(Flow::Normal) => {}
+                    Ok(flow) => {
+                        flow_out = flow;
+                        break;
+                    }
+                    Err(e) => {
+                        hard_err = Some(e);
                         break;
                     }
                 }
-                // Restore previous capabilities registry
-                let mut caps_w = env.caps.caps.write();
-                *caps_w = old_caps;
-                res
             }
-            Stmt::ReactiveCell { name, pipeline } => {
-                // Reject mutations unless in unsafe context
-                if !unsafe_context {
-                    let reg = env.builtins.read();
-                    for stage in &pipeline.stages {
-                        if !is_query_stage(stage, &reg) {
-                            let name = match stage {
-                                PipelineStage::CommandCall { name, .. } => name.clone(),
-                                _ => "unknown".to_string(),
-                            };
-                            return Err(EngineError::MutationNotAllowed {
-                                message: format!(
-                                    "Mutation '{}' not allowed in reactive cell. Wrap in 'unsafe {{ ... }}' to allow.",
-                                    name
-                                ),
-                                span: None,
-                            });
-                        }
-                    }
-                }
-
-                // Set up reactive watch channel
-                let (tx, rx) = watch::channel(Arc::new(Vec::new()));
-                {
-                    let mut cells = lock_reactive!(env.reactive.cells.write());
-                    cells.insert(name.clone(), rx);
-                    env.reactive
-                        .has_cells
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-
-                // Populate reactive pipelines
-                {
-                    let mut pipes = env.reactive.pipelines.write();
-                    pipes.insert(name.clone(), format_pipeline(pipeline));
-                }
-
-                // Send registration event to global scheduler
-                let _ = env
-                    .reactive
-                    .tx
-                    .send(ReactiveEvent::RegisterCell {
-                        name: name.clone(),
-                        pipeline: pipeline.clone(),
-                        tx,
-                    })
-                    .await;
-
-                Ok(())
+            // Restore previous capabilities registry
+            let mut caps_w = env.caps.caps.write();
+            *caps_w = old_caps;
+            if let Some(e) = hard_err {
+                return Err(e);
             }
-            Stmt::Match { expr, arms } => {
-                let val = eval_expr(expr, env).await?;
-                let mut matched = false;
-                for arm in arms {
-                    if matches_pattern(&val, &arm.pattern) {
-                        for s in &arm.body {
-                            eval_stmt(s, env, false).await?;
-                        }
-                        matched = true;
-                        break;
-                    }
-                }
-                if !matched {
-                    return Err(EngineError::MatchNonExhaustive { span: None });
-                }
-                Ok(())
-            }
-            Stmt::Source { path, bash } => {
-                let path_val = eval_expr(path, env).await?;
-                let path_str = match path_val {
-                    Val::String(s) => s,
-                    other => {
-                        return Err(EngineError::TypeMismatch {
-                            expected: "String".to_string(),
-                            found: format!("{:?}", other),
+            Ok(flow_out)
+        }
+        Stmt::ReactiveCell { name, pipeline } => {
+            // Reject mutations unless in unsafe context
+            if !unsafe_context {
+                let reg = env.builtins.read();
+                for stage in &pipeline.stages {
+                    if !is_query_stage(stage, &reg) {
+                        let name = match stage {
+                            PipelineStage::CommandCall { name, .. } => name.clone(),
+                            _ => "unknown".to_string(),
+                        };
+                        return Err(EngineError::MutationNotAllowed {
+                            message: format!(
+                                "Mutation '{}' not allowed in reactive cell. Wrap in 'unsafe {{ ... }}' to allow.",
+                                name
+                            ),
                             span: None,
                         });
                     }
-                };
-                // Expand tilde in path
-                let path_str = if path_str == "~" {
-                    std::env::var("HOME").unwrap_or(path_str)
-                } else if let Some(rest) = path_str.strip_prefix("~/") {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    if home.is_empty() {
-                        path_str
-                    } else {
-                        format!("{}/{}", home, rest)
+                }
+            }
+
+            // Set up reactive watch channel
+            let (tx, rx) = watch::channel(Arc::new(Vec::new()));
+            {
+                let mut cells = lock_reactive!(env.reactive.cells.write());
+                cells.insert(name.clone(), rx);
+                env.reactive
+                    .has_cells
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            // Populate reactive pipelines
+            {
+                let mut pipes = env.reactive.pipelines.write();
+                pipes.insert(name.clone(), format_pipeline(pipeline));
+            }
+
+            // Send registration event to global scheduler
+            let _ = env
+                .reactive
+                .tx
+                .send(ReactiveEvent::RegisterCell {
+                    name: name.clone(),
+                    pipeline: pipeline.clone(),
+                    tx,
+                })
+                .await;
+
+            Ok(Flow::Normal)
+        }
+        Stmt::Match { expr, arms } => {
+            let val = eval_expr(expr, env).await?;
+            let mut matched = false;
+            for arm in arms {
+                if matches_pattern(&val, &arm.pattern) {
+                    match eval_block_flow(&arm.body, env, false).await? {
+                        Flow::Normal => {}
+                        flow => return Ok(flow),
                     }
-                } else {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return Err(EngineError::MatchNonExhaustive { span: None });
+            }
+            Ok(Flow::Normal)
+        }
+        Stmt::Source { path, bash } => {
+            let path_val = eval_expr(path, env).await?;
+            let path_str = match path_val {
+                Val::String(s) => s,
+                other => {
+                    return Err(EngineError::TypeMismatch {
+                        expected: "String".to_string(),
+                        found: format!("{:?}", other),
+                        span: None,
+                    });
+                }
+            };
+            // Expand tilde in path
+            let path_str = if path_str == "~" {
+                std::env::var("HOME").unwrap_or(path_str)
+            } else if let Some(rest) = path_str.strip_prefix("~/") {
+                let home = std::env::var("HOME").unwrap_or_default();
+                if home.is_empty() {
                     path_str
-                };
-                // POSIX fast-path: if the file looks like a POSIX script (shebang or bash constructs),
-                // try fshell-posix engine first when available (registered via posix handler).
-                let use_posix_engine = !*bash
-                    && std::fs::read_to_string(&path_str)
-                        .map(|c| crate::login::looks_like_posix(&c))
-                        .unwrap_or(false);
-                if use_posix_engine && let Some(handler) = crate::posix_handler() {
-                    let content =
-                        std::fs::read_to_string(&path_str).map_err(|e| EngineError::IoError {
-                            message: format!("Failed to read {:?}: {}", path_str, e),
-                            span: None,
-                        })?;
-                    match handler(content.clone(), Vec::new(), env.clone(), false).await {
-                        Ok((code, _)) => {
-                            env.set_exit_code(code as i64);
-                            return Ok(());
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                if path_str.starts_with("http://") || path_str.starts_with("https://") {
-                    let url = path_str.clone();
-                    let content = tokio::task::spawn_blocking(move || {
-                        let resp = ureq::get(&url)
-                            .call()
-                            .map_err(|e| format!("source: failed to fetch {}: {}", url, e))?;
-                        let mut body = resp.into_body();
-                        body.read_to_string()
-                            .map_err(|e| format!("source: failed to read response: {}", e))
-                    })
-                    .await
-                    .map_err(|e| EngineError::from(format!("source: task failed: {}", e)))?
-                    .map_err(EngineError::from)?;
-                    let stmts = fshell_core::Parser::new(&content)
-                        .parse_statements()
-                        .map_err(|e| {
-                            EngineError::from(format!("source: parse error in {}: {}", path_str, e))
-                        })?;
-                    let noexec = env.options.read().noexec;
-                    if noexec {
-                        return Ok(());
-                    }
-                    for stmt in stmts {
-                        eval_stmt(&stmt, env, false).await?;
-                    }
-                    return Ok(());
-                }
-                if *bash {
-                    let content = tokio::fs::read_to_string(&path_str).await.map_err(|e| {
-                        EngineError::IoError {
-                            message: format!("Failed to read {:?}: {}", path_str, e),
-                            span: None,
-                        }
-                    })?;
-                    if let Some(handler) = crate::posix_handler() {
-                        let (code, _) = handler(content, Vec::new(), env.clone(), false).await?;
-                        env.set_exit_code(code as i64);
-                        return Ok(());
-                    } else {
-                        return Err(EngineError::from(
-                            "source --bash: POSIX handler not registered",
-                        ));
-                    }
                 } else {
-                    let path_buf = std::path::PathBuf::from(&path_str);
-                    let metadata =
-                        tokio::fs::metadata(&path_buf)
-                            .await
-                            .map_err(|e| EngineError::IoError {
-                                message: format!("Failed to stat {:?}: {}", path_str, e),
-                                span: None,
-                            })?;
-                    let mtime = metadata
-                        .modified()
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-
-                    let cached_stmts = {
-                        let mut cache = env.ast_cache.write();
-                        cache.get_by_path(&path_buf, mtime)
-                    };
-
-                    let mut stmts = match cached_stmts {
-                        Some(stmts) => stmts,
-                        None => {
-                            let content =
-                                tokio::fs::read_to_string(&path_buf).await.map_err(|e| {
-                                    EngineError::IoError {
-                                        message: format!("Failed to read {:?}: {}", path_str, e),
-                                        span: None,
-                                    }
-                                })?;
-                            let hash = fshell_hash::fhash256(content.as_bytes());
-                            let mut parser = fshell_core::Parser::new(&content);
-                            let stmts = match parser.parse_statements() {
-                                Ok(stmts) => stmts,
-                                Err(e) => {
-                                    // Auto-detect POSIX scripts (e.g. venv
-                                    // `activate` files) and delegate to the
-                                    // posix handler instead of surfacing a parse
-                                    // error for what is really a POSIX script.
-                                    if crate::login::looks_like_posix(&content)
-                                        && let Some(handler) = crate::posix_handler()
-                                    {
-                                        let (code, _) =
-                                            handler(content, Vec::new(), env.clone(), false)
-                                                .await?;
-                                        env.set_exit_code(code as i64);
-                                        return Ok(());
-                                    }
-                                    return Err(EngineError::Parse(e));
-                                }
-                            };
-                            {
-                                let mut cache = env.ast_cache.write();
-                                cache.insert(path_buf.clone(), mtime, hash, stmts.clone());
-                            }
-                            stmts
-                        }
-                    };
-
-                    merge_adjacent_setopt(&mut stmts);
-
-                    let noexec = env.options.read().noexec;
-                    if noexec {
-                        return Ok(());
+                    format!("{}/{}", home, rest)
+                }
+            } else {
+                path_str
+            };
+            // POSIX fast-path: if the file looks like a POSIX script (shebang or bash constructs),
+            // try fshell-posix engine first when available (registered via posix handler).
+            let use_posix_engine = !*bash
+                && std::fs::read_to_string(&path_str)
+                    .map(|c| crate::login::looks_like_posix(&c))
+                    .unwrap_or(false);
+            if use_posix_engine && let Some(handler) = crate::posix_handler() {
+                let content =
+                    std::fs::read_to_string(&path_str).map_err(|e| EngineError::IoError {
+                        message: format!("Failed to read {:?}: {}", path_str, e),
+                        span: None,
+                    })?;
+                match handler(content.clone(), Vec::new(), env.clone(), false).await {
+                    Ok((code, _)) => {
+                        env.set_exit_code(code as i64);
+                        return Ok(Flow::Normal);
                     }
+                    Err(e) => return Err(e),
+                }
+            }
+            if path_str.starts_with("http://") || path_str.starts_with("https://") {
+                let url = path_str.clone();
+                let content = tokio::task::spawn_blocking(move || {
+                    let resp = ureq::get(&url)
+                        .call()
+                        .map_err(|e| format!("source: failed to fetch {}: {}", url, e))?;
+                    let mut body = resp.into_body();
+                    body.read_to_string()
+                        .map_err(|e| format!("source: failed to read response: {}", e))
+                })
+                .await
+                .map_err(|e| EngineError::from(format!("source: task failed: {}", e)))?
+                .map_err(EngineError::from)?;
+                let stmts = fshell_core::Parser::new(&content)
+                    .parse_statements()
+                    .map_err(|e| {
+                        EngineError::from(format!("source: parse error in {}: {}", path_str, e))
+                    })?;
+                let noexec = env.options.read().noexec;
+                if noexec {
+                    return Ok(Flow::Normal);
+                }
+                eval_block_flow(&stmts, env, false).await?;
+                return Ok(Flow::Normal);
+            }
+            if *bash {
+                let content = tokio::fs::read_to_string(&path_str).await.map_err(|e| {
+                    EngineError::IoError {
+                        message: format!("Failed to read {:?}: {}", path_str, e),
+                        span: None,
+                    }
+                })?;
+                if let Some(handler) = crate::posix_handler() {
+                    let (code, _) = handler(content, Vec::new(), env.clone(), false).await?;
+                    env.set_exit_code(code as i64);
+                    return Ok(Flow::Normal);
+                } else {
+                    return Err(EngineError::from(
+                        "source --bash: POSIX handler not registered",
+                    ));
+                }
+            } else {
+                let path_buf = std::path::PathBuf::from(&path_str);
+                let metadata =
+                    tokio::fs::metadata(&path_buf)
+                        .await
+                        .map_err(|e| EngineError::IoError {
+                            message: format!("Failed to stat {:?}: {}", path_str, e),
+                            span: None,
+                        })?;
+                let mtime = metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
-                    let trusted = if crate::suggestions::has_trust_profile(&path_str) {
+                let cached_stmts = {
+                    let mut cache = env.ast_cache.write();
+                    cache.get_by_path(&path_buf, mtime)
+                };
+
+                let mut stmts = match cached_stmts {
+                    Some(stmts) => stmts,
+                    None => {
                         let content = tokio::fs::read_to_string(&path_buf).await.map_err(|e| {
                             EngineError::IoError {
                                 message: format!("Failed to read {:?}: {}", path_str, e),
                                 span: None,
                             }
                         })?;
-                        crate::suggestions::is_script_trusted(&path_str, &content)
-                    } else {
-                        false
-                    };
-
-                    let _source_guard = ProfilerState::guard(
-                        &env.profiler,
-                        &format!("source {}", path_str),
-                        ProfilerCategory::Source,
-                    );
-                    if trusted {
-                        IS_TRUSTED_CONTEXT
-                            .scope(true, async move {
-                                for stmt in stmts {
-                                    let _stmt_guard = ProfilerState::guard(
-                                        &env.profiler,
-                                        &stmt_label(&stmt),
-                                        ProfilerCategory::Source,
-                                    );
-                                    Box::pin(eval_stmt(&stmt, env, false)).await?;
+                        let hash = fshell_hash::fhash256(content.as_bytes());
+                        let mut parser = fshell_core::Parser::new(&content);
+                        let stmts = match parser.parse_statements() {
+                            Ok(stmts) => stmts,
+                            Err(e) => {
+                                // Auto-detect POSIX scripts (e.g. venv
+                                // `activate` files) and delegate to the
+                                // posix handler instead of surfacing a parse
+                                // error for what is really a POSIX script.
+                                if crate::login::looks_like_posix(&content)
+                                    && let Some(handler) = crate::posix_handler()
+                                {
+                                    let (code, _) =
+                                        handler(content, Vec::new(), env.clone(), false).await?;
+                                    env.set_exit_code(code as i64);
+                                    return Ok(Flow::Normal);
                                 }
-                                Ok::<(), EngineError>(())
-                            })
-                            .await?;
-                    } else {
-                        for stmt in stmts {
-                            let _stmt_guard = ProfilerState::guard(
-                                &env.profiler,
-                                &stmt_label(&stmt),
-                                ProfilerCategory::Source,
-                            );
-                            Box::pin(eval_stmt(&stmt, env, false)).await?;
+                                return Err(EngineError::Parse(e));
+                            }
+                        };
+                        {
+                            let mut cache = env.ast_cache.write();
+                            cache.insert(path_buf.clone(), mtime, hash, stmts.clone());
                         }
+                        stmts
                     }
-                }
-                Ok(())
-            }
-            Stmt::While { condition, body } => {
-                let old_errexit = {
-                    let opts = env.options.read();
-                    opts.errexit
                 };
-                loop {
-                    let cond_val = if let Some(res) = try_eval_sync(condition, env) {
-                        res?
-                    } else {
-                        if old_errexit {
-                            let mut opts = env.options.write();
-                            opts.errexit = false;
+
+                merge_adjacent_setopt(&mut stmts);
+
+                let noexec = env.options.read().noexec;
+                if noexec {
+                    return Ok(Flow::Normal);
+                }
+
+                let trusted = if crate::suggestions::has_trust_profile(&path_str) {
+                    let content = tokio::fs::read_to_string(&path_buf).await.map_err(|e| {
+                        EngineError::IoError {
+                            message: format!("Failed to read {:?}: {}", path_str, e),
+                            span: None,
                         }
-                        let cond_res = eval_expr(condition, env).await;
-                        if old_errexit {
-                            let mut opts = env.options.write();
-                            opts.errexit = true;
+                    })?;
+                    crate::suggestions::is_script_trusted(&path_str, &content)
+                } else {
+                    false
+                };
+
+                let _source_guard = ProfilerState::guard(
+                    &env.profiler,
+                    &format!("source {}", path_str),
+                    ProfilerCategory::Source,
+                );
+                let mut flow_out = Flow::Normal;
+                if trusted {
+                    IS_TRUSTED_CONTEXT
+                        .scope(true, async {
+                            for stmt in stmts.iter() {
+                                let _stmt_guard = ProfilerState::guard(
+                                    &env.profiler,
+                                    &stmt_label(stmt),
+                                    ProfilerCategory::Source,
+                                );
+                                let flow = Box::pin(eval_stmt(stmt, env, false)).await?;
+                                if !flow.is_normal() {
+                                    return Ok::<Flow, EngineError>(flow);
+                                }
+                            }
+                            Ok(Flow::Normal)
+                        })
+                        .await?;
+                } else {
+                    for stmt in stmts.iter() {
+                        let _stmt_guard = ProfilerState::guard(
+                            &env.profiler,
+                            &stmt_label(stmt),
+                            ProfilerCategory::Source,
+                        );
+                        let flow = Box::pin(eval_stmt(stmt, env, false)).await?;
+                        if !flow.is_normal() {
+                            flow_out = flow;
+                            break;
                         }
-                        cond_res?
-                    };
-                    if !val_to_bool(&cond_val)? {
-                        break;
-                    }
-                    if !eval_loop_body(body, env).await? {
-                        return Ok(());
                     }
                 }
-                Ok(())
+                if !flow_out.is_normal() {
+                    return Ok(flow_out);
+                }
             }
-            // `for <var> in <iterable> { body }`
-            Stmt::For { var, iter, body } => {
-                let iterable = eval_expr(iter, env).await?;
-                let items = match iterable {
-                    Val::List(items) => items,
-                    Val::String(s) => {
-                        if s.contains('{') && (s.contains(',') || s.contains("..")) {
-                            let expanded = fshell_core::expand_braces(&s);
-                            expanded
-                                .into_iter()
-                                .map(|item| {
-                                    if let Ok(i) = item.parse::<i64>() {
-                                        Val::Int(i)
-                                    } else {
-                                        Val::String(item)
-                                    }
-                                })
-                                .collect()
-                        } else {
-                            s.chars().map(|c| Val::String(c.to_string())).collect()
-                        }
+            Ok(Flow::Normal)
+        }
+        Stmt::While { condition, body } => {
+            let old_errexit = {
+                let opts = env.options.read();
+                opts.errexit
+            };
+            loop {
+                let cond_val = if let Some(res) = try_eval_sync(condition, env) {
+                    res?
+                } else {
+                    if old_errexit {
+                        let mut opts = env.options.write();
+                        opts.errexit = false;
                     }
-                    other => {
+                    let cond_res = eval_expr(condition, env).await;
+                    if old_errexit {
+                        let mut opts = env.options.write();
+                        opts.errexit = true;
+                    }
+                    cond_res?
+                };
+                if !val_to_bool(&cond_val)? {
+                    break;
+                }
+                match eval_loop_body(body, env).await? {
+                    Flow::Normal | Flow::Continue => {}
+                    Flow::Break => return Ok(Flow::Normal),
+                    flow => return Ok(flow),
+                }
+            }
+            Ok(Flow::Normal)
+        }
+        // `for <var> in <iterable> { body }`
+        Stmt::For { var, iter, body } => {
+            let iterable = eval_expr(iter, env).await?;
+            let items = match iterable {
+                Val::List(items) => items,
+                Val::String(s) => {
+                    if s.contains('{') && (s.contains(',') || s.contains("..")) {
+                        let expanded = fshell_core::expand_braces(&s);
+                        expanded
+                            .into_iter()
+                            .map(|item| {
+                                if let Ok(i) = item.parse::<i64>() {
+                                    Val::Int(i)
+                                } else {
+                                    Val::String(item)
+                                }
+                            })
+                            .collect()
+                    } else {
+                        s.chars().map(|c| Val::String(c.to_string())).collect()
+                    }
+                }
+                other => {
+                    return Err(EngineError::TypeMismatch {
+                        expected: "List or String (iterable)".to_string(),
+                        found: format!("{:?}", other),
+                        span: None,
+                    });
+                }
+            };
+            for item in items {
+                let mut local_map = FxHashMap::default();
+                local_map.insert(var.clone(), item);
+                let loop_env = env.push_scope(Arc::new(fshell_core::RwLock::new(local_map)));
+                match eval_loop_body(body, &loop_env).await? {
+                    Flow::Normal | Flow::Continue => {}
+                    Flow::Break => break,
+                    flow => return Ok(flow),
+                }
+            }
+            Ok(Flow::Normal)
+        }
+        // Loop control-flow signals
+        Stmt::Break => Ok(Flow::Break),
+        Stmt::Continue => Ok(Flow::Continue),
+        // Return signal
+        Stmt::Return(expr) => {
+            let val = eval_expr(expr, env).await?;
+            Ok(Flow::Return(val))
+        }
+        // Exit signal — propagates through all frames, only caught by REPL loop
+        Stmt::Exit(expr) => {
+            let code = if let Some(expr) = expr {
+                let val = eval_expr(expr, env).await?;
+                match val {
+                    Val::Int(i) => i as i32,
+                    Val::Float(f) => f as i32,
+                    _ => {
                         return Err(EngineError::TypeMismatch {
-                            expected: "List or String (iterable)".to_string(),
-                            found: format!("{:?}", other),
+                            expected: "Int or Float".to_string(),
+                            found: format!("{:?}", val),
                             span: None,
                         });
                     }
-                };
-                for item in items {
-                    let mut local_map = FxHashMap::default();
-                    local_map.insert(var.clone(), item);
-                    let loop_env = env.push_scope(Arc::new(fshell_core::RwLock::new(local_map)));
-                    if !eval_loop_body(body, &loop_env).await? {
-                        break;
-                    }
                 }
-                Ok(())
+            } else {
+                0
+            };
+            {
+                let mut ec = env.prompt.last_exit_code.write();
+                *ec = code as i64;
             }
-            // Loop control-flow signals
-            Stmt::Break => Err(EngineError::BreakSignal),
-            Stmt::Continue => Err(EngineError::ContinueSignal),
-            // Return signal
-            Stmt::Return(expr) => {
-                let val = eval_expr(expr, env).await?;
-                Err(EngineError::ReturnSignal(val))
+            Ok(Flow::Exit(code))
+        }
+        // On signal handler — registered via hook system
+        Stmt::On { signal, handler } => {
+            dispatch_on_signal(signal, handler, env).await?;
+            Ok(Flow::Normal)
+        }
+        Stmt::Unsafe { body } => {
+            match eval_block_flow(body, env, true).await? {
+                Flow::Normal => {}
+                flow => return Ok(flow),
             }
-            // Exit signal — propagates through all frames, only caught by REPL loop
-            Stmt::Exit(expr) => {
-                let code = if let Some(expr) = expr {
-                    let val = eval_expr(expr, env).await?;
-                    match val {
-                        Val::Int(i) => i as i32,
-                        Val::Float(f) => f as i32,
-                        _ => {
-                            return Err(EngineError::TypeMismatch {
-                                expected: "Int or Float".to_string(),
-                                found: format!("{:?}", val),
-                                span: None,
-                            });
-                        }
-                    }
-                } else {
-                    0
-                };
-                {
-                    let mut ec = env.prompt.last_exit_code.write();
-                    *ec = code as i64;
-                }
-                Err(EngineError::ExitSignal(code))
-            }
-            // On signal handler — registered via hook system
-            Stmt::On { signal, handler } => {
-                dispatch_on_signal(signal, handler, env).await?;
-                Ok(())
-            }
-            Stmt::Unsafe { body } => {
-                for s in body {
-                    Box::pin(eval_stmt(s, env, true)).await?;
-                }
-                Ok(())
-            }
-            Stmt::Every {
-                duration,
-                unit,
-                body,
-            } => {
-                let millis = match unit {
-                    TimeUnit::Second => duration * 1000,
-                    TimeUnit::Minute => duration * 60 * 1000,
-                    TimeUnit::Hour => duration * 60 * 60 * 1000,
-                };
+            Ok(Flow::Normal)
+        }
+        Stmt::Every {
+            duration,
+            unit,
+            body,
+        } => {
+            let millis = match unit {
+                TimeUnit::Second => duration * 1000,
+                TimeUnit::Minute => duration * 60 * 1000,
+                TimeUnit::Hour => duration * 60 * 60 * 1000,
+            };
 
-                let interval_duration = std::time::Duration::from_millis(millis);
-                let mut interval = tokio::time::interval(interval_duration);
-                // The first tick completes immediately; consume it so the first
-                // body execution is not followed by an immediate second burst.
-                interval.tick().await;
-                let unit_label = match unit {
-                    TimeUnit::Second => "s",
-                    TimeUnit::Minute => "m",
-                    TimeUnit::Hour => "h",
-                };
+            let interval_duration = std::time::Duration::from_millis(millis);
+            let mut interval = tokio::time::interval(interval_duration);
+            // The first tick completes immediately; consume it so the first
+            // body execution is not followed by an immediate second burst.
+            interval.tick().await;
+            let unit_label = match unit {
+                TimeUnit::Second => "s",
+                TimeUnit::Minute => "m",
+                TimeUnit::Hour => "h",
+            };
 
-                loop {
+            loop {
+                check_sigint(env)?;
+
+                // Header for each tick — makes the stream scannable and
+                // distinguishes ticks when the underlying data hasn't changed.
+                // Uses local time for human readability; falls back to UTC.
+                let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                // Use stderr for the header so that `every 5s { ps | @json }`
+                // remains machine-readable on stdout.
+                eprintln!(
+                    "\x1b[2m— every {}{} @ {} —\x1b[0m",
+                    duration, unit_label, ts
+                );
+
+                for stmt in body {
                     check_sigint(env)?;
 
-                    // Header for each tick — makes the stream scannable and
-                    // distinguishes ticks when the underlying data hasn't changed.
-                    // Uses local time for human readability; falls back to UTC.
-                    let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-                    // Use stderr for the header so that `every 5s { ps | @json }`
-                    // remains machine-readable on stdout.
-                    eprintln!(
-                        "\x1b[2m— every {}{} @ {} —\x1b[0m",
-                        duration, unit_label, ts
-                    );
-
-                    for stmt in body {
-                        check_sigint(env)?;
-
-                        match stmt.unpack() {
-                            Stmt::Expr(expr) => {
-                                let val = eval_expr(expr, env).await?;
-                                match val {
-                                    Val::List(list) => {
-                                        if list.is_empty() {
-                                            println!("(no results)");
+                    match stmt.unpack() {
+                        Stmt::Expr(expr) => {
+                            let val = eval_expr(expr, env).await?;
+                            match val {
+                                Val::List(list) => {
+                                    if list.is_empty() {
+                                        println!("(no results)");
+                                        continue;
+                                    }
+                                    let is_map_list = matches!(list[0], Val::Map(_));
+                                    if is_map_list {
+                                        let all_maps =
+                                            list.iter().all(|v| matches!(v, Val::Map(_)));
+                                        if all_maps {
+                                            println!("{}", render_table(&list));
                                             continue;
                                         }
-                                        let is_map_list = matches!(list[0], Val::Map(_));
-                                        if is_map_list {
-                                            let all_maps =
-                                                list.iter().all(|v| matches!(v, Val::Map(_)));
-                                            if all_maps {
-                                                println!("{}", render_table(&list));
-                                                continue;
-                                            }
-                                        }
-                                        for item in list {
-                                            println!("{}", item.to_text());
-                                        }
                                     }
-                                    Val::Null => {}
-                                    other => {
-                                        println!("{}", other.to_text());
+                                    for item in list {
+                                        println!("{}", item.to_text());
+                                    }
+                                }
+                                Val::Null => {}
+                                other => {
+                                    println!("{}", other.to_text());
+                                }
+                            }
+                        }
+                        other_stmt => {
+                            let flow = Box::pin(eval_stmt(other_stmt, env, unsafe_context)).await?;
+                            if !flow.is_normal() {
+                                return Ok(flow);
+                            }
+                        }
+                    }
+                }
+
+                // Wait for next tick, polling cancellation every 100ms.
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => { break; }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                            check_sigint(env)?;
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::ReactiveCellEvery {
+            name,
+            duration,
+            unit,
+            body,
+        } => {
+            let (tx, rx) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+            {
+                let mut cells = lock_reactive!(env.reactive.cells.write());
+                cells.insert(name.clone(), rx);
+                env.reactive
+                    .has_cells
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            {
+                let mut pipes = env.reactive.pipelines.write();
+                pipes.insert(
+                    name.clone(),
+                    format!(
+                        "every {}{} {{ ... }}",
+                        duration,
+                        match unit {
+                            TimeUnit::Second => "s",
+                            TimeUnit::Minute => "m",
+                            TimeUnit::Hour => "h",
+                        }
+                    ),
+                );
+            }
+
+            let env_clone = env.clone();
+            let name_clone = name.clone();
+            let body_clone = body.clone();
+            let duration_val = *duration;
+            let unit_val = *unit;
+
+            tokio::spawn(async move {
+                let millis = match unit_val {
+                    TimeUnit::Second => duration_val * 1000,
+                    TimeUnit::Minute => duration_val * 60 * 1000,
+                    TimeUnit::Hour => duration_val * 60 * 60 * 1000,
+                };
+
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(millis));
+                loop {
+                    if tx.receiver_count() == 0 {
+                        break;
+                    }
+                    if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                        break;
+                    }
+
+                    interval.tick().await;
+
+                    let mut results = Vec::new();
+                    for stmt in &body_clone {
+                        match stmt.unpack() {
+                            Stmt::Expr(expr) => {
+                                if let Ok(val) = eval_expr(expr, &env_clone).await {
+                                    match val {
+                                        Val::List(list) => {
+                                            results.extend(list);
+                                        }
+                                        Val::Null => {}
+                                        other => {
+                                            results.push(other);
+                                        }
                                     }
                                 }
                             }
                             other_stmt => {
-                                Box::pin(eval_stmt(other_stmt, env, unsafe_context)).await?;
+                                let _ = Box::pin(eval_stmt(other_stmt, &env_clone, false)).await;
                             }
                         }
                     }
 
-                    // Wait for next tick, polling cancellation every 100ms.
-                    loop {
-                        tokio::select! {
-                            _ = interval.tick() => { break; }
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                                check_sigint(env)?;
-                            }
-                        }
-                    }
+                    let _ = tx.send(Arc::new(results));
+
+                    let _ = env_clone
+                        .reactive
+                        .tx
+                        .send(ReactiveEvent::TriggerCell(name_clone.clone()))
+                        .await;
                 }
-            }
-            Stmt::ReactiveCellEvery {
-                name,
-                duration,
-                unit,
-                body,
-            } => {
-                let (tx, rx) = tokio::sync::watch::channel(Arc::new(Vec::new()));
-                {
-                    let mut cells = lock_reactive!(env.reactive.cells.write());
-                    cells.insert(name.clone(), rx);
-                    env.reactive
-                        .has_cells
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                }
+            });
 
-                {
-                    let mut pipes = env.reactive.pipelines.write();
-                    pipes.insert(
-                        name.clone(),
-                        format!(
-                            "every {}{} {{ ... }}",
-                            duration,
-                            match unit {
-                                TimeUnit::Second => "s",
-                                TimeUnit::Minute => "m",
-                                TimeUnit::Hour => "h",
-                            }
-                        ),
-                    );
-                }
-
-                let env_clone = env.clone();
-                let name_clone = name.clone();
-                let body_clone = body.clone();
-                let duration_val = *duration;
-                let unit_val = *unit;
-
-                tokio::spawn(async move {
-                    let millis = match unit_val {
-                        TimeUnit::Second => duration_val * 1000,
-                        TimeUnit::Minute => duration_val * 60 * 1000,
-                        TimeUnit::Hour => duration_val * 60 * 60 * 1000,
-                    };
-
-                    let mut interval =
-                        tokio::time::interval(std::time::Duration::from_millis(millis));
-                    loop {
-                        if tx.receiver_count() == 0 {
-                            break;
-                        }
-                        if env_clone.job_control.cancellation.load(Ordering::Acquire) {
-                            break;
-                        }
-
-                        interval.tick().await;
-
-                        let mut results = Vec::new();
-                        for stmt in &body_clone {
-                            match stmt.unpack() {
-                                Stmt::Expr(expr) => {
-                                    if let Ok(val) = eval_expr(expr, &env_clone).await {
-                                        match val {
-                                            Val::List(list) => {
-                                                results.extend(list);
-                                            }
-                                            Val::Null => {}
-                                            other => {
-                                                results.push(other);
-                                            }
-                                        }
-                                    }
-                                }
-                                other_stmt => {
-                                    let _ =
-                                        Box::pin(eval_stmt(other_stmt, &env_clone, false)).await;
-                                }
-                            }
-                        }
-
-                        let _ = tx.send(Arc::new(results));
-
-                        let _ = env_clone
-                            .reactive
-                            .tx
-                            .send(ReactiveEvent::TriggerCell(name_clone.clone()))
-                            .await;
-                    }
-                });
-
-                Ok(())
-            }
-            Stmt::PosixBlock { body } => {
-                let content = body.clone();
-                if let Some(handler) = crate::posix_handler() {
-                    let (code, _) = handler(content, Vec::new(), env.clone(), false).await?;
-                    env.set_exit_code(code as i64);
-                    if code != 0 {
-                        return Err(EngineError::PipelineError {
-                            message: format!("POSIX block exited with status {}", code),
-                            span: None,
-                        });
-                    }
-                } else {
-                    // Fallback: execute via bash subprocess for environments without posix handler
-                    let output = tokio::task::spawn_blocking(move || {
-                        std::process::Command::new("sh")
-                            .arg("-c")
-                            .arg(&content)
-                            .output()
-                    })
-                    .await
-                    .map_err(|e| EngineError::from(format!("POSIX block task failed: {}", e)))?
-                    .map_err(|e| EngineError::from(format!("Failed to spawn sh: {}", e)))?;
-                    use std::io::Write;
-                    if !output.stdout.is_empty() {
-                        let _ = std::io::stdout().write_all(&output.stdout);
-                    }
-                    if !output.stderr.is_empty() {
-                        let _ = std::io::stderr().write_all(&output.stderr);
-                    }
-                    let code = output.status.code().unwrap_or(0);
-                    env.set_exit_code(code as i64);
-                    if code != 0 {
-                        let errexit = env.options.read().errexit;
-                        if errexit {
-                            return Err(EngineError::ExitSignal(code));
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Stmt::Background(stmt) => {
-                let stmt = stmt.clone();
-                let env = env.clone();
-                let cmd_str = format!("{:?}", stmt);
-                let job_id = env.background_count.fetch_add(1, Ordering::Relaxed) as usize + 1;
-
-                // Register a virtual job entry so `jobs` shows it
-                let vpid = -(job_id as i32);
-                {
-                    let mut jobs = env.job_control.jobs.write();
-                    jobs.insert(
-                        vpid,
-                        crate::Job {
-                            id: job_id,
-                            pgid: vpid,
-                            pids: vec![],
-                            cmd: cmd_str.clone(),
-                            status: crate::JobStatus::Running,
-                            disowned: false,
-                            started_at: Some(std::time::Instant::now()),
-                        },
-                    );
-                }
-
-                let mut env_for_task = env.clone();
-                env_for_task.is_captured = true;
-                tokio::spawn(async move {
-                    let result = Box::pin(eval_stmt(&stmt, &env_for_task, false)).await;
-                    let prev = env_for_task
-                        .background_count
-                        .fetch_sub(1, Ordering::Relaxed);
-                    if prev == 1 {
-                        env_for_task.background_notify.notify_waiters();
-                    }
-                    // Clean up virtual job entry
-                    env_for_task.job_control.jobs.write().remove(&vpid);
-                    if env_for_task.options.read().notify {
-                        let status = if result.is_ok() { "Done" } else { "Exit 1" };
-                        eprintln!("[{}]\t{}  {}", job_id, status, cmd_str);
-                    }
-                });
-                Ok(())
-            }
+            Ok(Flow::Normal)
         }
-    })
+        Stmt::PosixBlock { body } => {
+            let content = body.clone();
+            if let Some(handler) = crate::posix_handler() {
+                let (code, _) = handler(content, Vec::new(), env.clone(), false).await?;
+                env.set_exit_code(code as i64);
+                if code != 0 {
+                    return Err(EngineError::PipelineError {
+                        message: format!("POSIX block exited with status {}", code),
+                        span: None,
+                    });
+                }
+            } else {
+                // Fallback: execute via bash subprocess for environments without posix handler
+                let output = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&content)
+                        .output()
+                })
+                .await
+                .map_err(|e| EngineError::from(format!("POSIX block task failed: {}", e)))?
+                .map_err(|e| EngineError::from(format!("Failed to spawn sh: {}", e)))?;
+                use std::io::Write;
+                if !output.stdout.is_empty() {
+                    let _ = std::io::stdout().write_all(&output.stdout);
+                }
+                if !output.stderr.is_empty() {
+                    let _ = std::io::stderr().write_all(&output.stderr);
+                }
+                let code = output.status.code().unwrap_or(0);
+                env.set_exit_code(code as i64);
+                if code != 0 {
+                    let errexit = env.options.read().errexit;
+                    if errexit {
+                        return Ok(Flow::Exit(code));
+                    }
+                }
+            }
+            Ok(Flow::Normal)
+        }
+        Stmt::Background(stmt) => {
+            let stmt = stmt.clone();
+            let env = env.clone();
+            let cmd_str = format!("{:?}", stmt);
+            let job_id = env.background_count.fetch_add(1, Ordering::Relaxed) as usize + 1;
+
+            // Register a virtual job entry so `jobs` shows it
+            let vpid = -(job_id as i32);
+            {
+                let mut jobs = env.job_control.jobs.write();
+                jobs.insert(
+                    vpid,
+                    crate::Job {
+                        id: job_id,
+                        pgid: vpid,
+                        pids: vec![],
+                        cmd: cmd_str.clone(),
+                        status: crate::JobStatus::Running,
+                        disowned: false,
+                        started_at: Some(std::time::Instant::now()),
+                    },
+                );
+            }
+
+            let mut env_for_task = env.clone();
+            env_for_task.is_captured = true;
+            tokio::spawn(async move {
+                let result = Box::pin(eval_stmt(&stmt, &env_for_task, false)).await;
+                let prev = env_for_task
+                    .background_count
+                    .fetch_sub(1, Ordering::Relaxed);
+                if prev == 1 {
+                    env_for_task.background_notify.notify_waiters();
+                }
+                // Clean up virtual job entry
+                env_for_task.job_control.jobs.write().remove(&vpid);
+                if env_for_task.options.read().notify {
+                    let status = if result.is_ok() { "Done" } else { "Exit 1" };
+                    eprintln!("[{}]\t{}  {}", job_id, status, cmd_str);
+                }
+            });
+            Ok(Flow::Normal)
+        }
+    }
 }
 
 pub(crate) fn is_query_stage(

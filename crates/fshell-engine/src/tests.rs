@@ -26,7 +26,7 @@ mod tests {
         let mut p = Parser::new("exit 42");
         let stmts = p.parse_statements().unwrap();
         let result = eval_stmt(&stmts[0], &env, false).await;
-        assert!(matches!(result, Err(EngineError::ExitSignal(42))));
+        assert!(matches!(result, Ok(Flow::Exit(42))));
     }
 
     #[test]
@@ -44,14 +44,14 @@ mod tests {
         ];
         let (ec, err) = pipeline_finalize(failures, 0, false);
         assert_eq!(ec, 1);
-        assert!(matches!(err, Some(EngineError::ConditionFalse { .. })));
+        assert!(matches!(err, Some(PipelineFailure::ConditionFalse)));
     }
 
     #[test]
     fn finalize_condition_false_respects_nonzero_last_exit_code() {
         let (ec, err) = pipeline_finalize(vec![PipelineFailure::ConditionFalse], 3, false);
         assert_eq!(ec, 1);
-        assert!(matches!(err, Some(EngineError::ConditionFalse { .. })));
+        assert!(matches!(err, Some(PipelineFailure::ConditionFalse)));
     }
 
     #[test]
@@ -70,13 +70,12 @@ mod tests {
             PipelineFailure::Hard(hard_b),
         ];
         let (ec, err) = pipeline_finalize(failures, 2, false);
-        // Hard error present: exit code comes from the last stage.
         assert_eq!(ec, 2);
         match err {
-            Some(EngineError::PipelineError { message, .. }) => {
-                assert!(message.contains("last failure"));
+            Some(PipelineFailure::Hard(diag)) => {
+                assert!(diag.report.to_string().contains("last failure"));
             }
-            other => panic!("expected PipelineError, got {other:?}"),
+            other => panic!("expected PipelineFailure::Hard, got {other:?}"),
         }
     }
 
@@ -107,7 +106,7 @@ mod tests {
         let mut p = Parser::new("exit");
         let stmts = p.parse_statements().unwrap();
         let result = eval_stmt(&stmts[0], &env, false).await;
-        assert!(matches!(result, Err(EngineError::ExitSignal(0))));
+        assert!(matches!(result, Ok(Flow::Exit(0))));
     }
 
     #[test]

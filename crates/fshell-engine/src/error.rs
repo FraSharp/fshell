@@ -52,16 +52,6 @@ pub enum EngineError {
         span: Option<SourceSpan>,
     },
 
-    /// Logical condition evaluated to false (test(1) / false builtin).
-    /// Not a hard failure — consumed by `&&`/`||`, `if`, and `$?` plumbing.
-    /// Never shown to the user as an error line.
-    #[error("false")]
-    #[diagnostic(code = "FSH-EXEC-004")]
-    ConditionFalse {
-        #[label("condition was false here")]
-        span: Option<SourceSpan>,
-    },
-
     #[error("{message}")]
     #[diagnostic(
         code = "FSH-PIPE-001",
@@ -130,30 +120,6 @@ pub enum EngineError {
         #[label("non-exhaustive match here")]
         span: Option<SourceSpan>,
     },
-
-    /// Internal control-flow signal for `break` statements.
-    /// Not a real error — caught by loop evaluators.
-    #[error("break")]
-    #[diagnostic(code = "FSH-CTRL-001")]
-    BreakSignal,
-
-    /// Internal control-flow signal for `continue` statements.
-    /// Not a real error — caught by loop evaluators.
-    #[error("continue")]
-    #[diagnostic(code = "FSH-CTRL-002")]
-    ContinueSignal,
-
-    /// Internal control-flow signal for `return <val>` statements.
-    /// Not a real error — caught by function body evaluators.
-    #[error("return")]
-    #[diagnostic(code = "FSH-CTRL-003")]
-    ReturnSignal(fshell_core::Val),
-
-    /// Internal control-flow signal for `exit <code>` statements.
-    /// Caught by the REPL loop to terminate.
-    #[error("exit")]
-    #[diagnostic(code = "FSH-CTRL-004")]
-    ExitSignal(i32),
 }
 
 impl From<String> for EngineError {
@@ -187,17 +153,12 @@ impl EngineError {
             EngineError::TypeMismatch { span, .. } => *span,
             EngineError::CapabilityDenied { span, .. } => *span,
             EngineError::DivisionByZero { span, .. } => *span,
-            EngineError::ConditionFalse { span, .. } => *span,
             EngineError::PipelineError { span, .. } => *span,
             EngineError::MutationNotAllowed { span, .. } => *span,
             EngineError::IoError { span, .. } => *span,
             EngineError::Generic { span, .. } => *span,
             EngineError::Parse(_) => None,
             EngineError::MatchNonExhaustive { span, .. } => *span,
-            EngineError::BreakSignal => None,
-            EngineError::ContinueSignal => None,
-            EngineError::ReturnSignal(_) => None,
-            EngineError::ExitSignal(_) => None,
             EngineError::CycleDetected { span, .. } => *span,
         }
     }
@@ -208,28 +169,18 @@ impl EngineError {
             EngineError::TypeMismatch { span, .. } => *span = Some(new_span),
             EngineError::CapabilityDenied { span, .. } => *span = Some(new_span),
             EngineError::DivisionByZero { span, .. } => *span = Some(new_span),
-            EngineError::ConditionFalse { span, .. } => *span = Some(new_span),
             EngineError::PipelineError { span, .. } => *span = Some(new_span),
             EngineError::MutationNotAllowed { span, .. } => *span = Some(new_span),
             EngineError::IoError { span, .. } => *span = Some(new_span),
             EngineError::Generic { span, .. } => *span = Some(new_span),
             EngineError::Parse(_) => {}
             EngineError::MatchNonExhaustive { span, .. } => *span = Some(new_span),
-            // Control-flow signals carry no span.
-            EngineError::BreakSignal => {}
-            EngineError::ContinueSignal => {}
-            EngineError::ReturnSignal(_) => {}
-            EngineError::ExitSignal(_) => {}
             EngineError::CycleDetected { span, .. } => *span = Some(new_span),
         }
     }
 
     pub fn contains(&self, pat: &str) -> bool {
         self.to_string().contains(pat)
-    }
-
-    pub fn is_condition_false(&self) -> bool {
-        matches!(self, EngineError::ConditionFalse { .. })
     }
 }
 
@@ -240,7 +191,6 @@ impl DiagnosticExt for EngineError {
             EngineError::TypeMismatch { .. } => "types",
             EngineError::CapabilityDenied { .. } => "security",
             EngineError::DivisionByZero { .. } => "arithmetic",
-            EngineError::ConditionFalse { .. } => "condition",
             EngineError::PipelineError { .. } => "pipeline",
             EngineError::MutationNotAllowed { .. } => "security",
             EngineError::IoError { .. } => "io",
@@ -248,10 +198,6 @@ impl DiagnosticExt for EngineError {
             EngineError::Parse(p) => p.category(),
             EngineError::MatchNonExhaustive { .. } => "pattern",
             EngineError::CycleDetected { .. } => "reactive",
-            EngineError::BreakSignal
-            | EngineError::ContinueSignal
-            | EngineError::ReturnSignal(_)
-            | EngineError::ExitSignal(_) => "control",
         }
     }
 
@@ -261,7 +207,6 @@ impl DiagnosticExt for EngineError {
             EngineError::TypeMismatch { .. } => Some(ErrorCode::TypeError),
             EngineError::CapabilityDenied { .. } => Some(ErrorCode::CapabilityDenied),
             EngineError::DivisionByZero { .. } => Some(ErrorCode::DivisionByZero),
-            EngineError::ConditionFalse { .. } => Some(ErrorCode::ConditionFalse),
             EngineError::PipelineError { .. } => Some(ErrorCode::PipelineError),
             EngineError::MutationNotAllowed { .. } => Some(ErrorCode::ImmutableVariable),
             EngineError::IoError { .. } => Some(ErrorCode::IoError),
@@ -272,10 +217,6 @@ impl DiagnosticExt for EngineError {
             EngineError::Parse(p) => p.code_enum(),
             EngineError::MatchNonExhaustive { .. } => Some(ErrorCode::RuntimeError),
             EngineError::CycleDetected { .. } => Some(ErrorCode::CycleDetected),
-            EngineError::BreakSignal
-            | EngineError::ContinueSignal
-            | EngineError::ReturnSignal(_)
-            | EngineError::ExitSignal(_) => None,
         }
     }
 

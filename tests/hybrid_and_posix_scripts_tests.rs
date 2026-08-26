@@ -27,7 +27,10 @@ async fn run_posix(script: &str, env: &Env) -> i32 {
         .unwrap()
 }
 
-async fn run_fsh(script: &str, env: &Env) -> Result<(), fshell_engine::EngineError> {
+async fn run_fsh(
+    script: &str,
+    env: &Env,
+) -> Result<fshell_engine::Flow, fshell_engine::EngineError> {
     fshell_engine::run_script(script, env).await
 }
 

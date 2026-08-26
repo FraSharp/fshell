@@ -9,8 +9,10 @@ use fshell_core::{Expr, FshDiag, FxIndexMap, PromptConfig, Stmt, StringPart, Val
 use fshell_hash::FxHashMap;
 pub mod ast_cache;
 pub mod error;
+pub mod flow;
 pub mod keybindings;
 pub use error::EngineError;
+pub use flow::Flow;
 
 // Optional POSIX handler — registered by the binary crate (fshell) to avoid
 // a cyclic dependency fshell-engine -> fshell-posix -> fshell-engine.
@@ -71,13 +73,11 @@ impl From<EngineError> for StringError {
             EngineError::MatchNonExhaustive { .. } => ErrorCode::RuntimeError,
             EngineError::MutationNotAllowed { .. } => ErrorCode::CapabilityDenied,
             EngineError::Parse(_) => ErrorCode::ParseError,
-            EngineError::ConditionFalse { .. } => ErrorCode::ConditionFalse,
             EngineError::PipelineError { .. } => ErrorCode::PipelineError,
             EngineError::TypeMismatch { .. } => ErrorCode::TypeError,
             EngineError::VariableNotFound { .. } => ErrorCode::RuntimeError,
             EngineError::CycleDetected { .. } => ErrorCode::RuntimeError,
             EngineError::Generic { .. } => ErrorCode::General,
-            _ => ErrorCode::General,
         };
         StringError::new(code, e.to_string())
     }
@@ -2652,31 +2652,27 @@ pub fn pipeline_channel_size(env: &Env) -> usize {
 /// failed `test`: exit code 1, no user-visible error) from a hard error
 /// carrying its full diagnostic, so control-flow decisions never rely on
 /// string matching against error text.
+#[derive(Clone, Debug)]
 pub(crate) enum PipelineFailure {
     ConditionFalse,
     Hard(fshell_core::FshDiag),
 }
 
-/// Pure pipeline finalizer: computes exit code and typed error from collected
-/// stage failures and the last stage's exit code. Logical `false` failures
-/// yield exit 1 without hard-error rendering; with `pipefail`, any nonzero
-/// exit code wins over the synthesized 1.
+/// Pure pipeline finalizer: computes exit code and typed failure from
+/// collected stage failures and the last stage's exit code. Logical `false`
+/// failures yield exit 1 without hard-error rendering; with `pipefail`, any
+/// nonzero exit code wins over the synthesized 1.
 pub(crate) fn pipeline_finalize(
     failures: Vec<PipelineFailure>,
     last_ec: i64,
     pipefail: bool,
-) -> (i64, Option<EngineError>) {
+) -> (i64, Option<PipelineFailure>) {
     let mut saw_condition_false = false;
-    let mut last_hard: Option<EngineError> = None;
+    let mut last_hard: Option<PipelineFailure> = None;
     for failure in &failures {
         match failure {
             PipelineFailure::ConditionFalse => saw_condition_false = true,
-            PipelineFailure::Hard(diag) => {
-                last_hard = Some(EngineError::PipelineError {
-                    message: diag.report.to_string(),
-                    span: None,
-                });
-            }
+            PipelineFailure::Hard(_) => last_hard = Some(failure.clone()),
         }
     }
 
@@ -2696,11 +2692,24 @@ pub(crate) fn pipeline_finalize(
     let err = if last_hard.is_some() {
         last_hard
     } else if saw_condition_false {
-        Some(EngineError::ConditionFalse { span: None })
+        Some(PipelineFailure::ConditionFalse)
     } else {
         None
     };
     (exit_code, err)
+}
+
+/// Recover an `EngineError` from a hard stage diagnostic. Prefers the typed
+/// error carried by the report; falls back to a generic error carrying the
+/// rendered message.
+pub(crate) fn engine_error_from_diag(diag: &fshell_core::FshDiag) -> EngineError {
+    if let Some(e) = diag.report.downcast_ref::<EngineError>() {
+        return e.clone();
+    }
+    EngineError::PipelineError {
+        message: diag.report.to_string(),
+        span: None,
+    }
 }
 
 /// Send a pipeline payload with try_send first for backpressure visibility.
@@ -2775,18 +2784,12 @@ pub fn get_hooks(event: &str, env: &Env) -> Vec<String> {
 
 /// True iff the given `FshDiag` represents a logical `false` condition
 /// (exit 1, no error line), regardless of whether it was wrapped as a
-/// `StringError::ConditionFalse` or an `EngineError::ConditionFalse`.
-/// Centralizes the only place where the false-vs-hard-error distinction is
-/// made so collectors and `&&`/`||` don't string-match.
+/// `StringError::ConditionFalse`. Centralizes the only place where the
+/// false-vs-hard-error distinction is made so collectors and `&&`/`||`
+/// don't string-match.
 #[allow(clippy::result_large_err)]
 pub fn is_condition_false_diag(diag: &fshell_core::FshDiag) -> bool {
-    if diag.is_condition_false() {
-        return true;
-    }
-    // Also recognize EngineError::ConditionFalse wrapped as a report.
-    diag.report
-        .downcast_ref::<EngineError>()
-        .is_some_and(|e| e.is_condition_false())
+    diag.is_condition_false()
 }
 
 thread_local! {
