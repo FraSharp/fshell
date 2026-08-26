@@ -18,6 +18,7 @@ walkdir.workspace = true
 ustr.workspace = true
 async-recursion = { workspace = true }
 bytes = { workspace = true }
+globset = { workspace = true }
 
 [lints]
 workspace = true

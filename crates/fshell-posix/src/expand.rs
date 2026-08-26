@@ -67,52 +67,53 @@ pub fn split_ifs(s: &str, ifs: &str) -> Vec<String> {
         return parts;
     }
 
-    // Mixed IFS: each nws char is its own delimiter (preserves empties between),
-    // sequences of ws chars collapse and trim at edges.
+    // POSIX 2.6.5 Mixed IFS splitting:
+    // IFS whitespace is ignored at the beginning and end of input.
+    // Each non-whitespace IFS char, along with any adjacent IFS whitespace, delimits a field.
     let mut fields: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut chars = s.chars().peekable();
-    let mut prev_was_ws_delim = true; // treat leading ws as delimiter (trim leading)
+
+    // 1. Skip leading IFS whitespace
+    while matches!(chars.peek(), Some(&c) if ifs_ws.contains(&c)) {
+        chars.next();
+    }
+
+    let mut had_nws_delim = false;
 
     while let Some(c) = chars.next() {
         if ifs_nws.contains(&c) {
-            // nws delimiter: push current field (may be empty)
+            // Non-whitespace IFS delimiter: push current field
             fields.push(std::mem::take(&mut cur));
-            prev_was_ws_delim = false;
-        } else if ifs_ws.contains(&c) {
-            // ws delimiter: only delimit if we have accumulated content
-            if !cur.is_empty() {
-                fields.push(std::mem::take(&mut cur));
-            }
-            prev_was_ws_delim = true;
-            // Collapse consecutive ws
+            had_nws_delim = true;
+            // Skip any following IFS whitespace adjacent to this delimiter
             while matches!(chars.peek(), Some(&nc) if ifs_ws.contains(&nc)) {
                 chars.next();
             }
+        } else if ifs_ws.contains(&c) {
+            // IFS whitespace: skip additional whitespace
+            while matches!(chars.peek(), Some(&nc) if ifs_ws.contains(&nc)) {
+                chars.next();
+            }
+            // If immediately followed by a non-whitespace IFS delimiter,
+            // that delimiter will handle the split; otherwise this whitespace is a delimiter.
+            if matches!(chars.peek(), Some(&nc) if ifs_nws.contains(&nc)) {
+                // let next iteration handle the nws delimiter
+            } else if chars.peek().is_some() {
+                // Not trailing whitespace -> delimits field
+                fields.push(std::mem::take(&mut cur));
+                had_nws_delim = false;
+            }
         } else {
             cur.push(c);
-            prev_was_ws_delim = false;
+            had_nws_delim = false;
         }
     }
-    if !cur.is_empty()
-        || (fields.is_empty() && s.is_empty())
-        || (!prev_was_ws_delim && !cur.is_empty())
-    {
+
+    if !cur.is_empty() || had_nws_delim {
         fields.push(cur);
     }
-    // Trailing delimiters
-    if let Some(last) = s.chars().last()
-        && ifs_nws.contains(&last)
-        && (fields.last().map(|f| !f.is_empty()).unwrap_or(true) || fields.is_empty())
-    {
-        fields.push(String::new());
-    }
-    // Remove leading phantom empty that shouldn't be there when string started with ws
-    if s.starts_with(|c| ifs_ws.contains(&c))
-        && fields.first().map(|f| f.is_empty()).unwrap_or(false)
-    {
-        fields.remove(0);
-    }
+
     fields
 }
 
@@ -472,27 +473,24 @@ fn eval_parameter_expr(
         } => {
             let val = resolve_parameter(parameter, env, positional);
             if let Some(pat) = pattern {
-                let pat_expanded =
-                    expand_word(pat, env, &ExpansionConfig::default(), positional).join("");
-                // # shortest prefix
-                if val.starts_with(&pat_expanded) {
-                    val[pat_expanded.len()..].to_string()
-                } else {
-                    // Try glob match for pattern
-                    match glob::Pattern::new(&pat_expanded) {
-                        Ok(g) => {
-                            // Find shortest prefix matching pattern
-                            for i in 0..=val.len() {
-                                let prefix = &val[..i];
-                                if g.matches(prefix) {
-                                    return val[i..].to_string();
-                                }
-                            }
-                            val
+                let no_glob_cfg = ExpansionConfig {
+                    do_glob: false,
+                    ..Default::default()
+                };
+                let pat_expanded = expand_word(pat, env, &no_glob_cfg, positional).join("");
+                if let Ok(g) = globset::Glob::new(&pat_expanded) {
+                    let matcher = g.compile_matcher();
+                    for (idx, _) in val.char_indices() {
+                        let prefix = &val[..idx];
+                        if matcher.is_match(prefix) {
+                            return val[idx..].to_string();
                         }
-                        Err(_) => val,
+                    }
+                    if matcher.is_match(&val) {
+                        return String::new();
                     }
                 }
+                val
             } else {
                 val
             }
@@ -502,14 +500,20 @@ fn eval_parameter_expr(
         } => {
             let val = resolve_parameter(parameter, env, positional);
             if let Some(pat) = pattern {
-                let pat_expanded =
-                    expand_word(pat, env, &ExpansionConfig::default(), positional).join("");
-                // ## longest prefix
-                if let Ok(g) = glob::Pattern::new(&pat_expanded) {
-                    for i in (0..=val.len()).rev() {
-                        let prefix = &val[..i];
-                        if g.matches(prefix) {
-                            return val[i..].to_string();
+                let no_glob_cfg = ExpansionConfig {
+                    do_glob: false,
+                    ..Default::default()
+                };
+                let pat_expanded = expand_word(pat, env, &no_glob_cfg, positional).join("");
+                if let Ok(g) = globset::Glob::new(&pat_expanded) {
+                    let matcher = g.compile_matcher();
+                    if matcher.is_match(&val) {
+                        return String::new();
+                    }
+                    for (idx, _) in val.char_indices().rev() {
+                        let prefix = &val[..idx];
+                        if matcher.is_match(prefix) {
+                            return val[idx..].to_string();
                         }
                     }
                 }
@@ -523,14 +527,21 @@ fn eval_parameter_expr(
         } => {
             let val = resolve_parameter(parameter, env, positional);
             if let Some(pat) = pattern {
-                let pat_expanded =
-                    expand_word(pat, env, &ExpansionConfig::default(), positional).join("");
-                if let Ok(g) = glob::Pattern::new(&pat_expanded) {
-                    for i in 0..=val.len() {
-                        let suffix = &val[val.len() - i..];
-                        if g.matches(suffix) {
-                            return val[..val.len() - i].to_string();
+                let no_glob_cfg = ExpansionConfig {
+                    do_glob: false,
+                    ..Default::default()
+                };
+                let pat_expanded = expand_word(pat, env, &no_glob_cfg, positional).join("");
+                if let Ok(g) = globset::Glob::new(&pat_expanded) {
+                    let matcher = g.compile_matcher();
+                    for (idx, _) in val.char_indices().rev() {
+                        let suffix = &val[idx..];
+                        if matcher.is_match(suffix) {
+                            return val[..idx].to_string();
                         }
+                    }
+                    if matcher.is_match(&val) {
+                        return String::new();
                     }
                 }
                 val
@@ -543,13 +554,20 @@ fn eval_parameter_expr(
         } => {
             let val = resolve_parameter(parameter, env, positional);
             if let Some(pat) = pattern {
-                let pat_expanded =
-                    expand_word(pat, env, &ExpansionConfig::default(), positional).join("");
-                if let Ok(g) = glob::Pattern::new(&pat_expanded) {
-                    for i in 0..=val.len() {
-                        let suffix = &val[val.len() - i..];
-                        if g.matches(suffix) {
-                            return val[..val.len() - i].to_string();
+                let no_glob_cfg = ExpansionConfig {
+                    do_glob: false,
+                    ..Default::default()
+                };
+                let pat_expanded = expand_word(pat, env, &no_glob_cfg, positional).join("");
+                if let Ok(g) = globset::Glob::new(&pat_expanded) {
+                    let matcher = g.compile_matcher();
+                    if matcher.is_match(&val) {
+                        return String::new();
+                    }
+                    for (idx, _) in val.char_indices() {
+                        let suffix = &val[idx..];
+                        if matcher.is_match(suffix) {
+                            return val[..idx].to_string();
                         }
                     }
                 }
@@ -565,8 +583,11 @@ fn eval_parameter_expr(
             ..
         } => {
             let val = resolve_parameter(parameter, env, positional);
-            let offset_str =
-                expand_word(&offset.value, env, &ExpansionConfig::default(), positional).join("");
+            let no_glob_cfg = ExpansionConfig {
+                do_glob: false,
+                ..Default::default()
+            };
+            let offset_str = expand_word(&offset.value, env, &no_glob_cfg, positional).join("");
             let off: i64 = offset_str.trim().parse().unwrap_or(0);
             let chars: Vec<char> = val.chars().collect();
             let len = chars.len() as i64;
@@ -576,13 +597,7 @@ fn eval_parameter_expr(
                 (off as usize).min(chars.len())
             };
             let end = if let Some(len_expr) = length {
-                let len_str = expand_word(
-                    &len_expr.value,
-                    env,
-                    &ExpansionConfig::default(),
-                    positional,
-                )
-                .join("");
+                let len_str = expand_word(&len_expr.value, env, &no_glob_cfg, positional).join("");
                 let l: i64 = len_str.trim().parse().unwrap_or(0);
                 if l < 0 {
                     chars.len()
@@ -602,7 +617,11 @@ fn eval_parameter_expr(
             ..
         } => {
             let val = resolve_parameter(parameter, env, positional);
-            let pat = expand_word(pattern, env, &ExpansionConfig::default(), positional).join("");
+            let no_glob_cfg = ExpansionConfig {
+                do_glob: false,
+                ..Default::default()
+            };
+            let pat = expand_word(pattern, env, &no_glob_cfg, positional).join("");
             let repl = replacement.clone().unwrap_or_default();
             match match_kind {
                 word::SubstringMatchKind::FirstOccurrence => {

@@ -1184,13 +1184,20 @@ dependencies = [
 name = "fshell-fuzz"
 version = "0.0.1"
 dependencies = [
+ "brush-parser",
+ "fshell-builtins",
+ "fshell-capabilities",
  "fshell-core",
+ "fshell-engine",
  "fshell-hash",
  "fshell-panes",
  "fshell-posix",
  "libfuzzer-sys",
+ "regex",
  "rmp-serde",
  "serde_json",
+ "tokio",
+ "ustr",
  "yaml_serde",
 ]
 
@@ -1258,6 +1265,7 @@ dependencies = [
  "fshell-core",
  "fshell-engine",
  "glob",
+ "globset",
  "libc",
  "tempfile",
  "tokio",
