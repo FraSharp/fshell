@@ -3,8 +3,8 @@
 
 use crate::profiler::{ProfilerCategory, ProfilerState};
 use crate::{
-    BuiltinHandler, EngineError, Env, IS_TRUSTED_CONTEXT, PipelinePayload, ReactiveEvent,
-    collect_pipeline, dispatch_on_signal, format_pipeline, spawn_pipeline_stream,
+    BuiltinHandler, EngineError, Env, IS_TRUSTED_CONTEXT, PipelineFailure, PipelinePayload,
+    ReactiveEvent, collect_pipeline, dispatch_on_signal, format_pipeline, spawn_pipeline_stream,
 };
 use fshell_core::diagnostic::FshDiag;
 use fshell_core::{
@@ -1696,7 +1696,7 @@ pub fn eval_stmt<'a>(
                     // not capture it. collect_pipeline would set is_captured=true and
                     // silently discard output.
                     let mut rx = spawn_pipeline_stream(pipeline, env);
-                    let mut errors: Vec<String> = Vec::new();
+                    let mut errors: Vec<crate::PipelineFailure> = Vec::new();
                     while let Some(payload) = rx.recv().await {
                         match payload {
                             PipelinePayload::Data(v) => {
@@ -1709,11 +1709,9 @@ pub fn eval_stmt<'a>(
                             PipelinePayload::Structured(d) => {
                                 if crate::is_condition_false_diag(&d) {
                                     // Logical false: exit 1 but don't print an error line.
-                                    // Track separately so finalizer can distinguish logical
-                                    // failure from hard errors without string-matching.
-                                    errors.push("__condition_false__".to_string());
+                                    errors.push(PipelineFailure::ConditionFalse);
                                 } else {
-                                    errors.push(d.report.to_string());
+                                    errors.push(PipelineFailure::Hard(d));
                                 }
                             }
                         }

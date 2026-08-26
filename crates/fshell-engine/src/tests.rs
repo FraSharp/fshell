@@ -27,7 +27,83 @@ mod tests {
         let stmts = p.parse_statements().unwrap();
         let result = eval_stmt(&stmts[0], &env, false).await;
         assert!(matches!(result, Err(EngineError::ExitSignal(42))));
+    }
 
+    #[test]
+    fn finalize_no_failures_keeps_last_exit_code() {
+        let (ec, err) = pipeline_finalize(Vec::new(), 7, false);
+        assert_eq!(ec, 7);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn finalize_all_condition_false_yields_exit_1_and_no_hard_error() {
+        let failures = vec![
+            PipelineFailure::ConditionFalse,
+            PipelineFailure::ConditionFalse,
+        ];
+        let (ec, err) = pipeline_finalize(failures, 0, false);
+        assert_eq!(ec, 1);
+        assert!(matches!(err, Some(EngineError::ConditionFalse { .. })));
+    }
+
+    #[test]
+    fn finalize_condition_false_respects_nonzero_last_exit_code() {
+        let (ec, err) = pipeline_finalize(vec![PipelineFailure::ConditionFalse], 3, false);
+        assert_eq!(ec, 1);
+        assert!(matches!(err, Some(EngineError::ConditionFalse { .. })));
+    }
+
+    #[test]
+    fn finalize_mixed_takes_last_hard_error_message() {
+        let hard_a = FshDiag::new(EngineError::Generic {
+            message: "first failure".to_string(),
+            span: None,
+        });
+        let hard_b = FshDiag::new(EngineError::Generic {
+            message: "last failure".to_string(),
+            span: None,
+        });
+        let failures = vec![
+            PipelineFailure::Hard(hard_a),
+            PipelineFailure::ConditionFalse,
+            PipelineFailure::Hard(hard_b),
+        ];
+        let (ec, err) = pipeline_finalize(failures, 2, false);
+        // Hard error present: exit code comes from the last stage.
+        assert_eq!(ec, 2);
+        match err {
+            Some(EngineError::PipelineError { message, .. }) => {
+                assert!(message.contains("last failure"));
+            }
+            other => panic!("expected PipelineError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_pipefail_synthesizes_exit_1_when_last_stage_succeeded() {
+        let failures = vec![PipelineFailure::Hard(FshDiag::new(EngineError::Generic {
+            message: "boom".to_string(),
+            span: None,
+        }))];
+        let (ec, err) = pipeline_finalize(failures, 0, true);
+        assert_eq!(ec, 1);
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn finalize_pipefail_prefers_nonzero_last_exit_code() {
+        let failures = vec![PipelineFailure::Hard(FshDiag::new(EngineError::Generic {
+            message: "boom".to_string(),
+            span: None,
+        }))];
+        let (ec, _) = pipeline_finalize(failures, 5, true);
+        assert_eq!(ec, 5);
+    }
+
+    #[tokio::test]
+    async fn test_exit_stmt_bare_exit() {
+        let env = Env::new();
         let mut p = Parser::new("exit");
         let stmts = p.parse_statements().unwrap();
         let result = eval_stmt(&stmts[0], &env, false).await;

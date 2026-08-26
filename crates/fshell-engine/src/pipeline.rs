@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use crate::PipelineFailure;
 use crate::{
     CapAction, EngineError, Env, PendingSuggestion, PipeSender, PipeStream, PipelinePayload,
     SuggestionMode, cmp_vals, decode_csv_input, eval_expr, eval_stmt, expand_alias_with_args,
@@ -2568,7 +2569,7 @@ pub(crate) fn run_script_stmt<'a>(
                         *ec = 0;
                     }
                     let mut rx = spawn_pipeline_stream(pipeline, env);
-                    let mut errors: Vec<String> = Vec::new();
+                    let mut errors: Vec<crate::PipelineFailure> = Vec::new();
                     while let Some(payload) = rx.recv().await {
                         match payload {
                             PipelinePayload::Data(v) => {
@@ -2579,8 +2580,6 @@ pub(crate) fn run_script_stmt<'a>(
                                 let _ = std::io::stdout().write_all(&b);
                             }
                             PipelinePayload::Structured(d) => {
-                                let is_false = crate::is_condition_false_diag(&d);
-                                let msg = d.report.to_string();
                                 let config = {
                                     let opts = env.options.read();
                                     fshell_render::RenderConfig {
@@ -2589,14 +2588,14 @@ pub(crate) fn run_script_stmt<'a>(
                                         is_interactive: false,
                                     }
                                 };
-                                if !is_false {
+                                if crate::is_condition_false_diag(&d) {
+                                    errors.push(PipelineFailure::ConditionFalse);
+                                } else {
                                     env.set_last_error(d.clone());
+                                    errors.push(PipelineFailure::Hard(d.clone()));
                                     let err_str =
                                         fshell_render::render(d, None, "pipeline", &config);
                                     eprintln!("{}", err_str);
-                                    errors.push(msg);
-                                } else {
-                                    errors.push("__condition_false__".to_string());
                                 }
                             }
                         }

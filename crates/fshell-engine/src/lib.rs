@@ -2646,21 +2646,45 @@ pub fn pipeline_channel_size(env: &Env) -> usize {
     env.options.read().pipeline_channel_size
 }
 
+/// A failure collected from a pipeline stage while it runs.
+///
+/// Distinguishes a logical `false` (a `filter` that dropped everything, a
+/// failed `test`: exit code 1, no user-visible error) from a hard error
+/// carrying its full diagnostic, so control-flow decisions never rely on
+/// string matching against error text.
+pub(crate) enum PipelineFailure {
+    ConditionFalse,
+    Hard(fshell_core::FshDiag),
+}
+
 /// Pure pipeline finalizer: computes exit code and typed error from collected
-/// error strings and the last stage's exit code. The `__condition_false__`
-/// sentinel represents a logical `false` (filter false, test false) — exit 1
-/// without hard-error rendering.
+/// stage failures and the last stage's exit code. Logical `false` failures
+/// yield exit 1 without hard-error rendering; with `pipefail`, any nonzero
+/// exit code wins over the synthesized 1.
 pub(crate) fn pipeline_finalize(
-    errors: Vec<String>,
+    failures: Vec<PipelineFailure>,
     last_ec: i64,
     pipefail: bool,
 ) -> (i64, Option<EngineError>) {
-    let has_hard = errors.iter().any(|e| e != "__condition_false__");
-    let has_any = !errors.is_empty();
+    let mut saw_condition_false = false;
+    let mut last_hard: Option<EngineError> = None;
+    for failure in &failures {
+        match failure {
+            PipelineFailure::ConditionFalse => saw_condition_false = true,
+            PipelineFailure::Hard(diag) => {
+                last_hard = Some(EngineError::PipelineError {
+                    message: diag.report.to_string(),
+                    span: None,
+                });
+            }
+        }
+    }
+
+    let has_any = saw_condition_false || last_hard.is_some();
     let exit_code = if has_any {
         if pipefail {
             if last_ec != 0 { last_ec } else { 1 }
-        } else if has_hard {
+        } else if last_hard.is_some() {
             last_ec
         } else {
             1
@@ -2668,19 +2692,13 @@ pub(crate) fn pipeline_finalize(
     } else {
         last_ec
     };
-    let err = if errors.is_empty() {
-        None
-    } else if errors.iter().all(|e| e == "__condition_false__") {
+
+    let err = if last_hard.is_some() {
+        last_hard
+    } else if saw_condition_false {
         Some(EngineError::ConditionFalse { span: None })
     } else {
-        let last_hard = errors
-            .into_iter()
-            .rfind(|e| e != "__condition_false__")
-            .unwrap_or_else(|| "pipeline failed".to_string());
-        Some(EngineError::PipelineError {
-            message: last_hard,
-            span: None,
-        })
+        None
     };
     (exit_code, err)
 }
