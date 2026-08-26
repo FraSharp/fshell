@@ -1300,6 +1300,16 @@ impl Env {
         }
     }
 
+    pub fn set_last_error_with_source(
+        &self,
+        diag: fshell_core::diagnostic::FshDiag,
+        source: String,
+        source_name: String,
+    ) {
+        let diag = diag.with_source(source, source_name);
+        self.set_last_error(diag);
+    }
+
     /// Retrieve the most recent diagnostic recorded in the session.
     pub fn get_last_error(&self) -> Option<fshell_core::diagnostic::FshDiag> {
         self.prompt.last_error.read().clone()

@@ -2527,7 +2527,11 @@ pub async fn run_script(input: &str, env: &Env) -> Result<Flow, EngineError> {
         }
         match run_script_stmt(&stmt, env).await {
             Err(e) => {
-                env.set_last_error(FshDiag::new(e.clone()));
+                env.set_last_error_with_source(
+                    FshDiag::new(e.clone()),
+                    input.to_string(),
+                    "script".to_string(),
+                );
                 return Err(e);
             }
             Ok(Flow::Normal) | Ok(Flow::ConditionFalse) => {}

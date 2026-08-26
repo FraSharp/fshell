@@ -63,10 +63,14 @@ fn render_graphical(diag: FshDiag, source: Option<&str>, source_name: &str, colo
     let fix = diag.fix.clone();
     let suggestions = diag.suggestions.clone();
     let docs_url = diag.docs_url();
+    let stored_source = diag.source.clone();
+    let stored_name = diag.source_name.clone();
 
     let mut report = diag.into_inner();
     if let Some(src) = source {
         report = report.with_source_code(miette::NamedSource::new(source_name, src.to_string()));
+    } else if let (Some(src), Some(name)) = (stored_source, stored_name) {
+        report = report.with_source_code(miette::NamedSource::new(name, (*src).clone()));
     }
     let mut output = String::new();
     let theme = if color {
@@ -128,18 +132,22 @@ fn render_compact(diag: FshDiag, source: Option<&str>, color: bool) -> String {
 
     let category = diag.code.map(|c| c.name()).unwrap_or(diag.category);
 
-    let location = if let (Some(src), Some(labels)) = (source, diag_ref.labels()) {
-        labels
-            .into_iter()
-            .next()
-            .map(|l| {
-                let (line, col) = calculate_line_col(src, l.offset());
-                format!(" at {line}:{col}")
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let effective_source = source
+        .map(|s| s.to_string())
+        .or_else(|| diag.source.as_ref().map(|s| (**s).clone()));
+    let location =
+        if let (Some(src), Some(labels)) = (effective_source.as_deref(), diag_ref.labels()) {
+            labels
+                .into_iter()
+                .next()
+                .map(|l| {
+                    let (line, col) = calculate_line_col(src, l.offset());
+                    format!(" at {line}:{col}")
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
 
     let (c_red, c_cyan, c_dim, c_bold, c_yellow, c_green, c_reset) = if color {
         (
@@ -213,10 +221,17 @@ fn render_explain(diag: FshDiag, source: Option<&str>, source_name: &str, color:
     out.push_str(&format!("{c_dim}{desc}{c_reset}\n\n"));
     out.push_str(&format!("{c_bold}Message:{c_reset} {diag_ref}\n"));
 
-    if let Some(src) = source {
+    let effective_source = source
+        .map(|s| (s.to_string(), source_name.to_string()))
+        .or_else(|| {
+            diag.source
+                .as_ref()
+                .zip(diag.source_name.as_ref())
+                .map(|(s, n)| ((**s).clone(), n.clone()))
+        });
+    if let Some((src, name)) = effective_source {
         let mut snippet_report = diag.clone().into_inner();
-        snippet_report =
-            snippet_report.with_source_code(miette::NamedSource::new(source_name, src.to_string()));
+        snippet_report = snippet_report.with_source_code(miette::NamedSource::new(name, src));
         let mut snippet_out = String::new();
         let theme = if color {
             miette::GraphicalTheme::unicode()

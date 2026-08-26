@@ -2826,7 +2826,11 @@ pub(crate) async fn handle_line_generic(
                 return Ok(());
             }
             Err(pe) => {
-                env.set_last_error(FshDiag::new(pe.clone()));
+                env.set_last_error_with_source(
+                    FshDiag::new(pe.clone()),
+                    line_trimmed.to_string(),
+                    "repl".to_string(),
+                );
                 let err_str = {
                     let opts = env.options.read();
                     let config = fshell_render::RenderConfig {
@@ -2872,7 +2876,11 @@ pub(crate) async fn handle_line_generic(
                             env.set_exit_code(1);
                         }
                         Err(e) => {
-                            env.set_last_error(FshDiag::new(e.clone()));
+                            env.set_last_error_with_source(
+                                FshDiag::new(e.clone()),
+                                line_trimmed.to_string(),
+                                "repl".to_string(),
+                            );
                             let opts = env.options.read();
                             let config = fshell_render::RenderConfig {
                                 format: opts.error_format,
@@ -2943,7 +2951,11 @@ pub(crate) async fn handle_line_generic(
                                             }
                                         };
                                         if !fshell_engine::is_condition_false_diag(&diag) {
-                                            env.set_last_error(diag.clone());
+                                            env.set_last_error_with_source(
+                                                diag.clone(),
+                                                line_trimmed.to_string(),
+                                                "repl".to_string(),
+                                            );
                                             let err_str = fshell_render::render(
                                                 diag, None, "pipeline", &config,
                                             );
@@ -3011,7 +3023,11 @@ pub(crate) async fn handle_line_generic(
                                     }
                                 }
                                 Err(e) => {
-                                    env.set_last_error(FshDiag::new(e.clone()));
+                                    env.set_last_error_with_source(
+                                        FshDiag::new(e.clone()),
+                                        line_trimmed.to_string(),
+                                        "repl".to_string(),
+                                    );
                                     let err_str = {
                                         let opts = env.options.read();
                                         let config = fshell_render::RenderConfig {
@@ -3046,7 +3062,11 @@ pub(crate) async fn handle_line_generic(
                             env.set_exit_code(1);
                         }
                         Err(e) => {
-                            env.set_last_error(FshDiag::new(e.clone()));
+                            env.set_last_error_with_source(
+                                FshDiag::new(e.clone()),
+                                line_trimmed.to_string(),
+                                "repl".to_string(),
+                            );
                             let err_str = {
                                 let opts = env.options.read();
                                 let config = fshell_render::RenderConfig {
@@ -3108,7 +3128,11 @@ pub(crate) async fn handle_line_generic(
                         exit_code = Some(code as i64);
                     }
                     Err(pe) => {
-                        env.set_last_error(FshDiag::new(pe.clone()));
+                        env.set_last_error_with_source(
+                            FshDiag::new(pe.clone()),
+                            line_trimmed.to_string(),
+                            "repl".to_string(),
+                        );
                         let err_str = {
                             let opts = env.options.read();
                             let config = fshell_render::RenderConfig {
@@ -3123,7 +3147,11 @@ pub(crate) async fn handle_line_generic(
                     }
                 }
             } else {
-                env.set_last_error(FshDiag::new(e.clone()));
+                env.set_last_error_with_source(
+                    FshDiag::new(e.clone()),
+                    line_trimmed.to_string(),
+                    "repl".to_string(),
+                );
                 let err_str = {
                     let opts = env.options.read();
                     let config = fshell_render::RenderConfig {

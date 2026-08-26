@@ -465,6 +465,8 @@ pub struct FshDiag {
     pub code: Option<ErrorCode>,
     pub fix: Option<String>,
     pub suggestions: Vec<String>,
+    pub source: Option<std::sync::Arc<String>>,
+    pub source_name: Option<String>,
 }
 
 impl DiagnosticExt for FshDiag {
@@ -494,7 +496,15 @@ impl FshDiag {
             code,
             fix,
             suggestions,
+            source: None,
+            source_name: None,
         }
+    }
+
+    pub fn with_source(mut self, source: String, source_name: String) -> Self {
+        self.source = Some(std::sync::Arc::new(source));
+        self.source_name = Some(source_name);
+        self
     }
 
     pub fn into_inner(self) -> miette::Report {
