@@ -3,8 +3,9 @@
 
 use crate::error::BuiltinError;
 use crate::utils::expand_tilde;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -89,7 +90,7 @@ pub fn get_frecency_db_path() -> Option<PathBuf> {
     fshell_engine::config_dir().map(|d| d.join("frecency.db"))
 }
 
-pub fn log_frecency_visit(path: &std::path::Path) -> Result<(), StringError> {
+pub fn log_frecency_visit(path: &std::path::Path) -> Result<(), ShellError> {
     let path_str = path.to_string_lossy().to_string();
     let db_path = match get_frecency_db_path() {
         Some(p) => p,
@@ -229,7 +230,7 @@ pub fn z_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         let db_path = match get_frecency_db_path() {
             Some(p) => p,
@@ -312,7 +313,12 @@ pub fn z_builtin(
                     fragments.push(s.to_lowercase());
                 }
             }
-            _ => return Err("z arguments must be strings".to_string().into()),
+            _ => {
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "z arguments must be strings",
+                ));
+            }
         }
     }
 
@@ -339,7 +345,7 @@ pub fn zi_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut fragments = Vec::new();
     let mut subdirectory_only = false;
     for arg in args {
@@ -351,7 +357,12 @@ pub fn zi_builtin(
                     fragments.push(s.to_lowercase());
                 }
             }
-            _ => return Err("zi arguments must be strings".to_string().into()),
+            _ => {
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "zi arguments must be strings",
+                ));
+            }
         }
     }
 
@@ -443,11 +454,17 @@ pub fn zi_builtin(
                     if output.status.success() {
                         let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         if selected.is_empty() {
-                            return Err("Interactive selection cancelled".to_string().into());
+                            return Err(ShellError::new(
+                                ErrorCode::Cancelled,
+                                "Interactive selection cancelled",
+                            ));
                         }
                         selected
                     } else {
-                        return Err("Interactive selection cancelled".to_string().into());
+                        return Err(ShellError::new(
+                            ErrorCode::Cancelled,
+                            "Interactive selection cancelled",
+                        ));
                     }
                 }
                 Err(_) => {
@@ -485,17 +502,25 @@ pub fn zi_builtin(
         }
 
         if read_res.is_err() {
-            return Err("Failed to read input".to_string().into());
+            return Err(ShellError::new(ErrorCode::IoError, "Failed to read input"));
         }
 
         let input_trimmed = input.trim();
         if input_trimmed.eq_ignore_ascii_case("q") {
-            return Err("Interactive selection cancelled".to_string().into());
+            return Err(ShellError::new(
+                ErrorCode::Cancelled,
+                "Interactive selection cancelled",
+            ));
         }
 
         match input_trimmed.parse::<usize>() {
             Ok(idx) if idx > 0 && idx <= displayed_count => candidates[idx - 1].clone(),
-            _ => return Err("Invalid selection".to_string().into()),
+            _ => {
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "Invalid selection",
+                ));
+            }
         }
     } else {
         selected_path

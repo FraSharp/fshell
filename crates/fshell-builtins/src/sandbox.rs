@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream};
 use fshell_sandbox::{SandboxConfig, SandboxMode, run_sandboxed};
 
@@ -12,7 +13,7 @@ pub fn sandbox_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err("usage: sandbox [options] <command> [args...]
 
@@ -76,7 +77,10 @@ Options:
     }
 
     if arg_idx >= args.len() {
-        return Err("sandbox: missing command".into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "sandbox: missing command",
+        ));
     }
 
     let name = match &args[arg_idx] {
@@ -93,7 +97,7 @@ Options:
     let cmd_args: Vec<Val> = args[arg_idx + 1..].to_vec();
 
     let config = SandboxConfig::with_profile(profile);
-    run_sandboxed(&name, &cmd_args, in_rx, env, tx, &config).map_err(StringError::from)
+    run_sandboxed(&name, &cmd_args, in_rx, env, tx, &config).map_err(ShellError::from)
 }
 
 pub fn unsafe_builtin(
@@ -101,7 +105,7 @@ pub fn unsafe_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err("usage: unsafe <command> [args...]".into());
     }
@@ -123,5 +127,5 @@ pub fn unsafe_builtin(
         mode: SandboxMode::Off,
         ..Default::default()
     };
-    run_sandboxed(&name, &cmd_args, in_rx, env, tx, &config).map_err(StringError::from)
+    run_sandboxed(&name, &cmd_args, in_rx, env, tx, &config).map_err(ShellError::from)
 }

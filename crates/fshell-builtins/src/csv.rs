@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 use ustr::ustr;
@@ -12,7 +12,7 @@ pub fn csv_builtin(
     _args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     tokio::spawn(async move {
         if let Some(mut rx) = in_rx {
             while let Some(payload) = rx.recv().await {

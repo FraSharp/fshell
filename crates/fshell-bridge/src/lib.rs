@@ -4,8 +4,9 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::panic))]
 #![allow(clippy::result_large_err)]
 use crate::cmdnotfound::{lookup_cached, spawn_background_search};
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::{ErrorCode, StringError};
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload, resolve_cached_command_path};
 use std::io::Write;
 use std::os::unix::io::FromRawFd;
@@ -158,7 +159,7 @@ impl Drop for InteractiveTerminalGuard {
 }
 
 /// Checks if a command matches catastrophic destructive patterns (e.g. `rm -rf /` or raw disk writes).
-fn check_destructive_command(name: &str, args: &[Val], env: &Env) -> Result<(), StringError> {
+fn check_destructive_command(name: &str, args: &[Val], env: &Env) -> Result<(), ShellError> {
     let confirm_destructive = env.options.read().confirm_destructive;
 
     if !confirm_destructive {
@@ -276,16 +277,22 @@ fn check_destructive_command(name: &str, args: &[Val], env: &Env) -> Result<(), 
         if std::io::stdin().read_line(&mut input).is_ok() && input.trim() == "yes" {
             Ok(())
         } else {
-            Err(StringError::from(format!(
-                "Cancelled dangerous operation: {name} {}",
-                arg_strs.join(" ")
-            )))
+            Err(ShellError::new(
+                fshell_core::diagnostic::ErrorCode::Cancelled,
+                format!(
+                    "Cancelled dangerous operation: {name} {}",
+                    arg_strs.join(" ")
+                ),
+            ))
         }
     } else {
-        Err(StringError::from(format!(
-            "Dangerous operation '{name} {}' ({warning_detail}) blocked by default safety guard. Run with 'unsafe <cmd>' or unsetopt confirm_destructive to bypass.",
-            arg_strs.join(" ")
-        )))
+        Err(ShellError::new(
+            fshell_core::diagnostic::ErrorCode::PermissionDenied,
+            format!(
+                "Dangerous operation '{name} {}' ({warning_detail}) blocked by default safety guard. Run with 'unsafe <cmd>' or unsetopt confirm_destructive to bypass.",
+                arg_strs.join(" ")
+            ),
+        ))
     }
 }
 
@@ -297,7 +304,7 @@ pub fn run_external(
     env: &Env,
     tx: PipeSender,
     has_next: bool,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let cnf_debug = std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1");
     let ext_start = std::time::Instant::now();
     if cnf_debug {
@@ -390,7 +397,7 @@ pub fn run_external(
         if let Some(mode) = mode {
             let config = fshell_sandbox::SandboxConfig::new(mode);
             return fshell_sandbox::run_sandboxed(&resolved_name, &args, in_rx, env, tx, &config)
-                .map_err(StringError::from);
+                .map_err(ShellError::from);
         }
     }
 
@@ -651,7 +658,7 @@ pub fn run_external(
                 // filter condition `size > 100` followed by a pipeline stage `KB`.
                 // The size literal must be written without a space: `100KB`.
                 if is_size_unit(name) {
-                    return Err(StringError::new(
+                    return Err(ShellError::new(
                         ErrorCode::CommandNotFound,
                         format!("Command not found: {name}"),
                     )
@@ -672,7 +679,7 @@ pub fn run_external(
                             cache_start.elapsed()
                         );
                     }
-                    return Err(StringError::new(
+                    return Err(ShellError::new(
                         ErrorCode::CommandNotFound,
                         format!("Command not found: {name}"),
                     )
@@ -697,7 +704,7 @@ pub fn run_external(
                         total_elapsed
                     );
                 }
-                return Err(StringError::new(
+                return Err(ShellError::new(
                     ErrorCode::CommandNotFound,
                     format!("Command not found: {name}"),
                 )
@@ -705,7 +712,7 @@ pub fn run_external(
                     "Check the command name, PATH variable, or type `help` for available builtins.",
                 ));
             }
-            return Err(StringError::new(
+            return Err(ShellError::new(
                 ErrorCode::CommandFailed,
                 format!("Failed to spawn {name}: {e}"),
             ));

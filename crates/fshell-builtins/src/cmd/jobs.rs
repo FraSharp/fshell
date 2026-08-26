@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ pub fn jobs_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let jobs = env.job_control.jobs.read().clone();
     tokio::spawn(async move {
         for (_, job) in jobs {
@@ -32,7 +32,7 @@ pub fn jobs_builtin(
     Ok(())
 }
 
-fn resolve_job(args: &[Val], env: &Env, cmd: &str) -> Result<(usize, i32, String), StringError> {
+fn resolve_job(args: &[Val], env: &Env, cmd: &str) -> Result<(usize, i32, String), ShellError> {
     let job_id = if !args.is_empty() {
         match &args[0] {
             Val::Int(i) => *i as usize,
@@ -73,7 +73,7 @@ pub fn fg_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let (job_id, pgid, cmd) = resolve_job(&args, env, "fg")?;
 
     println!("Resuming foreground: {}", cmd);
@@ -170,7 +170,7 @@ pub fn bg_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let (job_id, pgid, cmd) = resolve_job(&args, env, "bg")?;
 
     println!("[{}] + Resuming background {}", job_id, cmd);
@@ -195,7 +195,7 @@ pub fn kill_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err("kill: expected at least one PID or job ID"
             .to_string()
@@ -209,7 +209,7 @@ pub fn kill_builtin(
         pgid: i32,
         job_id: usize,
         signal: libc::c_int,
-    ) -> Result<(), StringError> {
+    ) -> Result<(), ShellError> {
         unsafe {
             libc::kill(-pgid, libc::SIGCONT);
             libc::kill(-pgid, signal);
@@ -284,7 +284,7 @@ pub fn wait_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let env = env.clone();
     let tx = tx.clone();
     tokio::spawn(async move {
@@ -309,7 +309,7 @@ pub fn disown_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let (job_id, pgid, cmd) = resolve_job(&args, env, "disown")?;
     let mut jobs = env.job_control.jobs.write();
     if let Some(job) = jobs.get_mut(&pgid) {

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use fshell_core::diagnostic::StringError;
+use fshell_core::ShellError;
 use fshell_core::{ResourceHandle, Val, set_var};
 use fshell_engine::{CapAction, Env};
 use std::ffi::CString;
 use std::path::PathBuf;
 
-pub fn check_read_file(env: &Env, cmd: &str, path: PathBuf) -> Result<(), StringError> {
+pub fn check_read_file(env: &Env, cmd: &str, path: PathBuf) -> Result<(), ShellError> {
     env.enforce_capability(cmd, CapAction::ReadFile(path.clone()))?;
     env.track_read(path);
     Ok(())
@@ -16,13 +16,17 @@ pub fn check_read_file(env: &Env, cmd: &str, path: PathBuf) -> Result<(), String
 pub fn change_dir_and_update_caps(
     target_path: &std::path::Path,
     env: &Env,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     env.enforce_capability("cd", CapAction::ReadDir(target_path.to_path_buf()))?;
 
     let old_pwd = std::env::current_dir().ok();
 
-    std::env::set_current_dir(target_path)
-        .map_err(|e| format!("Failed to change directory to {:?}: {}", target_path, e))?;
+    std::env::set_current_dir(target_path).map_err(|e| {
+        ShellError::io_error(
+            format!("Failed to change directory to {:?}: {}", target_path, e),
+            None,
+        )
+    })?;
 
     let mut caps = env.caps.caps.write();
     if let Some(ref old_path) = old_pwd {

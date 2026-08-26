@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::io::Write;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ pub fn read_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut prompt_str = None;
     let mut timeout_secs = None;
     let mut silent = false;
@@ -37,7 +38,10 @@ pub fn read_builtin(
                     other => Some(other.to_text()),
                 };
             } else {
-                return Err("read: expected prompt string after -p".to_string().into());
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "read: expected prompt string after -p",
+                ));
             }
         } else if s == "-t" {
             if idx + 1 < args.len() {
@@ -51,7 +55,10 @@ pub fn read_builtin(
                     .map_err(|_| "read: invalid timeout value".to_string())?;
                 timeout_secs = Some(t);
             } else {
-                return Err("read: expected timeout value after -t".to_string().into());
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "read: expected timeout value after -t",
+                ));
             }
         } else if s == "-s" {
             silent = true;

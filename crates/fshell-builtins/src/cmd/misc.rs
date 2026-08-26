@@ -3,8 +3,9 @@
 
 use crate::error::BuiltinError;
 use crate::utils::{get_home_dir, interpret_ansi_escapes, val_to_display_string};
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use nu_ansi_term::Color;
 use std::path::PathBuf;
@@ -37,7 +38,7 @@ fn find_workspace_root() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn clone_workspace_root() -> Result<PathBuf, StringError> {
+fn clone_workspace_root() -> Result<PathBuf, ShellError> {
     let repo_url = option_env!("FSHELL_REPO_URL").unwrap_or("https://github.com/FraSharp/fshell");
 
     let home = get_home_dir().ok_or("Could not determine home directory")?;
@@ -85,7 +86,7 @@ pub fn reload_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let is_build_debug = args.iter().any(|arg| match arg {
         Val::String(s) => s == "--build-debug" || s == "-bd",
         _ => false,
@@ -277,9 +278,12 @@ pub fn which_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err("which: missing argument".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "which: missing argument",
+        ));
     }
 
     let mut paths = Vec::new();
@@ -351,7 +355,7 @@ pub fn caps_profile_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut curr =
         std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?;
     let mut caps_yaml_path = None;
@@ -413,7 +417,12 @@ pub fn caps_profile_builtin(
 
     let target_profile = match &args[0] {
         Val::String(s) => s,
-        _ => return Err("caps: profile name must be a string".to_string().into()),
+        _ => {
+            return Err(ShellError::new(
+                ErrorCode::InvalidArgument,
+                "caps: profile name must be a string",
+            ));
+        }
     };
 
     let profile_handles =
@@ -682,18 +691,18 @@ pub fn test_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         tokio::spawn(async move {
             let _ = tx
                 .send(PipelinePayload::Data(Arc::new(Val::Bool(false))))
                 .await;
         });
-        return Err(StringError::condition_false());
+        return Err(ShellError::condition_false());
     }
 
     let mut parser = TestParser::new(&args, env);
-    let res = parser.parse_or().map_err(StringError::from)?;
+    let res = parser.parse_or().map_err(ShellError::from)?;
 
     if parser.pos < args.len() {
         return Err(BuiltinError::UnexpectedArgument {
@@ -713,7 +722,7 @@ pub fn test_builtin(
     if res {
         Ok(())
     } else {
-        Err(StringError::condition_false())
+        Err(ShellError::condition_false())
     }
 }
 
@@ -722,9 +731,12 @@ pub fn bracket_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.last().is_none_or(|a| val_to_display_string(a) != "]") {
-        return Err("[: expected ']' to close bracket test".into());
+        return Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            "[: expected ']' to close bracket test",
+        ));
     }
     let len = args.len();
     let inner_args: Vec<Val> = args.into_iter().take(len - 1).collect();
@@ -1033,16 +1045,19 @@ pub fn printf_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err("printf: missing format string".into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "printf: missing format string",
+        ));
     }
 
     let format_str = val_to_display_string(&args[0]);
     let format_args = &args[1..];
 
     let (interpreted_format, _) = interpret_ansi_escapes(&format_str);
-    let output = format_printf(&interpreted_format, format_args).map_err(StringError::from)?;
+    let output = format_printf(&interpreted_format, format_args).map_err(ShellError::from)?;
 
     tokio::spawn(async move {
         let _ = tx
@@ -1058,7 +1073,7 @@ pub fn true_builtin(
     _args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     tokio::spawn(async move {
         let _ = tx
             .send(PipelinePayload::Data(Arc::new(Val::Bool(true))))
@@ -1072,16 +1087,16 @@ pub fn false_builtin(
     _args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     tokio::spawn(async move {
         let _ = tx
             .send(PipelinePayload::Data(Arc::new(Val::Bool(false))))
             .await;
     });
-    Err(StringError::condition_false())
+    Err(ShellError::condition_false())
 }
 
-fn parse_duration(s: &str) -> Result<std::time::Duration, StringError> {
+fn parse_duration(s: &str) -> Result<std::time::Duration, ShellError> {
     let s = s.trim();
     if let Some(ms) = s.strip_suffix("ms") {
         let val: f64 = ms
@@ -1116,9 +1131,12 @@ pub fn sleep_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err("sleep: missing duration".into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "sleep: missing duration",
+        ));
     }
 
     let duration_str = val_to_display_string(&args[0]);
@@ -1146,7 +1164,7 @@ pub fn lint_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let source = if args.is_empty() {
         return Err("lint: requires a file path or inline source".into());
     } else {
@@ -1159,7 +1177,12 @@ pub fn lint_builtin(
                     s.clone()
                 }
             }
-            _ => return Err("lint: argument must be a string".into()),
+            _ => {
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "lint: argument must be a string",
+                ));
+            }
         }
     };
 
@@ -1217,7 +1240,7 @@ pub fn prompt_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let cmd = args.first().and_then(|v| match v {
         Val::String(s) if !s.is_empty() => Some(s.as_str()),
         _ => None,
@@ -1349,7 +1372,7 @@ pub fn prompt_builtin(
             let type_name = args.get(1).and_then(|v| match v {
                 Val::String(s) => Some(s.as_str()),
                 _ => None,
-            }).ok_or_else(|| StringError::from("prompt add: usage: prompt add <segment_type>"))?;
+            }).ok_or_else(|| ShellError::from("prompt add: usage: prompt add <segment_type>"))?;
 
             let st = match type_name {
                 "cargo_run" | "crun" | "fsh_crun" => fshell_core::SegmentType::CargoRun,
@@ -1402,7 +1425,7 @@ pub fn prompt_builtin(
             let target = args.get(1).and_then(|v| match v {
                 Val::String(s) => Some(s.as_str()),
                 _ => None,
-            }).ok_or_else(|| StringError::from("prompt remove: usage: prompt remove <index|type> [left|right]"))?;
+            }).ok_or_else(|| ShellError::from("prompt remove: usage: prompt remove <index|type> [left|right]"))?;
 
             let side = args.get(2).and_then(|v| match v {
                 Val::String(s) => Some(s.as_str()),
@@ -1480,7 +1503,7 @@ pub fn exec_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         // `exec` with no arguments is a no-op (handles fd manipulation in bash).
         return Ok(());

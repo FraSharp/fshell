@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 use ustr::ustr;
@@ -12,7 +12,7 @@ pub fn files_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let path_str = match args.first() {
         Some(Val::String(s)) => s.clone(),
         _ => ".".to_string(),
@@ -36,7 +36,7 @@ async fn scan_dir(
     start_path: std::path::PathBuf,
     tx: &PipeSender,
     env: &Env,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut stack = vec![(start_path, 0)];
 
     while let Some((path, depth)) = stack.pop() {

@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use std::io::Read;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ pub fn hash_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut algo = "256".to_string();
     let mut xof_len = 32;
     let mut files = Vec::new();

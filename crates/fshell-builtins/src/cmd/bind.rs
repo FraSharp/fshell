@@ -3,8 +3,9 @@
 
 #![allow(clippy::result_large_err)]
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::keybindings::{KeyAction, KeyMapMode};
 use fshell_engine::{Env, PipeSender, PipeStream};
 
@@ -24,7 +25,7 @@ pub fn builtin_bind(
     args: Vec<Val>,
     env: &Env,
     _out: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let arg_strs: Vec<String> = args
         .iter()
         .map(|v| match v {
@@ -62,13 +63,13 @@ pub fn builtin_bind(
                     let mode_str = &arg_strs[idx];
                     target_mode = KeyMapMode::parse_mode(mode_str);
                     if target_mode.is_none() {
-                        return Err(StringError::from(format!(
-                            "unknown keymap mode: {}",
-                            mode_str
-                        )));
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            format!("unknown keymap mode: {}", mode_str),
+                        ));
                     }
                 } else {
-                    return Err(StringError::from("missing argument for -M/--mode"));
+                    return Err(ShellError::missing_argument("bind", "-M/--mode", None));
                 }
             }
             "-s" | "--macro" => macro_mode = true,
@@ -86,7 +87,11 @@ pub fn builtin_bind(
                 return Ok(());
             }
             s if s.starts_with('-') => {
-                return Err(StringError::from(format!("unknown option: {}", s)));
+                return Err(ShellError::invalid_argument(
+                    "bind",
+                    &format!("unknown option: {}", s),
+                    None,
+                ));
             }
             _ => positional.push(arg.clone()),
         }
@@ -154,13 +159,17 @@ pub fn builtin_bind(
 
     if remove_mode {
         if positional.is_empty() {
-            return Err(StringError::from("bind -r requires a key chord to unbind"));
+            return Err(ShellError::missing_argument(
+                "bind",
+                "key chord to unbind",
+                None,
+            ));
         }
         for chord in positional {
             match reg.unbind(mode, &chord) {
                 Ok(true) => println!("Unbound {} in [{}]", chord, mode),
                 Ok(false) => println!("No binding found for {} in [{}]", chord, mode),
-                Err(e) => return Err(StringError::from(e)),
+                Err(e) => return Err(ShellError::from(e)),
             }
         }
         return Ok(());
@@ -180,7 +189,7 @@ pub fn builtin_bind(
         // Lookup specific binding
         let chord_str = &positional[0];
         let chord =
-            fshell_engine::keybindings::KeyChord::parse(chord_str).map_err(StringError::from)?;
+            fshell_engine::keybindings::KeyChord::parse(chord_str).map_err(ShellError::from)?;
         if let Some(action) = reg.get_action(mode, &chord) {
             println!("{} -> {} [{}]", chord, action, mode);
         } else {
@@ -201,7 +210,7 @@ pub fn builtin_bind(
     };
 
     reg.bind(mode, chord_str, action)
-        .map_err(StringError::from)?;
+        .map_err(ShellError::from)?;
 
     Ok(())
 }

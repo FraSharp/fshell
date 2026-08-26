@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 use ustr::ustr;
@@ -13,7 +13,7 @@ pub fn replace_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let (old_text, new_text, globs, dry_run) = parse_args(&args)?;
 
     let tx = tx.clone();
@@ -89,7 +89,7 @@ async fn run_replace(
     dry_run: bool,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if !globs.is_empty() {
         // Expand globs and process files directly
         for glob in globs {
@@ -133,7 +133,7 @@ async fn process_glob(
     dry_run: bool,
     env: &Env,
     tx: &PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     // Simple glob expansion by scanning directories
     let (base_dir, glob_part) = if let Some(idx) = pattern.rfind(std::path::MAIN_SEPARATOR) {
         (pattern[..idx].to_string(), pattern[idx + 1..].to_string())
@@ -188,7 +188,7 @@ async fn process_file(
     dry_run: bool,
     env: &Env,
     tx: &PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let file_path = std::path::PathBuf::from(path);
 
     // Capability checks

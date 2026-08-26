@@ -3,8 +3,8 @@
 
 use crate::error::BuiltinError;
 use chrono::{DateTime, Utc};
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -51,7 +51,7 @@ pub fn ff_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     // 1. Check process / file-read capability on the current dir
     let pwd = std::env::current_dir().map_err(|e| format!("ff: {}", e))?;
     env.enforce_capability("ff", fshell_engine::CapAction::ReadDir(pwd.clone()))?;
@@ -85,7 +85,7 @@ pub fn ff_builtin(
     Ok(())
 }
 
-async fn run_search(config: &FfConfig, tx: PipeSender) -> Result<(), StringError> {
+async fn run_search(config: &FfConfig, tx: PipeSender) -> Result<(), ShellError> {
     let now = SystemTime::now();
     // Bounded defaults: an unbounded recursive walk from cwd (e.g. `/`) can
     // scan the whole filesystem. 32 levels covers real project layouts and

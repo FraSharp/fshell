@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream};
 
 pub fn eval_direnv_builtin(
@@ -11,7 +11,7 @@ pub fn eval_direnv_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     // Check process spawn capability
     env.enforce_capability("eval_direnv", CapAction::ProcessSpawn)?;
 
@@ -93,11 +93,11 @@ pub fn load_env_file_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     load_env_file_internal(env, tx)
 }
 
-fn load_env_file_internal(env: &Env, tx: PipeSender) -> Result<(), StringError> {
+fn load_env_file_internal(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     let current_dir = std::env::current_dir().map_err(|e| format!("load_env: {}", e))?;
     let dotenv_path = current_dir.join(".env");
 

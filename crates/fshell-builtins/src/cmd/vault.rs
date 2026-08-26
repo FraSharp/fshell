@@ -11,7 +11,7 @@
 use crate::error::BuiltinError;
 use crossterm::event::{self, Event, KeyCode};
 use fshell_core::RwLock;
-use fshell_core::diagnostic::StringError;
+use fshell_core::ShellError;
 use fshell_core::{FxIndexMap, Val};
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use nu_ansi_term::{Color, Style};
@@ -106,17 +106,22 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-fn hex_decode(s: &str) -> Result<Vec<u8>, StringError> {
+fn hex_decode(s: &str) -> Result<Vec<u8>, ShellError> {
     if s.len() % 2 != 0 {
         return Err("Odd hex string length".to_string().into());
     }
     let mut bytes = Vec::with_capacity(s.len() / 2);
     for i in (0..s.len()).step_by(2) {
-        let digit_bytes = s
-            .get(i..i + 2)
-            .ok_or_else(|| StringError::from("Invalid hex character index"))?;
-        let b = u8::from_str_radix(digit_bytes, 16)
-            .map_err(|_| StringError::from(format!("Invalid hex byte: {}", digit_bytes)))?;
+        let digit_bytes = s.get(i..i + 2).ok_or_else(|| {
+            ShellError::invalid_argument("vault", "Invalid hex character index", None)
+        })?;
+        let b = u8::from_str_radix(digit_bytes, 16).map_err(|_| {
+            ShellError::invalid_argument(
+                "vault",
+                &format!("Invalid hex byte: {}", digit_bytes),
+                None,
+            )
+        })?;
         bytes.push(b);
     }
     Ok(bytes)
@@ -124,7 +129,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, StringError> {
 
 // CRYPTOGRAPHY SCHEME (fshell-hash based)
 
-pub fn get_random_bytes(buf: &mut [u8]) -> Result<(), StringError> {
+pub fn get_random_bytes(buf: &mut [u8]) -> Result<(), ShellError> {
     if getrandom::fill(buf).is_ok() {
         return Ok(());
     }
@@ -133,7 +138,7 @@ pub fn get_random_bytes(buf: &mut [u8]) -> Result<(), StringError> {
             return Ok(());
         }
     }
-    Err(StringError::from(
+    Err(ShellError::from(
         "secure random generation failed: no entropy source available",
     ))
 }
@@ -169,7 +174,7 @@ pub fn pad_data(plaintext: &[u8]) -> Vec<u8> {
     padded
 }
 
-pub fn unpad_data(padded: &[u8]) -> Result<Vec<u8>, StringError> {
+pub fn unpad_data(padded: &[u8]) -> Result<Vec<u8>, ShellError> {
     if padded.is_empty() || padded.len() % 4096 != 0 || padded.len() < 2 {
         return Err("Invalid padded data block size".to_string().into());
     }
@@ -247,7 +252,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 struct RawModeGuard;
 
 impl RawModeGuard {
-    fn new() -> Result<Self, StringError> {
+    fn new() -> Result<Self, ShellError> {
         crossterm::terminal::enable_raw_mode()
             .map_err(|e| format!("Failed to enable raw mode: {}", e))?;
         Ok(Self)
@@ -260,7 +265,7 @@ impl Drop for RawModeGuard {
     }
 }
 
-pub fn read_password_prompt(prompt: &str) -> Result<String, StringError> {
+pub fn read_password_prompt(prompt: &str) -> Result<String, ShellError> {
     print!("{}", prompt);
     let _ = std::io::stdout().flush();
 
@@ -411,9 +416,9 @@ pub fn hmac_sha1(key: &[u8], message: &[u8]) -> [u8; 20] {
     sha1(&outer)
 }
 
-pub fn generate_totp(secret_b32: &str, time_sec: u64) -> Result<String, StringError> {
+pub fn generate_totp(secret_b32: &str, time_sec: u64) -> Result<String, ShellError> {
     let key =
-        base32_decode(secret_b32).ok_or_else(|| StringError::from("Invalid Base32 Secret Key"))?;
+        base32_decode(secret_b32).ok_or_else(|| ShellError::from("Invalid Base32 Secret Key"))?;
     let counter = time_sec / 30;
     let hmac_res = hmac_sha1(&key, &counter.to_be_bytes());
 
@@ -577,15 +582,15 @@ struct EncryptedVault {
     mac: String,
 }
 
-fn get_vault_path() -> Result<PathBuf, StringError> {
+fn get_vault_path() -> Result<PathBuf, ShellError> {
     if let Some(cfg) = fshell_engine::config_dir() {
         Ok(cfg.join("vault.enc"))
     } else {
-        Err(StringError::from("Could not locate config directory"))
+        Err(ShellError::from("Could not locate config directory"))
     }
 }
 
-fn load_vault_file(path: &Path, password: &str) -> Result<Vec<VaultEntry>, StringError> {
+fn load_vault_file(path: &Path, password: &str) -> Result<Vec<VaultEntry>, ShellError> {
     let mut f = std::fs::File::open(path).map_err(|e| format!("Failed to open vault: {}", e))?;
     let enc_vault: EncryptedVault =
         serde_json::from_reader(&mut f).map_err(|e| format!("Corrupt vault structure: {}", e))?;
@@ -604,7 +609,7 @@ fn load_vault_file(path: &Path, password: &str) -> Result<Vec<VaultEntry>, Strin
 
     let computed_mac = compute_mac(&mac_key, &ciphertext, &iv_arr, &salt_arr);
     if !constant_time_eq(&computed_mac, &stored_mac) {
-        return Err(StringError::from(
+        return Err(ShellError::from(
             "Password incorrect or vault tampered with",
         ));
     }
@@ -618,7 +623,7 @@ fn load_vault_file(path: &Path, password: &str) -> Result<Vec<VaultEntry>, Strin
     Ok(entries)
 }
 
-fn save_vault_file(path: &Path, entries: &[VaultEntry], password: &str) -> Result<(), StringError> {
+fn save_vault_file(path: &Path, entries: &[VaultEntry], password: &str) -> Result<(), ShellError> {
     let mut salt = [0u8; 16];
     get_random_bytes(&mut salt)?;
 
@@ -709,7 +714,7 @@ fn clear_session_keys() {
     *SESSION_KEYS.write() = None;
 }
 
-fn load_vault_with_session(path: &Path, _env: &Env) -> Result<Vec<VaultEntry>, StringError> {
+fn load_vault_with_session(path: &Path, _env: &Env) -> Result<Vec<VaultEntry>, ShellError> {
     if let Some((enc_key, mac_key)) = get_active_session_keys() {
         let mut f =
             std::fs::File::open(path).map_err(|e| format!("Failed to open vault: {}", e))?;
@@ -728,13 +733,13 @@ fn load_vault_with_session(path: &Path, _env: &Env) -> Result<Vec<VaultEntry>, S
 
         let computed_mac = compute_mac(&mac_key, &ciphertext, &iv_arr, &salt_arr);
         if !constant_time_eq(&computed_mac, &stored_mac) {
-            return Err(StringError::from("Session key invalid or vault modified"));
+            return Err(ShellError::from("Session key invalid or vault modified"));
         }
 
         let padded_plaintext = decrypt_payload(&enc_key, &ciphertext, &iv_arr);
         let plaintext = unpad_data(&padded_plaintext)?;
         let entries: Vec<VaultEntry> =
-            serde_json::from_slice(&plaintext).map_err(|e| StringError::from(format!("{}", e)))?;
+            serde_json::from_slice(&plaintext).map_err(|e| ShellError::from(format!("{}", e)))?;
         Ok(entries)
     } else {
         let pwd = read_password_prompt("Enter master password: ")?;
@@ -747,7 +752,7 @@ fn save_vault_with_session(
     path: &Path,
     entries: &[VaultEntry],
     _env: &Env,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if let Some((enc_key, mac_key)) = get_active_session_keys() {
         let mut salt = [0u8; 16];
         get_random_bytes(&mut salt)?;
@@ -933,7 +938,7 @@ pub fn entry_to_val_map(entry: &VaultEntry, reveal: bool) -> Val {
 
 // TUI: OPTION A (WATCH MODE)
 
-pub fn watch_totps(entries: &[VaultEntry]) -> Result<(), StringError> {
+pub fn watch_totps(entries: &[VaultEntry]) -> Result<(), ShellError> {
     let totp_entries: Vec<&VaultEntry> =
         entries.iter().filter(|e| e.totp_secret.is_some()).collect();
     if totp_entries.is_empty() {
@@ -1012,12 +1017,12 @@ pub fn watch_totps(entries: &[VaultEntry]) -> Result<(), StringError> {
 
 // TUI: OPTION B (FULL RATATUI UI EXPLICIT EXPLORER)
 
-pub fn run_tui(path: &Path, env: &Env) -> Result<(), StringError> {
+pub fn run_tui(path: &Path, env: &Env) -> Result<(), ShellError> {
     let mut entries = load_vault_with_session(path, env)?;
 
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let _raw_guard = RawModeGuard::new()?;
 
     let backend = CrosstermBackend::new(stdout);
@@ -1351,16 +1356,16 @@ fn interactive_add(
     path: &Path,
     entries: &mut Vec<VaultEntry>,
     env: &Env,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     print!("Entry Name: ");
     let _ = std::io::stdout().flush();
     let mut name = String::new();
     std::io::stdin()
         .read_line(&mut name)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let name = name.trim().to_string();
     if name.is_empty() {
-        return Err(StringError::from("Name cannot be empty"));
+        return Err(ShellError::from("Name cannot be empty"));
     }
 
     print!("Username / Account: ");
@@ -1368,7 +1373,7 @@ fn interactive_add(
     let mut username = String::new();
     std::io::stdin()
         .read_line(&mut username)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let username = username.trim().to_string();
     let username_opt = if username.is_empty() {
         None
@@ -1399,7 +1404,7 @@ fn interactive_add(
     let mut url = String::new();
     std::io::stdin()
         .read_line(&mut url)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let url = url.trim().to_string();
     let url_opt = if url.is_empty() { None } else { Some(url) };
 
@@ -1408,7 +1413,7 @@ fn interactive_add(
     let mut totp = String::new();
     std::io::stdin()
         .read_line(&mut totp)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let totp = totp.trim().to_string();
     let totp_opt = if totp.is_empty() { None } else { Some(totp) };
 
@@ -1417,7 +1422,7 @@ fn interactive_add(
     let mut tags_str = String::new();
     std::io::stdin()
         .read_line(&mut tags_str)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let tags: Vec<String> = tags_str
         .split(',')
         .map(|t| t.trim().to_string())
@@ -1429,7 +1434,7 @@ fn interactive_add(
     let mut notes = String::new();
     std::io::stdin()
         .read_line(&mut notes)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let notes = notes.trim().to_string();
     let notes_opt = if notes.is_empty() { None } else { Some(notes) };
 
@@ -1462,7 +1467,7 @@ fn interactive_edit(
     entries: &mut [VaultEntry],
     idx: usize,
     env: &Env,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let entry = &mut entries[idx];
 
     print!("Entry Name [{}]: ", entry.name);
@@ -1470,7 +1475,7 @@ fn interactive_edit(
     let mut name = String::new();
     std::io::stdin()
         .read_line(&mut name)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let name = name.trim().to_string();
     if !name.is_empty() {
         entry.name = name;
@@ -1484,7 +1489,7 @@ fn interactive_edit(
     let mut username = String::new();
     std::io::stdin()
         .read_line(&mut username)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let username = username.trim().to_string();
     if !username.is_empty() {
         entry.username = Some(username);
@@ -1502,7 +1507,7 @@ fn interactive_edit(
     let mut url = String::new();
     std::io::stdin()
         .read_line(&mut url)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let url = url.trim().to_string();
     if !url.is_empty() {
         entry.url = Some(url);
@@ -1516,7 +1521,7 @@ fn interactive_edit(
     let mut totp = String::new();
     std::io::stdin()
         .read_line(&mut totp)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let totp = totp.trim().to_string();
     if !totp.is_empty() {
         entry.totp_secret = Some(totp);
@@ -1527,7 +1532,7 @@ fn interactive_edit(
     let mut tags_str = String::new();
     std::io::stdin()
         .read_line(&mut tags_str)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let tags_str = tags_str.trim().to_string();
     if !tags_str.is_empty() {
         entry.tags = tags_str
@@ -1542,7 +1547,7 @@ fn interactive_edit(
     let mut notes = String::new();
     std::io::stdin()
         .read_line(&mut notes)
-        .map_err(|e| StringError::from(format!("{}", e)))?;
+        .map_err(|e| ShellError::from(format!("{}", e)))?;
     let notes = notes.trim().to_string();
     if !notes.is_empty() {
         entry.notes = Some(notes);
@@ -1561,7 +1566,7 @@ pub fn vault_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut subcommand = "ui".to_string();
     let mut sub_args = Vec::new();
 
@@ -1947,7 +1952,7 @@ pub fn vault_builtin(
                 let mut confirm = String::new();
                 std::io::stdin()
                     .read_line(&mut confirm)
-                    .map_err(|e| StringError::from(format!("{}", e)))?;
+                    .map_err(|e| ShellError::from(format!("{}", e)))?;
                 if confirm.trim().to_lowercase() != "y" {
                     return Err("Delete aborted".to_string().into());
                 }
@@ -2099,7 +2104,7 @@ pub fn vault_builtin(
     Ok(())
 }
 
-fn show_vault_help(tx: PipeSender) -> Result<(), StringError> {
+fn show_vault_help(tx: PipeSender) -> Result<(), ShellError> {
     let help = "Usage: vault <subcommand> [args...]
 
 fshell Secure Secrets Vault & Authenticator Manager

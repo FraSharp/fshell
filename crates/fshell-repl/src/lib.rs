@@ -89,7 +89,7 @@ pub fn history_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: fshell_engine::PipeSender,
-) -> Result<(), fshell_core::diagnostic::StringError> {
+) -> Result<(), fshell_core::ShellError> {
     let mut interactive = false;
     let mut stats = false;
     let mut filter_exit: Option<i64> = None;

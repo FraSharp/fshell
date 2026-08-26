@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::profiler::{ProfilerCategory, ProfilerEdge, ProfilerEntry};
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
@@ -13,7 +13,7 @@ pub fn profile_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let strings: Vec<String> = args
         .iter()
         .filter_map(|v| {
@@ -48,7 +48,7 @@ pub fn profile_builtin(
             }
             other => {
                 let msg = format!("profile: unknown subcommand '{other}'. Use: on, off, reset");
-                return Err(StringError::from(msg));
+                return Err(ShellError::from(msg));
             }
         }
         return Ok(());
@@ -97,7 +97,7 @@ fn compute_load_pct(self_time: Duration, total: Duration) -> f64 {
     self_time.as_secs_f64() / total.as_secs_f64() * 100.0
 }
 
-fn print_flat_report(env: &Env, tx: &PipeSender) -> Result<(), StringError> {
+fn print_flat_report(env: &Env, tx: &PipeSender) -> Result<(), ShellError> {
     let state = env.profiler.read();
 
     if !state.is_enabled() {
@@ -262,7 +262,7 @@ fn render_tree_line(node: &DisplayNode, prefix: &str, is_last: bool, lines: &mut
     }
 }
 
-fn print_tree_report(env: &Env, tx: &PipeSender) -> Result<(), StringError> {
+fn print_tree_report(env: &Env, tx: &PipeSender) -> Result<(), ShellError> {
     let state = env.profiler.read();
 
     if !state.is_enabled() {

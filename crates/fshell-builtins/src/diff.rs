@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 use ustr::ustr;
@@ -12,7 +12,7 @@ pub fn diff_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.len() < 2 {
         return Err("diff requires two file paths".to_string().into());
     }
@@ -42,7 +42,7 @@ pub fn diff_builtin(
     Ok(())
 }
 
-async fn run_diff(file1: &str, file2: &str, tx: &PipeSender) -> Result<(), StringError> {
+async fn run_diff(file1: &str, file2: &str, tx: &PipeSender) -> Result<(), ShellError> {
     let content1 = tokio::fs::read_to_string(file1)
         .await
         .map_err(|e| format!("Failed to read {}: {}", file1, e))?;

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{Env, PipeSender, PipeStream};
 use std::path::PathBuf;
 
@@ -11,7 +11,7 @@ pub fn serve_builtin(
     args: Vec<Val>,
     _env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let port = match args.first() {
         Some(Val::Int(p)) => *p as u16,
         Some(Val::String(s)) => s.parse().unwrap_or(8080),
@@ -31,7 +31,7 @@ pub fn serve_builtin(
     Ok(())
 }
 
-async fn run_server(port: u16, _live_reload: bool) -> Result<(), StringError> {
+async fn run_server(port: u16, _live_reload: bool) -> Result<(), ShellError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 

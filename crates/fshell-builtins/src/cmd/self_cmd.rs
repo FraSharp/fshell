@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 
@@ -44,7 +44,7 @@ pub fn self_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     // Normalize args to strings for flag parsing
     let str_args: Vec<String> = args
         .iter()
@@ -200,7 +200,7 @@ pub fn self_builtin(
     Ok(())
 }
 
-fn do_exec(args: Vec<String>) -> Result<(), StringError> {
+fn do_exec(args: Vec<String>) -> Result<(), ShellError> {
     // This replaces the current process. On success it never returns.
     // On failure we surface the OS error as a builtin error.
     match fshell_engine::exe::exec_self(&args) {

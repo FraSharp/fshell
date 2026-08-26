@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::io::BufRead;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ pub fn ps_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     // Check process spawn capability (we delegate to ps command)
     env.enforce_capability("ps", fshell_engine::CapAction::ProcessSpawn)?;
 
@@ -41,7 +41,7 @@ pub fn ps_builtin(
     Ok(())
 }
 
-async fn run_ps(all_users: bool, pids: &[String], tx: PipeSender) -> Result<(), StringError> {
+async fn run_ps(all_users: bool, pids: &[String], tx: PipeSender) -> Result<(), ShellError> {
     // Use native ps command with structured output.
     // `args` must be last (otherwise BSD truncates it to column width) and we
     // force wide output (`ww`) so long command lines are not clipped at $COLUMNS.

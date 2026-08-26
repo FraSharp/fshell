@@ -9,7 +9,7 @@ use crate::{
 };
 use crate::{Flow, PipelineFailure};
 use fshell_core::RwLock;
-use fshell_core::diagnostic::StringError;
+use fshell_core::ShellError;
 use fshell_core::{
     Expr, FshDiag, Parser, Pipeline, PipelineStage, SerializationFormat, Stmt, StringPart,
     TypeConstraint, Val,
@@ -155,7 +155,7 @@ fn strip_capture_sentinel(val: Val) -> Val {
 pub(crate) fn check_type_constraint(
     val: &Val,
     constraint: &TypeConstraint,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     use ustr::ustr;
     match (val, constraint) {
         (_, TypeConstraint::Any) => Ok(()),

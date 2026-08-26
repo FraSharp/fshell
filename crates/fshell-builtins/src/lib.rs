@@ -3,7 +3,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::panic))]
 #![allow(clippy::result_large_err)]
-use fshell_core::diagnostic::StringError;
+use fshell_core::ShellError;
+use fshell_core::diagnostic::ErrorCode;
 #[allow(unused_imports)]
 use fshell_core::{ResourceHandle, Val};
 use fshell_engine::Env;
@@ -59,7 +60,7 @@ fn http_stub(
     _args: Vec<Val>,
     _env: &Env,
     _tx: fshell_engine::PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     Err("http: not yet implemented (enable with --features http)"
         .to_string()
         .into())
@@ -70,7 +71,7 @@ fn sql_stub(
     _args: Vec<Val>,
     _env: &Env,
     _tx: fshell_engine::PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     Err("sql: not yet implemented (enable with --features sql)"
         .to_string()
         .into())
@@ -81,8 +82,11 @@ fn chart_stub(
     _args: Vec<Val>,
     _env: &Env,
     _tx: fshell_engine::PipeSender,
-) -> Result<(), StringError> {
-    Err("chart: not yet implemented".to_string().into())
+) -> Result<(), ShellError> {
+    Err(ShellError::new(
+        ErrorCode::Unsupported,
+        "chart: not yet implemented",
+    ))
 }
 
 pub fn init(env: &Env) {
@@ -226,7 +230,7 @@ pub fn init(env: &Env) {
             args: Vec<Val>,
             env: &Env,
             tx: PipeSender,
-        ) -> Result<(), StringError> {
+        ) -> Result<(), ShellError> {
             crate::ai::ai_main(input, args, env, tx)
         }
         entries.push(("ai".to_string(), Arc::new(ai_builtin)));

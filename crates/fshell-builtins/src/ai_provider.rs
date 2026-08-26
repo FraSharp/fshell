@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use fshell_core::diagnostic::StringError;
+use fshell_core::ShellError;
 
 /// Safety verdict for AI-generated commands.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,7 +17,7 @@ pub enum SafetyVerdict {
 /// AI provider trait — synchronous, Send + Sync.
 pub trait AiProvider: Send + Sync {
     /// Generate a response given system prompt and user prompt.
-    fn generate(&self, system: &str, prompt: &str) -> Result<String, StringError>;
+    fn generate(&self, system: &str, prompt: &str) -> Result<String, ShellError>;
     /// Provider display name.
     fn name(&self) -> &str;
 }
@@ -29,8 +29,8 @@ fn make_agent(timeout_secs: u64) -> ureq::Agent {
     ureq::Agent::new_with_config(config)
 }
 
-fn se(s: String) -> StringError {
-    StringError::from(s)
+fn se(s: String) -> ShellError {
+    ShellError::from(s)
 }
 
 // NVIDIA NIM Provider (default)
@@ -64,7 +64,7 @@ impl AiProviderNvidia {
 }
 
 impl AiProvider for AiProviderNvidia {
-    fn generate(&self, system: &str, prompt: &str) -> Result<String, StringError> {
+    fn generate(&self, system: &str, prompt: &str) -> Result<String, ShellError> {
         let url = format!("{}/chat/completions", self.endpoint);
         let body = serde_json::json!({
             "model": self.model,
@@ -157,7 +157,7 @@ impl AiProviderAnthropic {
 }
 
 impl AiProvider for AiProviderAnthropic {
-    fn generate(&self, system: &str, prompt: &str) -> Result<String, StringError> {
+    fn generate(&self, system: &str, prompt: &str) -> Result<String, ShellError> {
         let body = serde_json::json!({
             "model": self.model,
             "system": system,
@@ -220,7 +220,7 @@ impl AiProviderOllama {
 }
 
 impl AiProvider for AiProviderOllama {
-    fn generate(&self, system: &str, prompt: &str) -> Result<String, StringError> {
+    fn generate(&self, system: &str, prompt: &str) -> Result<String, ShellError> {
         let url = format!("{}/api/chat", self.endpoint);
         let body = serde_json::json!({
             "model": self.model,

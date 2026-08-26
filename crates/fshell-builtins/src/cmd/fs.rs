@@ -7,8 +7,9 @@ use crate::utils::{
     change_dir_and_update_caps, check_read_file, expand_tilde, interpret_ansi_escapes,
     val_to_display_string,
 };
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -445,7 +446,7 @@ pub fn ls_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     fshell_core::debug_log!(
         "ls_builtin called, is_captured={}, is_last_stage={}",
         env.is_captured,
@@ -645,7 +646,7 @@ pub fn ls_builtin(
     Ok(())
 }
 
-fn cd_change_dir(target: &std::path::Path, env: &Env) -> Result<(), StringError> {
+fn cd_change_dir(target: &std::path::Path, env: &Env) -> Result<(), ShellError> {
     let prev_dir = std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
@@ -669,7 +670,7 @@ pub fn cd_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let raw_path = if !args.is_empty() {
         match &args[0] {
             Val::String(s) => {
@@ -690,7 +691,12 @@ pub fn cd_builtin(
                     expanded
                 }
             }
-            _ => return Err("cd argument must be a string path".to_string().into()),
+            _ => {
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "cd argument must be a string path",
+                ));
+            }
         }
     } else {
         match crate::utils::get_home_dir() {
@@ -763,7 +769,7 @@ pub fn pushd_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut vars = env.vars.write();
 
     let mut stack = match vars.get("DIRSTACK") {
@@ -780,7 +786,12 @@ pub fn pushd_builtin(
         let top_val = stack.remove(0);
         let top_str = match &top_val {
             Val::String(s) => s.clone(),
-            _ => return Err("pushd: invalid entry in stack".to_string().into()),
+            _ => {
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "pushd: invalid entry in stack",
+                ));
+            }
         };
         let target = std::path::PathBuf::from(top_str);
 
@@ -793,7 +804,12 @@ pub fn pushd_builtin(
     } else {
         let target_arg = match &args[0] {
             Val::String(s) => s.clone(),
-            _ => return Err("pushd: argument must be a string path".to_string().into()),
+            _ => {
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "pushd: argument must be a string path",
+                ));
+            }
         };
         let target = std::fs::canonicalize(expand_tilde(&target_arg))
             .map_err(|e| format!("pushd: {}: {}", target_arg, e))?;
@@ -816,7 +832,7 @@ pub fn popd_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut vars = env.vars.write();
 
     let mut stack = match vars.get("DIRSTACK") {
@@ -831,7 +847,12 @@ pub fn popd_builtin(
     let top_val = stack.remove(0);
     let top_str = match &top_val {
         Val::String(s) => s.clone(),
-        _ => return Err("popd: invalid entry in stack".to_string().into()),
+        _ => {
+            return Err(ShellError::new(
+                ErrorCode::InvalidArgument,
+                "popd: invalid entry in stack",
+            ));
+        }
     };
     let target = std::path::PathBuf::from(top_str);
 
@@ -851,7 +872,7 @@ pub fn dirs_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut verbose = false;
     for arg in args {
         if let Val::String(s) = arg
@@ -900,7 +921,7 @@ pub fn dirs_builtin(
     Ok(())
 }
 
-fn send_dir_stack(env: &Env, tx: &PipeSender) -> Result<(), StringError> {
+fn send_dir_stack(env: &Env, tx: &PipeSender) -> Result<(), ShellError> {
     let vars = env.vars.read();
     let stack = match vars.get("DIRSTACK") {
         Some(Val::List(list)) => list.clone(),
@@ -926,7 +947,7 @@ pub fn extract_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err("extract requires at least one archive file path"
             .to_string()
@@ -935,7 +956,12 @@ pub fn extract_builtin(
 
     let archive_path_str = match &args[0] {
         Val::String(s) => s,
-        _ => return Err("extract argument must be a string path".to_string().into()),
+        _ => {
+            return Err(ShellError::new(
+                ErrorCode::InvalidArgument,
+                "extract argument must be a string path",
+            ));
+        }
     };
 
     let raw_path = expand_tilde(archive_path_str);
@@ -1070,7 +1096,7 @@ fn split_multiline_payload(payload: &PipelinePayload) -> Vec<PipelinePayload> {
     vec![payload.clone()]
 }
 
-fn parse_head_tail_args(args: &[Val]) -> Result<(usize, Vec<String>), StringError> {
+fn parse_head_tail_args(args: &[Val]) -> Result<(usize, Vec<String>), ShellError> {
     let mut n = 10usize;
     let mut paths = Vec::new();
     let mut i = 0;
@@ -1085,11 +1111,19 @@ fn parse_head_tail_args(args: &[Val]) -> Result<(usize, Vec<String>), StringErro
                                 .parse::<usize>()
                                 .map_err(|_| format!("Invalid number for -n: {val_str}"))?;
                         }
-                        _ => return Err("Expected a number after -n".to_string().into()),
+                        _ => {
+                            return Err(ShellError::new(
+                                ErrorCode::InvalidArgument,
+                                "Expected a number after -n",
+                            ));
+                        }
                     }
                     i += 2;
                 } else {
-                    return Err("Expected a number after -n".to_string().into());
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "Expected a number after -n",
+                    ));
                 }
             }
             Val::String(s) if s.starts_with("-n") => {
@@ -1126,7 +1160,7 @@ fn resolve_canonical_paths(
     paths: &[String],
     env: &Env,
     cmd: &str,
-) -> Result<Vec<PathBuf>, StringError> {
+) -> Result<Vec<PathBuf>, ShellError> {
     let mut canonical = Vec::new();
     for p in paths {
         let raw = expand_tilde(p);
@@ -1142,7 +1176,7 @@ pub fn head_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let (n, paths) = parse_head_tail_args(&args)?;
 
     if paths.is_empty() {
@@ -1215,7 +1249,7 @@ pub fn tail_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let (n, paths) = parse_head_tail_args(&args)?;
 
     if paths.is_empty() {
@@ -1295,14 +1329,19 @@ pub fn uniq_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut paths = Vec::new();
     for arg in args {
         match arg {
             Val::String(s) => {
                 paths.push(s);
             }
-            _ => return Err("Unexpected non-string argument to uniq".to_string().into()),
+            _ => {
+                return Err(ShellError::new(
+                    ErrorCode::InvalidArgument,
+                    "Unexpected non-string argument to uniq",
+                ));
+            }
         }
     }
 
@@ -1372,7 +1411,7 @@ pub fn echo_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut no_newline = false;
     let mut interpret_escapes = false;
     let mut idx = 0;
@@ -1427,7 +1466,7 @@ pub fn clear_builtin(
     _args: Vec<Val>,
     _env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     print!("\x1B[2J\x1B[3J\x1B[1;1H");
     let _ = std::io::stdout().flush();
     Ok(())
@@ -1438,7 +1477,7 @@ pub fn wrap_builtin(
     _args: Vec<Val>,
     _env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let (_, h) = crossterm::terminal::size().unwrap_or((80, 24));
     print!("{}", "\n".repeat(h as usize));
     print!("\x1B[1;1H");
@@ -1451,7 +1490,7 @@ pub fn type_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let names: Vec<String> = args
         .into_iter()
         .map(|arg| match arg {
@@ -1461,7 +1500,10 @@ pub fn type_builtin(
         .collect::<Result<Vec<_>, _>>()?;
 
     if names.is_empty() {
-        return Err("type: missing operand".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "type: missing operand",
+        ));
     }
 
     for name in names {
@@ -1560,7 +1602,7 @@ pub fn pwd_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let current_dir =
         std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
 
@@ -1581,13 +1623,16 @@ pub fn watch_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut path_args = Vec::new();
     for arg in &args {
         if let Val::String(s) = arg {
             path_args.push(s.clone());
         } else {
-            return Err("watch argument must be a string path".to_string().into());
+            return Err(ShellError::new(
+                ErrorCode::InvalidArgument,
+                "watch argument must be a string path",
+            ));
         }
     }
 
@@ -1676,9 +1721,12 @@ pub fn mkdir_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err("mkdir: missing operand".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "mkdir: missing operand",
+        ));
     }
 
     let mut make_parents = false;
@@ -1695,7 +1743,10 @@ pub fn mkdir_builtin(
     }
 
     if paths.is_empty() {
-        return Err("mkdir: missing operand".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "mkdir: missing operand",
+        ));
     }
 
     for path_str in paths {
@@ -1740,14 +1791,20 @@ pub fn touch_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err("touch: missing file operand".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "touch: missing file operand",
+        ));
     }
 
     for arg in args {
         let Val::String(s) = arg else {
-            return Err("touch: argument must be a string".to_string().into());
+            return Err(ShellError::new(
+                ErrorCode::InvalidArgument,
+                "touch: argument must be a string",
+            ));
         };
         let path = expand_tilde(&s);
         env.enforce_capability("touch", CapAction::WriteFile(path.clone()))?;
@@ -1774,7 +1831,7 @@ pub fn cat_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         if let Some(mut stream) = in_rx {
             tokio::spawn(async move {

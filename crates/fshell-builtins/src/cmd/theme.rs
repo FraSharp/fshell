@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_core::theme::Theme;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ pub fn theme_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         let theme = env.active_theme();
         send_string(tx, &format!("Active theme: {}", theme.name))?;
@@ -25,7 +26,12 @@ pub fn theme_builtin(
 
     let subcmd = match &args[0] {
         Val::String(s) => s.as_str(),
-        _ => return Err("theme: subcommand must be a string".to_string().into()),
+        _ => {
+            return Err(ShellError::new(
+                ErrorCode::InvalidArgument,
+                "theme: subcommand must be a string",
+            ));
+        }
     };
 
     match subcmd {
@@ -40,11 +46,19 @@ pub fn theme_builtin(
         }
         "set" => {
             if args.len() < 2 {
-                return Err("theme set: missing theme name".to_string().into());
+                return Err(ShellError::new(
+                    ErrorCode::MissingArgument,
+                    "theme set: missing theme name",
+                ));
             }
             let name = match &args[1] {
                 Val::String(s) => s.as_str(),
-                _ => return Err("theme set: name must be a string".to_string().into()),
+                _ => {
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "theme set: name must be a string",
+                    ));
+                }
             };
             let config_dir = theme_config_dir();
             let theme = Theme::load(name, &config_dir).map_err(|e| e.to_string())?;
@@ -58,11 +72,19 @@ pub fn theme_builtin(
         }
         "preview" => {
             if args.len() < 2 {
-                return Err("theme preview: missing theme name".to_string().into());
+                return Err(ShellError::new(
+                    ErrorCode::MissingArgument,
+                    "theme preview: missing theme name",
+                ));
             }
             let name = match &args[1] {
                 Val::String(s) => s.as_str(),
-                _ => return Err("theme preview: name must be a string".to_string().into()),
+                _ => {
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "theme preview: name must be a string",
+                    ));
+                }
             };
             let config_dir = theme_config_dir();
             let theme = Theme::load(name, &config_dir).map_err(|e| e.to_string())?;
@@ -76,7 +98,12 @@ pub fn theme_builtin(
             let theme = if args.len() > 1 {
                 let name = match &args[1] {
                     Val::String(s) => s.as_str(),
-                    _ => return Err("theme export: name must be a string".to_string().into()),
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            "theme export: name must be a string",
+                        ));
+                    }
                 };
                 let config_dir = theme_config_dir();
                 Theme::load(name, &config_dir).map_err(|e| e.to_string())?
@@ -92,11 +119,21 @@ pub fn theme_builtin(
             }
             let name1 = match &args[1] {
                 Val::String(s) => s.as_str(),
-                _ => return Err("theme diff: names must be strings".to_string().into()),
+                _ => {
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "theme diff: names must be strings",
+                    ));
+                }
             };
             let name2 = match &args[2] {
                 Val::String(s) => s.as_str(),
-                _ => return Err("theme diff: names must be strings".to_string().into()),
+                _ => {
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "theme diff: names must be strings",
+                    ));
+                }
             };
             let config_dir = theme_config_dir();
             let theme1 = Theme::load(name1, &config_dir).map_err(|e| e.to_string())?;
@@ -112,7 +149,7 @@ pub fn theme_builtin(
     }
 }
 
-fn send_string(tx: PipeSender, s: &str) -> Result<(), StringError> {
+fn send_string(tx: PipeSender, s: &str) -> Result<(), ShellError> {
     let _ = tx.try_send(PipelinePayload::Data(Arc::new(Val::String(s.to_string()))));
     Ok(())
 }

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::ai_provider::*;
-use fshell_core::diagnostic::StringError;
+use fshell_core::ShellError;
 use fshell_core::{Expr, Parser, PipelineStage, Stmt, Val};
 use fshell_engine::{ChatConfig, Env, PipeSender, PipeStream, PipelinePayload};
 use std::io::Write;
@@ -41,7 +41,7 @@ pub fn ai_main(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let raw: Vec<String> = args
         .iter()
         .filter_map(|v| match v {
@@ -276,7 +276,7 @@ pub fn collect_context() -> String {
     ctx
 }
 
-fn execute_generated(command: &str, env: &Env, tx: PipeSender) -> Result<(), StringError> {
+fn execute_generated(command: &str, env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     let stmts = Parser::new(command)
         .parse_statements()
         .map_err(|e| format!("Parse error in generated command: {e}"))?;
@@ -290,7 +290,7 @@ fn execute_generated(command: &str, env: &Env, tx: PipeSender) -> Result<(), Str
                 tokio::task::block_in_place(|| {
                     handle.block_on(fshell_engine::eval_stmt(stmt, env, false))
                 })
-                .map_err(StringError::from)?;
+                .map_err(ShellError::from)?;
                 continue;
             }
         };
@@ -307,13 +307,13 @@ fn execute_generated(command: &str, env: &Env, tx: PipeSender) -> Result<(), Str
                         tx_clone,
                     ))
                 })
-                .map_err(StringError::from)?;
+                .map_err(ShellError::from)?;
             }
             _ => {
                 tokio::task::block_in_place(|| {
                     handle.block_on(fshell_engine::eval_stmt(stmt, env, false))
                 })
-                .map_err(StringError::from)?;
+                .map_err(ShellError::from)?;
             }
         }
     }
@@ -374,7 +374,7 @@ fn run_explain(
     model_override: Option<String>,
     command: &str,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if command.is_empty() {
         let msg = "Usage: ai --explain \"<fsh command>\"".to_string();
         send_string(tx, msg);

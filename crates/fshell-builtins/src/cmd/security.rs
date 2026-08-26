@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
-use fshell_core::diagnostic::StringError;
+use fshell_core::ShellError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_core::{ResourceHandle, Val};
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::path::PathBuf;
@@ -13,7 +14,7 @@ pub fn fs_readwrite_builtin(
     args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let path_str = if !args.is_empty() {
         match &args[0] {
             Val::String(s) => s.clone(),
@@ -24,7 +25,10 @@ pub fn fs_readwrite_builtin(
             }
         }
     } else {
-        return Err("fs-readwrite: missing path operand".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "fs-readwrite: missing path operand",
+        ));
     };
     let path = crate::utils::expand_tilde(&path_str);
     let path2 = path.clone();
@@ -48,7 +52,7 @@ pub fn net_all_builtin(
     _args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     tokio::spawn(async move {
         let _ = tx
             .send(PipelinePayload::Data(Arc::new(Val::Capability(
@@ -64,7 +68,7 @@ pub fn process_spawn_builtin(
     _args: Vec<Val>,
     _env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     tokio::spawn(async move {
         let _ = tx
             .send(PipelinePayload::Data(Arc::new(Val::Capability(
@@ -97,7 +101,7 @@ pub fn caps_audit_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let action = match args.first() {
         Some(Val::String(s)) => s.as_str(),
         _ => "log",
@@ -223,7 +227,7 @@ pub fn strict_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let action = match args.first() {
         Some(Val::String(s)) => s.as_str(),
         _ => {
@@ -246,7 +250,12 @@ pub fn strict_builtin(
 
     let name = match &args[0] {
         Val::String(s) => s.clone(),
-        _ => return Err("strict: command name must be a string".to_string().into()),
+        _ => {
+            return Err(ShellError::new(
+                ErrorCode::InvalidArgument,
+                "strict: command name must be a string",
+            ));
+        }
     };
     let cmd_args: Vec<Val> = args[1..].to_vec();
 
@@ -272,7 +281,7 @@ pub fn strict_builtin(
 pub fn make_path_cap_builtin(
     name: &'static str,
     variant: fn(PathBuf) -> ResourceHandle,
-) -> impl Fn(Option<PipeStream>, Vec<Val>, &Env, PipeSender) -> Result<(), StringError>
+) -> impl Fn(Option<PipeStream>, Vec<Val>, &Env, PipeSender) -> Result<(), ShellError>
 + Send
 + Sync
 + 'static {
@@ -312,7 +321,7 @@ pub fn make_path_cap_builtin(
 pub fn make_str_cap_builtin(
     name: &'static str,
     variant: fn(String) -> ResourceHandle,
-) -> impl Fn(Option<PipeStream>, Vec<Val>, &Env, PipeSender) -> Result<(), StringError>
+) -> impl Fn(Option<PipeStream>, Vec<Val>, &Env, PipeSender) -> Result<(), ShellError>
 + Send
 + Sync
 + 'static {

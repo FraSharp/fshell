@@ -5,7 +5,7 @@
 #![allow(clippy::result_large_err)]
 use fshell_capabilities::CapsRegistry;
 use fshell_core::diagnostic::{ErrorCode, StringError};
-use fshell_core::{Expr, FshDiag, FxIndexMap, PromptConfig, Stmt, StringPart, Val};
+use fshell_core::{Expr, FshDiag, FxIndexMap, PromptConfig, ShellError, Stmt, StringPart, Val};
 use fshell_hash::FxHashMap;
 pub mod ast_cache;
 pub mod error;
@@ -80,6 +80,25 @@ impl From<EngineError> for StringError {
             EngineError::Generic { .. } => ErrorCode::General,
         };
         StringError::new(code, e.to_string())
+    }
+}
+
+impl From<EngineError> for ShellError {
+    fn from(e: EngineError) -> Self {
+        let code = match &e {
+            EngineError::CapabilityDenied { .. } => ErrorCode::CapabilityDenied,
+            EngineError::DivisionByZero { .. } => ErrorCode::RuntimeError,
+            EngineError::IoError { .. } => ErrorCode::IoError,
+            EngineError::MatchNonExhaustive { .. } => ErrorCode::RuntimeError,
+            EngineError::MutationNotAllowed { .. } => ErrorCode::CapabilityDenied,
+            EngineError::Parse(_) => ErrorCode::ParseError,
+            EngineError::PipelineError { .. } => ErrorCode::PipelineError,
+            EngineError::TypeMismatch { .. } => ErrorCode::TypeError,
+            EngineError::VariableNotFound { .. } => ErrorCode::RuntimeError,
+            EngineError::CycleDetected { .. } => ErrorCode::RuntimeError,
+            EngineError::Generic { .. } => ErrorCode::General,
+        };
+        ShellError::new(code, e.to_string())
     }
 }
 use fshell_core::RwLock;
@@ -2633,7 +2652,7 @@ pub fn setup_signal_handlers(env: Env) {
 
 #[allow(clippy::result_large_err)]
 pub type BuiltinHandler = Arc<
-    dyn Fn(Option<PipeStream>, Vec<Val>, &Env, PipeSender) -> Result<(), StringError> + Send + Sync,
+    dyn Fn(Option<PipeStream>, Vec<Val>, &Env, PipeSender) -> Result<(), ShellError> + Send + Sync,
 >;
 
 // Pipeline channel defaults
@@ -2784,7 +2803,7 @@ pub fn get_hooks(event: &str, env: &Env) -> Vec<String> {
 
 /// True iff the given `FshDiag` represents a logical `false` condition
 /// (exit 1, no error line), regardless of whether it was wrapped as a
-/// `StringError::ConditionFalse`. Centralizes the only place where the
+/// `ShellError::ConditionFalse`. Centralizes the only place where the
 /// false-vs-hard-error distinction is made so collectors and `&&`/`||`
 /// don't string-match.
 #[allow(clippy::result_large_err)]
@@ -2869,7 +2888,7 @@ pub async fn dispatch_on_signal(
 }
 
 pub type FallbackHandler = Arc<
-    dyn Fn(&str, Vec<Val>, Option<PipeStream>, &Env, PipeSender, bool) -> Result<(), StringError>
+    dyn Fn(&str, Vec<Val>, Option<PipeStream>, &Env, PipeSender, bool) -> Result<(), ShellError>
         + Send
         + Sync,
 >;

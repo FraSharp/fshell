@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{Env, PipeSender, PipeStream, Signal};
 
 pub fn trap_builtin(
@@ -10,7 +10,7 @@ pub fn trap_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     // trap [options] [action] [signal...]
     // trap -p           — list traps
     // trap              — list traps (POSIX)

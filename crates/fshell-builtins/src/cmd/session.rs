@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::handoff::HandoffState;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::os::unix::process::CommandExt;
@@ -16,7 +16,7 @@ pub fn session_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let subcmd = args.first().map(|v| v.to_text()).unwrap_or_default();
 
     match subcmd.as_str() {
@@ -48,7 +48,7 @@ pub fn session_builtin(
     }
 }
 // resume — spawn a nested fsh process
-fn cmd_resume(id: Option<&str>, env: &Env, tx: PipeSender) -> Result<(), StringError> {
+fn cmd_resume(id: Option<&str>, env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     let exe = std::env::current_exe().map_err(|e| BuiltinError::InternalError {
         cmd: CMD.into(),
         message: format!("Cannot determine fsh binary path: {e}"),
@@ -133,7 +133,7 @@ fn cmd_resume(id: Option<&str>, env: &Env, tx: PipeSender) -> Result<(), StringE
     Ok(())
 }
 // list — enumerate saved sessions
-fn cmd_list(tx: PipeSender) -> Result<(), StringError> {
+fn cmd_list(tx: PipeSender) -> Result<(), ShellError> {
     let sessions = load_sessions()?;
 
     if sessions.is_empty() {
@@ -199,7 +199,7 @@ fn cmd_list(tx: PipeSender) -> Result<(), StringError> {
     Ok(())
 }
 // save — tag current session with a display name
-fn cmd_save(name: Option<&str>, env: &Env) -> Result<(), StringError> {
+fn cmd_save(name: Option<&str>, env: &Env) -> Result<(), ShellError> {
     let name = name.ok_or_else(|| BuiltinError::MissingArgument {
         cmd: CMD.into(),
         description: "session name".into(),
@@ -220,7 +220,7 @@ fn cmd_save(name: Option<&str>, env: &Env) -> Result<(), StringError> {
     Ok(())
 }
 // delete — remove session files
-fn cmd_delete(id: Option<&str>) -> Result<(), StringError> {
+fn cmd_delete(id: Option<&str>) -> Result<(), ShellError> {
     let id = id.ok_or_else(|| BuiltinError::MissingArgument {
         cmd: CMD.into(),
         description: "session id".into(),
@@ -263,7 +263,7 @@ fn cmd_delete(id: Option<&str>) -> Result<(), StringError> {
     Ok(())
 }
 // rename — change display name in a saved session
-fn cmd_rename(id: Option<&str>, name: Option<&str>) -> Result<(), StringError> {
+fn cmd_rename(id: Option<&str>, name: Option<&str>) -> Result<(), ShellError> {
     let id = id.ok_or_else(|| BuiltinError::MissingArgument {
         cmd: CMD.into(),
         description: "session id".into(),
@@ -322,7 +322,7 @@ fn sessions_dir() -> Option<std::path::PathBuf> {
 }
 
 fn load_sessions()
--> Result<Vec<(std::path::PathBuf, HandoffState, std::time::SystemTime)>, StringError> {
+-> Result<Vec<(std::path::PathBuf, HandoffState, std::time::SystemTime)>, ShellError> {
     let dir = sessions_dir().ok_or_else(|| BuiltinError::InternalError {
         cmd: CMD.into(),
         message: "Cannot determine config directory".into(),

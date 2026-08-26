@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 
@@ -11,14 +12,17 @@ pub fn string_builtin(
     args: Vec<Val>,
     _env: &fshell_engine::Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut raw_args: Vec<String> = Vec::new();
     for arg in &args {
         raw_args.push(arg.to_text());
     }
 
     if raw_args.is_empty() {
-        return Err("string: expected a subcommand (split, trim, upper, lower, contains, starts-with, ends-with, substring)".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            "string: expected a subcommand (split, trim, upper, lower, contains, starts-with, ends-with, substring)",
+        ));
     }
 
     let subcommand = raw_args[0].clone();
@@ -40,7 +44,7 @@ async fn run_string_op(
     sub_args: &[String],
     in_rx: Option<PipeStream>,
     tx: &PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     match subcommand {
         "split" => {
             let (text, delimiter) = parse_split_args(sub_args)?;
@@ -179,7 +183,7 @@ async fn process_input_text(in_rx: Option<PipeStream>, fallback: &str) -> Vec<St
     }
 }
 
-fn parse_split_args(args: &[String]) -> Result<(String, String), StringError> {
+fn parse_split_args(args: &[String]) -> Result<(String, String), ShellError> {
     match args.len() {
         0 => Err("string split: expected <delimiter> or <text> <delimiter>"
             .to_string()
@@ -191,7 +195,7 @@ fn parse_split_args(args: &[String]) -> Result<(String, String), StringError> {
     }
 }
 
-fn parse_two_args(args: &[String], subcmd: &str) -> Result<(String, String), StringError> {
+fn parse_two_args(args: &[String], subcmd: &str) -> Result<(String, String), ShellError> {
     match args.len() {
         0 => Err(format!("string {}: expected <needle> or <text> <needle>", subcmd).into()),
         // 1 arg: needle only (text comes from pipe)
@@ -201,7 +205,7 @@ fn parse_two_args(args: &[String], subcmd: &str) -> Result<(String, String), Str
     }
 }
 
-fn parse_substring_args(args: &[String]) -> Result<(String, i64, Option<i64>), StringError> {
+fn parse_substring_args(args: &[String]) -> Result<(String, i64, Option<i64>), ShellError> {
     match args.len() {
         0 => Err(
             "string substring: expected <start> [length] or <text> <start> [length]"

@@ -7,10 +7,11 @@
 //! the unified fshell-render pipeline (graphical / compact / JSON).
 //!
 //! Builtins return `Result<(), BuiltinError>` internally and the framework
-//! converts them to `StringError` at the handler boundary (the public API
-//! still returns `Result<(), StringError>`).
+//! converts them to `ShellError` at the handler boundary (the public API
+//! still returns `Result<(), ShellError>`).
 
-use fshell_core::diagnostic::{DiagnosticExt, ErrorCode, FshDiag, StringError};
+use fshell_core::ShellError;
+use fshell_core::diagnostic::{DiagnosticExt, ErrorCode, FshDiag};
 use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
 
@@ -318,24 +319,23 @@ impl DiagnosticExt for BuiltinError {
     }
 }
 // Conversions to the public error types
-impl From<BuiltinError> for StringError {
+impl From<BuiltinError> for ShellError {
     fn from(err: BuiltinError) -> Self {
         let message = err.to_string();
         let code = err.error_code();
-        let category = err.category();
         let suggestions = err.suggestions();
         let span = err.span();
         // Extract help text from miette's diagnostic infrastructure.
         let help = miette_help(&err);
-        StringError {
-            message,
+        ShellError {
             code,
-            category,
+            message,
+            span,
             help,
             fix: None,
             suggestions,
-            span,
             secondary_spans: vec![],
+            severity: None,
         }
     }
 }
@@ -366,11 +366,11 @@ mod tests {
             arg: "--bad-flag".into(),
             span: mk_span(),
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("invalid argument"));
         assert!(se.message.contains("--bad-flag"));
         assert_eq!(se.code, ErrorCode::InvalidArgument);
-        assert_eq!(se.category, "builtins");
+        assert_eq!(se.category(), "builtin");
         assert!(se.help.is_some());
         assert!(se.span.is_some());
     }
@@ -382,7 +382,7 @@ mod tests {
             arg: "--bogus".into(),
             span: None,
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("unexpected argument"));
         assert_eq!(se.code, ErrorCode::InvalidArgument);
     }
@@ -394,7 +394,7 @@ mod tests {
             description: "URL".into(),
             span: None,
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("missing argument"));
         assert!(se.message.contains("URL"));
         assert_eq!(se.code, ErrorCode::InvalidArgument);
@@ -407,7 +407,7 @@ mod tests {
             path: "/nonexistent".into(),
             span: None,
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("file not found"));
         assert!(se.message.contains("/nonexistent"));
         assert_eq!(se.code, ErrorCode::FileNotFound);
@@ -421,7 +421,7 @@ mod tests {
             status: 128,
             stderr: "fatal: not a git repository".into(),
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("command exited with status"));
         assert!(se.message.contains("128"));
         assert_eq!(se.code, ErrorCode::CommandFailed);
@@ -435,7 +435,7 @@ mod tests {
             what: "foobar".into(),
             span: None,
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("not found"));
         assert_eq!(se.code, ErrorCode::NotFound);
     }
@@ -446,7 +446,7 @@ mod tests {
             cmd: "http".into(),
             message: "connection refused".into(),
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("network error"));
         assert_eq!(se.code, ErrorCode::NetworkError);
         assert_eq!(format!("{}", se.code), "FSH-NET-001");
@@ -459,7 +459,7 @@ mod tests {
             message: "unexpected state".into(),
             span: None,
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("internal error"));
         assert_eq!(se.code, ErrorCode::InternalError);
         assert!(se.help.is_some_and(|h| h.contains("bug report")));
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn test_cancelled() {
         let err = BuiltinError::Cancelled { cmd: "caps".into() };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("cancelled"));
         assert_eq!(se.code, ErrorCode::Cancelled);
     }
@@ -479,7 +479,7 @@ mod tests {
             cmd: "http".into(),
             feature: "method 'DELETE'".into(),
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("not supported"));
         assert_eq!(se.code, ErrorCode::Unsupported);
     }
@@ -490,7 +490,7 @@ mod tests {
             cmd: "http".into(),
             duration: 30.0,
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("timed out"));
         assert!(se.message.contains("30"));
         assert_eq!(se.code, ErrorCode::Timeout);
@@ -503,7 +503,7 @@ mod tests {
             path: "/tmp/foo".into(),
             span: None,
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(se.message.contains("already exists"));
         assert_eq!(se.code, ErrorCode::AlreadyExists);
     }
@@ -527,7 +527,7 @@ mod tests {
             path: "/missing".into(),
             span: mk_span(),
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         assert!(!se.suggestions.is_empty(), "should have suggestions");
         assert!(se.suggestions[0].contains("spelling"));
     }
@@ -558,7 +558,7 @@ mod tests {
             path: "/x".into(),
             span: None,
         };
-        let se: StringError = err.into();
+        let se: ShellError = err.into();
         let ed: FshDiag = se.into();
         let config = RenderConfig {
             format: RenderFormat::Compact,
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn test_all_variants_no_panic_on_convert() {
-        // Smoke test: every variant converts to StringError without panic
+        // Smoke test: every variant converts to ShellError without panic
         let variants: Vec<BuiltinError> = vec![
             BuiltinError::InvalidArgument {
                 cmd: "a".into(),
@@ -715,7 +715,7 @@ mod tests {
             BuiltinError::Cancelled { cmd: "a".into() },
         ];
         for v in variants {
-            let _: StringError = v.into();
+            let _: ShellError = v.into();
         }
     }
 }

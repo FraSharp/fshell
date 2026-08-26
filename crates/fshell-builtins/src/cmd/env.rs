@@ -2,12 +2,12 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 
-fn show_env_vars(env: &Env, tx: PipeSender) -> Result<(), StringError> {
+fn show_env_vars(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     env.enforce_capability("env", CapAction::ReadEnv("*".to_string()))?;
     env.ensure_env_populated();
     let entries: Vec<(String, String)> = {
@@ -50,7 +50,7 @@ pub fn export_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         return show_env_vars(env, tx);
     }
@@ -89,7 +89,7 @@ pub fn env_builtin(
     _args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     show_env_vars(env, tx)
 }
 
@@ -98,7 +98,7 @@ pub fn set_universal_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err(BuiltinError::MissingArgument {
             cmd: "set-universal".into(),
@@ -123,7 +123,7 @@ pub fn unset_universal_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         return Err(BuiltinError::MissingArgument {
             cmd: "unset-universal".into(),

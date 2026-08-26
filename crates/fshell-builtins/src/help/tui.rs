@@ -7,7 +7,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use fshell_core::diagnostic::StringError;
+use fshell_core::ShellError;
 use fshell_engine::Env;
 use nucleo_matcher::{Config, Matcher, Utf32String};
 use ratatui::{
@@ -77,8 +77,8 @@ pub fn get_matching_topics(query: &str) -> Vec<&'static HelpTopic> {
     matched.into_iter().map(|(t, _)| t).collect()
 }
 
-pub fn run_tui(_env: &Env) -> Result<(), StringError> {
-    let mut guard = TerminalGuard::new().map_err(StringError::from)?;
+pub fn run_tui(_env: &Env) -> Result<(), ShellError> {
+    let mut guard = TerminalGuard::new().map_err(ShellError::from)?;
     let mut query = String::new();
     let mut search_focused = true;
     let mut selected_index = 0;
@@ -213,7 +213,7 @@ pub fn run_tui(_env: &Env) -> Result<(), StringError> {
                     ));
                 }
             })
-            .map_err(|e| StringError::from(e.to_string()))?;
+            .map_err(|e| ShellError::from(e.to_string()))?;
 
         // Read event
         #[cfg(unix)]
@@ -225,11 +225,11 @@ pub fn run_tui(_env: &Env) -> Result<(), StringError> {
             }
         }
         if !event::poll(std::time::Duration::from_millis(100))
-            .map_err(|e| StringError::from(e.to_string()))?
+            .map_err(|e| ShellError::from(e.to_string()))?
         {
             continue;
         }
-        if let Event::Key(key) = event::read().map_err(|e| StringError::from(e.to_string()))? {
+        if let Event::Key(key) = event::read().map_err(|e| ShellError::from(e.to_string()))? {
             // Global shortcuts — work in both modes
             if key.code == KeyCode::PageUp {
                 let height = guard.terminal.size().map(|s| s.height).unwrap_or(24);

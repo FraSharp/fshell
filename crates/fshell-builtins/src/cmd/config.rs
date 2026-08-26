@@ -4,13 +4,14 @@
 use crate::error::BuiltinError;
 #[cfg(feature = "config-tui")]
 use fshell_config_tui;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload, ShellOptions};
 use nu_ansi_term::Color;
 use std::sync::Arc;
 
-fn setopt_impl(args: &[Val], env: &Env, value: bool) -> Result<(), StringError> {
+fn setopt_impl(args: &[Val], env: &Env, value: bool) -> Result<(), ShellError> {
     for arg in args {
         let name = match arg {
             Val::String(s) => s.as_str(),
@@ -33,7 +34,7 @@ pub fn setopt_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         let opts = env.options.read();
         let mut out = String::new();
@@ -87,9 +88,12 @@ pub fn unsetopt_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err("unsetopt: missing option names".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "unsetopt: missing option names",
+        ));
     }
     setopt_impl(&args, env, false)
 }
@@ -99,9 +103,12 @@ pub fn unset_builtin(
     args: Vec<Val>,
     env: &Env,
     _tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err("unset: expected variable or function name".into());
+        return Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            "unset: expected variable or function name",
+        ));
     }
 
     env.ensure_env_populated();
@@ -151,7 +158,7 @@ pub fn set_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         return set_list(env, tx);
     }
@@ -166,21 +173,31 @@ pub fn set_builtin(
         1 => {
             let key = match &args[0] {
                 Val::String(s) => s.as_str(),
-                _ => return Err("set: key must be a string".into()),
+                _ => {
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "set: key must be a string",
+                    ));
+                }
             };
             set_show(key, env, tx)
         }
         _ => {
             let key = match &args[0] {
                 Val::String(s) => s.as_str(),
-                _ => return Err("set: key must be a string".into()),
+                _ => {
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "set: key must be a string",
+                    ));
+                }
             };
             set_apply(key, &args[1..], env)
         }
     }
 }
 
-fn set_flags_or_positional(args: &[Val], env: &Env, tx: PipeSender) -> Result<(), StringError> {
+fn set_flags_or_positional(args: &[Val], env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     let mut i = 0;
     let mut positional = Vec::new();
     let mut has_positional_specifier = false;
@@ -262,7 +279,7 @@ fn set_flags_or_positional(args: &[Val], env: &Env, tx: PipeSender) -> Result<()
     Ok(())
 }
 
-fn set_list(env: &Env, tx: PipeSender) -> Result<(), StringError> {
+fn set_list(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     let vars = env.vars.read();
     let opts = env.options.read();
 
@@ -316,7 +333,7 @@ fn set_list(env: &Env, tx: PipeSender) -> Result<(), StringError> {
     Ok(())
 }
 
-pub fn get_option_value(env: &Env, key: &str) -> Result<Val, StringError> {
+pub fn get_option_value(env: &Env, key: &str) -> Result<Val, ShellError> {
     let bare_key = key.strip_prefix("options.").unwrap_or(key);
     let opts = env.options.read();
 
@@ -366,20 +383,23 @@ pub fn get_option_value(env: &Env, key: &str) -> Result<Val, StringError> {
     }
 }
 
-fn set_show(key: &str, env: &Env, tx: PipeSender) -> Result<(), StringError> {
+fn set_show(key: &str, env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     let val = get_option_value(env, key)?;
     let _ = tx.try_send(PipelinePayload::Data(Arc::new(val)));
     Ok(())
 }
 
-fn set_apply(key: &str, vals: &[Val], env: &Env) -> Result<(), StringError> {
+fn set_apply(key: &str, vals: &[Val], env: &Env) -> Result<(), ShellError> {
     if vals.is_empty() {
-        return Err("set: missing value".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::MissingArgument,
+            "set: missing value",
+        ));
     }
     apply_option(env, key, &vals[0])
 }
 
-pub fn apply_option(env: &Env, key: &str, val: &Val) -> Result<(), StringError> {
+pub fn apply_option(env: &Env, key: &str, val: &Val) -> Result<(), ShellError> {
     let bare_key = key.strip_prefix("options.").unwrap_or(key);
     if ShellOptions::bool_keys().contains(&bare_key) {
         let b = parse_bool(val)?;
@@ -408,7 +428,10 @@ pub fn apply_option(env: &Env, key: &str, val: &Val) -> Result<(), StringError> 
                     _ => return Err("set: clear_on_reload requires a string value".into()),
                 };
                 if !matches!(s.as_str(), "ask" | "always" | "never") {
-                    return Err("set: clear_on_reload must be 'ask', 'always', or 'never'".into());
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "set: clear_on_reload must be 'ask', 'always', or 'never'",
+                    ));
                 }
                 let mut opts = env.options.write();
                 opts.clear_on_reload = s;
@@ -489,7 +512,10 @@ pub fn apply_option(env: &Env, key: &str, val: &Val) -> Result<(), StringError> 
                         }
                     }
                     _ => {
-                        return Err("set: expected a map for command_binaries".into());
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            "set: expected a map for command_binaries",
+                        ));
                     }
                 }
                 let mut opts = env.options.write();
@@ -498,7 +524,10 @@ pub fn apply_option(env: &Env, key: &str, val: &Val) -> Result<(), StringError> 
             "pipeline_channel_size" => {
                 let v = parse_int(val)?;
                 if v <= 0 {
-                    return Err("set: pipeline_channel_size must be positive".into());
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "set: pipeline_channel_size must be positive",
+                    ));
                 }
                 let mut opts = env.options.write();
                 opts.pipeline_channel_size = v as usize;
@@ -516,7 +545,10 @@ pub fn apply_option(env: &Env, key: &str, val: &Val) -> Result<(), StringError> 
                     }
                 };
                 if bare_key == "keybinding" && !matches!(s.as_str(), "emacs" | "vi") {
-                    return Err("set: keybinding must be 'emacs' or 'vi'".into());
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "set: keybinding must be 'emacs' or 'vi'",
+                    ));
                 }
                 let var_name = match bare_key {
                     "prompt" => "FSH_PROMPT",
@@ -551,7 +583,7 @@ pub fn apply_option(env: &Env, key: &str, val: &Val) -> Result<(), StringError> 
     Ok(())
 }
 
-fn parse_bool(v: &Val) -> Result<bool, StringError> {
+fn parse_bool(v: &Val) -> Result<bool, ShellError> {
     match v {
         Val::Bool(b) => Ok(*b),
         Val::String(s) => match s.as_str() {
@@ -559,21 +591,27 @@ fn parse_bool(v: &Val) -> Result<bool, StringError> {
             "false" | "off" | "no" | "0" => Ok(false),
             _ => Err(format!("set: invalid bool value '{s}' (expected true/false/on/off)").into()),
         },
-        _ => Err("set: expected a boolean or string".into()),
+        _ => Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            "set: expected a boolean or string",
+        )),
     }
 }
 
-fn parse_int(v: &Val) -> Result<i64, StringError> {
+fn parse_int(v: &Val) -> Result<i64, ShellError> {
     match v {
         Val::Int(i) => Ok(*i),
         Val::String(s) => s
             .parse::<i64>()
             .map_err(|_| format!("set: invalid integer '{s}'").into()),
-        _ => Err("set: expected an integer or string".into()),
+        _ => Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            "set: expected an integer or string",
+        )),
     }
 }
 
-pub(crate) fn persist_settings(env: &Env) -> Result<(), StringError> {
+pub(crate) fn persist_settings(env: &Env) -> Result<(), ShellError> {
     let opts = env.options.read();
     let vars = env.vars.read();
 
@@ -630,7 +668,7 @@ pub(crate) fn persist_settings(env: &Env) -> Result<(), StringError> {
         .map_err(|e| format!("Failed to persist settings: {e}").into())
 }
 
-fn config_list(env: &Env, tx: PipeSender) -> Result<(), StringError> {
+fn config_list(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     let vars = env.vars.read();
     let opts = env.options.read();
 
@@ -680,17 +718,17 @@ fn config_list(env: &Env, tx: PipeSender) -> Result<(), StringError> {
     Ok(())
 }
 
-fn config_get(env: &Env, key: &str, tx: PipeSender) -> Result<(), StringError> {
+fn config_get(env: &Env, key: &str, tx: PipeSender) -> Result<(), ShellError> {
     let val = get_option_value(env, key)?;
     let _ = tx.try_send(PipelinePayload::Data(Arc::new(val)));
     Ok(())
 }
 
-pub fn config_set(env: &Env, key: &str, val: &Val) -> Result<(), StringError> {
+pub fn config_set(env: &Env, key: &str, val: &Val) -> Result<(), ShellError> {
     apply_option(env, key, val)
 }
 
-fn config_reload_sync(env: &Env) -> Result<(), StringError> {
+fn config_reload_sync(env: &Env) -> Result<(), ShellError> {
     fshell_core::debug_log!("config_reload_sync: resetting to defaults");
     {
         let mut opts = env.options.write();
@@ -721,7 +759,7 @@ pub fn config_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
         return config_list(env, tx);
     }
@@ -752,21 +790,37 @@ pub fn config_builtin(
         "list" => config_list(env, tx),
         "get" => {
             if args.len() < 2 {
-                return Err("config get: missing key".to_string().into());
+                return Err(ShellError::new(
+                    ErrorCode::MissingArgument,
+                    "config get: missing key",
+                ));
             }
             let key = match &args[1] {
                 Val::String(s) => s.as_str(),
-                _ => return Err("config get: key must be a string".to_string().into()),
+                _ => {
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "config get: key must be a string",
+                    ));
+                }
             };
             config_get(env, key, tx)
         }
         "set" => {
             if args.len() < 3 {
-                return Err("config set: missing key or value".to_string().into());
+                return Err(ShellError::new(
+                    ErrorCode::MissingArgument,
+                    "config set: missing key or value",
+                ));
             }
             let key = match &args[1] {
                 Val::String(s) => s.as_str(),
-                _ => return Err("config set: key must be a string".to_string().into()),
+                _ => {
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "config set: key must be a string",
+                    ));
+                }
             };
             let val = &args[2];
             config_set(env, key, val)
@@ -783,7 +837,7 @@ pub fn alias_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let str_args: Vec<String> = args
         .iter()
         .filter_map(|a| {
@@ -865,7 +919,7 @@ fn strip_quotes(s: &str) -> &str {
     }
 }
 
-fn parse_alias_args(str_args: &[String]) -> Result<Vec<(String, String)>, StringError> {
+fn parse_alias_args(str_args: &[String]) -> Result<Vec<(String, String)>, ShellError> {
     let mut results = Vec::new();
 
     // Check if tokens use lone `=`: e.g. `alias name = expansion ...`
@@ -931,7 +985,7 @@ fn parse_alias_args(str_args: &[String]) -> Result<Vec<(String, String)>, String
     )
 }
 
-fn register_alias_entry(name: &str, expansion: &str, env: &Env) -> Result<(), StringError> {
+fn register_alias_entry(name: &str, expansion: &str, env: &Env) -> Result<(), ShellError> {
     if name.is_empty() {
         return Err("alias: name cannot be empty".to_string().into());
     }
@@ -980,7 +1034,7 @@ pub fn hook_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let str_args: Vec<String> = args
         .iter()
         .filter_map(|a| {
@@ -1533,12 +1587,18 @@ pub fn funced_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err("funced: expected function name".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            "funced: expected function name",
+        ));
     }
     let Val::String(name) = &args[0] else {
-        return Err("funced: function name must be a string".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            "funced: function name must be a string",
+        ));
     };
 
     // 1. Retrieve function from memory
@@ -1712,9 +1772,12 @@ pub fn funcsave_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     if args.is_empty() {
-        return Err("funcsave: expected function name".to_string().into());
+        return Err(ShellError::new(
+            ErrorCode::InvalidArgument,
+            "funcsave: expected function name",
+        ));
     }
     let Val::String(name) = &args[0] else {
         return Err("funcsave: function name must be a string"

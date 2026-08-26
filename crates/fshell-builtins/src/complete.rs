@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
+use fshell_core::ShellError;
 use fshell_core::Val;
-use fshell_core::diagnostic::StringError;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ pub fn complete_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let mut command_name = None;
     let mut list_all = false;
     let mut erase = false;
@@ -51,77 +52,133 @@ pub fn complete_builtin(
             }
             "-c" | "--context" => {
                 if i + 1 >= args.len() {
-                    return Err("Missing value for context option".to_string().into());
+                    return Err(ShellError::new(
+                        ErrorCode::MissingArgument,
+                        "Missing value for context option",
+                    ));
                 }
                 let ctx_val = match &args[i + 1] {
                     Val::String(s) => s,
-                    _ => return Err("Context must be a string".to_string().into()),
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            "Context must be a string",
+                        ));
+                    }
                 };
                 context_subcmds = ctx_val.split_whitespace().map(|s| s.to_string()).collect();
                 i += 2;
             }
             "-s" | "--short" => {
                 if i + 1 >= args.len() {
-                    return Err("Missing value for short option".to_string().into());
+                    return Err(ShellError::new(
+                        ErrorCode::MissingArgument,
+                        "Missing value for short option",
+                    ));
                 }
                 let s_val = match &args[i + 1] {
                     Val::String(s) => s,
-                    _ => return Err("Short option must be a string".to_string().into()),
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            "Short option must be a string",
+                        ));
+                    }
                 };
                 short_flag = Some(s_val.clone());
                 i += 2;
             }
             "--long" => {
                 if i + 1 >= args.len() {
-                    return Err("Missing value for --long option".to_string().into());
+                    return Err(ShellError::new(
+                        ErrorCode::MissingArgument,
+                        "Missing value for --long option",
+                    ));
                 }
                 let l_val = match &args[i + 1] {
                     Val::String(s) => s,
-                    _ => return Err("Long option must be a string".to_string().into()),
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            "Long option must be a string",
+                        ));
+                    }
                 };
                 long_flag = Some(l_val.clone());
                 i += 2;
             }
             "-d" | "--desc" | "--description" => {
                 if i + 1 >= args.len() {
-                    return Err("Missing value for description option".to_string().into());
+                    return Err(ShellError::new(
+                        ErrorCode::MissingArgument,
+                        "Missing value for description option",
+                    ));
                 }
                 let d_val = match &args[i + 1] {
                     Val::String(s) => s,
-                    _ => return Err("Description must be a string".to_string().into()),
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            "Description must be a string",
+                        ));
+                    }
                 };
                 desc = Some(d_val.clone());
                 i += 2;
             }
             "-a" | "--arguments" | "-W" => {
                 if i + 1 >= args.len() {
-                    return Err("Missing value for arguments option".to_string().into());
+                    return Err(ShellError::new(
+                        ErrorCode::MissingArgument,
+                        "Missing value for arguments option",
+                    ));
                 }
                 let a_val = match &args[i + 1] {
                     Val::String(s) => s,
-                    _ => return Err("Arguments must be a string".to_string().into()),
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            "Arguments must be a string",
+                        ));
+                    }
                 };
                 arguments = Some(a_val.clone());
                 i += 2;
             }
             "-F" => {
                 if i + 1 >= args.len() {
-                    return Err("Missing value for -F option".to_string().into());
+                    return Err(ShellError::new(
+                        ErrorCode::MissingArgument,
+                        "Missing value for -F option",
+                    ));
                 }
                 let f_val = match &args[i + 1] {
                     Val::String(s) => s,
-                    _ => return Err("-F argument must be a string".to_string().into()),
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            "-F argument must be a string",
+                        ));
+                    }
                 };
                 arguments = Some(format!("fn:{}", f_val));
                 i += 2;
             }
             "-C" => {
                 if i + 1 >= args.len() {
-                    return Err("Missing value for -C option".to_string().into());
+                    return Err(ShellError::new(
+                        ErrorCode::MissingArgument,
+                        "Missing value for -C option",
+                    ));
                 }
                 let c_val = match &args[i + 1] {
                     Val::String(s) => s,
-                    _ => return Err("-C argument must be a string".to_string().into()),
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            "-C argument must be a string",
+                        ));
+                    }
                 };
                 arguments = Some(c_val.clone());
                 i += 2;
@@ -201,10 +258,13 @@ pub fn complete_builtin(
                 let mut reg = env.completions.write();
                 reg.remove(&cmd);
             }
-            fshell_engine::save_completions(env).map_err(StringError::from)?;
+            fshell_engine::save_completions(env).map_err(ShellError::from)?;
             return Ok(());
         } else {
-            return Err("Missing command name to erase".to_string().into());
+            return Err(ShellError::new(
+                ErrorCode::MissingArgument,
+                "Missing command name to erase",
+            ));
         }
     }
 
@@ -248,7 +308,7 @@ pub fn complete_builtin(
     }
 
     drop(reg);
-    fshell_engine::save_completions(env).map_err(StringError::from)?;
+    fshell_engine::save_completions(env).map_err(ShellError::from)?;
 
     Ok(())
 }
@@ -259,7 +319,7 @@ pub fn compgen_builtin(
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
-) -> Result<(), StringError> {
+) -> Result<(), ShellError> {
     let arg_strs: Vec<String> = args
         .iter()
         .map(|v| match v {
