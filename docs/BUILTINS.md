@@ -39,7 +39,7 @@ Arc<dyn Fn(
     Vec<Val>,           // Evaluated argument list
     &Env,               // Runtime environment reference
     PipeSender,         // Downstream output channel
-) -> Result<(), StringError> + Send + Sync>
+) -> Result<(), ShellError> + Send + Sync>
 ```
 
 builtins are registered into the environment at startup via `fshell_builtins::init(&env)` or dynamically via `env.register_builtin(name, handler)`.

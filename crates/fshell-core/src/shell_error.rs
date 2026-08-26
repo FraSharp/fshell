@@ -309,30 +309,6 @@ impl From<&str> for ShellError {
     }
 }
 
-impl From<crate::diagnostic::StringError> for ShellError {
-    fn from(e: crate::diagnostic::StringError) -> Self {
-        let mut err = Self::new(e.code, e.message);
-        err.help = e.help;
-        err.fix = e.fix;
-        err.suggestions = e.suggestions;
-        err.span = e.span;
-        err.secondary_spans = e.secondary_spans;
-        err
-    }
-}
-
-impl From<ShellError> for crate::diagnostic::StringError {
-    fn from(e: ShellError) -> Self {
-        let mut err = crate::diagnostic::StringError::new(e.code, e.message);
-        err.help = e.help;
-        err.fix = e.fix;
-        err.suggestions = e.suggestions;
-        err.span = e.span;
-        err.secondary_spans = e.secondary_spans;
-        err
-    }
-}
-
 impl From<ShellError> for FshDiag {
     fn from(err: ShellError) -> Self {
         FshDiag::new(err)

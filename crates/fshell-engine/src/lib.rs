@@ -4,7 +4,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::panic))]
 #![allow(clippy::result_large_err)]
 use fshell_capabilities::CapsRegistry;
-use fshell_core::diagnostic::{ErrorCode, StringError};
+use fshell_core::diagnostic::ErrorCode;
 use fshell_core::{Expr, FshDiag, FxIndexMap, PromptConfig, ShellError, Stmt, StringPart, Val};
 use fshell_hash::FxHashMap;
 pub mod ast_cache;
@@ -63,25 +63,6 @@ pub mod prompt;
 pub mod reactive;
 pub mod scope;
 pub mod special_vars;
-
-impl From<EngineError> for StringError {
-    fn from(e: EngineError) -> Self {
-        let code = match &e {
-            EngineError::CapabilityDenied { .. } => ErrorCode::CapabilityDenied,
-            EngineError::DivisionByZero { .. } => ErrorCode::RuntimeError,
-            EngineError::IoError { .. } => ErrorCode::IoError,
-            EngineError::MatchNonExhaustive { .. } => ErrorCode::RuntimeError,
-            EngineError::MutationNotAllowed { .. } => ErrorCode::CapabilityDenied,
-            EngineError::Parse(_) => ErrorCode::ParseError,
-            EngineError::PipelineError { .. } => ErrorCode::PipelineError,
-            EngineError::TypeMismatch { .. } => ErrorCode::TypeError,
-            EngineError::VariableNotFound { .. } => ErrorCode::RuntimeError,
-            EngineError::CycleDetected { .. } => ErrorCode::RuntimeError,
-            EngineError::Generic { .. } => ErrorCode::General,
-        };
-        StringError::new(code, e.to_string())
-    }
-}
 
 impl From<EngineError> for ShellError {
     fn from(e: EngineError) -> Self {

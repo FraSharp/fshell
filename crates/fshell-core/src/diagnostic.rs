@@ -4,11 +4,10 @@
 use crate::Val;
 use crate::val::FxIndexMap;
 use fshell_hash::FxBuildHasher;
-use miette::{Diagnostic, LabeledSpan, Severity, SourceSpan};
+use miette::Diagnostic;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
-use thiserror::Error;
 use ustr::ustr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -503,7 +502,7 @@ impl FshDiag {
             Ok(report) => report,
             Err(arc) => {
                 let msg = format!("{arc}");
-                StringError::from(msg).into()
+                crate::ShellError::from(msg).into()
             }
         }
     }
@@ -561,13 +560,10 @@ impl FshDiag {
         {
             return true;
         }
-        self.report
-            .downcast_ref::<StringError>()
-            .is_some_and(|e| e.is_condition_false())
-            || self.code().is_some_and(|c| {
-                let s = c.to_string();
-                s == "FSH-EXEC-004" || s == "fshell::engine::E014"
-            })
+        self.code().is_some_and(|c| {
+            let s = c.to_string();
+            s == "FSH-EXEC-004" || s == "fshell::engine::E014"
+        })
     }
 }
 
@@ -584,213 +580,14 @@ impl From<FshDiag> for miette::Report {
     }
 }
 
-impl From<StringError> for FshDiag {
-    fn from(err: StringError) -> Self {
-        let category = err.category;
-        let code = Some(err.code);
-        let fix = err.fix.clone();
-        let suggestions = err.suggestions.clone();
-        FshDiag {
-            report: Arc::new(miette::Report::new(err)),
-            category,
-            code,
-            fix,
-            suggestions,
-        }
-    }
-}
-
 impl From<String> for FshDiag {
     fn from(msg: String) -> Self {
-        StringError::from(msg).into()
+        crate::ShellError::from(msg).into()
     }
 }
 
 impl From<&str> for FshDiag {
     fn from(msg: &str) -> Self {
-        StringError::from(msg).into()
-    }
-}
-
-#[derive(Debug, Error)]
-#[error("{message}")]
-#[allow(clippy::result_large_err)]
-pub struct StringError {
-    pub message: String,
-    pub code: ErrorCode,
-    pub category: &'static str,
-    pub help: Option<String>,
-    pub fix: Option<String>,
-    pub suggestions: Vec<String>,
-    pub span: Option<SourceSpan>,
-    pub secondary_spans: Vec<(SourceSpan, String)>,
-}
-
-impl Diagnostic for StringError {
-    fn code<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
-        Some(Box::new(self.code))
-    }
-    fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
-        self.help
-            .as_deref()
-            .map(|h| Box::new(h) as Box<dyn fmt::Display + 'a>)
-    }
-    fn labels<'a>(&'a self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + 'a>> {
-        let mut labels: Vec<LabeledSpan> = Vec::new();
-        if let Some(span) = self.span {
-            labels.push(LabeledSpan::new_with_span(None, span));
-        }
-        for (span, label) in &self.secondary_spans {
-            labels.push(LabeledSpan::new_with_span(Some(label.clone()), *span));
-        }
-        if labels.is_empty() {
-            None
-        } else {
-            Some(Box::new(labels.into_iter()))
-        }
-    }
-    fn severity(&self) -> Option<Severity> {
-        None
-    }
-}
-
-impl DiagnosticExt for StringError {
-    fn category(&self) -> &'static str {
-        self.category
-    }
-    fn code_enum(&self) -> Option<ErrorCode> {
-        Some(self.code)
-    }
-    fn fix(&self) -> Option<String> {
-        self.fix.clone()
-    }
-    fn suggestions(&self) -> Vec<String> {
-        self.suggestions.clone()
-    }
-}
-
-impl From<String> for StringError {
-    fn from(message: String) -> Self {
-        StringError {
-            message,
-            code: ErrorCode::General,
-            category: "general",
-            help: None,
-            fix: None,
-            suggestions: Vec::new(),
-            span: None,
-            secondary_spans: Vec::new(),
-        }
-    }
-}
-
-impl From<&str> for StringError {
-    fn from(message: &str) -> Self {
-        String::from(message).into()
-    }
-}
-
-impl StringError {
-    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        let category = code.category();
-        StringError {
-            message: message.into(),
-            code,
-            category,
-            help: None,
-            fix: None,
-            suggestions: Vec::new(),
-            span: None,
-            secondary_spans: Vec::new(),
-        }
-    }
-
-    pub fn not_found(cmd: &str, target: &str) -> Self {
-        Self::new(
-            ErrorCode::FileNotFound,
-            format!("{cmd}: '{target}' not found"),
-        )
-        .with_help("Check that the target path or item exists and is spelled correctly.")
-    }
-
-    pub fn permission_denied(cmd: &str, target: &str) -> Self {
-        Self::new(
-            ErrorCode::PermissionDenied,
-            format!("{cmd}: permission denied for '{target}'"),
-        )
-        .with_help("Verify read/write permissions or grant required shell capabilities.")
-    }
-
-    pub fn invalid_argument(cmd: &str, arg: &str) -> Self {
-        Self::new(
-            ErrorCode::InvalidArgument,
-            format!("{cmd}: invalid argument '{arg}'"),
-        )
-        .with_help(format!("Use `help {cmd}` for syntax and allowed options."))
-    }
-
-    pub fn missing_argument(cmd: &str, desc: &str) -> Self {
-        Self::new(
-            ErrorCode::MissingArgument,
-            format!("{cmd}: missing argument: {desc}"),
-        )
-        .with_help(format!("Provide the required argument. See `help {cmd}`."))
-    }
-
-    pub fn type_error(expected: &str, found: &str) -> Self {
-        Self::new(
-            ErrorCode::TypeError,
-            format!("Type mismatch: expected {expected}, found {found}"),
-        )
-        .with_help("Use a type conversion function like `to_text()` or check operand types.")
-    }
-
-    pub fn with_help(mut self, help: impl Into<String>) -> Self {
-        self.help = Some(help.into());
-        self
-    }
-
-    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
-        self.fix = Some(fix.into());
-        self
-    }
-
-    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
-        self.suggestions.push(suggestion.into());
-        self
-    }
-
-    pub fn with_suggestions(mut self, suggestions: Vec<String>) -> Self {
-        self.suggestions = suggestions;
-        self
-    }
-
-    pub fn with_span(mut self, span: SourceSpan) -> Self {
-        self.span = Some(span);
-        self
-    }
-
-    pub fn with_secondary_span(mut self, span: SourceSpan, label: impl Into<String>) -> Self {
-        self.secondary_spans.push((span, label.into()));
-        self
-    }
-
-    /// True iff this error represents a logical `false` condition, not a hard failure.
-    pub fn is_condition_false(&self) -> bool {
-        self.code == ErrorCode::ConditionFalse
-    }
-
-    /// Construct a `ConditionFalse` sentinel (exit code 1, no error line).
-    pub fn condition_false() -> Self {
-        StringError {
-            message: "false".to_string(),
-            code: ErrorCode::ConditionFalse,
-            category: "condition",
-            help: None,
-            fix: None,
-            suggestions: Vec::new(),
-            span: None,
-            secondary_spans: Vec::new(),
-        }
+        crate::ShellError::from(msg).into()
     }
 }
