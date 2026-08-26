@@ -1259,3 +1259,13 @@ async fn test_external_pipeline_streaming_early_exit() {
         "Infinite streaming command piped to head must terminate promptly"
     );
 }
+
+#[tokio::test]
+async fn test_external_pipeline_chunked_streaming_and_count() {
+    let env = setup_test_env();
+    let mut parser =
+        fshell_core::Parser::new("printf 'alpha\\nbeta\\ngamma\\nalpha\\n' | grep alpha | count");
+    let stmts = parser.parse_statements().unwrap();
+    let res = fshell_engine::eval_stmt(&stmts[0], &env, false).await;
+    assert!(res.is_ok());
+}

@@ -332,6 +332,25 @@ pub fn maybe_inject_flag(cmd: &str, args: &[Val]) -> Option<&'static str> {
     }
 }
 
+/// Returns true if the command is a recognized structured output provider.
+pub fn is_known_structured_command(cmd: &str, args: &[String]) -> bool {
+    match cmd {
+        "rg" | "grep" | "ps" | "df" | "mount" => true,
+        "ls" => args
+            .iter()
+            .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('l')),
+        "git" => {
+            let is_status = args.iter().any(|a| a == "status");
+            let is_porcelain = args
+                .iter()
+                .any(|a| a == "--porcelain" || a == "--short" || a == "-s");
+            let is_log = args.iter().any(|a| a == "log") && args.iter().any(|a| a == "--oneline");
+            (is_status && is_porcelain) || is_log
+        }
+        _ => false,
+    }
+}
+
 /// Main dispatch: route stdout lines to the correct parser based on command name.
 /// Returns ParseResult — caller handles Data, Header, or Fallthrough.
 pub fn parse_line(cmd: &str, args: &[String], line: &str, state: &mut ParseState) -> ParseResult {

@@ -1122,8 +1122,31 @@ pub async fn execute_pipeline(
                                     }
                                 }
                                 PipelinePayload::Bytes(b) => {
-                                    // Boundary conversion: raw bytes -> line-split string Vals.
-                                    forward_bytes_as_lines(&out_tx, &b).await;
+                                    let text = String::from_utf8_lossy(&b);
+                                    for line in text.lines() {
+                                        if line.is_empty() {
+                                            continue;
+                                        }
+                                        let val_arc = Arc::new(Val::String(line.to_string()));
+                                        sub_env.scope.local_vars = None;
+                                        match eval_expr(&condition, &sub_env).await {
+                                            Ok(Val::Bool(true)) => {
+                                                let _ = out_tx
+                                                    .send(PipelinePayload::Data(val_arc))
+                                                    .await;
+                                            }
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                env_clone.report_stage_error();
+                                                let _ = out_tx
+                                                    .send(PipelinePayload::Structured(
+                                                        e.to_string().into(),
+                                                    ))
+                                                    .await;
+                                                break;
+                                            }
+                                        }
+                                    }
                                 }
                                 PipelinePayload::Structured(d) => {
                                     let _ = out_tx.send(PipelinePayload::Structured(d)).await;
@@ -1260,8 +1283,12 @@ pub async fn execute_pipeline(
                                     items.push(val_arc);
                                 }
                                 PipelinePayload::Bytes(b) => {
-                                    // Boundary conversion: raw bytes -> line-split string Vals.
-                                    forward_bytes_as_lines(&out_tx, &b).await;
+                                    let text = String::from_utf8_lossy(&b);
+                                    for line in text.lines() {
+                                        if !line.is_empty() {
+                                            items.push(Arc::new(Val::String(line.to_string())));
+                                        }
+                                    }
                                 }
                                 PipelinePayload::Structured(d) => {
                                     let _ = out_tx.send(PipelinePayload::Structured(d)).await;
@@ -1273,13 +1300,13 @@ pub async fn execute_pipeline(
                                 Val::Map(map) => {
                                     map.get(&ustr::ustr(&column)).unwrap_or(&Val::Null)
                                 }
-                                _ => &Val::Null,
+                                other => other,
                             };
                             let val_b = match &**b {
                                 Val::Map(map) => {
                                     map.get(&ustr::ustr(&column)).unwrap_or(&Val::Null)
                                 }
-                                _ => &Val::Null,
+                                other => other,
                             };
                             let cmp = cmp_vals(val_a, val_b);
                             if descending { cmp.reverse() } else { cmp }
@@ -1329,8 +1356,16 @@ pub async fn execute_pipeline(
                                     }
                                 }
                                 PipelinePayload::Bytes(b) => {
-                                    // Boundary conversion: raw bytes -> line-split string Vals.
-                                    forward_bytes_as_lines(&out_tx, &b).await;
+                                    let text = String::from_utf8_lossy(&b);
+                                    for line in text.lines() {
+                                        if line.contains(&pat_val) {
+                                            let _ = out_tx
+                                                .send(PipelinePayload::Data(Arc::new(Val::String(
+                                                    line.to_string(),
+                                                ))))
+                                                .await;
+                                        }
+                                    }
                                 }
                                 PipelinePayload::Structured(d) => {
                                     let _ = out_tx.send(PipelinePayload::Structured(d)).await;
@@ -1416,8 +1451,13 @@ pub async fn execute_pipeline(
                                 PipelinePayload::Data(_) => {
                                     count += 1;
                                 }
-                                PipelinePayload::Bytes(_) => {
-                                    count += 1;
+                                PipelinePayload::Bytes(b) => {
+                                    let newlines = b.iter().filter(|&&byte| byte == b'\n').count();
+                                    count += if newlines == 0 && !b.is_empty() {
+                                        1
+                                    } else {
+                                        newlines as i64
+                                    };
                                 }
                                 PipelinePayload::Structured(d) => {
                                     let _ = out_tx.send(PipelinePayload::Structured(d)).await;
@@ -1624,8 +1664,24 @@ pub async fn execute_pipeline(
                                         yielded += 1;
                                     }
                                     PipelinePayload::Bytes(b) => {
-                                        // Boundary conversion: raw bytes -> line-split string Vals.
-                                        forward_bytes_as_lines(&out_tx, &b).await;
+                                        let text = String::from_utf8_lossy(&b);
+                                        for line in text.lines() {
+                                            if yielded >= limit_count {
+                                                break;
+                                            }
+                                            if !line.is_empty() {
+                                                if out_tx
+                                                    .send(PipelinePayload::Data(Arc::new(
+                                                        Val::String(line.to_string()),
+                                                    )))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    break;
+                                                }
+                                                yielded += 1;
+                                            }
+                                        }
                                     }
                                     PipelinePayload::Structured(d) => {
                                         if out_tx

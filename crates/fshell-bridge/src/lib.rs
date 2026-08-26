@@ -826,70 +826,92 @@ pub fn run_external(
         let args_strs = arg_strs.clone();
         let json_auto_parse = env.options.read().json_auto_parse;
         let env_clone = env.clone();
+        let is_structured = structured::is_known_structured_command(&name_owned, &args_strs);
         tokio::spawn(async move {
             use structured::{ParseResult, ParseState};
-            use tokio::io::AsyncBufReadExt;
-            let mut reader = tokio::io::BufReader::new(&mut async_stdout);
-            let mut buf = Vec::new();
-            let mut parse_state = ParseState::default();
-            while let Ok(n) = reader.read_until(b'\n', &mut buf).await {
-                if n == 0 {
-                    break;
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+            if !is_structured && !json_auto_parse {
+                let mut buf = vec![0u8; 64 * 1024];
+                while let Ok(n) = async_stdout.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+                    if fshell_engine::send_with_backpressure(
+                        &env_clone,
+                        &tx_clone,
+                        PipelinePayload::Bytes(chunk),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
                 }
-                // Try decoding as UTF-8 line first
-                let val = match std::str::from_utf8(&buf) {
-                    Ok(s) => {
-                        let line = s.trim_end_matches(&['\r', '\n'][..]);
-                        let trimmed = line.trim();
-                        // Try structured parsers first. Blank lines are preserved as
-                        // empty string values (a user piping `printf "a\n\nb\n" | count`
-                        // expects 3 lines, not 1) rather than being silently dropped.
-                        match structured::parse_line(
-                            &name_owned,
-                            &args_strs,
-                            trimmed,
-                            &mut parse_state,
-                        ) {
-                            ParseResult::Data(val) => val,
-                            ParseResult::Header => {
-                                buf.clear();
-                                continue;
-                            }
-                            ParseResult::Fallthrough => {
-                                // Fall back to existing JSON detection
-                                if json_auto_parse
-                                    && ((trimmed.starts_with('{') && trimmed.ends_with('}'))
-                                        || (trimmed.starts_with('[') && trimmed.ends_with(']')))
-                                {
-                                    if let Ok(json_val) =
-                                        serde_json::from_str::<serde_json::Value>(trimmed)
+            } else {
+                let mut reader = tokio::io::BufReader::new(&mut async_stdout);
+                let mut buf = Vec::new();
+                let mut parse_state = ParseState::default();
+                while let Ok(n) = reader.read_until(b'\n', &mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    // Try decoding as UTF-8 line first
+                    let val = match std::str::from_utf8(&buf) {
+                        Ok(s) => {
+                            let line = s.trim_end_matches(&['\r', '\n'][..]);
+                            let trimmed = line.trim();
+                            // Try structured parsers first. Blank lines are preserved as
+                            // empty string values (a user piping `printf "a\n\nb\n" | count`
+                            // expects 3 lines, not 1) rather than being silently dropped.
+                            match structured::parse_line(
+                                &name_owned,
+                                &args_strs,
+                                trimmed,
+                                &mut parse_state,
+                            ) {
+                                ParseResult::Data(val) => val,
+                                ParseResult::Header => {
+                                    buf.clear();
+                                    continue;
+                                }
+                                ParseResult::Fallthrough => {
+                                    // Fall back to existing JSON detection
+                                    if json_auto_parse
+                                        && ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+                                            || (trimmed.starts_with('[') && trimmed.ends_with(']')))
                                     {
-                                        parse_json_value(json_val)
+                                        if let Ok(json_val) =
+                                            serde_json::from_str::<serde_json::Value>(trimmed)
+                                        {
+                                            parse_json_value(json_val)
+                                        } else {
+                                            Val::String(line.to_string())
+                                        }
                                     } else {
                                         Val::String(line.to_string())
                                     }
-                                } else {
-                                    Val::String(line.to_string())
                                 }
                             }
                         }
+                        Err(_) => {
+                            // Binary data / non-UTF8 payload: preserve exact bytes as Val::Blob
+                            Val::Blob(buf.clone())
+                        }
+                    };
+                    buf.clear();
+                    if fshell_engine::send_with_backpressure(
+                        &env_clone,
+                        &tx_clone,
+                        PipelinePayload::Data(Arc::new(val)),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        // Channel closed (downstream consumer exited, e.g. `head` finished).
+                        break;
                     }
-                    Err(_) => {
-                        // Binary data / non-UTF8 payload: preserve exact bytes as Val::Blob
-                        Val::Blob(buf.clone())
-                    }
-                };
-                buf.clear();
-                if fshell_engine::send_with_backpressure(
-                    &env_clone,
-                    &tx_clone,
-                    PipelinePayload::Data(Arc::new(val)),
-                )
-                .await
-                .is_err()
-                {
-                    // Channel closed (downstream consumer exited, e.g. `head` finished).
-                    break;
                 }
             }
         });

@@ -1039,6 +1039,7 @@ dependencies = [
 name = "fshell-bridge"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "criterion",
  "crossterm",
  "fshell-builtins",
