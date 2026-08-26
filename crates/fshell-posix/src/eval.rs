@@ -133,7 +133,7 @@ pub async fn eval_source_capture(parsed: &ParsedScript, env: &Env) -> Result<Vec
     Ok(out.unwrap_or_default())
 }
 
-enum PosixError {
+pub(crate) enum PosixError {
     Engine(EngineError),
     Exit(i32),
     Return(i32),
@@ -144,6 +144,18 @@ enum PosixError {
 impl From<EngineError> for PosixError {
     fn from(e: EngineError) -> Self {
         PosixError::Engine(e)
+    }
+}
+
+impl std::fmt::Display for PosixError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PosixError::Engine(e) => write!(f, "{e}"),
+            PosixError::Exit(c) => write!(f, "exit {c}"),
+            PosixError::Return(c) => write!(f, "return {c}"),
+            PosixError::Break => write!(f, "break"),
+            PosixError::Continue => write!(f, "continue"),
+        }
     }
 }
 
@@ -308,7 +320,12 @@ pub struct RedirectionContext {
 }
 
 impl RedirectionContext {
-    pub fn apply_item(&mut self, redir: &IoRedirect, env: &Env, positional: &[String]) {
+    pub(crate) fn apply_item(
+        &mut self,
+        redir: &IoRedirect,
+        env: &Env,
+        positional: &[String],
+    ) -> Result<(), PosixError> {
         match redir {
             IoRedirect::File(fd_opt, kind, target) => {
                 let default_fd = match kind {
@@ -330,11 +347,25 @@ impl RedirectionContext {
                             positional,
                         );
                         let filename = expanded.join(" ");
-                        let path = std::path::PathBuf::from(filename);
+                        let raw_path = std::path::PathBuf::from(filename);
+                        let path = if raw_path.is_absolute() {
+                            raw_path
+                        } else {
+                            env.cwd().join(raw_path)
+                        };
+
                         match fd {
                             0 => {
-                                if let Ok(bytes) = std::fs::read(&path) {
-                                    self.stdin_bytes = Some(bytes);
+                                match std::fs::read(&path) {
+                                    Ok(bytes) => {
+                                        self.stdin_bytes = Some(bytes);
+                                    }
+                                    Err(e) => {
+                                        return Err(PosixError::Engine(EngineError::IoError {
+                                            message: format!("{}: {}", path.display(), e),
+                                            span: None,
+                                        }));
+                                    }
                                 }
                                 self.stdin_file = Some(path);
                             }
@@ -419,11 +450,18 @@ impl RedirectionContext {
                     },
                     positional,
                 );
-                let path = std::path::PathBuf::from(expanded.join(" "));
+                let filename = expanded.join(" ");
+                let raw_path = std::path::PathBuf::from(filename);
+                let path = if raw_path.is_absolute() {
+                    raw_path
+                } else {
+                    env.cwd().join(raw_path)
+                };
                 self.stdout_file = Some((path.clone(), *append));
                 self.stderr_file = Some((path, *append));
             }
         }
+        Ok(())
     }
 }
 
@@ -550,7 +588,14 @@ async fn eval_command_stream(
             let mut redir = RedirectionContext::default();
             if let Some(list) = redirects {
                 for r in &list.0 {
-                    redir.apply_item(r, env, &cfg.positional);
+                    if let Err(e) = redir.apply_item(r, env, &cfg.positional) {
+                        eprintln!("{e}");
+                        env.set_exit_code(1);
+                        if cfg.errexit {
+                            return Err(PosixError::Exit(1));
+                        }
+                        return Ok((1, None));
+                    }
                 }
             }
             let capture = io_cfg.capture_stdout || redir.stdout_file.is_some();
@@ -1007,7 +1052,14 @@ async fn eval_simple_command(
 
     let mut redir = RedirectionContext::default();
     for r in &redirects {
-        redir.apply_item(r, env, positional);
+        if let Err(e) = redir.apply_item(r, env, positional) {
+            eprintln!("{e}");
+            env.set_exit_code(1);
+            if cfg.errexit {
+                return Err(PosixError::Exit(1));
+            }
+            return Ok((1, None));
+        }
     }
 
     if cmd_word.is_none() {

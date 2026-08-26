@@ -599,3 +599,34 @@ test "$(pwd)" = "$initial"
     .await;
     assert_eq!(code, 0);
 }
+
+#[tokio::test]
+async fn posix_subshell_fd_and_env_isolation() {
+    let env = setup_posix_env();
+    let tmp = std::env::temp_dir().join(format!("subshell_isolation_{}.txt", std::process::id()));
+    let tmp_path = tmp.display().to_string();
+    let script = format!(
+        r#"
+(
+  X=inner
+  cd /tmp
+  echo "inside subshell" > "{}"
+)
+test -z "$X"
+"#,
+        tmp_path
+    );
+    let code = run_posix(&script, &env).await;
+    let _ = std::fs::remove_file(&tmp);
+    assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn posix_failed_input_redirection_aborts() {
+    let env = setup_posix_env();
+    let code = run_posix("cat < /nonexistent_path_xyz_123_456", &env).await;
+    assert_ne!(
+        code, 0,
+        "reading from nonexistent file must return non-zero exit code"
+    );
+}
