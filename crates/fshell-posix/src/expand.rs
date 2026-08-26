@@ -155,6 +155,11 @@ fn resolve_parameter(param: &Parameter, env: &fshell_engine::Env, positional: &[
             if let Some(v) = env.special_vars.resolve(name) {
                 return v.to_text();
             }
+            if let Some(ref locals) = env.local_vars
+                && let Some(val) = locals.read().get(name.as_str())
+            {
+                return val.to_text();
+            }
             Some(env.vars.read())
                 .and_then(|vars| vars.get(name.as_str()).map(|v| v.to_text()))
                 .unwrap_or_default()

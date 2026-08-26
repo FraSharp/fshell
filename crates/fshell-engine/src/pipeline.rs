@@ -434,8 +434,14 @@ pub async fn execute_pipeline(
                     };
                     let val = {
                         let mut found = {
-                            let vars = lock_vars!(env_clone.vars.read());
-                            vars.get(&var_name).cloned()
+                            if let Some(ref locals) = env_clone.local_vars
+                                && let Some(val) = locals.read().get(&var_name)
+                            {
+                                Some(val.clone())
+                            } else {
+                                let vars = lock_vars!(env_clone.vars.read());
+                                vars.get(&var_name).cloned()
+                            }
                         };
                         if found.is_none()
                             && env_clone

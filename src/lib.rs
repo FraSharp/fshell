@@ -28,6 +28,10 @@ struct Cli {
     /// Path to an fsh script file to execute non-interactively
     script: Option<String>,
 
+    /// Arguments passed to the script ($1, $2, $@)
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+
     /// Run an inline fsh command and exit
     #[arg(short = 'c', long = "command", value_name = "COMMAND")]
     command: Option<String>,
@@ -310,6 +314,22 @@ pub async fn run() {
     apply_cli_render_options(&env, &cli);
 
     if let Some(script_path) = &cli.script {
+        {
+            let mut vars = env.vars.write();
+            vars.insert("0".to_string(), Val::String(script_path.clone()));
+            for (i, arg) in cli.args.iter().enumerate() {
+                vars.insert((i + 1).to_string(), Val::String(arg.clone()));
+            }
+            vars.insert(
+                "@".to_string(),
+                Val::List(cli.args.iter().map(|a| Val::String(a.clone())).collect()),
+            );
+            vars.insert(
+                "*".to_string(),
+                Val::List(cli.args.iter().map(|a| Val::String(a.clone())).collect()),
+            );
+            vars.insert("#".to_string(), Val::Int(cli.args.len() as i64));
+        }
         match std::fs::read_to_string(script_path) {
             Ok(content) => {
                 // POSIX file dispatch: shebang auto-detect or --posix flag
@@ -317,16 +337,16 @@ pub async fn run() {
                 if use_posix {
                     match fshell_posix::parser::parse_posix_script(&content) {
                         Ok(parsed) => {
-                            let code = fshell_posix::eval::eval_source(
-                                &parsed,
-                                &env,
-                                &fshell_posix::eval::EvalConfig::default(),
-                            )
-                            .await
-                            .unwrap_or_else(|e| {
-                                eprintln!("POSIX execution error: {e}");
-                                std::process::exit(1);
-                            });
+                            let cfg = fshell_posix::eval::EvalConfig {
+                                positional: cli.args.clone(),
+                                ..Default::default()
+                            };
+                            let code = fshell_posix::eval::eval_source(&parsed, &env, &cfg)
+                                .await
+                                .unwrap_or_else(|e| {
+                                    eprintln!("POSIX execution error: {e}");
+                                    std::process::exit(1);
+                                });
                             std::process::exit(code);
                         }
                         Err(e) => {

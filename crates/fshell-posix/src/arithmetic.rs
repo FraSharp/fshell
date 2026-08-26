@@ -277,10 +277,17 @@ impl<'a> ArithParser<'a> {
     }
 
     fn resolve_var(&self, name: &str) -> i64 {
-        if let Some(v) = self.env.vars.read().get(name) {
+        let v_opt = if let Some(ref locals) = self.env.local_vars
+            && let Some(v) = locals.read().get(name)
+        {
+            Some(v.clone())
+        } else {
+            self.env.vars.read().get(name).cloned()
+        };
+        if let Some(v) = v_opt {
             let text = match v {
-                Val::Int(i) => return *i,
-                Val::Float(f) => return *f as i64,
+                Val::Int(i) => return i,
+                Val::Float(f) => return f as i64,
                 other => other.to_text(),
             };
             if let Ok(n) = text.trim().parse::<i64>() {

@@ -1487,6 +1487,35 @@ pub(crate) fn try_eval_stmt_sync(
         Stmt::Expr(expr) => {
             if matches!(expr.unpack(), Expr::Pipeline(_) | Expr::InlinePipeline(_)) {
                 None
+            } else if let Expr::If {
+                condition,
+                then_body,
+                else_body,
+            } = expr.unpack()
+            {
+                let cond_val = match try_eval_sync(condition, env)? {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let is_truthy = match val_to_bool(&cond_val) {
+                    Ok(b) => b,
+                    Err(e) => return Some(Err(e)),
+                };
+                let body = if is_truthy {
+                    then_body
+                } else if let Some(else_body) = else_body {
+                    else_body
+                } else {
+                    return Some(Ok(Flow::Normal));
+                };
+                for s in body {
+                    let flow_res = try_eval_stmt_sync(s, env, _unsafe_context)?;
+                    match flow_res {
+                        Ok(Flow::Normal) => {}
+                        other => return Some(other),
+                    }
+                }
+                Some(Ok(Flow::Normal))
             } else {
                 let val_res = try_eval_sync(expr, env)?;
                 let val = match val_res {
@@ -1705,7 +1734,30 @@ async fn eval_stmt_inner(
         }
         Stmt::Comment(_) => Ok(Flow::Normal),
         Stmt::Expr(expr) => {
-            if let Expr::Pipeline(pipeline) | Expr::InlinePipeline(pipeline) = expr.unpack() {
+            if let Expr::If {
+                condition,
+                then_body,
+                else_body,
+            } = expr.unpack()
+            {
+                let cond_val = eval_expr(condition, env).await?;
+                let is_truthy = val_to_bool(&cond_val)?;
+                let body = if is_truthy {
+                    then_body
+                } else if let Some(else_body) = else_body {
+                    else_body
+                } else {
+                    return Ok(Flow::Normal);
+                };
+                for s in body {
+                    let flow = eval_stmt(s, env, false).await?;
+                    if flow != Flow::Normal {
+                        return Ok(flow);
+                    }
+                }
+                return Ok(Flow::Normal);
+            } else if let Expr::Pipeline(pipeline) | Expr::InlinePipeline(pipeline) = expr.unpack()
+            {
                 if let Some(result) = try_run_startup_builtin(pipeline, env).await {
                     return result;
                 }
