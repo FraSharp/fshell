@@ -1438,6 +1438,39 @@ impl reedline::Completer for FshellCompleter {
             }
         }
 
+        // Suggest any executable on PATH when typing the first word.
+        // This is the live catalog (same cache the engine uses to run commands),
+        // not just the curated COMMON_EXTERNAL_COMMANDS list. Gated on a non-empty
+        // prefix so an empty Tab doesn't dump thousands of entries.
+        if words.len() <= 1 && !last_word_lower.is_empty() {
+            let env_path = {
+                let vars = self.env.vars.read();
+                vars.get("PATH").and_then(|v| match v {
+                    fshell_core::Val::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+            };
+            let candidates = fshell_engine::get_path_executables(env_path.as_deref());
+            for exe in candidates {
+                if exe.to_lowercase().starts_with(&last_word_lower) {
+                    if suggestions.iter().any(|s| s.value == exe) {
+                        continue;
+                    }
+                    let desc = command_description(&exe).unwrap_or("PATH executable");
+                    suggestions.push(reedline::Suggestion {
+                        value: exe,
+                        description: Some(format!("[ext] {}", desc)),
+                        extra: None,
+                        span: reedline::Span::new(pos - last_word.len(), pos),
+                        append_whitespace: true,
+                        style: None,
+                        display_override: None,
+                        match_indices: None,
+                    });
+                }
+            }
+        }
+
         // Suggest frequent full command lines from history (e.g. "reload --full")
         if words.len() <= 1
             && !last_word_lower.is_empty()

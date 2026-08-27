@@ -3275,6 +3275,35 @@ pub fn is_external_command(name: &str, env_path: Option<&str>) -> bool {
     found
 }
 
+/// Returns a snapshot of all executable names on PATH from the cache.
+/// If the cache is missing or stale for the requested PATH it is rebuilt
+/// synchronously. Starts the background watcher so future changes are picked
+/// up without blocking. `env_path` should be the shell's `$PATH` when
+/// available to avoid skew vs the OS environment.
+pub fn get_path_executables(env_path: Option<&str>) -> Vec<String> {
+    start_path_watcher();
+    let current_path = env_path
+        .map(|p| p.to_string())
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    if current_path.is_empty() {
+        return Vec::new();
+    }
+    let mut cache_guard = PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cache) = *cache_guard
+        && cache.path == current_path
+        && cache.last_updated.elapsed() < PATH_CACHE_TTL
+    {
+        return cache.executables.keys().cloned().collect();
+    }
+    let rebuild_start = std::time::Instant::now();
+    *cache_guard = Some(rebuild_path_cache(&current_path, rebuild_start));
+    cache_guard
+        .as_ref()
+        .map(|cache| cache.executables.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Returns the resolved full path for a command name, using the PATH cache.
 /// Returns None if the command is not found on PATH.
 pub fn resolve_cached_command_path(name: &str, env_path: Option<&str>) -> Option<String> {

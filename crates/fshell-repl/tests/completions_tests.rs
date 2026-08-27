@@ -3,13 +3,55 @@
 
 use fshell_bridge::init as bridge_init;
 use fshell_builtins::init as builtins_init;
-use fshell_core::{remove_var, set_var};
-use fshell_engine::{Env, Job, JobStatus};
+use fshell_core::{Val, remove_var, set_var};
+use fshell_engine::{Env, Job, JobStatus, get_path_executables, invalidate_path_cache};
 use fshell_repl::FshellCompleter;
 use reedline::Completer;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{LazyLock, Mutex};
 
 static TEST_CWD_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static TEST_PATH_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn create_temp_bins(prefix: &str, bins: &[&str]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "fsh_path_test_{}_{}",
+        prefix,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    for bin in bins {
+        let path = dir.join(bin);
+        let _ = std::fs::write(&path, b"#!/bin/sh\necho hi\n");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(&path, perms);
+    }
+    dir
+}
+
+fn make_completer_with_path(path_dir: &std::path::Path) -> FshellCompleter {
+    let env = Env::new();
+    {
+        let mut opts = env.options.write();
+        opts.sandbox_mode = "off".to_string();
+    }
+    builtins_init(&env);
+    bridge_init(&env);
+    env.vars.write().insert(
+        "PATH".to_string(),
+        Val::String(path_dir.to_string_lossy().to_string()),
+    );
+    // Ensure the global PATH cache reflects this isolated PATH.
+    invalidate_path_cache();
+    // Warming is done lazily by get_path_executables; no extra call needed,
+    // but we prime it so the first complete() doesn't pay rebuild cost inside the assert.
+    let _ = get_path_executables(Some(&path_dir.to_string_lossy().to_string()));
+    FshellCompleter { env }
+}
 
 fn make_completer() -> FshellCompleter {
     let env = Env::new();
@@ -587,4 +629,277 @@ async fn test_tui_completions_sequence() {
         "bare com suggestions should contain .commandcode, got {:?}",
         suggestions_bare_com
     );
+}
+
+// ---------------------------------------------------------------------------
+// PATH executable completions — happy path + regressions for `arbo` → `arborist`
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_path_completion_arbo_suggests_arborist() {
+    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let dir = create_temp_bins("arbo_single", &["arborist"]);
+    let mut c = make_completer_with_path(&dir);
+
+    let results = c.complete("arbo", 4);
+    let values: Vec<&str> = results.iter().map(|s| s.value.as_str()).collect();
+
+    assert!(
+        values.iter().any(|v| *v == "arborist"),
+        "arbo should suggest arborist via PATH, got: {:?}",
+        values
+    );
+
+    let arborist = results.iter().find(|s| s.value == "arborist").unwrap();
+    assert!(
+        arborist
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .contains("ext"),
+        "PATH suggestion should be marked [ext], got {:?}",
+        arborist.description
+    );
+    assert_eq!(arborist.span.start, 0, "first-word span should start at 0");
+    assert_eq!(arborist.span.end, 4, "span should cover typed prefix");
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_path_completion_offers_similar_names_popup() {
+    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let dir = create_temp_bins(
+        "arbo_multi",
+        &["arbor", "arborist", "arborist-cli", "argo", "other-tool"],
+    );
+    let mut c = make_completer_with_path(&dir);
+
+    let results = c.complete("arbo", 4);
+    let values: Vec<&str> = results.iter().map(|s| s.value.as_str()).collect();
+
+    // All three arbo* should appear, argo/other-tool should not.
+    assert!(
+        values.contains(&"arbor"),
+        "should contain arbor, got {:?}",
+        values
+    );
+    assert!(
+        values.contains(&"arborist"),
+        "should contain arborist, got {:?}",
+        values
+    );
+    assert!(
+        values.contains(&"arborist-cli"),
+        "should contain arborist-cli, got {:?}",
+        values
+    );
+    assert!(
+        !values.contains(&"argo"),
+        "argo does not start with arbo, should not be suggested"
+    );
+    assert!(
+        !values.contains(&"other-tool"),
+        "other-tool should not be suggested for arbo"
+    );
+    // Ranking should keep them together; at least 3 PATH results.
+    let arbo_count = values.iter().filter(|v| v.starts_with("arbor")).count();
+    assert!(
+        arbo_count >= 3,
+        "popup should offer multiple similar names, got {}: {:?}",
+        arbo_count,
+        values
+    );
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_path_completion_case_insensitive() {
+    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let dir = create_temp_bins("arbo_case", &["Arborist"]);
+    let mut c = make_completer_with_path(&dir);
+
+    let results = c.complete("ARBO", 4);
+    assert!(
+        results.iter().any(|s| s.value == "Arborist"),
+        "ARBO should match Arborist case-insensitively, got: {:?}",
+        results.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+
+    let results2 = c.complete("arBo", 4);
+    assert!(
+        results2.iter().any(|s| s.value == "Arborist"),
+        "arBo should match Arborist, got: {:?}",
+        results2.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_path_completion_dedup_against_builtins_and_common() {
+    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    // Create PATH bins that shadow a builtin (ls) and a COMMON_EXTERNAL (git)
+    let dir = create_temp_bins("arbo_dedup", &["ls", "git", "arborist"]);
+    let mut c = make_completer_with_path(&dir);
+
+    // "ls" prefix should appear once
+    let results_ls = c.complete("ls", 2);
+    let ls_count = results_ls.iter().filter(|s| s.value == "ls").count();
+    assert_eq!(
+        ls_count,
+        1,
+        "ls should not be duplicated (builtin vs PATH), got {} occurrences: {:?}",
+        ls_count,
+        results_ls.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+
+    // "gi" should contain git once, not twice
+    let results_gi = c.complete("gi", 2);
+    let git_count = results_gi.iter().filter(|s| s.value == "git").count();
+    assert_eq!(
+        git_count,
+        1,
+        "git should not be duplicated (COMMON vs PATH), got {}: {:?}",
+        git_count,
+        results_gi.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+
+    // but our unique bin still shows
+    let results_arbo = c.complete("arbo", 4);
+    assert!(
+        results_arbo.iter().any(|s| s.value == "arborist"),
+        "arborist should still be suggested alongside deduped entries"
+    );
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_path_completion_empty_prefix_does_not_dump_path() {
+    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let dir = create_temp_bins("arbo_empty", &["arborist", "zzz-unique-bin-12345"]);
+    let mut c = make_completer_with_path(&dir);
+
+    let results_empty = c.complete("", 0);
+    let contains_arborist = results_empty.iter().any(|s| s.value == "arborist");
+    let contains_zzz = results_empty
+        .iter()
+        .any(|s| s.value == "zzz-unique-bin-12345");
+    assert!(
+        !contains_arborist && !contains_zzz,
+        "empty first-word should not dump PATH (gated on non-empty prefix), got arborist={} zzz={} in {:?}",
+        contains_arborist,
+        contains_zzz,
+        results_empty
+            .iter()
+            .take(10)
+            .map(|s| &s.value)
+            .collect::<Vec<_>>()
+    );
+
+    // but a real prefix must still work
+    let results_arbo = c.complete("arbo", 4);
+    assert!(
+        results_arbo.iter().any(|s| s.value == "arborist"),
+        "non-empty prefix must still suggest PATH bins"
+    );
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_path_completion_not_suggested_when_not_on_path() {
+    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    // Create a bin in dir A, but completer PATH points to dir B
+    let dir_a = create_temp_bins("arbo_not_on_path_a", &["arborist"]);
+    let dir_b = create_temp_bins("arbo_not_on_path_b", &["other-bin"]);
+    let mut c = make_completer_with_path(&dir_b);
+
+    let results = c.complete("arbo", 4);
+    assert!(
+        !results.iter().any(|s| s.value == "arborist"),
+        "arborist in dir_a should NOT be suggested when PATH=dir_b, got: {:?}",
+        results.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+}
+
+#[tokio::test]
+async fn test_path_completion_env_path_isolation_over_os_path() {
+    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let dir = create_temp_bins("arbo_isolation", &["arborist-isolated-test"]);
+    // Point only the shell's $PATH at our dir; OS PATH stays whatever.
+    let mut c = make_completer_with_path(&dir);
+
+    // Direct engine check should also respect env_path isolation
+    let via_env = get_path_executables(Some(&dir.to_string_lossy().to_string()));
+    assert!(
+        via_env.contains(&"arborist-isolated-test".to_string()),
+        "get_path_executables with env_path should see isolated bin"
+    );
+
+    let via_completer = c.complete("arborist-isolated", 17);
+    assert!(
+        via_completer
+            .iter()
+            .any(|s| s.value == "arborist-isolated-test"),
+        "completer should use env PATH isolation, got: {:?}",
+        via_completer.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_path_completion_only_on_first_word() {
+    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let dir = create_temp_bins("arbo_first_word", &["arborist"]);
+    let mut c = make_completer_with_path(&dir);
+
+    // First word: should suggest
+    let first = c.complete("arbo", 4);
+    assert!(first.iter().any(|s| s.value == "arborist"));
+
+    // Second word (arg position) should fall through to file completion,
+    // not PATH. Since no file named arborist in cwd, it should NOT suggest.
+    // We use a known builtin `ls` as the command context.
+    let second = c.complete("ls arbo", 7);
+    let suggests_arborist_as_arg = second.iter().any(|s| s.value == "arborist");
+    assert!(
+        !suggests_arborist_as_arg,
+        "PATH should not be suggested in arg position (file completion), got: {:?}",
+        second.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_get_path_executables_direct_happy_and_missing() {
+    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let dir = create_temp_bins("arbo_engine", &["arborist", "mytool"]);
+    invalidate_path_cache();
+
+    let listed = get_path_executables(Some(&dir.to_string_lossy().to_string()));
+    assert!(listed.contains(&"arborist".to_string()));
+    assert!(listed.contains(&"mytool".to_string()));
+
+    // Empty / missing PATH returns empty without panic
+    assert!(get_path_executables(Some("")).is_empty());
+    assert!(get_path_executables(None).iter().all(|s| !s.is_empty())); // just not crash, may contain OS bins
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir);
 }

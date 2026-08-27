@@ -3016,8 +3016,8 @@ pub mod suggestions;
 pub mod tests;
 
 pub use eval::{
-    eval_expr, eval_stmt, invalidate_path_cache, is_external_command, is_external_command_cached,
-    resolve_cached_command_path, warmup_path_cache,
+    eval_expr, eval_stmt, get_path_executables, invalidate_path_cache, is_external_command,
+    is_external_command_cached, resolve_cached_command_path, warmup_path_cache,
 };
 pub use format::{cmp_vals, format_expr, format_pipeline};
 pub use glob::expand_globs;
