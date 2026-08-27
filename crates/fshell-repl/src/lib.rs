@@ -3725,7 +3725,7 @@ mod tests {
         fshell_bridge::init(&env);
         env.register_builtin(
             "debug-panic",
-            std::sync::Arc::new(|_, _, _, _| panic!("explicit test panic")),
+            std::sync::Arc::new(|_, _, _, _, _| panic!("explicit test panic")),
         );
 
         let _ = handle_line_generic(&env, "debug-panic", "/", "test-session").await;
