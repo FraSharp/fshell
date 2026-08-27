@@ -143,12 +143,16 @@ impl Parser {
 
     /// Parses a single expression.
     pub fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        let start = self.pos;
-        let expr = self.parse_expr_with_pipeline(true)?;
-        let span = self.span_from(start);
-        Ok(Expr::Spanned {
-            expr: Box::new(expr),
-            span,
+        let span = self.current_span();
+        let _guard = super::RecursionGuard::new(&self.recursion_depth, span)?;
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+            let start = self.pos;
+            let expr = self.parse_expr_with_pipeline(true)?;
+            let span = self.span_from(start);
+            Ok(Expr::Spanned {
+                expr: Box::new(expr),
+                span,
+            })
         })
     }
 
@@ -327,6 +331,14 @@ impl Parser {
         &mut self,
         allow_pipeline: bool,
     ) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        let _guard = super::RecursionGuard::new(&self.recursion_depth, span)?;
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+            self.parse_expr_with_pipeline_inner(allow_pipeline)
+        })
+    }
+
+    fn parse_expr_with_pipeline_inner(&mut self, allow_pipeline: bool) -> Result<Expr, ParseError> {
         let start = self.pos;
 
         self.skip_whitespace();
@@ -524,6 +536,14 @@ impl Parser {
 
     /// Pratt parser entry for binary expressions with precedence.
     pub(crate) fn parse_expr_with_precedence(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        let _guard = super::RecursionGuard::new(&self.recursion_depth, span)?;
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+            self.parse_expr_with_precedence_inner(min_prec)
+        })
+    }
+
+    fn parse_expr_with_precedence_inner(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_primary_expr()?;
 
         loop {
@@ -621,6 +641,12 @@ impl Parser {
     }
 
     pub(crate) fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        let _guard = super::RecursionGuard::new(&self.recursion_depth, span)?;
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || self.parse_primary_expr_inner())
+    }
+
+    fn parse_primary_expr_inner(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_atom()?;
         while self.peek() == Some('.') {
             if self.pos + 1 < self.input.len() {
@@ -640,6 +666,12 @@ impl Parser {
     }
 
     pub(crate) fn parse_atom(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        let _guard = super::RecursionGuard::new(&self.recursion_depth, span)?;
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || self.parse_atom_inner())
+    }
+
+    fn parse_atom_inner(&mut self) -> Result<Expr, ParseError> {
         self.skip_whitespace();
         if self.cmd_arg_mode
             && let Some(c) = self.peek()
@@ -1547,6 +1579,12 @@ impl Parser {
     }
 
     pub(crate) fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        let _guard = super::RecursionGuard::new(&self.recursion_depth, span)?;
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || self.parse_if_expr_inner())
+    }
+
+    fn parse_if_expr_inner(&mut self) -> Result<Expr, ParseError> {
         self.skip_whitespace();
         // Parse condition
         let saved_arg = self.cmd_arg_mode;

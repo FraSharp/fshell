@@ -395,16 +395,27 @@ macro_rules! build_map {
 }
 
 pub(crate) fn try_eval_sync(expr: &Expr, env: &Env) -> Option<Result<Val, EngineError>> {
-    match expr {
-        Expr::Spanned { expr: inner, span } => {
-            let res = try_eval_sync(inner, env)?;
-            Some(res.map_err(|mut err| {
+    let mut spans = Vec::new();
+    let mut cur = expr;
+    while let Expr::Spanned { expr: inner, span } = cur {
+        spans.push(*span);
+        cur = inner;
+    }
+    let res = stacker::maybe_grow(32 * 1024, 1024 * 1024, || try_eval_sync_inner(cur, env));
+    res.map(|r| {
+        r.map_err(|mut err| {
+            for span in spans.into_iter().rev() {
                 if err.span().is_none() {
-                    err.set_span(*span);
+                    err.set_span(span);
                 }
-                err
-            }))
-        }
+            }
+            err
+        })
+    })
+}
+
+fn try_eval_sync_inner(expr: &Expr, env: &Env) -> Option<Result<Val, EngineError>> {
+    match expr {
         Expr::Null => Some(Ok(Val::Null)),
         Expr::Bool(b) => Some(Ok(Val::Bool(*b))),
         Expr::Int(i) => Some(Ok(Val::Int(*i))),
@@ -846,17 +857,29 @@ pub fn eval_expr<'a>(
     if let Some(res) = try_eval_sync(expr, env) {
         return Box::pin(async move { res });
     }
-    Box::pin(async move {
-        match expr {
-            Expr::Spanned { expr: inner, span } => {
-                let res = eval_expr(inner, env).await;
-                res.map_err(|mut err| {
+    // Iterative handling for deeply nested Spanned wrappers (e.g. (((42))) ) to avoid stack overflow.
+    let mut spans = Vec::new();
+    let mut cur = expr;
+    while let Expr::Spanned { expr: inner, span } = cur {
+        spans.push(*span);
+        cur = inner;
+    }
+    if !spans.is_empty() {
+        return Box::pin(async move {
+            let res = eval_expr(cur, env).await;
+            res.map_err(|mut err| {
+                for span in spans.into_iter().rev() {
                     if err.span().is_none() {
-                        err.set_span(*span);
+                        err.set_span(span);
                     }
-                    err
-                })
-            }
+                }
+                err
+            })
+        });
+    }
+    Box::pin(async move {
+        match cur {
+            Expr::Spanned { .. } => unreachable!("Spanned should have been stripped"),
             Expr::Null => Ok(Val::Null),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
             Expr::Int(i) => Ok(Val::Int(*i)),
@@ -1348,16 +1371,31 @@ pub(crate) fn try_eval_stmt_sync(
     env: &Env,
     _unsafe_context: bool,
 ) -> Option<Result<Flow, EngineError>> {
-    match stmt {
-        Stmt::Spanned { stmt: inner, span } => {
-            let res = try_eval_stmt_sync(inner, env, _unsafe_context)?;
-            Some(res.map_err(|mut err| {
-                if err.span().is_none() {
-                    err.set_span(*span);
-                }
-                err
-            }))
+    let mut spans = Vec::new();
+    let mut cur = stmt;
+    while let Stmt::Spanned { stmt: inner, span } = cur {
+        spans.push(*span);
+        cur = inner;
+    }
+    let res = stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+        try_eval_stmt_sync_inner(cur, env, _unsafe_context)
+    })?;
+    Some(res.map_err(|mut err| {
+        for span in spans.into_iter().rev() {
+            if err.span().is_none() {
+                err.set_span(span);
+            }
         }
+        err
+    }))
+}
+
+fn try_eval_stmt_sync_inner(
+    stmt: &Stmt,
+    env: &Env,
+    _unsafe_context: bool,
+) -> Option<Result<Flow, EngineError>> {
+    match stmt {
         Stmt::Local { name, expr } => {
             let val = if let Some(expr) = expr {
                 let val_res = try_eval_sync(expr, env)?;
@@ -1579,7 +1617,26 @@ pub fn eval_stmt<'a>(
     if let Some(res) = try_eval_stmt_sync(stmt, env, unsafe_context) {
         return Box::pin(async move { res });
     }
-    Box::pin(async move { eval_stmt_inner(stmt, env, unsafe_context).await })
+    let mut spans = Vec::new();
+    let mut cur = stmt;
+    while let Stmt::Spanned { stmt: inner, span } = cur {
+        spans.push(*span);
+        cur = inner;
+    }
+    if !spans.is_empty() {
+        return Box::pin(async move {
+            let res = eval_stmt(cur, env, unsafe_context).await;
+            res.map_err(|mut err| {
+                for span in spans.into_iter().rev() {
+                    if err.span().is_none() {
+                        err.set_span(span);
+                    }
+                }
+                err
+            })
+        });
+    }
+    Box::pin(async move { eval_stmt_inner(cur, env, unsafe_context).await })
 }
 
 /// Evaluate a statement sequence, propagating the first non-normal flow or
@@ -1603,16 +1660,14 @@ async fn eval_stmt_inner(
     env: &Env,
     unsafe_context: bool,
 ) -> Result<Flow, EngineError> {
-    match stmt {
-        Stmt::Spanned { stmt: inner, span } => {
-            let res = eval_stmt(inner, env, unsafe_context).await;
-            res.map_err(|mut err| {
-                if err.span().is_none() {
-                    err.set_span(*span);
-                }
-                err
-            })
-        }
+    let mut spans = Vec::new();
+    let mut cur = stmt;
+    while let Stmt::Spanned { stmt: inner, span } = cur {
+        spans.push(*span);
+        cur = inner;
+    }
+    let res: Result<Flow, EngineError> = match cur {
+        Stmt::Spanned { .. } => unreachable!("Spanned should have been stripped"),
         Stmt::Local { name, expr } => {
             let val = if let Some(expr) = expr {
                 eval_expr(expr, env).await?
@@ -2549,7 +2604,15 @@ async fn eval_stmt_inner(
             });
             Ok(Flow::Normal)
         }
-    }
+    };
+    res.map_err(|mut err| {
+        for span in spans.into_iter().rev() {
+            if err.span().is_none() {
+                err.set_span(span);
+            }
+        }
+        err
+    })
 }
 
 pub(crate) fn is_query_stage(

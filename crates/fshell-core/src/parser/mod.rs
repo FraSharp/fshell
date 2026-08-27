@@ -85,6 +85,45 @@ pub struct Parser {
     /// When true, we are parsing a subsequent stage of a pipeline (after the first stage),
     /// which allows keywords like `hash` to be parsed as pipeline stages instead of commands.
     is_subsequent_stage: bool,
+    recursion_depth: std::cell::Cell<usize>,
+}
+
+pub(crate) const MAX_PARSER_RECURSION: usize = 1024;
+
+pub(crate) struct RecursionGuard {
+    depth_ptr: *const std::cell::Cell<usize>,
+}
+
+impl RecursionGuard {
+    pub(crate) fn new(
+        depth: &std::cell::Cell<usize>,
+        span: miette::SourceSpan,
+    ) -> Result<Self, ParseError> {
+        let d = depth.get();
+        if d >= MAX_PARSER_RECURSION {
+            return Err(ParseError::SyntaxError {
+                message: format!(
+                    "Expression too deeply nested (recursion limit {MAX_PARSER_RECURSION} exceeded)"
+                ),
+                span,
+            });
+        }
+        depth.set(d + 1);
+        Ok(Self {
+            depth_ptr: depth as *const std::cell::Cell<usize>,
+        })
+    }
+}
+
+impl Drop for RecursionGuard {
+    fn drop(&mut self) {
+        // SAFETY: depth_ptr was derived from a valid &Cell and lives as long as the Parser.
+        unsafe {
+            let cell = &*self.depth_ptr;
+            let d = cell.get();
+            cell.set(d.saturating_sub(1));
+        }
+    }
 }
 
 impl DiagnosticExt for ParseError {

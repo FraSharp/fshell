@@ -68,6 +68,12 @@ impl Parser {
     }
 
     pub fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        let _guard = crate::parser::RecursionGuard::new(&self.recursion_depth, span)?;
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || self.parse_statement_inner())
+    }
+
+    fn parse_statement_inner(&mut self) -> Result<Stmt, ParseError> {
         self.skip_whitespace();
         let start = self.pos;
         if self.peek() == Some('#') {
@@ -108,6 +114,12 @@ impl Parser {
     }
 
     pub(crate) fn parse_statement_body(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.current_span();
+        let _guard = crate::parser::RecursionGuard::new(&self.recursion_depth, span)?;
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || self.parse_statement_body_inner())
+    }
+
+    fn parse_statement_body_inner(&mut self) -> Result<Stmt, ParseError> {
         self.skip_whitespace();
 
         // Check for variable assignment or update statement (e.g. `a = 3` or `a += 3`)
@@ -836,6 +848,14 @@ impl Parser {
     }
 
     pub(crate) fn parse_block_statements(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        let span = self.current_span();
+        let _guard = crate::parser::RecursionGuard::new(&self.recursion_depth, span)?;
+        stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+            self.parse_block_statements_inner()
+        })
+    }
+
+    fn parse_block_statements_inner(&mut self) -> Result<Vec<Stmt>, ParseError> {
         let mut stmts = Vec::new();
         self.skip_whitespace();
         while !self.is_eof() && self.peek() != Some('}') {
