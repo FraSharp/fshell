@@ -1432,13 +1432,13 @@ pub async fn run_ftui_repl(
                             // Footer with count info
                             let footer_text = if total_items > visible_rows {
                                 format!(
-                                    " {} of {} — ↑↓ navigate, PgUp/PgDn page, Tab/→ accept, Enter run ",
+                                    " {} of {} — ↑↓ navigate, PgUp/PgDn page, Tab cycle, Enter/→ accept ",
                                     comp_mgr.selected_idx + 1,
                                     total_items,
                                 )
                             } else {
                                 format!(
-                                    " {} item{} — ↑↓ navigate, Tab/→ accept, Enter run, Esc close ",
+                                    " {} item{} — ↑↓ navigate, Tab cycle, Enter/→ accept, Esc close ",
                                     total_items,
                                     if total_items == 1 { "" } else { "s" },
                                 )
@@ -2255,18 +2255,6 @@ pub async fn run_ftui_repl(
                         continue;
                     }
 
-                    if comp_mgr.visible && comp_mgr.active_selection && key.code == KeyCode::Right {
-                        if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
-                            let line = text_buf.text().clone();
-                            apply_completion(&mut text_buf, &line, &s);
-                        }
-                        comp_mgr.clear();
-                        redraw = true;
-                        continue;
-                    }
-                    // Typed characters fall through to the main input handler below,
-                    // which inserts the character and re-filters completions live.
-
                     if comp_mgr.visible {
                         match key.code {
                             KeyCode::Esc => {
@@ -2322,7 +2310,7 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Right if comp_mgr.active_selection => {
+                            KeyCode::Right | KeyCode::Enter if comp_mgr.active_selection => {
                                 if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
                                     let line = text_buf.text().clone();
                                     apply_completion(&mut text_buf, &line, &s);
