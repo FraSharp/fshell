@@ -175,9 +175,7 @@ pub struct PromptManager {
 
 impl PromptManager {
     pub fn new(env: Env) -> Self {
-        let current_pwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string());
+        let current_pwd = env.cwd().to_string_lossy().to_string();
 
         let snapshot = refresh_prompt_snapshot(&env, &current_pwd);
 
@@ -208,9 +206,7 @@ impl PromptManager {
     /// Returns true if any prompt state changed (warranting a redraw).
     pub fn update(&mut self) -> bool {
         let mut changed = false;
-        let current_pwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string());
+        let current_pwd = self.env.cwd().to_string_lossy().to_string();
 
         // Update database/environment status snapshot every 1 second
         if self.last_snapshot_update.elapsed() > Duration::from_millis(1000) {

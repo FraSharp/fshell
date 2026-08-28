@@ -375,9 +375,7 @@ pub async fn run_ftui_repl(
         // keep the legacy per-command behavior so the pane rewrite can be
         // A/B'd. A2's complete migration (raw always session-wide) will
         // remove this branch.
-        current_dir = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string());
+        current_dir = env.cwd().to_string_lossy().to_string();
         prompt_mgr.refresh_snapshot(&current_dir);
 
         let _guard: Option<TuiGuard> = if _raw_session.is_some() {
@@ -1434,13 +1432,13 @@ pub async fn run_ftui_repl(
                             // Footer with count info
                             let footer_text = if total_items > visible_rows {
                                 format!(
-                                    " {} of {} — ↑↓ navigate, PgUp/PgDn page, Tab cycle, Enter accept ",
+                                    " {} of {} — ↑↓ navigate, PgUp/PgDn page, Tab/→ accept, Enter run ",
                                     comp_mgr.selected_idx + 1,
                                     total_items,
                                 )
                             } else {
                                 format!(
-                                    " {} item{} — ↑↓ navigate, Enter accept, Esc close ",
+                                    " {} item{} — ↑↓ navigate, Tab/→ accept, Enter run, Esc close ",
                                     total_items,
                                     if total_items == 1 { "" } else { "s" },
                                 )

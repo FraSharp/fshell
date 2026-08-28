@@ -1136,12 +1136,33 @@ fn is_action_allowed(
 impl Env {
     /// Get the logical current working directory for this environment.
     pub fn cwd(&self) -> PathBuf {
-        self.scope.cwd.read().clone()
+        let p = self.scope.cwd.read().clone();
+        if p.exists() {
+            p
+        } else {
+            std::env::current_dir()
+                .ok()
+                .filter(|d| d.exists())
+                .unwrap_or_else(|| PathBuf::from("/"))
+        }
     }
 
-    /// Set the logical current working directory for this environment.
+    /// Set the logical current working directory for this environment,
+    /// synchronizing the process working directory and PWD environment variable.
     pub fn set_cwd(&self, new_cwd: PathBuf) {
-        *self.scope.cwd.write() = new_cwd;
+        *self.scope.cwd.write() = new_cwd.clone();
+        let _ = std::env::set_current_dir(&new_cwd);
+        let pwd_str = new_cwd.to_string_lossy().to_string();
+        {
+            let mut vars = lock_vars!(self.vars.write());
+            vars.insert("PWD".to_string(), Val::String(pwd_str.clone()));
+            if let Some(Val::Map(env_map)) = vars.get("env") {
+                let mut new_map = env_map.clone();
+                new_map.insert(ustr::ustr("PWD"), Val::String(pwd_str.clone()));
+                vars.insert("env".to_string(), Val::Map(new_map));
+            }
+        }
+        fshell_core::set_var("PWD", &pwd_str);
     }
 
     /// Check if strict capability enforcement mode is active.
@@ -1720,7 +1741,10 @@ impl Env {
         let (reactive_tx, reactive_rx) = tokio::sync::mpsc::channel(1000);
         let (cap_prompt_tx, cap_prompt_rx) = tokio::sync::mpsc::channel(PIPELINE_CHANNEL_SIZE);
         let exe_path = Arc::new(crate::exe::resolve_exe());
-        let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let initial_cwd = std::env::current_dir()
+            .ok()
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| PathBuf::from("/"));
         let env = Env {
             scope: scope::Scope {
                 vars: Arc::new(RwLock::new(FxHashMap::default())),

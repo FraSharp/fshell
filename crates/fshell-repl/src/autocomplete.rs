@@ -708,10 +708,9 @@ fn process_parse_request(name: &str) {
 
 // Git branch/tag completions
 
-/// Get git branches for the current repository.
-pub fn git_branches() -> Vec<String> {
-    let pwd = std::env::current_dir().unwrap_or_default();
-    let repo = match fshell_git::repo::Repository::discover(&pwd) {
+/// Get git branches for the specified directory.
+pub fn git_branches_for_path(pwd: &std::path::Path) -> Vec<String> {
+    let repo = match fshell_git::repo::Repository::discover(pwd) {
         Ok(r) => r,
         Err(_) => return vec![],
     };
@@ -728,8 +727,16 @@ pub fn git_branches() -> Vec<String> {
         .collect()
 }
 
+/// Get git branches for the current repository.
+pub fn git_branches() -> Vec<String> {
+    let pwd = std::env::current_dir().unwrap_or_default();
+    git_branches_for_path(&pwd)
+}
+
 /// Get cached git branches (uses Env cache, invalidated on chpwd or .git/HEAD change).
 pub fn git_branches_cached(env: &fshell_engine::Env) -> Vec<String> {
+    let cwd = env.cwd();
+    let head_path = cwd.join(".git/HEAD");
     // Fast path: check cache with read lock. Only stat .git/HEAD when TTL
     // has expired — avoids a syscall on every keystroke.
     {
@@ -741,7 +748,7 @@ pub fn git_branches_cached(env: &fshell_engine::Env) -> Vec<String> {
         }
         // TTL expired: validate against .git/HEAD mtime before falling through
         if let Some((_, branches, head_mtime)) = cache.as_ref()
-            && let Ok(current_mtime) = std::fs::metadata(".git/HEAD").and_then(|m| m.modified())
+            && let Ok(current_mtime) = std::fs::metadata(&head_path).and_then(|m| m.modified())
             && current_mtime == *head_mtime
         {
             // mtime unchanged — refresh TTL and return cached
@@ -754,8 +761,8 @@ pub fn git_branches_cached(env: &fshell_engine::Env) -> Vec<String> {
         }
     }
     // Cache miss: acquire write lock to populate
-    let branches = git_branches();
-    let head_mtime = std::fs::metadata(".git/HEAD")
+    let branches = git_branches_for_path(&cwd);
+    let head_mtime = std::fs::metadata(&head_path)
         .and_then(|m| m.modified())
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
     {

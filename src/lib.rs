@@ -450,7 +450,7 @@ fn restore_handoff_state(env: &fshell_engine::Env, state: fshell_engine::handoff
             pipes.insert(k, v);
         }
     }
-    let _ = std::env::set_current_dir(&state.cwd);
+    env.set_cwd(std::path::PathBuf::from(&state.cwd));
     {
         let mut opts = env.options.write();
         *opts = state.options;

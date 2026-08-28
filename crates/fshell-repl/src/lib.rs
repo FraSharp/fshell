@@ -2043,9 +2043,7 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
         env.set_theme(std::sync::Arc::new(t));
     }
 
-    if let Ok(pwd) = std::env::current_dir() {
-        emit_osc7(&pwd.to_string_lossy());
-    }
+    emit_osc7(&env.cwd().to_string_lossy());
     let mut session_id = {
         let vars = env.vars.read();
         if let Some(Val::String(s)) = vars.get("FSH_SESSION_ID") {
@@ -2376,7 +2374,7 @@ fn restore_session_state(env: &Env, state: fshell_engine::handoff::HandoffState)
             pipes.insert(k, v);
         }
     }
-    let _ = std::env::set_current_dir(&state.cwd);
+    env.set_cwd(std::path::PathBuf::from(&state.cwd));
     {
         let mut opts = env.options.write();
         *opts = state.options;
@@ -2430,9 +2428,7 @@ fn save_session_state(env: &Env, session_id: &str) {
                 pipes.clone()
             },
             session_id: session_id.to_string(),
-            cwd: std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "/".to_string()),
+            cwd: env.cwd().to_string_lossy().to_string(),
             options: env.options.read().clone(),
             hooks: env.hooks.registry.read().clone(),
             last_exit_code: *env.prompt.last_exit_code.read(),
@@ -2742,7 +2738,7 @@ pub(crate) async fn handle_line_generic(
 
     fshell_engine::run_hooks("preexec", env).await;
 
-    let prev_pwd = std::env::current_dir().ok();
+    let prev_pwd = env.cwd();
 
     env.job_control
         .sigint_pending
@@ -2753,9 +2749,7 @@ pub(crate) async fn handle_line_generic(
         .duration_since(std::time::UNIX_EPOCH)
         .expect("SystemTime before UNIX_EPOCH")
         .as_millis() as i64;
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "/".to_string());
+    let cwd = env.cwd().to_string_lossy().to_string();
     let username = std::env::var("USER")
         .unwrap_or_else(|_| std::env::var("USERNAME").unwrap_or_else(|_| "unknown".to_string()));
     let host = get_hostname();
@@ -3219,9 +3213,10 @@ pub(crate) async fn handle_line_generic(
     // For most commands this is fine; for `reload -bd` it's essential since
     // the process is replaced before any async logging can run.
 
-    let new_pwd = std::env::current_dir().ok();
+    let new_pwd = env.cwd();
     if prev_pwd != new_pwd {
         fshell_engine::invalidate_git_cache(env);
+        prompt::clear_git_status_cache();
         fshell_engine::run_hooks("chpwd", env).await;
     }
 

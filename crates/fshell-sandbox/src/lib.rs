@@ -14,7 +14,6 @@ pub use profile::{SandboxMode, SandboxProfile};
 
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream};
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWriteExt};
@@ -123,9 +122,7 @@ pub fn run_sandboxed(
             eprint!(
                 "[fshell sandbox:prompt] Run '{}' sandboxed (ReadOnlySystem, cwd={}, allow={:?})? [Y/n] ",
                 name,
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .display(),
+                env.cwd().display(),
                 config.profile.allow_write_paths
             );
             let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -176,7 +173,7 @@ pub fn run_sandboxed(
     }
 
     // Set working directory
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = env.cwd();
     cmd.current_dir(&cwd);
 
     // Apply OS kernel sandbox via pre_exec (unless Off)
