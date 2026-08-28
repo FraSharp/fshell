@@ -2334,16 +2334,6 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Enter if comp_mgr.active_selection => {
-                                if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
-                                    let line = text_buf.text().clone();
-                                    apply_completion(&mut text_buf, &line, &s);
-                                }
-                                comp_mgr
-                                    .refresh_after_completion(&text_buf.text(), text_buf.cursor());
-                                redraw = true;
-                                continue;
-                            }
                             _ => {}
                         }
                     }

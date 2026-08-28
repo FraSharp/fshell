@@ -1158,7 +1158,10 @@ mod tests {
         if let Stmt::Expr(expr) = stmts[0].unpack() {
             if let Expr::Pipeline(pipeline) = expr.unpack() {
                 assert_eq!(pipeline.stages.len(), 1);
-                if let PipelineStage::CommandCall { name, args, env } = &pipeline.stages[0] {
+                if let PipelineStage::CommandCall {
+                    name, args, env, ..
+                } = &pipeline.stages[0]
+                {
                     assert_eq!(name, "echo");
                     assert_eq!(args.len(), 1);
                     assert_eq!(env.len(), 1);
@@ -1182,7 +1185,10 @@ mod tests {
         if let Stmt::Expr(expr) = stmts[0].unpack() {
             if let Expr::Pipeline(pipeline) = expr.unpack() {
                 assert_eq!(pipeline.stages.len(), 1);
-                if let PipelineStage::CommandCall { name, args, env } = &pipeline.stages[0] {
+                if let PipelineStage::CommandCall {
+                    name, args, env, ..
+                } = &pipeline.stages[0]
+                {
                     assert_eq!(name, "/tmp/test.sh");
                     assert!(args.is_empty());
                     assert_eq!(env.len(), 1);
@@ -1206,7 +1212,10 @@ mod tests {
         if let Stmt::Expr(expr) = stmts[0].unpack() {
             if let Expr::Pipeline(pipeline) = expr.unpack() {
                 assert_eq!(pipeline.stages.len(), 1);
-                if let PipelineStage::CommandCall { name, args, env } = &pipeline.stages[0] {
+                if let PipelineStage::CommandCall {
+                    name, args, env, ..
+                } = &pipeline.stages[0]
+                {
                     assert_eq!(name, "echo");
                     assert_eq!(args.len(), 1);
                     assert_eq!(env.len(), 3);

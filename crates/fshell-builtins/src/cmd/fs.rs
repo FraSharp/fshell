@@ -755,48 +755,11 @@ pub fn cd_builtin(
         raw_path.clone()
     };
 
-    let target_path = match std::fs::canonicalize(&resolved_raw) {
-        Ok(target_path) => target_path,
-        Err(e) => {
-            let mut resolved = None;
-            if !args.is_empty()
-                && let Val::String(_) = args[0]
-            {
-                let mut fragments = Vec::new();
-                let mut subdirectory_only = false;
-                for arg in &args {
-                    if let Val::String(s) = arg {
-                        if s == "/" {
-                            subdirectory_only = true;
-                        } else {
-                            fragments.push(s.to_lowercase());
-                        }
-                    }
-                }
-                if let Ok(matched_path) = crate::cmd::frecency::resolve_z_match(
-                    &fragments,
-                    subdirectory_only,
-                    Some(&env.cwd()),
-                ) {
-                    let _ = tx.try_send(PipelinePayload::Data(Arc::new(Val::String(
-                        matched_path.display().to_string(),
-                    ))));
-                    resolved = Some(matched_path);
-                }
-            }
-
-            if let Some(r) = resolved {
-                r
-            } else {
-                return Err(BuiltinError::IoError {
-                    cmd: "cd".into(),
-                    message: format!("invalid path {raw_path:?}: {e}"),
-                    span,
-                }
-                .into());
-            }
-        }
-    };
+    let target_path = std::fs::canonicalize(&resolved_raw).map_err(|e| BuiltinError::IoError {
+        cmd: "cd".into(),
+        message: format!("invalid path {raw_path:?}: {e}"),
+        span,
+    })?;
 
     cd_change_dir(&target_path, env)?;
     drop(tx);
