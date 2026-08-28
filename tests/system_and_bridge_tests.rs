@@ -13,17 +13,25 @@ use std::path::PathBuf;
 
 #[tokio::test]
 async fn test_integration_cd_and_paths() {
-    let _cwd_guard = ProcessLockGuard::acquire();
+    let cwd_guard = CwdGuard::new_temp();
     let env = setup_test_env();
-    let old_dir = env.cwd();
 
-    // Grant capability for the parent directory to allow cd .. in sandbox
+    // Create a sub-directory and move into it
+    let parent_dir = cwd_guard.path().canonicalize().unwrap();
+    let sub_dir = parent_dir.join("subdir");
+    std::fs::create_dir(&sub_dir).unwrap();
+    let sub_dir_canon = sub_dir.canonicalize().unwrap();
+
     env.caps
         .caps
         .write()
-        .grant(fshell_core::ResourceHandle::ReadDir(
-            old_dir.parent().unwrap().to_path_buf(),
-        ));
+        .grant(fshell_core::ResourceHandle::ReadDir(parent_dir.clone()));
+    env.caps
+        .caps
+        .write()
+        .grant(fshell_core::ResourceHandle::ReadDir(sub_dir_canon.clone()));
+
+    env.set_cwd(sub_dir_canon.clone());
 
     // Test cd ..
     let mut parser = Parser::new("cd ..");
@@ -34,7 +42,49 @@ async fn test_integration_cd_and_paths() {
     let new_dir = env.cwd();
 
     // It should have successfully moved to the parent directory
-    assert_eq!(new_dir, old_dir.parent().unwrap());
+    assert_eq!(new_dir.canonicalize().unwrap(), parent_dir);
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        parent_dir
+    );
+    assert_eq!(
+        env.vars.read().get("PWD").unwrap(),
+        &Val::String(parent_dir.to_string_lossy().to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_integration_cd_syncs_process_and_env_vars() {
+    let cwd_guard = CwdGuard::new_temp();
+    let env = setup_test_env();
+    let parent_dir = cwd_guard.path().canonicalize().unwrap();
+    let sub_dir = parent_dir.join("test_cd_target");
+    std::fs::create_dir(&sub_dir).unwrap();
+    let target_canon = sub_dir.canonicalize().unwrap();
+
+    env.caps
+        .caps
+        .write()
+        .grant(fshell_core::ResourceHandle::ReadDir(target_canon.clone()));
+
+    let script = format!("cd \"{}\"", target_canon.display());
+    let mut parser = Parser::new(&script);
+    let stmts = parser.parse_statements().unwrap();
+    eval_stmt(&stmts[0], &env, false).await.unwrap();
+
+    assert_eq!(env.cwd().canonicalize().unwrap(), target_canon);
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        target_canon
+    );
+    assert_eq!(
+        env.vars.read().get("PWD").unwrap(),
+        &Val::String(target_canon.to_string_lossy().to_string())
+    );
+    assert_eq!(
+        fshell_core::get_var("PWD").unwrap().to_string_lossy(),
+        target_canon.to_string_lossy()
+    );
 }
 
 #[tokio::test]

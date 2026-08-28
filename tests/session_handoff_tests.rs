@@ -185,3 +185,41 @@ let next_lvl = ($CONFIG_LVL + 1)
     );
     assert_eq!(read_vars.get("next_lvl"), Some(&Val::Int(4)));
 }
+
+#[tokio::test]
+async fn test_handoff_cwd_synchronization() {
+    let cwd_guard = CwdGuard::new_temp();
+    let env = setup_test_env();
+
+    let target_dir = cwd_guard.path().canonicalize().unwrap();
+    let sub = target_dir.join("handoff_target");
+    std::fs::create_dir(&sub).unwrap();
+    let sub_canon = sub.canonicalize().unwrap();
+
+    let state = HandoffState {
+        vars: FxHashMap::default(),
+        fns: FxHashMap::default(),
+        caps_held: std::collections::HashSet::new(),
+        caps_strict_mode: false,
+        reactive_pipelines: FxHashMap::default(),
+        session_id: "handoff-sync-session".to_string(),
+        cwd: sub_canon.to_string_lossy().to_string(),
+        options: fshell_engine::ShellOptions::default(),
+        hooks: FxHashMap::default(),
+        last_exit_code: 0,
+        last_duration_secs: 0.0,
+    };
+
+    // Restore state
+    env.set_cwd(std::path::PathBuf::from(&state.cwd));
+
+    assert_eq!(env.cwd().canonicalize().unwrap(), sub_canon);
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        sub_canon
+    );
+    assert_eq!(
+        env.vars.read().get("PWD").unwrap(),
+        &Val::String(sub_canon.to_string_lossy().to_string())
+    );
+}

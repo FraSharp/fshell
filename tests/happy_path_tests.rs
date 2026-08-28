@@ -680,10 +680,11 @@ let parts = (string split ", " $upper)
 
 #[tokio::test]
 async fn test_happy_directory_stack_pushd_popd() {
+    let cwd_guard = CwdGuard::new_temp();
     let env = setup_test_env();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let dir_a = temp_dir.path().join("dir_a");
-    let dir_b = temp_dir.path().join("dir_b");
+    let parent = cwd_guard.path();
+    let dir_a = parent.join("dir_a");
+    let dir_b = parent.join("dir_b");
     std::fs::create_dir(&dir_a).unwrap();
     std::fs::create_dir(&dir_b).unwrap();
 
@@ -708,6 +709,7 @@ let in_a = (pwd)
 
 #[tokio::test]
 async fn test_happy_heredoc_config_generation() {
+    let _guard = ProcessLockGuard::acquire();
     let env = setup_test_env();
     let temp_dir = tempfile::tempdir().unwrap();
     let config_file = temp_dir.path().join("generated_config.yaml");

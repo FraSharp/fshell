@@ -428,7 +428,7 @@ async fn test_path_completion_with_env_var() {
 
 #[tokio::test]
 async fn test_dotfile_completion_with_alias_prefix() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap();
+    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     // Full-line test: user types "hx .co" / "hx .com" where hx is an alias.
     // Completer must resolve alias and fall through to file completion.
     let tmp = std::env::temp_dir().join("fsh_compl_alias");
@@ -436,22 +436,20 @@ async fn test_dotfile_completion_with_alias_prefix() {
     let dotdir = tmp.join(".commandcode");
     std::fs::create_dir_all(&dotdir).ok();
 
-    let cwd = std::env::current_dir().ok();
-    std::env::set_current_dir(&tmp).ok();
-
     let env = Env::new();
+    let orig_cwd = env.cwd();
+    env.set_cwd(tmp.canonicalize().unwrap());
+
     builtins_init(&env);
     bridge_init(&env);
     // Register hx as an alias (mimics the user's real config)
     env.register_alias("hx", "hx");
-    let mut c = FshellCompleter { env };
+    let mut c = FshellCompleter { env: env.clone() };
 
     let results_dotco = c.complete("hx .co", 6);
     let results_dotcom = c.complete("hx .com", 7);
 
-    if let Some(d) = cwd {
-        std::env::set_current_dir(d).ok();
-    }
+    env.set_cwd(orig_cwd);
     let _ = std::fs::remove_dir_all(&tmp);
 
     let values_co: Vec<_> = results_dotco.iter().map(|s| s.value.as_str()).collect();
@@ -478,7 +476,7 @@ async fn test_dotfile_completion_with_alias_prefix() {
 
 #[tokio::test]
 async fn test_dotfile_completion_shows_for_partial_prefix() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap();
+    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     // Create temp dir with a hidden .commandcode dir, then check it appears
     // for both ".co" and ".com" queries — regression: .com must still match.
     let tmp = std::env::temp_dir().join("fsh_compl_dotfile");
@@ -486,19 +484,16 @@ async fn test_dotfile_completion_shows_for_partial_prefix() {
     let dotdir = tmp.join(".commandcode");
     std::fs::create_dir_all(&dotdir).ok();
 
-    let cwd = std::env::current_dir().ok();
-    std::env::set_current_dir(&tmp).ok();
-
     let mut c = make_completer();
+    let orig_cwd = c.env.cwd();
+    c.env.set_cwd(tmp.canonicalize().unwrap());
 
     // cd to the dir so bare ".prefix" resolves to local files
     let results_dotco = c.complete(".co", 3);
     let results_dotcom = c.complete(".com", 4);
 
     // Restore cwd
-    if let Some(d) = cwd {
-        std::env::set_current_dir(d).ok();
-    }
+    c.env.set_cwd(orig_cwd);
     let _ = std::fs::remove_dir_all(&tmp);
 
     let values_co: Vec<_> = results_dotco.iter().map(|s| s.value.as_str()).collect();
@@ -525,7 +520,7 @@ async fn test_dotfile_completion_shows_for_partial_prefix() {
 
 #[tokio::test]
 async fn test_path_completion_with_pwd_var() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap();
+    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     // $PWD is always set and points to a real directory with known content
     let mut c = make_completer();
     // The current directory is the project root - $PWD/Cargo.toml should exist
@@ -542,16 +537,15 @@ async fn test_path_completion_with_pwd_var() {
 
 #[tokio::test]
 async fn test_tui_completions_sequence() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap();
+    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = std::env::temp_dir().join("fsh_compl_tui_seq");
     let _ = std::fs::create_dir_all(&tmp);
     let dotdir = tmp.join(".commandcode");
     std::fs::create_dir_all(&dotdir).ok();
 
-    let cwd = std::env::current_dir().ok();
-    std::env::set_current_dir(&tmp).ok();
-
     let env = Env::new();
+    let orig_cwd = env.cwd();
+    env.set_cwd(tmp.canonicalize().unwrap());
     {
         let mut opts = env.options.write();
         opts.sandbox_mode = "off".to_string();
@@ -560,7 +554,7 @@ async fn test_tui_completions_sequence() {
     bridge_init(&env);
     env.register_alias("hx", "hx");
 
-    let mut comp_mgr = fshell_repl::ftui::completions::CompletionsManager::new(env);
+    let mut comp_mgr = fshell_repl::ftui::completions::CompletionsManager::new(env.clone());
 
     // 1. User types "hx .co" and presses Tab (force_visible = true)
     comp_mgr.update("hx .co", 6, true);
@@ -598,9 +592,7 @@ async fn test_tui_completions_sequence() {
     println!("SUGGESTIONS FOR 'hx com': {:?}", suggestions_bare_com);
 
     // Restore cwd
-    if let Some(d) = cwd {
-        std::env::set_current_dir(d).ok();
-    }
+    env.set_cwd(orig_cwd);
     let _ = std::fs::remove_dir_all(&tmp);
 
     assert!(
@@ -902,4 +894,49 @@ async fn test_get_path_executables_direct_happy_and_missing() {
 
     invalidate_path_cache();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_completions_update_after_cd() {
+    let _guard = TEST_CWD_MUTEX.lock().unwrap();
+    let orig_cwd = std::env::current_dir().ok();
+
+    let tmp = std::env::temp_dir().join("fsh_compl_cd_update");
+    let _ = std::fs::create_dir_all(&tmp);
+    let dir_a = tmp.join("dir_a");
+    let dir_b = tmp.join("dir_b");
+    std::fs::create_dir_all(&dir_a).ok();
+    std::fs::create_dir_all(&dir_b).ok();
+
+    std::fs::write(dir_a.join("alpha_file.txt"), "hello").ok();
+    std::fs::write(dir_b.join("beta_file.txt"), "world").ok();
+
+    let env = Env::new();
+    builtins_init(&env);
+    bridge_init(&env);
+
+    // Change to dir_a via env.set_cwd
+    env.set_cwd(dir_a.canonicalize().unwrap());
+    let mut c = FshellCompleter { env: env.clone() };
+
+    let results_a = c.complete("alp", 3);
+    assert!(
+        results_a.iter().any(|s| s.value.contains("alpha_file")),
+        "Completer should find alpha_file in dir_a, got: {:?}",
+        results_a.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+
+    // Change to dir_b via env.set_cwd
+    env.set_cwd(dir_b.canonicalize().unwrap());
+    let results_b = c.complete("bet", 3);
+    assert!(
+        results_b.iter().any(|s| s.value.contains("beta_file")),
+        "Completer should find beta_file in dir_b, got: {:?}",
+        results_b.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+
+    if let Some(orig) = orig_cwd {
+        std::env::set_current_dir(orig).ok();
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
 }

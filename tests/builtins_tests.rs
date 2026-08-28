@@ -632,7 +632,7 @@ async fn test_integration_touch_rm_mkdir() {
 
 #[tokio::test]
 async fn test_integration_pushd_popd_dirs() {
-    let _cwd_guard = ProcessLockGuard::acquire();
+    let _cwd_guard = CwdGuard::new_temp();
     let env = setup_test_env();
     let tmp = std::env::temp_dir();
     let dir1 = tmp.join("fshell_test_dir1");
@@ -1209,7 +1209,7 @@ async fn test_integration_disabled_builtins() {
 
 #[tokio::test]
 async fn test_integration_pushd_popd_dirs_streaming() {
-    let _cwd_guard = ProcessLockGuard::acquire();
+    let _cwd_guard = CwdGuard::new_temp();
     let env = setup_test_env();
 
     // pushd /tmp | ...
