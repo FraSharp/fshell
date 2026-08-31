@@ -510,7 +510,7 @@ mod tests {
     fn test_ai_help_via_main() {
         let env = fshell_engine::Env::new();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let result = ai_main(None, vec![Val::String("--help".into())], &env, tx);
+        let result = ai_main(None, vec![Val::String("--help".into())], &env, tx, None);
         assert!(result.is_ok());
     }
 
@@ -523,6 +523,7 @@ mod tests {
             vec![Val::String("--list-providers".into())],
             &env,
             tx.clone(),
+            None,
         );
         assert!(result.is_ok());
         // Should receive a message listing providers
@@ -543,7 +544,7 @@ mod tests {
     fn test_ai_chat_sets_env_flag() {
         let env = fshell_engine::Env::new();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let result = ai_main(None, vec![Val::String("--chat".into())], &env, tx);
+        let result = ai_main(None, vec![Val::String("--chat".into())], &env, tx, None);
         assert!(result.is_ok());
         let chat_mode = env.chat_mode.lock().unwrap();
         assert!(chat_mode.is_some());
@@ -553,7 +554,7 @@ mod tests {
     fn test_ai_empty_prompt_sets_env_flag() {
         let env = fshell_engine::Env::new();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let result = ai_main(None, vec![], &env, tx);
+        let result = ai_main(None, vec![], &env, tx, None);
         assert!(result.is_ok());
         let chat_mode = env.chat_mode.lock().unwrap();
         assert!(chat_mode.is_some());
@@ -574,6 +575,7 @@ mod tests {
             ],
             &env,
             tx,
+            None,
         );
         assert!(result.is_ok());
         let chat_mode = env.chat_mode.lock().unwrap();

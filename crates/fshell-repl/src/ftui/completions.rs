@@ -37,7 +37,7 @@ fn truncate_by_width(s: &str, max_width: usize) -> String {
     out
 }
 
-/// Category groups for rendering completions with headers
+/// Category groups for rendering completions with clean textual badges
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionCategory {
     Directory,
@@ -56,58 +56,74 @@ pub enum CompletionCategory {
 }
 
 impl CompletionCategory {
-    pub fn icon(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            CompletionCategory::Directory => "d",
-            CompletionCategory::File => "f",
-            CompletionCategory::Command => "!",
-            CompletionCategory::Builtin => "*",
-            CompletionCategory::Alias => "@",
-            CompletionCategory::Function => "ƒ",
-            CompletionCategory::Variable => "$",
-            CompletionCategory::Job => "%",
-            CompletionCategory::Flag => "—",
-            CompletionCategory::Pipeline => "▸",
-            CompletionCategory::Keyword => "kw",
-            CompletionCategory::History => "#",
-            CompletionCategory::Ref => "&",
+            CompletionCategory::Directory => "dir",
+            CompletionCategory::File => "file",
+            CompletionCategory::Command => "cmd",
+            CompletionCategory::Builtin => "builtin",
+            CompletionCategory::Alias => "alias",
+            CompletionCategory::Function => "fn",
+            CompletionCategory::Variable => "var",
+            CompletionCategory::Job => "job",
+            CompletionCategory::Flag => "flag",
+            CompletionCategory::Pipeline => "pipe",
+            CompletionCategory::Keyword => "keyword",
+            CompletionCategory::History => "history",
+            CompletionCategory::Ref => "branch",
         }
+    }
+
+    pub fn badge(self) -> &'static str {
+        self.label()
+    }
+
+    pub fn icon(self) -> &'static str {
+        ""
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            CompletionCategory::Directory => "Dirs",
-            CompletionCategory::File => "Files",
-            CompletionCategory::Command => "Commands",
-            CompletionCategory::Builtin => "Builtins",
-            CompletionCategory::Alias => "Aliases",
-            CompletionCategory::Function => "Functions",
-            CompletionCategory::Variable => "Variables",
-            CompletionCategory::Job => "Jobs",
-            CompletionCategory::Flag => "Flags",
+            CompletionCategory::Directory => "Directory",
+            CompletionCategory::File => "File",
+            CompletionCategory::Command => "Command",
+            CompletionCategory::Builtin => "Builtin",
+            CompletionCategory::Alias => "Alias",
+            CompletionCategory::Function => "Function",
+            CompletionCategory::Variable => "Variable",
+            CompletionCategory::Job => "Job",
+            CompletionCategory::Flag => "Flag",
             CompletionCategory::Pipeline => "Pipeline",
-            CompletionCategory::Keyword => "Keywords",
+            CompletionCategory::Keyword => "Keyword",
             CompletionCategory::History => "History",
-            CompletionCategory::Ref => "References",
+            CompletionCategory::Ref => "Reference",
         }
     }
 
-    pub fn header_style(self, theme: &CompletionsTheme) -> Style {
+    pub fn icon_style(self, theme: &CompletionsTheme) -> Style {
         match self {
-            CompletionCategory::Directory => theme.header_directory.to_style_dim(),
+            CompletionCategory::Directory => theme.header_directory.to_style_bold(),
             CompletionCategory::File => theme.header_file.to_style_dim(),
-            CompletionCategory::Command => theme.header_command.to_style_dim(),
-            CompletionCategory::Builtin => theme.header_builtin.to_style_dim(),
-            CompletionCategory::Alias => theme.header_alias.to_style_dim(),
-            CompletionCategory::Function => theme.header_function.to_style_dim(),
-            CompletionCategory::Variable => theme.header_variable.to_style_dim(),
+            CompletionCategory::Command => theme.header_command.to_style_bold(),
+            CompletionCategory::Builtin => theme.header_builtin.to_style_bold(),
+            CompletionCategory::Alias => theme.header_alias.to_style_bold(),
+            CompletionCategory::Function => theme.header_function.to_style_bold(),
+            CompletionCategory::Variable => theme.header_variable.to_style_bold(),
             CompletionCategory::Flag => theme.header_flag.to_style_dim(),
-            CompletionCategory::Pipeline => theme.header_pipeline.to_style_dim(),
-            CompletionCategory::Keyword => theme.header_keyword.to_style_dim(),
+            CompletionCategory::Pipeline => theme.header_pipeline.to_style_bold(),
+            CompletionCategory::Keyword => theme.header_keyword.to_style_bold(),
             CompletionCategory::Job => theme.header_job.to_style_dim(),
             CompletionCategory::History => theme.header_history.to_style_dim(),
-            CompletionCategory::Ref => theme.header_ref.to_style_dim(),
+            CompletionCategory::Ref => theme.header_ref.to_style_bold(),
         }
+    }
+
+    pub fn badge_style(self, theme: &CompletionsTheme) -> Style {
+        self.icon_style(theme)
+    }
+
+    pub fn header_style(self, theme: &CompletionsTheme) -> Style {
+        self.icon_style(theme)
     }
 
     /// Get the value style for a completion item (non-selected state).
@@ -130,6 +146,55 @@ impl CompletionCategory {
             CompletionCategory::Ref => theme.header_ref.to_style(),
         }
     }
+}
+
+/// Helper to render matched substring characters with highlight styling
+pub fn render_highlighted_spans(
+    text: &str,
+    match_indices: Option<&[usize]>,
+    base_style: Style,
+    highlight_style: Style,
+) -> Vec<Span<'static>> {
+    let Some(indices) = match_indices else {
+        return vec![Span::styled(text.to_string(), base_style)];
+    };
+    if indices.is_empty() {
+        return vec![Span::styled(text.to_string(), base_style)];
+    }
+
+    let mut spans = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut current_segment = String::new();
+    let mut is_highlighted = false;
+
+    for (i, &c) in chars.iter().enumerate() {
+        let matches = indices.contains(&i);
+        if matches != is_highlighted && !current_segment.is_empty() {
+            let style = if is_highlighted {
+                highlight_style
+            } else {
+                base_style
+            };
+            spans.push(Span::styled(std::mem::take(&mut current_segment), style));
+        }
+        is_highlighted = matches;
+        current_segment.push(c);
+    }
+    if !current_segment.is_empty() {
+        let style = if is_highlighted {
+            highlight_style
+        } else {
+            base_style
+        };
+        spans.push(Span::styled(current_segment, style));
+    }
+    spans
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionLayoutMode {
+    List,
+    Grid { cols: usize, col_width: usize },
 }
 
 /// A categorized suggestion with its group info
@@ -326,6 +391,7 @@ pub struct CompletionsManager {
     pub selected_idx: usize,
     pub scroll_offset: usize,
     pub visible: bool,
+    pub session_active: bool,
     pub lscolors: LsColors,
     pub active_selection: bool,
     /// True when the longest common prefix has already been filled in by a previous Tab
@@ -345,6 +411,7 @@ impl CompletionsManager {
             selected_idx: 0,
             scroll_offset: 0,
             visible: false,
+            session_active: false,
             lscolors: LsColors::from_env().unwrap_or_default(),
             active_selection: false,
             prefix_accepted: false,
@@ -358,6 +425,15 @@ impl CompletionsManager {
 
     pub fn update(&mut self, line: &str, cursor_pos: usize, force_visible: bool) {
         self.active_selection = false;
+        if force_visible {
+            self.session_active = true;
+        }
+
+        // Skip full completer when completions session is not active and not explicitly requested
+        if !force_visible && !self.session_active {
+            return;
+        }
+
         if line.trim().is_empty() {
             if force_visible {
                 // Tab on empty line — show curated command list
@@ -425,20 +501,11 @@ impl CompletionsManager {
                 self.filter(partial);
                 self.selected_idx = 0;
                 self.scroll_offset = 0;
-                self.visible = true;
+                self.visible = !self.suggestions.is_empty();
+                self.session_active = self.visible;
             } else {
-                self.suggestions.clear();
-                self.grouped = None;
-                self.all_suggestions.clear();
-                self.selected_idx = 0;
-                self.scroll_offset = 0;
-                self.visible = false;
+                self.clear();
             }
-            return;
-        }
-
-        // Skip full completer when completions aren't visible and not explicitly requested
-        if !force_visible && !self.visible {
             return;
         }
 
@@ -482,19 +549,16 @@ impl CompletionsManager {
         let partial = extract_partial_word(line, cursor_pos);
         self.filter(partial);
 
-        if self.all_suggestions.is_empty() {
+        if self.suggestions.is_empty() {
             self.visible = false;
             self.selected_idx = 0;
             self.scroll_offset = 0;
-        } else if force_visible {
+        } else {
             self.visible = true;
             if self.selected_idx >= self.suggestions.len() {
                 self.selected_idx = 0;
                 self.scroll_offset = 0;
             }
-        } else if self.visible && self.selected_idx >= self.suggestions.len() {
-            self.selected_idx = 0;
-            self.scroll_offset = 0;
         }
     }
 
@@ -516,12 +580,42 @@ impl CompletionsManager {
         }
     }
 
+    pub fn select_down(&mut self, cols: usize) {
+        if self.suggestions.is_empty() {
+            return;
+        }
+        if cols <= 1 {
+            self.select_next();
+        } else {
+            let next = self.selected_idx + cols;
+            if next < self.suggestions.len() {
+                self.selected_idx = next;
+            } else {
+                self.selected_idx %= cols;
+            }
+        }
+    }
+
+    pub fn select_up(&mut self, cols: usize) {
+        if self.suggestions.is_empty() {
+            return;
+        }
+        if cols <= 1 {
+            self.select_prev();
+        } else if self.selected_idx >= cols {
+            self.selected_idx -= cols;
+        } else {
+            let mut target = self.selected_idx;
+            while target + cols < self.suggestions.len() {
+                target += cols;
+            }
+            self.selected_idx = target;
+        }
+    }
+
     /// Fuzzy-filter `all_suggestions` against `partial` word, updating
-    /// `suggestions` and `grouped`. Does NOT call the completer backend.
-    /// Resets `prefix_accepted` so Tab can fill the new LCP after narrowing.
+    /// `suggestions` and `grouped`. Computes fuzzy match indices for live highlighting.
     pub fn filter(&mut self, partial: &str) {
-        // Long-term fix for audit R8: LCP state must follow the filtered set,
-        // not the initial one. Any filter change invalidates prior prefix_accept.
         self.prefix_accepted = false;
         self.filter_query = partial.to_string();
         if partial.is_empty() {
@@ -553,15 +647,21 @@ impl CompletionsManager {
             AtomKind::Fuzzy,
         );
 
-        // Score all items, keep only those that match
-        let mut scored: Vec<(u32, usize, &Suggestion)> = self
+        // Score all items, keep only those that match, and record matched character indices
+        let mut scored: Vec<(u32, usize, Suggestion)> = self
             .all_suggestions
             .iter()
             .enumerate()
             .filter_map(|(i, s)| {
                 let haystack = Utf32String::from(s.value.as_str());
-                let score = pattern.score(haystack.slice(..), &mut self.nucleo_matcher)?;
-                Some((score, i, s))
+                let mut indices = Vec::new();
+                let score =
+                    pattern.indices(haystack.slice(..), &mut self.nucleo_matcher, &mut indices)?;
+                let mut suggestion = s.clone();
+                indices.sort_unstable();
+                suggestion.match_indices =
+                    Some(indices.into_iter().map(|idx| idx as usize).collect());
+                Some((score, i, suggestion))
             })
             .collect();
 
@@ -578,14 +678,12 @@ impl CompletionsManager {
                 .then_with(|| a.1.cmp(&b.1))
         });
 
-        self.suggestions = scored.into_iter().map(|(_, _, s)| s.clone()).collect();
+        self.suggestions = scored.into_iter().map(|(_, _, s)| s).collect();
 
         self.grouped = if self.suggestions.is_empty() {
             None
         } else {
             let grouped = GroupedSuggestions::new(self.suggestions.clone());
-            // Re-order suggestions to match grouped.items order so that
-            // selected_idx is consistent between suggestions and grouped navigation.
             self.suggestions = grouped
                 .items
                 .iter()
@@ -603,129 +701,21 @@ impl CompletionsManager {
         }
     }
 
-    /// Advance selection by `page_size` visible display lines, accounting for group headers.
-    /// In grouped mode, headers consume display rows that don't correspond to suggestion indices.
-    /// We walk forward suggestion-by-suggestion, counting the display lines consumed (including headers),
-    /// until we've consumed at least `page_size` display lines.
+    /// Advance selection by `page_size` visible display lines
     pub fn page_down(&mut self, page_size: usize) {
         if self.suggestions.is_empty() {
             return;
         }
-        let page_size = page_size.max(1);
-        if let Some(ref grouped) = self.grouped {
-            let group_sizes = grouped.group_sizes();
-            let mut display_consumed = 0usize;
-            let mut target_idx = self.selected_idx;
-            // Walk forward through groups
-            for (gi, count) in group_sizes.iter().enumerate() {
-                let group_start: usize = group_sizes[..gi].iter().sum();
-                let group_end = group_start + count;
-                if target_idx < group_start {
-                    // Haven't reached this group yet — skip header too
-                    continue;
-                }
-                if target_idx >= group_end {
-                    // Past this group — skip
-                    continue;
-                }
-                // We're inside this group
-                let remaining_in_group = group_end - target_idx;
-                let display_needed = page_size.saturating_sub(display_consumed);
-                if display_needed <= remaining_in_group {
-                    target_idx += display_needed;
-                    display_consumed = page_size;
-                    break;
-                } else {
-                    target_idx = group_end; // end of this group
-                    display_consumed += remaining_in_group;
-                    // Add 1 for this group's header (we'll "consume" it when we enter next group)
-                    // Actually we already counted the header at the start — the header for next group
-                    // is only consumed when we step into it
-                    if gi + 1 < group_sizes.len() {
-                        // To 'enter' the next group, we must consume 1 display line (its header)
-                        if display_consumed + 1 >= page_size {
-                            // We'd land on the next group's header — pick first item of next group
-                            target_idx = group_end; // first item of next group
-                            display_consumed = page_size;
-                            break;
-                        }
-                        display_consumed += 1; // consume the header
-                        // Continue to next group
-                    }
-                }
-            }
-            if display_consumed < page_size {
-                // Hit the end — go to last item
-                target_idx = self.suggestions.len().saturating_sub(1);
-            }
-            self.selected_idx = target_idx.min(self.suggestions.len().saturating_sub(1));
-        } else {
-            // Ungrouped: simple advance
-            let new_idx = self.selected_idx.saturating_add(page_size);
-            self.selected_idx = new_idx.min(self.suggestions.len().saturating_sub(1));
-        }
+        let next = self.selected_idx.saturating_add(page_size.max(1));
+        self.selected_idx = next.min(self.suggestions.len().saturating_sub(1));
     }
 
-    /// Move selection backward by `page_size` visible display lines, accounting for group headers.
+    /// Move selection backward by `page_size` visible display lines
     pub fn page_up(&mut self, page_size: usize) {
         if self.suggestions.is_empty() {
             return;
         }
-        let page_size = page_size.max(1);
-        if let Some(ref grouped) = self.grouped {
-            let group_sizes = grouped.group_sizes();
-            let mut display_consumed = 0usize;
-            let mut target_idx = self.selected_idx;
-            // Walk backward through groups (reversed iteration)
-            for gi in (0..group_sizes.len()).rev() {
-                let count = group_sizes[gi];
-                let group_start: usize = group_sizes[..gi].iter().sum();
-                let group_end = group_start + count;
-                if target_idx >= group_end {
-                    // Past this group — haven't reached it yet going backward
-                    continue;
-                }
-                if target_idx < group_start {
-                    // Before this group — skip
-                    continue;
-                }
-                // We're inside (or at the boundary of) this group
-                let offset_in_group = target_idx - group_start;
-                // Items we can move back within this group
-                let display_needed = page_size.saturating_sub(display_consumed);
-                if display_needed <= offset_in_group {
-                    target_idx -= display_needed;
-                    display_consumed = page_size;
-                    break;
-                } else {
-                    display_consumed += offset_in_group;
-                    target_idx = group_start; // back to start of this group
-                    // Consume header to go to previous group
-                    if gi > 0 && display_consumed + 1 >= page_size {
-                        // Land on last item of previous group
-                        let prev_group_end: usize = group_sizes[..gi].iter().sum();
-                        target_idx = prev_group_end.saturating_sub(1);
-                        display_consumed = page_size;
-                        break;
-                    }
-                    if gi > 0 {
-                        display_consumed += 1; // consume this group's header
-                        // Move to end of previous group for next iteration
-                        let prev_group_end: usize = group_sizes[..gi].iter().sum();
-                        target_idx = prev_group_end.saturating_sub(1);
-                        // Continue backward
-                    }
-                }
-            }
-            if display_consumed < page_size {
-                // Hit the start
-                target_idx = 0;
-            }
-            self.selected_idx = target_idx;
-        } else {
-            // Ungrouped: simple retreat
-            self.selected_idx = self.selected_idx.saturating_sub(page_size);
-        }
+        self.selected_idx = self.selected_idx.saturating_sub(page_size.max(1));
     }
 
     pub fn get_selected_suggestion(&self) -> Option<&Suggestion> {
@@ -738,20 +728,18 @@ impl CompletionsManager {
 
     pub fn clear(&mut self) {
         self.suggestions.clear();
+        self.all_suggestions.clear();
         self.grouped = None;
         self.selected_idx = 0;
         self.scroll_offset = 0;
         self.visible = false;
+        self.session_active = false;
         self.active_selection = false;
         self.prefix_accepted = false;
     }
 
     /// After a completion has been applied to the buffer, decide whether to keep
     /// the menu visible (drill into directory) or close it (file/final completion).
-    ///
-    /// If the text under the cursor ends with `/` (directory completion), the
-    /// menu refreshes to show the directory's contents.  For any other case
-    /// (file, flag, command, …) the menu is dismissed as before.
     pub fn refresh_after_completion(&mut self, new_line: &str, cursor_char_pos: usize) {
         let last_word = extract_partial_word(new_line, cursor_char_pos);
         if last_word.ends_with('/') {
@@ -766,27 +754,57 @@ impl CompletionsManager {
         }
     }
 
-    /// Map a raw suggestion index to its flat display index, accounting for
-    /// group header lines (each group header is +1 display line).
-    pub fn flat_index_of(&self, raw_idx: usize) -> usize {
-        let Some(ref grouped) = self.grouped else {
-            return raw_idx;
-        };
-        if raw_idx >= grouped.items.len() {
-            return grouped.display_lines();
+    /// Compute whether to display in Grid mode or List mode based on contents and popup width
+    pub fn compute_layout_mode(&self, area_width: u16) -> CompletionLayoutMode {
+        if self.suggestions.is_empty() {
+            return CompletionLayoutMode::List;
         }
-        let group_sizes = grouped.group_sizes();
-        let mut flat = 0usize;
-        let mut seen = 0usize;
-        for count in &group_sizes {
-            flat += 1; // header
-            if raw_idx >= seen && raw_idx < seen + count {
-                return flat + (raw_idx - seen);
+
+        // Check if suggestions have long sentence documentation (e.g. flags or command docs)
+        let has_long_descriptions = self.suggestions.iter().any(|s| {
+            let cat = categorize(s);
+            if matches!(
+                cat,
+                CompletionCategory::Directory | CompletionCategory::File
+            ) {
+                return false;
             }
-            flat += count;
-            seen += count;
+            if let Some(ref d) = s.description {
+                !d.is_empty() && d.len() > 14
+            } else {
+                false
+            }
+        });
+
+        if has_long_descriptions || self.suggestions.len() < 3 {
+            return CompletionLayoutMode::List;
         }
-        flat
+
+        let max_val_len = self
+            .suggestions
+            .iter()
+            .map(|s| s.value.width())
+            .max()
+            .unwrap_or(10);
+
+        let cell_width = (max_val_len + 4).max(14);
+        let usable_width = area_width.saturating_sub(2) as usize;
+
+        let possible_cols = (usable_width / cell_width).clamp(1, 5);
+        if possible_cols >= 2 {
+            let col_w = usable_width / possible_cols;
+            CompletionLayoutMode::Grid {
+                cols: possible_cols,
+                col_width: col_w,
+            }
+        } else {
+            CompletionLayoutMode::List
+        }
+    }
+
+    /// Map a raw suggestion index to its display row index
+    pub fn flat_index_of(&self, raw_idx: usize) -> usize {
+        raw_idx
     }
 
     /// Compute the longest common prefix among all suggestion values
@@ -796,25 +814,25 @@ impl CompletionsManager {
         }
         let values: Vec<&str> = self.suggestions.iter().map(|s| s.value.as_str()).collect();
         let first = values.first()?;
-        let mut end = first.len();
+        let first_chars: Vec<char> = first.chars().collect();
+        let mut char_count = first_chars.len();
         for other in &values[1..] {
-            let common = first
-                .chars()
+            let common = first_chars
+                .iter()
+                .copied()
                 .zip(other.chars())
                 .take_while(|(a, b)| a == b)
                 .count();
-            end = end.min(common);
+            char_count = char_count.min(common);
         }
-        if end == 0 {
+        if char_count == 0 {
             None
         } else {
-            Some(first[..end].to_string())
+            Some(first_chars[..char_count].iter().collect())
         }
     }
 
-    /// Render the popup content as grouped ListItems.
-    /// Only builds items that fall within the visible window to avoid
-    /// allocating thousands of ListItem objects for large completion lists.
+    /// Render the popup content using adaptive dual-mode layout (Grid or List).
     #[allow(clippy::type_complexity)]
     pub fn render_popup(
         &self,
@@ -825,109 +843,180 @@ impl CompletionsManager {
             Option<CompletionCategory>,
             Vec<ratatui::widgets::ListItem<'static>>,
         )>,
-        usize, /* total display lines */
+        usize, /* total display rows */
     ) {
-        let Some(ref grouped) = self.grouped else {
-            return (Vec::new(), 0);
-        };
-        if grouped.items.is_empty() {
+        if self.suggestions.is_empty() {
             return (Vec::new(), 0);
         }
 
-        // Reserve at least 14 cols for descriptions, or 38% of width for wider popups
-        let max_desc_width = if area_width > 70 {
-            ((area_width as f64) * 0.38).min(36.0) as usize
-        } else {
-            ((area_width as usize).saturating_sub(20) / 2).clamp(14, 22)
-        };
-        let max_value_width = (area_width as usize).saturating_sub(max_desc_width + 6);
-
-        let total_display = grouped.display_lines();
-
-        // Determine which flat display lines are visible
-        let vis_start = self.scroll_offset;
-        let vis_end = (self.scroll_offset + visible_lines).min(total_display);
-
-        let mut sections: Vec<(Option<CompletionCategory>, Vec<ratatui::widgets::ListItem>)> =
-            Vec::new();
-        let group_sizes = grouped.group_sizes();
-
-        let mut flat_idx = 0;
-        let mut current_items: Vec<ratatui::widgets::ListItem> = Vec::new();
-
-        // Helper: flush current_items into sections and clear it
-        macro_rules! flush_section {
-            ($cat:expr) => {
-                if !current_items.is_empty() {
-                    sections.push(($cat, std::mem::take(&mut current_items)));
-                }
-            };
-        }
-
-        for (gi, cat) in grouped.groups.iter().enumerate() {
-            let count = group_sizes[gi];
-
-            // Header line
-            if flat_idx >= vis_end {
-                break;
-            }
-            if flat_idx >= vis_start {
-                flush_section!(None);
-                let header = self.render_header(*cat, count);
-                current_items.push(header);
-            }
-            flat_idx += 1;
-
-            // Items in this group
-            let range_start = grouped
-                .group_indices
-                .iter()
-                .position(|g| *g == gi)
-                .unwrap_or(0);
-
-            for i in range_start..range_start + count {
-                if flat_idx >= vis_end {
-                    break;
-                }
-                let item = &grouped.items[i];
-                if flat_idx >= vis_start {
-                    // Bug 3.3: Use actual suggestion index `i`, not `flat_idx` which
-                    // includes group header lines. `self.selected_idx` is a raw suggestion
-                    // index into `self.suggestions` (reordered to match grouped.items order).
-                    let is_selected = i == self.selected_idx;
-                    let list_item = self.render_list_item(
-                        &item.suggestion,
-                        item.category,
-                        is_selected,
-                        max_value_width,
-                        max_desc_width,
-                    );
-                    current_items.push(list_item);
-                }
-                flat_idx += 1;
-            }
-            if flat_idx >= vis_end {
-                break;
+        let layout = self.compute_layout_mode(area_width);
+        match layout {
+            CompletionLayoutMode::List => self.render_list_popup(area_width, visible_lines),
+            CompletionLayoutMode::Grid { cols, col_width } => {
+                self.render_grid_popup(visible_lines, cols, col_width)
             }
         }
-        flush_section!(None);
-
-        (sections, total_display)
     }
 
-    fn render_header(
+    #[allow(clippy::type_complexity)]
+    fn render_list_popup(
         &self,
-        cat: CompletionCategory,
-        count: usize,
-    ) -> ratatui::widgets::ListItem<'static> {
-        let style = cat.header_style(&self.theme.completions);
-        let icon = cat.icon();
-        let name = cat.name();
-        let text = format!(" {} {}  ({})", icon, name, count);
-        ratatui::widgets::ListItem::new(Line::from(Span::styled(text, style)))
+        area_width: u16,
+        visible_lines: usize,
+    ) -> (
+        Vec<(
+            Option<CompletionCategory>,
+            Vec<ratatui::widgets::ListItem<'static>>,
+        )>,
+        usize,
+    ) {
+        let total_items = self.suggestions.len();
+        let total_display = total_items;
+
+        let vis_start = self.scroll_offset.min(total_items);
+        let vis_end = (self.scroll_offset + visible_lines).min(total_items);
+
+        let max_desc_width = if area_width > 70 {
+            ((area_width as f64) * 0.40).min(38.0) as usize
+        } else {
+            ((area_width as usize).saturating_sub(24) / 2).clamp(12, 22)
+        };
+        let max_value_width = (area_width as usize).saturating_sub(max_desc_width + 12);
+
+        let mut list_items = Vec::with_capacity(vis_end.saturating_sub(vis_start));
+
+        for i in vis_start..vis_end {
+            let s = &self.suggestions[i];
+            let cat = categorize(s);
+            let is_selected = i == self.selected_idx;
+            let item = self.render_list_item(s, cat, is_selected, max_value_width, max_desc_width);
+            list_items.push(item);
+        }
+
+        (vec![(None, list_items)], total_display)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
+    fn render_grid_popup(
+        &self,
+        visible_lines: usize,
+        cols: usize,
+        col_width: usize,
+    ) -> (
+        Vec<(
+            Option<CompletionCategory>,
+            Vec<ratatui::widgets::ListItem<'static>>,
+        )>,
+        usize,
+    ) {
+        let total_items = self.suggestions.len();
+        let total_rows = total_items.div_ceil(cols);
+
+        let vis_start = self.scroll_offset.min(total_rows);
+        let vis_end = (self.scroll_offset + visible_lines).min(total_rows);
+
+        let mut list_items = Vec::with_capacity(vis_end.saturating_sub(vis_start));
+
+        for r in vis_start..vis_end {
+            let mut spans = Vec::new();
+            for c in 0..cols {
+                let idx = r * cols + c;
+                if idx < total_items {
+                    let s = &self.suggestions[idx];
+                    let cat = categorize(s);
+                    let is_selected = idx == self.selected_idx;
+                    let cell_spans = self.render_grid_cell(s, cat, is_selected, col_width);
+                    spans.extend(cell_spans);
+                } else {
+                    spans.push(Span::raw(" ".repeat(col_width)));
+                }
+            }
+            list_items.push(ratatui::widgets::ListItem::new(Line::from(spans)));
+        }
+
+        (vec![(None, list_items)], total_rows)
+    }
+
+    fn render_grid_cell(
+        &self,
+        suggestion: &Suggestion,
+        category: CompletionCategory,
+        is_selected: bool,
+        col_width: usize,
+    ) -> Vec<Span<'static>> {
+        let t = &self.theme;
+        let selection_bg = t.widgets.item_selected_bg.to_ratatui_color();
+        let selection_fg = t.widgets.item_selected_fg.to_ratatui_color();
+
+        let base_bg = if is_selected {
+            Style::default().bg(selection_bg)
+        } else {
+            Style::default()
+        };
+
+        let indicator = if is_selected {
+            Span::styled(
+                "▸ ",
+                Style::default()
+                    .bg(selection_bg)
+                    .fg(selection_fg)
+                    .add_modifier(StyleModifier::BOLD),
+            )
+        } else {
+            Span::raw("  ")
+        };
+
+        let base_val_style = if is_selected {
+            Style::default()
+                .bg(selection_bg)
+                .fg(selection_fg)
+                .add_modifier(StyleModifier::BOLD)
+        } else {
+            match category {
+                CompletionCategory::Directory | CompletionCategory::File => {
+                    if let Some(ls) = self.lscolors.style_for_path(&suggestion.value) {
+                        self.convert_lscolors_style(ls, false)
+                    } else {
+                        category.value_style(&t.completions)
+                    }
+                }
+                _ => category.value_style(&t.completions),
+            }
+        };
+
+        let highlight_style = if is_selected {
+            Style::default()
+                .bg(selection_bg)
+                .fg(selection_fg)
+                .add_modifier(StyleModifier::BOLD | StyleModifier::UNDERLINED)
+        } else {
+            base_val_style.add_modifier(StyleModifier::BOLD | StyleModifier::UNDERLINED)
+        };
+
+        let max_val_w = col_width.saturating_sub(3);
+        let display_val = if suggestion.value.width() > max_val_w && max_val_w > 3 {
+            truncate_by_width(&suggestion.value, max_val_w)
+        } else {
+            suggestion.value.clone()
+        };
+        let val_w = display_val.width();
+
+        let val_spans = render_highlighted_spans(
+            &display_val,
+            suggestion.match_indices.as_deref(),
+            base_val_style,
+            highlight_style,
+        );
+
+        let pad_w = col_width.saturating_sub(2 + val_w);
+        let pad_span = Span::styled(" ".repeat(pad_w), base_bg);
+
+        let mut out = vec![indicator];
+        out.extend(val_spans);
+        out.push(pad_span);
+        out
+    }
+
     fn render_list_item(
         &self,
         suggestion: &Suggestion,
@@ -942,14 +1031,25 @@ impl CompletionsManager {
         let selection_bg = t.widgets.item_selected_bg.to_ratatui_color();
         let selection_fg = t.widgets.item_selected_fg.to_ratatui_color();
 
-        let base_style = if is_selected {
+        let base_bg = if is_selected {
             Style::default().bg(selection_bg)
         } else {
             Style::default()
         };
 
-        // Determine value style based on category/path
-        let value_style = if is_selected {
+        let indicator = if is_selected {
+            Span::styled(
+                "▸ ",
+                Style::default()
+                    .bg(selection_bg)
+                    .fg(selection_fg)
+                    .add_modifier(StyleModifier::BOLD),
+            )
+        } else {
+            Span::raw("  ")
+        };
+
+        let base_val_style = if is_selected {
             Style::default()
                 .bg(selection_bg)
                 .fg(selection_fg)
@@ -967,14 +1067,15 @@ impl CompletionsManager {
             }
         };
 
-        // Selection indicator
-        let indicator = if is_selected {
-            Span::styled("▸ ", Style::default().bg(selection_bg).fg(selection_fg))
+        let highlight_style = if is_selected {
+            Style::default()
+                .bg(selection_bg)
+                .fg(selection_fg)
+                .add_modifier(StyleModifier::BOLD | StyleModifier::UNDERLINED)
         } else {
-            Span::raw("  ")
+            base_val_style.add_modifier(StyleModifier::BOLD | StyleModifier::UNDERLINED)
         };
 
-        // Truncate value by display width (Bug 8.2 fix)
         let display_val = if value.width() > max_value_width && max_value_width > 5 {
             truncate_by_width(value, max_value_width.saturating_sub(1))
         } else {
@@ -982,43 +1083,50 @@ impl CompletionsManager {
         };
         let display_width = display_val.width();
 
-        let display_span = Span::styled(
-            display_val,
-            if is_selected {
-                value_style.bg(selection_bg)
-            } else {
-                value_style
-            },
+        let val_spans = render_highlighted_spans(
+            &display_val,
+            suggestion.match_indices.as_deref(),
+            base_val_style,
+            highlight_style,
         );
 
-        let mut spans = vec![indicator, display_span];
+        let mut spans = vec![indicator];
+        spans.extend(val_spans);
 
-        // Right-aligned description — truncate by display width (Bug 3.2 fix)
-        if let Some(desc) = &suggestion.description {
-            let trim_desc = truncate_by_width(desc, max_desc_width);
-            if !trim_desc.is_empty() {
-                let pad_needed = max_value_width.saturating_sub(display_width);
-                let spacing = " ".repeat(pad_needed);
-
-                let desc_style = if is_selected {
-                    Style::default().bg(selection_bg).fg(selection_fg)
-                } else {
-                    t.completions.description.to_style()
-                };
-
-                let text_style = if is_selected {
-                    Style::default().bg(selection_bg).fg(selection_fg)
-                } else {
-                    t.widgets.foreground.to_style()
-                };
-
-                spans.push(Span::styled(spacing, base_style));
-                spans.push(Span::styled("┆ ", desc_style));
-                spans.push(Span::styled(trim_desc, text_style));
+        let desc_opt = match &suggestion.description {
+            Some(desc) if !desc.is_empty() && desc != "Directory" && desc != "File" => {
+                Some(truncate_by_width(desc, max_desc_width))
             }
+            _ => {
+                if !matches!(
+                    category,
+                    CompletionCategory::Directory | CompletionCategory::File
+                ) {
+                    Some(category.label().to_string())
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(desc_text) = desc_opt {
+            let pad_needed = max_value_width.saturating_sub(display_width);
+            let spacing = " ".repeat(pad_needed.max(2));
+
+            let desc_text_style = if is_selected {
+                Style::default()
+                    .bg(selection_bg)
+                    .fg(selection_fg)
+                    .add_modifier(StyleModifier::DIM)
+            } else {
+                t.completions.description.to_style_dim()
+            };
+
+            spans.push(Span::styled(spacing, base_bg));
+            spans.push(Span::styled(desc_text, desc_text_style));
         }
 
-        ratatui::widgets::ListItem::new(Line::from(spans))
+        ratatui::widgets::ListItem::new(Line::from(spans).style(base_bg))
     }
 
     fn convert_lscolors_style(&self, ls: &LsStyle, is_selected: bool) -> Style {
@@ -1155,11 +1263,45 @@ pub fn extract_partial_word(line: &str, cursor_char_idx: usize) -> &str {
         .nth(cursor_char_idx)
         .map(|(i, _)| i)
         .unwrap_or(line.len());
-    let before_cursor = &line[..byte_idx];
-    before_cursor
-        .split(|c: char| c.is_whitespace() || c == '|' || c == '>' || c == '<')
-        .next_back()
-        .unwrap_or("")
+    let prefix = &line[..byte_idx];
+    extract_quote_aware_token(prefix)
+}
+
+/// Extract the last token from a command line prefix, taking into account
+/// single and double quotes so tokens with spaces inside quotes aren't split.
+pub fn extract_quote_aware_token(prefix: &str) -> &str {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+    let mut token_start = 0;
+
+    for (idx, ch) in prefix.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !in_single_quote {
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+        if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            continue;
+        }
+
+        if !in_single_quote
+            && !in_double_quote
+            && (ch.is_whitespace() || ch == '|' || ch == '>' || ch == '<' || ch == ';' || ch == '&')
+        {
+            token_start = idx + ch.len_utf8();
+        }
+    }
+
+    &prefix[token_start..]
 }
 
 #[cfg(test)]

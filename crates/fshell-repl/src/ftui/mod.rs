@@ -114,7 +114,7 @@ use reedline::Hinter;
 
 use agent::AgentModeState;
 use buffer::TextBuffer;
-use completions::{CompletionsManager, extract_partial_word};
+use completions::CompletionsManager;
 use cursor::{Coord, CursorConfig, CursorState};
 use history::HistoryManager;
 use mouse::{MouseMode, MouseStateManager};
@@ -919,360 +919,286 @@ pub async fn run_ftui_repl(
 
                     let mut relative_cursor_y = 0u16;
 
-                    if term.draw(|f| {
-                        let prompt_h = if multi_line_count > 1 {
-                            multi_line_count + 2
-                        } else {
-                            1
-                        };
-                        let (constraints, prompt_area_idx, popup_area_idx) = if !output_lines.is_empty() {
-                            let output_h = output_lines.len().min(
-                                f.area().height.saturating_sub(prompt_h) as usize
-                            );
-                            (
-                                vec![
-                                    Constraint::Length(output_h as u16), // Output lines at top
-                                    Constraint::Length(prompt_h),        // Prompt line(s)
-                                    Constraint::Min(0),                  // Popup overlays
-                                ],
-                                1usize,
-                                2usize,
-                            )
-                        } else {
-                            (
-                                vec![
-                                    Constraint::Length(prompt_h), // Prompt line(s) at top
-                                    Constraint::Min(0),           // Popup list / overlays below
-                                ],
-                                0usize,
-                                1usize,
-                            )
-                        };
-
-                        let chunks = Layout::default()
-                            .direction(Direction::Vertical)
-                            .constraints(constraints)
-                            .split(f.area());
-
-                        let prompt_line = chunks[prompt_area_idx];
-                        let popup_area = chunks[popup_area_idx];
-
-                        // Render captured output above the prompt
-                        if !output_lines.is_empty() {
-                            let output_h = output_lines.len().min(
-                                f.area().height.saturating_sub(prompt_h) as usize
-                            );
-                            let output_area = chunks[0]; // Output area at top
-                            let output_height = output_area.height.min(output_h as u16);
-                            let skip = output_lines.len().saturating_sub(output_height as usize);
-                            let display_lines: Vec<String> = output_lines
-                                .iter()
-                                .skip(skip)
-                                .cloned()
-                                .collect();
-                            let output_text = display_lines.join("\n");
-                            f.render_widget(
-                                Paragraph::new(output_text)
-                                    .style(theme.widgets.foreground.to_style()),
-                                Rect::new(
-                                    output_area.x,
-                                    output_area.y,
-                                    output_area.width,
-                                    output_height,
-                                ),
-                            );
-                        }
-
-                        // Render Prompt and Text Line(s)
-                        if multi_line_count > 1 {
-                            let per_line_spans = split_spans_by_newline(
-                                &text_line_spans,
-                                cursor_visual_line,
-                                text_scroll_offset,
-                                available_width,
-                            );
-                            let mut text_lines: Vec<Line> = Vec::with_capacity((multi_line_count + 2) as usize);
-                            let left_spans = prompt_left.spans.clone();
-                            let left_width = prompt_len as usize;
-                            let gutter_num_width = format!("{}", multi_line_count).len().max(2);
-
-                            // Row 0: Elevated prompt header (with right prompt if space permits)
-                            let mut header_spans = left_spans.clone();
-                            let right_prompt = prompt_mgr.render_prompt_right();
-                            let right_width = right_prompt.width();
-                            if right_width > 0 && left_width + right_width + 1 < size.width as usize {
-                                let pad = (size.width as usize).saturating_sub(left_width + right_width);
-                                header_spans.push(Span::raw(" ".repeat(pad)));
-                                header_spans.extend(right_prompt.spans.clone());
-                            }
-                            text_lines.push(Line::from(header_spans));
-
-                            // Rows 1..=multi_line_count: Code lines flush at column 0
-                            for (line_idx, line_spans) in per_line_spans.iter().enumerate() {
-                                let is_cl = line_idx == cursor_visual_line;
-                                let indicator = if is_cl {
-                                    Span::styled("▶ ", theme.widgets.title.to_style_bold())
+                    if term
+                        .draw(|f| {
+                            let prompt_h = if multi_line_count > 1 {
+                                multi_line_count + 2
+                            } else {
+                                1
+                            };
+                            let (constraints, prompt_area_idx, popup_area_idx) =
+                                if !output_lines.is_empty() {
+                                    let output_h = output_lines
+                                        .len()
+                                        .min(f.area().height.saturating_sub(prompt_h) as usize);
+                                    (
+                                        vec![
+                                            Constraint::Length(output_h as u16), // Output lines at top
+                                            Constraint::Length(prompt_h),        // Prompt line(s)
+                                            Constraint::Min(0),                  // Popup overlays
+                                        ],
+                                        1usize,
+                                        2usize,
+                                    )
                                 } else {
-                                    Span::raw("  ")
+                                    (
+                                        vec![
+                                            Constraint::Length(prompt_h), // Prompt line(s) at top
+                                            Constraint::Min(0), // Popup list / overlays below
+                                        ],
+                                        0usize,
+                                        1usize,
+                                    )
                                 };
-                                let num_str = format!("{:>width$}", line_idx + 1, width = gutter_num_width);
-                                let num_span = if is_cl {
-                                    Span::styled(num_str, theme.widgets.title.to_style_bold())
-                                } else {
-                                    Span::styled(num_str, theme.status.muted.to_style())
-                                };
-                                let sep_span = Span::styled("│ ", theme.syntax.separator.to_style());
 
-                                let mut spans: Vec<Span> = vec![indicator, num_span, sep_span];
-                                spans.extend(line_spans.iter().cloned());
-                                text_lines.push(Line::from(spans));
+                            let chunks = Layout::default()
+                                .direction(Direction::Vertical)
+                                .constraints(constraints)
+                                .split(f.area());
+
+                            let prompt_line = chunks[prompt_area_idx];
+                            let popup_area = chunks[popup_area_idx];
+
+                            // Render captured output above the prompt
+                            if !output_lines.is_empty() {
+                                let output_h = output_lines
+                                    .len()
+                                    .min(f.area().height.saturating_sub(prompt_h) as usize);
+                                let output_area = chunks[0]; // Output area at top
+                                let output_height = output_area.height.min(output_h as u16);
+                                let skip =
+                                    output_lines.len().saturating_sub(output_height as usize);
+                                let display_lines: Vec<String> =
+                                    output_lines.iter().skip(skip).cloned().collect();
+                                let output_text = display_lines.join("\n");
+                                f.render_widget(
+                                    Paragraph::new(output_text)
+                                        .style(theme.widgets.foreground.to_style()),
+                                    Rect::new(
+                                        output_area.x,
+                                        output_area.y,
+                                        output_area.width,
+                                        output_height,
+                                    ),
+                                );
                             }
 
-                            // Row multi_line_count + 1: Minimalist Transient Footer
-                            let branch_pad = " ".repeat(gutter_num_width + 2);
-                            let footer_branch = Span::styled(
-                                format!("{}└── ", branch_pad),
-                                theme.status.muted.to_style(),
-                            );
-                            let coord_span = Span::styled(
-                                format!("[Ln {}, Col {}]", cursor_visual_line + 1, cursor_col + 1),
-                                theme.status.info.to_style(),
-                            );
-                            let dot_span = Span::styled(" • ", theme.status.muted.to_style());
-                            let hint_newline = Span::styled("⌥⏎ newline", theme.status.muted.to_style());
-                            let hint_submit = Span::styled("⏎ submit", theme.status.muted.to_style());
-                            let footer_line = Line::from(vec![
-                                footer_branch,
-                                coord_span,
-                                dot_span.clone(),
-                                hint_newline,
-                                dot_span,
-                                hint_submit,
-                            ]);
-                            text_lines.push(footer_line);
+                            // Render Prompt and Text Line(s)
+                            if multi_line_count > 1 {
+                                let per_line_spans = split_spans_by_newline(
+                                    &text_line_spans,
+                                    cursor_visual_line,
+                                    text_scroll_offset,
+                                    available_width,
+                                );
+                                let mut text_lines: Vec<Line> =
+                                    Vec::with_capacity((multi_line_count + 2) as usize);
+                                let left_spans = prompt_left.spans.clone();
+                                let left_width = prompt_len as usize;
+                                let gutter_num_width = format!("{}", multi_line_count).len().max(2);
 
-                            // Pad each line with spaces to fill the full terminal width.
-                            // ratatui's Paragraph only writes cells that its spans cover,
-                            // leaving untouched cells with old frame content.
-                            let prompt_area_w = prompt_line.width as usize;
-                            for line in text_lines.iter_mut() {
-                                let line_w: usize = line
-                                    .spans
+                                // Row 0: Elevated prompt header (with right prompt if space permits)
+                                let mut header_spans = left_spans.clone();
+                                let right_prompt = prompt_mgr.render_prompt_right();
+                                let right_width = right_prompt.width();
+                                if right_width > 0
+                                    && left_width + right_width + 1 < size.width as usize
+                                {
+                                    let pad = (size.width as usize)
+                                        .saturating_sub(left_width + right_width);
+                                    header_spans.push(Span::raw(" ".repeat(pad)));
+                                    header_spans.extend(right_prompt.spans.clone());
+                                }
+                                text_lines.push(Line::from(header_spans));
+
+                                // Rows 1..=multi_line_count: Code lines flush at column 0
+                                for (line_idx, line_spans) in per_line_spans.iter().enumerate() {
+                                    let is_cl = line_idx == cursor_visual_line;
+                                    let indicator = if is_cl {
+                                        Span::styled("▶ ", theme.widgets.title.to_style_bold())
+                                    } else {
+                                        Span::raw("  ")
+                                    };
+                                    let num_str = format!(
+                                        "{:>width$}",
+                                        line_idx + 1,
+                                        width = gutter_num_width
+                                    );
+                                    let num_span = if is_cl {
+                                        Span::styled(num_str, theme.widgets.title.to_style_bold())
+                                    } else {
+                                        Span::styled(num_str, theme.status.muted.to_style())
+                                    };
+                                    let sep_span =
+                                        Span::styled("│ ", theme.syntax.separator.to_style());
+
+                                    let mut spans: Vec<Span> = vec![indicator, num_span, sep_span];
+                                    spans.extend(line_spans.iter().cloned());
+                                    text_lines.push(Line::from(spans));
+                                }
+
+                                // Row multi_line_count + 1: Minimalist Transient Footer
+                                let branch_pad = " ".repeat(gutter_num_width + 2);
+                                let footer_branch = Span::styled(
+                                    format!("{}└── ", branch_pad),
+                                    theme.status.muted.to_style(),
+                                );
+                                let coord_span = Span::styled(
+                                    format!(
+                                        "[Ln {}, Col {}]",
+                                        cursor_visual_line + 1,
+                                        cursor_col + 1
+                                    ),
+                                    theme.status.info.to_style(),
+                                );
+                                let dot_span = Span::styled(" • ", theme.status.muted.to_style());
+                                let hint_newline =
+                                    Span::styled("⌥⏎ newline", theme.status.muted.to_style());
+                                let hint_submit =
+                                    Span::styled("⏎ submit", theme.status.muted.to_style());
+                                let footer_line = Line::from(vec![
+                                    footer_branch,
+                                    coord_span,
+                                    dot_span.clone(),
+                                    hint_newline,
+                                    dot_span,
+                                    hint_submit,
+                                ]);
+                                text_lines.push(footer_line);
+
+                                // Pad each line with spaces to fill the full terminal width.
+                                // ratatui's Paragraph only writes cells that its spans cover,
+                                // leaving untouched cells with old frame content.
+                                let prompt_area_w = prompt_line.width as usize;
+                                for line in text_lines.iter_mut() {
+                                    let line_w: usize = line
+                                        .spans
+                                        .iter()
+                                        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                                        .sum();
+                                    if line_w < prompt_area_w {
+                                        line.spans
+                                            .push(Span::raw(" ".repeat(prompt_area_w - line_w)));
+                                    }
+                                }
+                                f.render_widget(
+                                    Paragraph::new(Text::from(text_lines)),
+                                    prompt_line,
+                                );
+                                // Cursor positioned on the visual line
+                                let render_x = animated_cursor.x.min(size.width.saturating_sub(1));
+                                let cursor_y = prompt_line.y
+                                    + 1
+                                    + (cursor_visual_line as u16)
+                                        .min(multi_line_count.saturating_sub(1));
+                                if let Some(cursor_style) =
+                                    cursor_state.get_style(true, &cursor_config, &theme)
+                                {
+                                    let cursor_area = Rect::new(render_x, cursor_y, 1, 1);
+                                    f.render_widget(
+                                        Block::default().style(cursor_style),
+                                        cursor_area,
+                                    );
+                                }
+                                relative_cursor_y = cursor_y;
+                                f.set_cursor_position(ratatui::layout::Position::new(
+                                    render_x, cursor_y,
+                                ));
+                            } else {
+                                let left_spans = if in_continuation {
+                                    vec![Span::styled("> ", theme.status.muted.to_style())]
+                                } else {
+                                    prompt_left.spans.clone()
+                                };
+                                let mut combined_spans = left_spans;
+                                combined_spans.extend(input_line.spans.clone());
+
+                                // B3: Right prompt — pad with spaces to right-align
+                                let right_prompt = prompt_mgr.render_prompt_right();
+                                let right_width = right_prompt.width();
+                                let left_plus_input = combined_spans
+                                    .iter()
+                                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                                    .sum::<usize>();
+                                if right_width > 0
+                                    && left_plus_input + right_width + 1 < size.width as usize
+                                {
+                                    let pad = size.width as usize - left_plus_input - right_width;
+                                    combined_spans.push(Span::raw(" ".repeat(pad)));
+                                    combined_spans.extend(right_prompt.spans.clone());
+                                }
+
+                                // Pad with trailing spaces to fill the full terminal width.
+                                // ratatui's Paragraph only writes cells that its spans cover,
+                                // leaving untouched cells with old frame content. This causes
+                                // ghost text from previous frames when content shrinks.
+                                let total_w: usize = combined_spans
                                     .iter()
                                     .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                                     .sum();
-                                if line_w < prompt_area_w {
-                                    line.spans
-                                        .push(Span::raw(" ".repeat(prompt_area_w - line_w)));
+                                let prompt_area_w = prompt_line.width as usize;
+                                if total_w < prompt_area_w {
+                                    combined_spans
+                                        .push(Span::raw(" ".repeat(prompt_area_w - total_w)));
                                 }
-                            }
-                            f.render_widget(
-                                Paragraph::new(Text::from(text_lines)),
-                                prompt_line,
-                            );
-                            // Cursor positioned on the visual line
-                            let render_x = animated_cursor.x.min(size.width.saturating_sub(1));
-                            let cursor_y =
-                                prompt_line.y + 1 + (cursor_visual_line as u16).min(multi_line_count.saturating_sub(1));
-                            if let Some(cursor_style) =
-                                cursor_state.get_style(true, &cursor_config, &theme)
-                            {
-                                let cursor_area = Rect::new(render_x, cursor_y, 1, 1);
-                                f.render_widget(Block::default().style(cursor_style), cursor_area);
-                            }
-                            relative_cursor_y = cursor_y;
-                            f.set_cursor_position(ratatui::layout::Position::new(
-                                render_x,
-                                cursor_y,
-                            ));
-                        } else {
-                            let left_spans = if in_continuation {
-                                vec![Span::styled(
-                                    "> ",
-                                    theme.status.muted.to_style(),
-                                )]
-                            } else {
-                                prompt_left.spans.clone()
-                            };
-                            let mut combined_spans = left_spans;
-                            combined_spans.extend(input_line.spans.clone());
-
-                            // B3: Right prompt — pad with spaces to right-align
-                            let right_prompt = prompt_mgr.render_prompt_right();
-                            let right_width = right_prompt.width();
-                            let left_plus_input = combined_spans
-                                .iter()
-                                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                                .sum::<usize>();
-                            if right_width > 0
-                                && left_plus_input + right_width + 1 < size.width as usize
-                            {
-                                let pad =
-                                    size.width as usize - left_plus_input - right_width;
-                                combined_spans.push(Span::raw(" ".repeat(pad)));
-                                combined_spans.extend(right_prompt.spans.clone());
-                            }
-
-                            // Pad with trailing spaces to fill the full terminal width.
-                            // ratatui's Paragraph only writes cells that its spans cover,
-                            // leaving untouched cells with old frame content. This causes
-                            // ghost text from previous frames when content shrinks.
-                            let total_w: usize = combined_spans
-                                .iter()
-                                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                                .sum();
-                            let prompt_area_w = prompt_line.width as usize;
-                            if total_w < prompt_area_w {
-                                combined_spans.push(Span::raw(" ".repeat(prompt_area_w - total_w)));
-                            }
-                            f.render_widget(
-                                Paragraph::new(Line::from(combined_spans)),
-                                prompt_line,
-                            );
-
-                            // Render visual animated cursor overlay
-                            let render_x =
-                                animated_cursor.x.min(size.width.saturating_sub(1));
-                            if let Some(cursor_style) =
-                                cursor_state.get_style(true, &cursor_config, &theme)
-                            {
-                                let cursor_area =
-                                    Rect::new(render_x, prompt_line.y, 1, 1);
                                 f.render_widget(
-                                    Block::default().style(cursor_style),
-                                    cursor_area,
+                                    Paragraph::new(Line::from(combined_spans)),
+                                    prompt_line,
                                 );
+
+                                // Render visual animated cursor overlay
+                                let render_x = animated_cursor.x.min(size.width.saturating_sub(1));
+                                if let Some(cursor_style) =
+                                    cursor_state.get_style(true, &cursor_config, &theme)
+                                {
+                                    let cursor_area = Rect::new(render_x, prompt_line.y, 1, 1);
+                                    f.render_widget(
+                                        Block::default().style(cursor_style),
+                                        cursor_area,
+                                    );
+                                }
+                                // Move the system cursor to match
+                                relative_cursor_y = prompt_line.y;
+                                f.set_cursor_position(ratatui::layout::Position::new(
+                                    render_x,
+                                    prompt_line.y,
+                                ));
                             }
-                            // Move the system cursor to match
-                            relative_cursor_y = prompt_line.y;
-                            f.set_cursor_position(ratatui::layout::Position::new(
-                                render_x,
-                                prompt_line.y,
-                            ));
-                        }
 
-                        // Render overlays / popups above the prompt line
-                        if history_mgr.active {
-                            let hist_area = popup_area;
-                            if history_mgr.explorer_active {
-                                let hist_block = Block::default()
-                                    .borders(Borders::ALL)
-                                    .border_type(BorderType::Rounded)
-                                    .title(Span::styled(
-                                        format!(
-                                            " Interactive History Explorer: {} ({}) ",
-                                            history_mgr.query,
-                                            history_mgr.filter_mode.name()
-                                        ),
-                                        theme.status.info.to_style_bold(),
-                                    ));
+                            // Render overlays / popups above the prompt line
+                            if history_mgr.active {
+                                let hist_area = popup_area;
+                                if history_mgr.explorer_active {
+                                    let hist_block = Block::default()
+                                        .borders(Borders::ALL)
+                                        .border_type(BorderType::Rounded)
+                                        .title(Span::styled(
+                                            format!(
+                                                " Interactive History Explorer: {} ({}) ",
+                                                history_mgr.query,
+                                                history_mgr.filter_mode.name()
+                                            ),
+                                            theme.status.info.to_style_bold(),
+                                        ));
 
-                                let hist_scroll_offset = history_mgr.scroll_offset;
-                                let hist_selected_idx = history_mgr.selected_idx;
-                                let max_h = hist_area.height.saturating_sub(3) as usize; // header is 1 line, borders 2
+                                    let hist_scroll_offset = history_mgr.scroll_offset;
+                                    let hist_selected_idx = history_mgr.selected_idx;
+                                    let max_h = hist_area.height.saturating_sub(3) as usize; // header is 1 line, borders 2
 
-                                let header = Row::new(vec![
-                                    Cell::from("Command").style(theme.widgets.title.to_style_bold()),
-                                    Cell::from("Directory").style(theme.widgets.title.to_style_bold()),
-                                    Cell::from("Exit").style(theme.widgets.title.to_style_bold()),
-                                    Cell::from("Duration").style(theme.widgets.title.to_style_bold()),
-                                    Cell::from("Time").style(theme.widgets.title.to_style_bold()),
-                                ]);
+                                    let header = Row::new(vec![
+                                        Cell::from("Command")
+                                            .style(theme.widgets.title.to_style_bold()),
+                                        Cell::from("Directory")
+                                            .style(theme.widgets.title.to_style_bold()),
+                                        Cell::from("Exit")
+                                            .style(theme.widgets.title.to_style_bold()),
+                                        Cell::from("Duration")
+                                            .style(theme.widgets.title.to_style_bold()),
+                                        Cell::from("Time")
+                                            .style(theme.widgets.title.to_style_bold()),
+                                    ]);
 
-                                let rows: Vec<Row> = history_mgr
-                                    .results
-                                    .iter()
-                                    .skip(hist_scroll_offset)
-                                    .take(max_h)
-                                    .enumerate()
-                                    .map(|(i, entry)| {
-                                        let idx = hist_scroll_offset + i;
-                                        let status_cell = match entry.exit_code {
-                                            Some(0) => Cell::from("[ok] 0").style(theme.status.ok.to_style()),
-                                            Some(code) => Cell::from(format!("[!] {}", code)).style(theme.status.error.to_style()),
-                                            None => Cell::from("-"),
-                                        };
-                                        let local_time = chrono::Local.timestamp_millis_opt(entry.timestamp_ms)
-                                            .single()
-                                            .unwrap_or_else(chrono::Local::now);
-                                        let time_str = local_time.format("%Y-%m-%d %H:%M:%S").to_string();
-
-                                        let style = if idx == hist_selected_idx {
-                                            Style::default()
-                                                .fg(theme.widgets.item_selected_fg.to_ratatui_color())
-                                                .bg(theme.widgets.item_selected_bg.to_ratatui_color())
-                                                .add_modifier(Modifier::BOLD)
-                                        } else {
-                                            theme.widgets.foreground.to_style()
-                                        };
-
-                                        Row::new(vec![
-                                            Cell::from(entry.command.clone()),
-                                            Cell::from(entry.cwd.clone()),
-                                            status_cell,
-                                            Cell::from(format!("{}ms", entry.duration_ms)),
-                                            Cell::from(time_str),
-                                        ]).style(style)
-                                    })
-                                    .collect();
-
-                                let table = Table::new(
-                                    rows,
-                                    [
-                                        Constraint::Percentage(40),
-                                        Constraint::Percentage(25),
-                                        Constraint::Length(8),
-                                        Constraint::Length(10),
-                                        Constraint::Length(20),
-                                    ],
-                                )
-                                .header(header)
-                                .block(hist_block);
-
-                                f.render_widget(table, hist_area);
-                            } else {
-                                let hist_block = Block::default()
-                                    .borders(Borders::ALL)
-                                    .border_type(BorderType::Rounded)
-                                    .title(Span::styled(
-                                        format!(
-                                            " Fuzzy History: {} ({}) ",
-                                            history_mgr.query,
-                                            history_mgr.filter_mode.name()
-                                        ),
-                                        theme.status.info.to_style_bold(),
-                                    ));
-
-                                let hist_scroll_offset = history_mgr.scroll_offset; // B8: pre-computed
-                                let hist_selected_idx = history_mgr.selected_idx;
-                                let max_h = hist_area.height.saturating_sub(2) as usize;
-                                let items: Vec<ListItem> = if history_mgr.aborted_active {
-                                    let reversed_cmds: Vec<&String> =
-                                        history_mgr.aborted_commands.iter().rev().collect();
-
-                                    reversed_cmds
-                                        .iter()
-                                        .skip(hist_scroll_offset)
-                                        .take(max_h)
-                                        .enumerate()
-                                        .map(|(i, &cmd)| {
-                                            let idx = hist_scroll_offset + i;
-                                            let style = if idx == hist_selected_idx {
-                                                Style::default()
-                                                    .fg(theme.widgets.item_selected_fg.to_ratatui_color())
-                                                    .bg(theme.widgets.item_selected_bg.to_ratatui_color())
-                                                    .add_modifier(Modifier::BOLD)
-                                            } else {
-                                                theme.widgets.foreground.to_style()
-                                            };
-                                            ListItem::new(Line::from(vec![
-                                                Span::styled(" ~> ", theme.syntax.variable.to_style()),
-                                                Span::styled(cmd.clone(), style),
-                                            ]))
-                                        })
-                                        .collect()
-                                } else {
-                                    history_mgr
+                                    let rows: Vec<Row> = history_mgr
                                         .results
                                         .iter()
                                         .skip(hist_scroll_offset)
@@ -1280,375 +1206,565 @@ pub async fn run_ftui_repl(
                                         .enumerate()
                                         .map(|(i, entry)| {
                                             let idx = hist_scroll_offset + i;
-                                            let status_icon = if entry.exit_code == Some(0) {
-                                                Span::styled(" [ok] ", theme.status.ok.to_style())
-                                            } else {
-                                                Span::styled(" [!] ", theme.status.error.to_style())
+                                            let status_cell = match entry.exit_code {
+                                                Some(0) => Cell::from("[ok] 0")
+                                                    .style(theme.status.ok.to_style()),
+                                                Some(code) => Cell::from(format!("[!] {}", code))
+                                                    .style(theme.status.error.to_style()),
+                                                None => Cell::from("-"),
                                             };
+                                            let local_time = chrono::Local
+                                                .timestamp_millis_opt(entry.timestamp_ms)
+                                                .single()
+                                                .unwrap_or_else(chrono::Local::now);
+                                            let time_str =
+                                                local_time.format("%Y-%m-%d %H:%M:%S").to_string();
+
                                             let style = if idx == hist_selected_idx {
                                                 Style::default()
-                                                    .fg(theme.widgets.item_selected_fg.to_ratatui_color())
-                                                    .bg(theme.widgets.item_selected_bg.to_ratatui_color())
+                                                    .fg(theme
+                                                        .widgets
+                                                        .item_selected_fg
+                                                        .to_ratatui_color())
+                                                    .bg(theme
+                                                        .widgets
+                                                        .item_selected_bg
+                                                        .to_ratatui_color())
                                                     .add_modifier(Modifier::BOLD)
                                             } else {
                                                 theme.widgets.foreground.to_style()
                                             };
-                                            ListItem::new(Line::from(vec![
-                                                status_icon,
-                                                Span::styled(entry.command.clone(), style),
-                                                Span::styled(
-                                                    format!(" ({})", entry.cwd),
-                                                    theme.status.muted.to_style(),
-                                                ),
-                                            ]))
+
+                                            Row::new(vec![
+                                                Cell::from(entry.command.clone()),
+                                                Cell::from(entry.cwd.clone()),
+                                                status_cell,
+                                                Cell::from(format!("{}ms", entry.duration_ms)),
+                                                Cell::from(time_str),
+                                            ])
+                                            .style(style)
                                         })
-                                        .collect()
-                                };
+                                        .collect();
 
-                                let items = if items.is_empty() {
-                                    let msg = if history_mgr.query.is_empty() {
-                                        "  No history entries yet".to_string()
-                                    } else {
-                                        format!(
-                                            "  No commands matching \"{}\"",
-                                            history_mgr.query
-                                        )
-                                    };
-                                    vec![ListItem::new(Line::from(Span::styled(
-                                        msg,
-                                        theme.status.muted.to_style(),
-                                    )))]
+                                    let table = Table::new(
+                                        rows,
+                                        [
+                                            Constraint::Percentage(40),
+                                            Constraint::Percentage(25),
+                                            Constraint::Length(8),
+                                            Constraint::Length(10),
+                                            Constraint::Length(20),
+                                        ],
+                                    )
+                                    .header(header)
+                                    .block(hist_block);
+
+                                    f.render_widget(table, hist_area);
                                 } else {
-                                    items
-                                };
+                                    let hist_block = Block::default()
+                                        .borders(Borders::ALL)
+                                        .border_type(BorderType::Rounded)
+                                        .title(Span::styled(
+                                            format!(
+                                                " Fuzzy History: {} ({}) ",
+                                                history_mgr.query,
+                                                history_mgr.filter_mode.name()
+                                            ),
+                                            theme.status.info.to_style_bold(),
+                                        ));
 
-                                let list_widget = List::new(items).block(hist_block);
-                                f.render_widget(list_widget, hist_area);
-                            }
-                        } else if agent_state.active {
-                            let agent_area = popup_area;
-                            let agent_block = Block::default()
-                                .borders(Borders::ALL)
-                                .border_type(BorderType::Rounded)
-                                .title(Span::styled(
-                                    " fsh-ai Agent Mode ",
-                                    theme.syntax.keyword.to_style_bold(),
-                                ));
+                                    let hist_scroll_offset = history_mgr.scroll_offset; // B8: pre-computed
+                                    let hist_selected_idx = history_mgr.selected_idx;
+                                    let max_h = hist_area.height.saturating_sub(2) as usize;
+                                    let items: Vec<ListItem> = if history_mgr.aborted_active {
+                                        let reversed_cmds: Vec<&String> =
+                                            history_mgr.aborted_commands.iter().rev().collect();
 
-                            let content = if agent_state.is_loading {
-                                vec![
-                                    Line::from("  Translating request into fsh command..."),
-                                    Line::from("  Please wait while the AI provider responds."),
-                                ]
-                            } else if let Some(err) = &agent_state.error_msg {
-                                vec![
-                                    Line::from(vec![
-                                        Span::styled("  Error: ", theme.status.error.to_style()),
-                                        Span::raw(err),
-                                    ]),
-                                    Line::from("  Press Esc to return, Alt+Enter to try again."),
-                                ]
-                            } else {
-                                vec![
-                                    Line::from(format!("  Query: {}", agent_state.prompt)),
-                                    Line::from(vec![
-                                        Span::styled(
-                                            "  Generated: ",
-                                            theme.status.ok.to_style(),
-                                        ),
-                                        Span::styled(
-                                            agent_state.result_command.as_deref().unwrap_or(""),
-                                            theme.widgets.title.to_style_bold(),
-                                        ),
-                                    ]),
-                                    Line::from("  Press Enter to edit/run, Esc to exit."),
-                                ]
-                            };
-
-                            f.render_widget(Paragraph::new(content).block(agent_block), agent_area);
-                        } else if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
-                            let total_items = comp_mgr.suggestions.len();
-                            let popup_budget_h = popup_area.height.max(3);
-                            let max_w = size.width.saturating_sub(2);
-                            let popup_w = if size.width >= 120 {
-                                ((size.width as f64 * 0.5) as u16).clamp(50, 75).min(max_w)
-                            } else {
-                                (size.width / 2 + size.width / 4).clamp(40, 65).min(max_w)
-                            };
-                            let visual_cursor_col =
-                                cursor_col.saturating_sub(text_scroll_offset);
-                            let popup_x = (prompt_len + visual_cursor_col as u16)
-                                .min(size.width.saturating_sub(popup_w).saturating_sub(1));
-
-                            // R2: when the popup is at the bottom edge the inline
-                            // viewport scroll already made `popup_area` tall enough
-                            // to hold it below the prompt. Crushing only happens
-                            // when the terminal itself is shorter than prompt +
-                            // popup budget (tiny terminals). In that case render
-                            // at least 3 rows and clamp to the terminal bottom.
-                            let comp_h = popup_budget_h
-                                .min(size.height.saturating_sub(popup_area.y).max(3));
-                            let comp_area = Rect::new(
-                                popup_x,
-                                popup_area.y,
-                                popup_w.min(size.width.saturating_sub(popup_x).saturating_sub(1)),
-                                comp_h,
-                            );
-
-                            let list_area = comp_area;
-
-                            // Find the flat index of the selected suggestion (accounting for group headers)
-                            let selected_flat_idx = comp_mgr.flat_index_of(comp_mgr.selected_idx);
-
-                            // Update scroll offset based on selected flat index
-                            let visible_rows = comp_h.saturating_sub(2).max(1) as usize;
-                            if selected_flat_idx >= comp_mgr.scroll_offset + visible_rows {
-                                comp_mgr.scroll_offset = selected_flat_idx
-                                    .saturating_sub(visible_rows)
-                                    .saturating_add(1);
-                            } else if selected_flat_idx < comp_mgr.scroll_offset {
-                                comp_mgr.scroll_offset = selected_flat_idx;
-                            }
-
-                            // Determine if scrollbar is needed (accounts for headers)
-                            let total_display = comp_mgr.grouped.as_ref().map_or(0, |g| g.display_lines());
-                            let scrollbar_needed = total_display > visible_rows;
-                            let render_width = list_area.width.saturating_sub(if scrollbar_needed { 1 } else { 0 });
-
-                            // Build grouped list items (render_popup already windows
-                            // by scroll_offset..scroll_offset+visible_rows — no second slice).
-                            let (sections, _total_display) = comp_mgr.render_popup(
-                                render_width,
-                                visible_rows,
-                            );
-
-                            let mut list_items: Vec<ListItem> = Vec::new();
-                            for (_is_header, items) in &sections {
-                                for item in items {
-                                    list_items.push(item.clone());
-                                }
-                            }
-
-                            // Footer with count info
-                            let footer_text = if total_items > visible_rows {
-                                format!(
-                                    " {} of {} — ↑↓ navigate, PgUp/PgDn page, Tab cycle, Enter/→ accept ",
-                                    comp_mgr.selected_idx + 1,
-                                    total_items,
-                                )
-                            } else {
-                                format!(
-                                    " {} item{} — ↑↓ navigate, Tab cycle, Enter/→ accept, Esc close ",
-                                    total_items,
-                                    if total_items == 1 { "" } else { "s" },
-                                )
-                            };
-
-
-
-                            let comp_block = Block::default()
-                                .borders(Borders::ALL)
-                                .border_type(BorderType::Rounded)
-                                .border_style(theme.status.muted.to_style())
-                                .title(Span::styled(
-                                    footer_text,
-                                    theme.status.muted.to_style(),
-                                ))
-                                .title_alignment(ratatui::layout::Alignment::Left);
-
-                            if _total_display > visible_rows {
-                                let list_area = Rect::new(
-                                    comp_area.x,
-                                    comp_area.y,
-                                    comp_area.width.saturating_sub(1),
-                                    comp_area.height,
-                                );
-                                let scroll_area = Rect::new(
-                                    comp_area.x + comp_area.width.saturating_sub(1),
-                                    comp_area.y,
-                                    1,
-                                    comp_area.height,
-                                );
-                                let mut scrollbar_state =
-                                    ScrollbarState::new(_total_display)
-                                        .position(selected_flat_idx);
-                                f.render_widget(
-                                    List::new(list_items).block(comp_block),
-                                    list_area,
-                                );
-                                f.render_stateful_widget(
-                                    Scrollbar::default()
-                                        .orientation(ScrollbarOrientation::VerticalRight)
-                                        .begin_symbol(Some("▲"))
-                                        .end_symbol(Some("▼"))
-                                        .track_symbol(Some("│"))
-                                        .thumb_symbol("█")
-                                        .style(theme.status.muted.to_style())
-                                        .thumb_style(theme.widgets.foreground.to_style()),
-                                    scroll_area,
-                                    &mut scrollbar_state,
-                                );
-                            } else {
-                                f.render_widget(
-                                    List::new(list_items).block(comp_block),
-                                    list_area,
-                                );
-                            }
-
-
-                        } else if comp_mgr.visible {
-                            let empty_msg = Span::styled(
-                                "  No completions match",
-                                theme.status.muted.to_style(),
-                            );
-                            let empty_block = Block::default()
-                                .borders(Borders::ALL)
-                                .border_type(BorderType::Rounded)
-                                .border_style(theme.status.muted.to_style());
-                            f.render_widget(
-                                Paragraph::new(Line::from(empty_msg)).block(empty_block),
-                                popup_area,
-                            );
-                        } else if widget_explorer.active {
-                            let exp_area = popup_area;
-                            let title_str = if widget_explorer.query.is_empty() {
-                                " [Keybindings & Widget Palette] ".to_string()
-                            } else {
-                                format!(" [Keybindings & Widget Palette: {}] ", widget_explorer.query)
-                            };
-                            let exp_block = Block::default()
-                                .borders(Borders::ALL)
-                                .border_type(BorderType::Rounded)
-                                .border_style(theme.status.info.to_style())
-                                .title(Span::styled(title_str, theme.status.info.to_style_bold()));
-
-                            let max_h = exp_area.height.saturating_sub(3) as usize;
-                            let header = Row::new(vec![
-                                Cell::from("Category").style(theme.widgets.title.to_style_bold()),
-                                Cell::from("Widget Name").style(theme.widgets.title.to_style_bold()),
-                                Cell::from("Bound Key").style(theme.widgets.title.to_style_bold()),
-                                Cell::from("Description").style(theme.widgets.title.to_style_bold()),
-                            ]);
-
-                            let scroll_offset = widget_explorer.scroll_offset;
-                            let selected_idx = widget_explorer.selected_idx;
-
-                            let rows: Vec<Row> = widget_explorer
-                                .items
-                                .iter()
-                                .skip(scroll_offset)
-                                .take(max_h)
-                                .enumerate()
-                                .map(|(i, item)| {
-                                    let idx = scroll_offset + i;
-                                    let style = if idx == selected_idx {
-                                        Style::default()
-                                            .fg(theme.widgets.item_selected_fg.to_ratatui_color())
-                                            .bg(theme.widgets.item_selected_bg.to_ratatui_color())
-                                            .add_modifier(Modifier::BOLD)
+                                        reversed_cmds
+                                            .iter()
+                                            .skip(hist_scroll_offset)
+                                            .take(max_h)
+                                            .enumerate()
+                                            .map(|(i, &cmd)| {
+                                                let idx = hist_scroll_offset + i;
+                                                let style = if idx == hist_selected_idx {
+                                                    Style::default()
+                                                        .fg(theme
+                                                            .widgets
+                                                            .item_selected_fg
+                                                            .to_ratatui_color())
+                                                        .bg(theme
+                                                            .widgets
+                                                            .item_selected_bg
+                                                            .to_ratatui_color())
+                                                        .add_modifier(Modifier::BOLD)
+                                                } else {
+                                                    theme.widgets.foreground.to_style()
+                                                };
+                                                ListItem::new(Line::from(vec![
+                                                    Span::styled(
+                                                        " ~> ",
+                                                        theme.syntax.variable.to_style(),
+                                                    ),
+                                                    Span::styled(cmd.clone(), style),
+                                                ]))
+                                            })
+                                            .collect()
                                     } else {
-                                        theme.widgets.foreground.to_style()
+                                        history_mgr
+                                            .results
+                                            .iter()
+                                            .skip(hist_scroll_offset)
+                                            .take(max_h)
+                                            .enumerate()
+                                            .map(|(i, entry)| {
+                                                let idx = hist_scroll_offset + i;
+                                                let status_icon = if entry.exit_code == Some(0) {
+                                                    Span::styled(
+                                                        " [ok] ",
+                                                        theme.status.ok.to_style(),
+                                                    )
+                                                } else {
+                                                    Span::styled(
+                                                        " [!] ",
+                                                        theme.status.error.to_style(),
+                                                    )
+                                                };
+                                                let style = if idx == hist_selected_idx {
+                                                    Style::default()
+                                                        .fg(theme
+                                                            .widgets
+                                                            .item_selected_fg
+                                                            .to_ratatui_color())
+                                                        .bg(theme
+                                                            .widgets
+                                                            .item_selected_bg
+                                                            .to_ratatui_color())
+                                                        .add_modifier(Modifier::BOLD)
+                                                } else {
+                                                    theme.widgets.foreground.to_style()
+                                                };
+                                                ListItem::new(Line::from(vec![
+                                                    status_icon,
+                                                    Span::styled(entry.command.clone(), style),
+                                                    Span::styled(
+                                                        format!(" ({})", entry.cwd),
+                                                        theme.status.muted.to_style(),
+                                                    ),
+                                                ]))
+                                            })
+                                            .collect()
                                     };
 
-                                    Row::new(vec![
-                                        Cell::from(format!("[{}]", item.category)).style(theme.status.muted.to_style()),
-                                        Cell::from(item.name).style(theme.status.info.to_style()),
-                                        Cell::from(item.bound_chord.clone()).style(theme.status.ok.to_style()),
-                                        Cell::from(item.description).style(theme.widgets.foreground.to_style()),
-                                    ]).style(style)
-                                })
-                                .collect();
+                                    let items = if items.is_empty() {
+                                        let msg = if history_mgr.query.is_empty() {
+                                            "  No history entries yet".to_string()
+                                        } else {
+                                            format!(
+                                                "  No commands matching \"{}\"",
+                                                history_mgr.query
+                                            )
+                                        };
+                                        vec![ListItem::new(Line::from(Span::styled(
+                                            msg,
+                                            theme.status.muted.to_style(),
+                                        )))]
+                                    } else {
+                                        items
+                                    };
 
-                            let table = Table::new(
-                                rows,
-                                [
-                                    Constraint::Length(18),
-                                    Constraint::Length(28),
-                                    Constraint::Length(22),
-                                    Constraint::Percentage(40),
-                                ],
-                            )
-                            .header(header)
-                            .block(exp_block);
-
-                            f.render_widget(table, exp_area);
-                        } else if help_visible {
-                            // Render F1 Help Tooltip
-                            let cmd_name = get_command_for_cursor(&display_text, text_buf.cursor());
-                            if let Some(topic) = fshell_builtins::help::find_topic(&cmd_name) {
-                                let help_area = popup_area;
-                                let help_block = Block::default()
+                                    let list_widget = List::new(items).block(hist_block);
+                                    f.render_widget(list_widget, hist_area);
+                                }
+                            } else if agent_state.active {
+                                let agent_area = popup_area;
+                                let agent_block = Block::default()
                                     .borders(Borders::ALL)
                                     .border_type(BorderType::Rounded)
-                                    .border_style(theme.status.ok.to_style())
                                     .title(Span::styled(
-                                        format!(" Help: {} ", topic.name),
-                                        theme.status.ok.to_style_bold(),
+                                        " fsh-ai Agent Mode ",
+                                        theme.syntax.keyword.to_style_bold(),
                                     ));
 
-                                let mut lines = Vec::new();
-                                // Line 1: Summary
-                                lines.push(Line::from(vec![
-                                    Span::styled(topic.name, theme.status.info.to_style_bold()),
-                                    Span::raw(" - "),
-                                    Span::styled(topic.summary, theme.widgets.foreground.to_style()),
-                                ]));
-                                // Line 2: Syntax
-                                lines.push(Line::from(vec![
-                                    Span::styled("Syntax: ", theme.widgets.title.to_style()),
-                                    Span::styled(topic.syntax, theme.widgets.foreground.to_style()),
-                                ]));
-                                // Line 3: Examples/Flags
-                                if let Some(ex) = topic.examples.first() {
-                                    lines.push(Line::from(vec![
-                                        Span::styled("Example: ", theme.widgets.title.to_style()),
-                                        Span::styled(ex.input, theme.status.info.to_style()),
-                                        Span::raw(" ("),
-                                        Span::styled(ex.explanation, theme.status.muted.to_style()),
-                                        Span::raw(")"),
-                                    ]));
-                                } else if let Some(flag) = topic.flags.first() {
-                                    lines.push(Line::from(vec![
-                                        Span::styled("Flag: ", theme.widgets.title.to_style()),
-                                        Span::styled(flag.flag, theme.status.info.to_style()),
-                                        Span::raw(" - "),
-                                        Span::styled(flag.desc, theme.widgets.foreground.to_style()),
-                                    ]));
+                                let content = if agent_state.is_loading {
+                                    vec![
+                                        Line::from("  Translating request into fsh command..."),
+                                        Line::from("  Please wait while the AI provider responds."),
+                                    ]
+                                } else if let Some(err) = &agent_state.error_msg {
+                                    vec![
+                                        Line::from(vec![
+                                            Span::styled(
+                                                "  Error: ",
+                                                theme.status.error.to_style(),
+                                            ),
+                                            Span::raw(err),
+                                        ]),
+                                        Line::from(
+                                            "  Press Esc to return, Alt+Enter to try again.",
+                                        ),
+                                    ]
                                 } else {
-                                    lines.push(Line::from(vec![
-                                        Span::styled(topic.description, theme.status.muted.to_style()),
-                                    ]));
+                                    vec![
+                                        Line::from(format!("  Query: {}", agent_state.prompt)),
+                                        Line::from(vec![
+                                            Span::styled(
+                                                "  Generated: ",
+                                                theme.status.ok.to_style(),
+                                            ),
+                                            Span::styled(
+                                                agent_state.result_command.as_deref().unwrap_or(""),
+                                                theme.widgets.title.to_style_bold(),
+                                            ),
+                                        ]),
+                                        Line::from("  Press Enter to edit/run, Esc to exit."),
+                                    ]
+                                };
+
+                                f.render_widget(
+                                    Paragraph::new(content).block(agent_block),
+                                    agent_area,
+                                );
+                            } else if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
+                                let total_items = comp_mgr.suggestions.len();
+                                let popup_budget_h = popup_area.height.max(3);
+                                let max_w = size.width.saturating_sub(2);
+                                let popup_w = if size.width >= 120 {
+                                    ((size.width as f64 * 0.5) as u16).clamp(50, 75).min(max_w)
+                                } else {
+                                    (size.width / 2 + size.width / 4).clamp(40, 65).min(max_w)
+                                };
+                                let visual_cursor_col =
+                                    cursor_col.saturating_sub(text_scroll_offset);
+                                let popup_x = (prompt_len + visual_cursor_col as u16)
+                                    .min(size.width.saturating_sub(popup_w).saturating_sub(1));
+
+                                // R2: when the popup is at the bottom edge the inline
+                                // viewport scroll already made `popup_area` tall enough
+                                // to hold it below the prompt. Crushing only happens
+                                // when the terminal itself is shorter than prompt +
+                                // popup budget (tiny terminals). In that case render
+                                // at least 3 rows and clamp to the terminal bottom.
+                                let comp_h = popup_budget_h
+                                    .min(size.height.saturating_sub(popup_area.y).max(3));
+                                let comp_area = Rect::new(
+                                    popup_x,
+                                    popup_area.y,
+                                    popup_w
+                                        .min(size.width.saturating_sub(popup_x).saturating_sub(1)),
+                                    comp_h,
+                                );
+
+                                let list_area = comp_area;
+
+                                let layout = comp_mgr.compute_layout_mode(popup_w);
+                                let selected_row = match layout {
+                                    crate::ftui::completions::CompletionLayoutMode::Grid {
+                                        cols,
+                                        ..
+                                    } => comp_mgr.selected_idx / cols,
+                                    crate::ftui::completions::CompletionLayoutMode::List => {
+                                        comp_mgr.selected_idx
+                                    }
+                                };
+
+                                let visible_rows = comp_h.saturating_sub(2).max(1) as usize;
+                                if selected_row >= comp_mgr.scroll_offset + visible_rows {
+                                    comp_mgr.scroll_offset =
+                                        selected_row.saturating_sub(visible_rows).saturating_add(1);
+                                } else if selected_row < comp_mgr.scroll_offset {
+                                    comp_mgr.scroll_offset = selected_row;
                                 }
 
-                                let list = List::new(lines.into_iter().map(ListItem::new).collect::<Vec<_>>())
-                                    .block(help_block);
-                                f.render_widget(list, help_area);
-                            } else {
-                                // Render a fallback box
-                                let help_area = popup_area;
-                                let help_block = Block::default()
+                                let render_width = list_area.width;
+                                let (sections, total_display) =
+                                    comp_mgr.render_popup(render_width, visible_rows);
+
+                                let mut list_items: Vec<ListItem> = Vec::new();
+                                for (_is_header, items) in &sections {
+                                    for item in items {
+                                        list_items.push(item.clone());
+                                    }
+                                }
+
+                                let is_grid = matches!(
+                                    layout,
+                                    crate::ftui::completions::CompletionLayoutMode::Grid { .. }
+                                );
+                                let category_header = if is_grid {
+                                    " Files & Dirs "
+                                } else {
+                                    " Completions "
+                                };
+                                let title_text = format!(
+                                    "{}({}/{}) ",
+                                    category_header,
+                                    comp_mgr.selected_idx + 1,
+                                    total_items,
+                                );
+
+                                let mut comp_block = Block::default()
                                     .borders(Borders::ALL)
                                     .border_type(BorderType::Rounded)
-                                    .border_style(theme.status.muted.to_style())
-                                    .title(Span::styled(" Help Tooltip ", theme.status.muted.to_style()));
-                                let fallback_text = if cmd_name.is_empty() {
-                                    "No command under cursor".to_string()
-                                } else {
-                                    format!("No help topic found for command: '{}'", cmd_name)
-                                };
-                                let paragraph = Paragraph::new(fallback_text)
-                                    .style(theme.status.muted.to_style())
-                                    .block(help_block);
-                                f.render_widget(paragraph, help_area);
-                            }
-                        } else {
-                            // Clear the reserved popup area so stale content from
-                            // dismissed completions/help doesn't linger on screen.
-                            // Needed because Viewport::Inline doesn't auto-clear cells.
-                            f.render_widget(Clear, popup_area);
-                        }
+                                    .border_style(theme.status.muted.to_style_dim())
+                                    .title(Span::styled(
+                                        title_text,
+                                        theme.status.muted.to_style_bold(),
+                                    ))
+                                    .title_alignment(ratatui::layout::Alignment::Left);
 
-                    }).is_err() {
+                                if is_grid {
+                                    if let Some(s) = comp_mgr.get_selected_suggestion() {
+                                        if let Some(desc) = &s.description {
+                                            if !desc.is_empty()
+                                                && desc != "Directory"
+                                                && desc != "File"
+                                            {
+                                                let bottom_text =
+                                                    format!(" {} ({}) ", s.value, desc);
+                                                comp_block = comp_block.title_bottom(Span::styled(
+                                                    bottom_text,
+                                                    theme.status.muted.to_style_dim(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if total_display > visible_rows {
+                                    let list_area = Rect::new(
+                                        comp_area.x,
+                                        comp_area.y,
+                                        comp_area.width.saturating_sub(1),
+                                        comp_area.height,
+                                    );
+                                    let scroll_area = Rect::new(
+                                        comp_area.x + comp_area.width.saturating_sub(1),
+                                        comp_area.y.saturating_add(1),
+                                        1,
+                                        comp_area.height.saturating_sub(2),
+                                    );
+                                    let mut scrollbar_state =
+                                        ScrollbarState::new(total_display).position(selected_row);
+                                    f.render_widget(
+                                        List::new(list_items).block(comp_block),
+                                        list_area,
+                                    );
+                                    f.render_stateful_widget(
+                                        Scrollbar::default()
+                                            .orientation(ScrollbarOrientation::VerticalRight)
+                                            .begin_symbol(None)
+                                            .end_symbol(None)
+                                            .track_symbol(Some("│"))
+                                            .thumb_symbol("┃")
+                                            .style(theme.status.muted.to_style_dim())
+                                            .thumb_style(theme.widgets.foreground.to_style_bold()),
+                                        scroll_area,
+                                        &mut scrollbar_state,
+                                    );
+                                } else {
+                                    f.render_widget(
+                                        List::new(list_items).block(comp_block),
+                                        comp_area,
+                                    );
+                                }
+                            } else if comp_mgr.visible {
+                                let empty_msg = Span::styled(
+                                    "  No completions match",
+                                    theme.status.muted.to_style(),
+                                );
+                                let empty_block = Block::default()
+                                    .borders(Borders::ALL)
+                                    .border_type(BorderType::Rounded)
+                                    .border_style(theme.status.muted.to_style());
+                                f.render_widget(
+                                    Paragraph::new(Line::from(empty_msg)).block(empty_block),
+                                    popup_area,
+                                );
+                            } else if widget_explorer.active {
+                                let exp_area = popup_area;
+                                let title_str = if widget_explorer.query.is_empty() {
+                                    " [Keybindings & Widget Palette] ".to_string()
+                                } else {
+                                    format!(
+                                        " [Keybindings & Widget Palette: {}] ",
+                                        widget_explorer.query
+                                    )
+                                };
+                                let exp_block = Block::default()
+                                    .borders(Borders::ALL)
+                                    .border_type(BorderType::Rounded)
+                                    .border_style(theme.status.info.to_style())
+                                    .title(Span::styled(
+                                        title_str,
+                                        theme.status.info.to_style_bold(),
+                                    ));
+
+                                let max_h = exp_area.height.saturating_sub(3) as usize;
+                                let header = Row::new(vec![
+                                    Cell::from("Category")
+                                        .style(theme.widgets.title.to_style_bold()),
+                                    Cell::from("Widget Name")
+                                        .style(theme.widgets.title.to_style_bold()),
+                                    Cell::from("Bound Key")
+                                        .style(theme.widgets.title.to_style_bold()),
+                                    Cell::from("Description")
+                                        .style(theme.widgets.title.to_style_bold()),
+                                ]);
+
+                                let scroll_offset = widget_explorer.scroll_offset;
+                                let selected_idx = widget_explorer.selected_idx;
+
+                                let rows: Vec<Row> = widget_explorer
+                                    .items
+                                    .iter()
+                                    .skip(scroll_offset)
+                                    .take(max_h)
+                                    .enumerate()
+                                    .map(|(i, item)| {
+                                        let idx = scroll_offset + i;
+                                        let style = if idx == selected_idx {
+                                            Style::default()
+                                                .fg(theme
+                                                    .widgets
+                                                    .item_selected_fg
+                                                    .to_ratatui_color())
+                                                .bg(theme
+                                                    .widgets
+                                                    .item_selected_bg
+                                                    .to_ratatui_color())
+                                                .add_modifier(Modifier::BOLD)
+                                        } else {
+                                            theme.widgets.foreground.to_style()
+                                        };
+
+                                        Row::new(vec![
+                                            Cell::from(format!("[{}]", item.category))
+                                                .style(theme.status.muted.to_style()),
+                                            Cell::from(item.name)
+                                                .style(theme.status.info.to_style()),
+                                            Cell::from(item.bound_chord.clone())
+                                                .style(theme.status.ok.to_style()),
+                                            Cell::from(item.description)
+                                                .style(theme.widgets.foreground.to_style()),
+                                        ])
+                                        .style(style)
+                                    })
+                                    .collect();
+
+                                let table = Table::new(
+                                    rows,
+                                    [
+                                        Constraint::Length(18),
+                                        Constraint::Length(28),
+                                        Constraint::Length(22),
+                                        Constraint::Percentage(40),
+                                    ],
+                                )
+                                .header(header)
+                                .block(exp_block);
+
+                                f.render_widget(table, exp_area);
+                            } else if help_visible {
+                                // Render F1 Help Tooltip
+                                let cmd_name =
+                                    get_command_for_cursor(&display_text, text_buf.cursor());
+                                if let Some(topic) = fshell_builtins::help::find_topic(&cmd_name) {
+                                    let help_area = popup_area;
+                                    let help_block = Block::default()
+                                        .borders(Borders::ALL)
+                                        .border_type(BorderType::Rounded)
+                                        .border_style(theme.status.ok.to_style())
+                                        .title(Span::styled(
+                                            format!(" Help: {} ", topic.name),
+                                            theme.status.ok.to_style_bold(),
+                                        ));
+
+                                    let mut lines = Vec::new();
+                                    // Line 1: Summary
+                                    lines.push(Line::from(vec![
+                                        Span::styled(topic.name, theme.status.info.to_style_bold()),
+                                        Span::raw(" - "),
+                                        Span::styled(
+                                            topic.summary,
+                                            theme.widgets.foreground.to_style(),
+                                        ),
+                                    ]));
+                                    // Line 2: Syntax
+                                    lines.push(Line::from(vec![
+                                        Span::styled("Syntax: ", theme.widgets.title.to_style()),
+                                        Span::styled(
+                                            topic.syntax,
+                                            theme.widgets.foreground.to_style(),
+                                        ),
+                                    ]));
+                                    // Line 3: Examples/Flags
+                                    if let Some(ex) = topic.examples.first() {
+                                        lines.push(Line::from(vec![
+                                            Span::styled(
+                                                "Example: ",
+                                                theme.widgets.title.to_style(),
+                                            ),
+                                            Span::styled(ex.input, theme.status.info.to_style()),
+                                            Span::raw(" ("),
+                                            Span::styled(
+                                                ex.explanation,
+                                                theme.status.muted.to_style(),
+                                            ),
+                                            Span::raw(")"),
+                                        ]));
+                                    } else if let Some(flag) = topic.flags.first() {
+                                        lines.push(Line::from(vec![
+                                            Span::styled("Flag: ", theme.widgets.title.to_style()),
+                                            Span::styled(flag.flag, theme.status.info.to_style()),
+                                            Span::raw(" - "),
+                                            Span::styled(
+                                                flag.desc,
+                                                theme.widgets.foreground.to_style(),
+                                            ),
+                                        ]));
+                                    } else {
+                                        lines.push(Line::from(vec![Span::styled(
+                                            topic.description,
+                                            theme.status.muted.to_style(),
+                                        )]));
+                                    }
+
+                                    let list = List::new(
+                                        lines.into_iter().map(ListItem::new).collect::<Vec<_>>(),
+                                    )
+                                    .block(help_block);
+                                    f.render_widget(list, help_area);
+                                } else {
+                                    // Render a fallback box
+                                    let help_area = popup_area;
+                                    let help_block = Block::default()
+                                        .borders(Borders::ALL)
+                                        .border_type(BorderType::Rounded)
+                                        .border_style(theme.status.muted.to_style())
+                                        .title(Span::styled(
+                                            " Help Tooltip ",
+                                            theme.status.muted.to_style(),
+                                        ));
+                                    let fallback_text = if cmd_name.is_empty() {
+                                        "No command under cursor".to_string()
+                                    } else {
+                                        format!("No help topic found for command: '{}'", cmd_name)
+                                    };
+                                    let paragraph = Paragraph::new(fallback_text)
+                                        .style(theme.status.muted.to_style())
+                                        .block(help_block);
+                                    f.render_widget(paragraph, help_area);
+                                }
+                            } else {
+                                // Clear the reserved popup area so stale content from
+                                // dismissed completions/help doesn't linger on screen.
+                                // Needed because Viewport::Inline doesn't auto-clear cells.
+                                f.render_widget(Clear, popup_area);
+                            }
+                        })
+                        .is_err()
+                    {
                         break 'repl_loop;
                     }
                     _last_relative_cursor_y = relative_cursor_y;
@@ -2284,13 +2400,37 @@ pub async fn run_ftui_repl(
                             }
                             KeyCode::Down => {
                                 comp_mgr.active_selection = true;
-                                comp_mgr.select_next();
+                                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                                let layout = comp_mgr.compute_layout_mode(term_w);
+                                match layout {
+                                    crate::ftui::completions::CompletionLayoutMode::Grid {
+                                        cols,
+                                        ..
+                                    } => {
+                                        comp_mgr.select_down(cols);
+                                    }
+                                    crate::ftui::completions::CompletionLayoutMode::List => {
+                                        comp_mgr.select_next();
+                                    }
+                                }
                                 redraw = true;
                                 continue;
                             }
                             KeyCode::Up => {
                                 comp_mgr.active_selection = true;
-                                comp_mgr.select_prev();
+                                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                                let layout = comp_mgr.compute_layout_mode(term_w);
+                                match layout {
+                                    crate::ftui::completions::CompletionLayoutMode::Grid {
+                                        cols,
+                                        ..
+                                    } => {
+                                        comp_mgr.select_up(cols);
+                                    }
+                                    crate::ftui::completions::CompletionLayoutMode::List => {
+                                        comp_mgr.select_prev();
+                                    }
+                                }
                                 redraw = true;
                                 continue;
                             }
@@ -2310,13 +2450,66 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Right | KeyCode::Enter if comp_mgr.active_selection => {
+                            KeyCode::Right if comp_mgr.active_selection => {
+                                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                                let layout = comp_mgr.compute_layout_mode(term_w);
+                                match layout {
+                                    crate::ftui::completions::CompletionLayoutMode::Grid {
+                                        ..
+                                    } => {
+                                        comp_mgr.select_next();
+                                    }
+                                    crate::ftui::completions::CompletionLayoutMode::List => {
+                                        if let Some(s) = comp_mgr.get_selected_suggestion().cloned()
+                                        {
+                                            let line = text_buf.text().clone();
+                                            apply_completion(&mut text_buf, &line, &s);
+                                        }
+                                        comp_mgr.refresh_after_completion(
+                                            &text_buf.text(),
+                                            text_buf.cursor(),
+                                        );
+                                    }
+                                }
+                                redraw = true;
+                                continue;
+                            }
+                            KeyCode::Left if comp_mgr.active_selection => {
+                                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                                let layout = comp_mgr.compute_layout_mode(term_w);
+                                if matches!(
+                                    layout,
+                                    crate::ftui::completions::CompletionLayoutMode::Grid { .. }
+                                ) {
+                                    comp_mgr.select_prev();
+                                    redraw = true;
+                                    continue;
+                                }
+                            }
+                            KeyCode::Enter if comp_mgr.active_selection => {
                                 if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
                                     let line = text_buf.text().clone();
                                     apply_completion(&mut text_buf, &line, &s);
                                 }
                                 comp_mgr
                                     .refresh_after_completion(&text_buf.text(), text_buf.cursor());
+                                redraw = true;
+                                continue;
+                            }
+                            KeyCode::Char(' ') if comp_mgr.active_selection => {
+                                if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
+                                    let line = text_buf.text().clone();
+                                    apply_completion(&mut text_buf, &line, &s);
+                                    if !s.value.ends_with('/') {
+                                        text_buf.insert_char(' ');
+                                        comp_mgr.clear();
+                                    } else {
+                                        comp_mgr.refresh_after_completion(
+                                            &text_buf.text(),
+                                            text_buf.cursor(),
+                                        );
+                                    }
+                                }
                                 redraw = true;
                                 continue;
                             }
@@ -2423,6 +2616,13 @@ pub async fn run_ftui_repl(
                                         continue;
                                     }
                                     widgets::WidgetAction::Redraw => {
+                                        if comp_mgr.session_active {
+                                            comp_mgr.update(
+                                                &text_buf.text(),
+                                                text_buf.cursor(),
+                                                false,
+                                            );
+                                        }
                                         redraw = true;
                                         continue;
                                     }
@@ -2457,6 +2657,13 @@ pub async fn run_ftui_repl(
                                             }
                                         } else {
                                             text_buf.insert_str(&m);
+                                            if comp_mgr.session_active {
+                                                comp_mgr.update(
+                                                    &text_buf.text(),
+                                                    text_buf.cursor(),
+                                                    false,
+                                                );
+                                            }
                                             redraw = true;
                                             continue;
                                         }
@@ -2737,25 +2944,13 @@ pub async fn run_ftui_repl(
                                     text_buf.delete_left();
                                 }
                             }
-                            if comp_mgr.visible {
-                                let buf_text = text_buf.text();
-                                let partial = extract_partial_word(&buf_text, text_buf.cursor());
-                                comp_mgr.filter(partial);
-                            } else {
-                                comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
-                            }
+                            comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                             redraw = true;
                         }
                         KeyCode::Delete => {
                             history_index = None;
                             text_buf.delete_right();
-                            if comp_mgr.visible {
-                                let buf_text = text_buf.text();
-                                let partial = extract_partial_word(&buf_text, text_buf.cursor());
-                                comp_mgr.filter(partial);
-                            } else {
-                                comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
-                            }
+                            comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                             redraw = true;
                         }
                         KeyCode::Esc => {
@@ -2826,13 +3021,7 @@ pub async fn run_ftui_repl(
                         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             history_index = None;
                             text_buf.delete_word_left();
-                            if comp_mgr.visible {
-                                let buf_text = text_buf.text();
-                                let partial = extract_partial_word(&buf_text, text_buf.cursor());
-                                comp_mgr.filter(partial);
-                            } else {
-                                comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
-                            }
+                            comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                             redraw = true;
                         }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -3136,13 +3325,7 @@ pub async fn run_ftui_repl(
                             history_index = None;
                             fshell_core::debug_log!("prefix_search cleared on char input");
                             text_buf.insert_char(c);
-                            if comp_mgr.visible {
-                                let buf_text = text_buf.text();
-                                let partial = extract_partial_word(&buf_text, text_buf.cursor());
-                                comp_mgr.filter(partial);
-                            } else {
-                                comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
-                            }
+                            comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                             redraw = true;
                         }
                         _ => {}
@@ -3763,27 +3946,16 @@ fn accept_completion_at_span(
     let start_char = byte_offset_to_char_index(line, span.start).min(total_chars);
     let end_char = byte_offset_to_char_index(line, span.end).min(total_chars);
 
-    // Calculate how far ahead the cursor is from the span start
-    let cursor = text_buf.cursor();
-    if cursor > start_char && cursor <= total_chars {
-        let len_to_delete = cursor - start_char;
-        // Move cursor back to start of span
+    // Delete the entire span range [start_char..end_char]
+    if start_char <= end_char && start_char <= total_chars {
         text_buf.set_cursor(start_char);
-        // Delete from start_char to old cursor
+        let len_to_delete = end_char.saturating_sub(start_char);
         for _ in 0..len_to_delete {
             text_buf.delete_right();
         }
-    } else if cursor == start_char && end_char > start_char {
-        // Delete the span forward
-        let len_to_delete = end_char - start_char;
-        for _ in 0..len_to_delete {
-            text_buf.delete_right();
-        }
+        text_buf.insert_str(value);
+        append_completion_tail(text_buf, value, append_whitespace);
     }
-
-    // Now cursor is at start_char, insert the value
-    text_buf.insert_str(value);
-    append_completion_tail(text_buf, value, append_whitespace);
 }
 
 /// Convert a byte offset to a character index.

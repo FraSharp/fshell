@@ -8,7 +8,6 @@ use fshell_engine::{EngineError, Env, Flow, PipelinePayload, eval_stmt, is_stdou
 use nu_ansi_term::Color;
 use std::future::Future;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -835,16 +834,7 @@ impl reedline::Completer for FshellCompleter {
         };
         let prefix = &line[..pos];
         let words: Vec<&str> = prefix.split_whitespace().collect();
-        let last_word = line[..pos]
-            .split(|c: char| {
-                if c == '$' {
-                    false
-                } else {
-                    c.is_whitespace() || c == '|' || c == '>' || c == '<'
-                }
-            })
-            .next_back()
-            .unwrap_or("");
+        let last_word = crate::ftui::completions::extract_quote_aware_token(prefix);
         let starting_new_arg = prefix.ends_with(' ');
 
         let is_external = if !words.is_empty() {
@@ -1807,16 +1797,34 @@ fn expand_env_vars(s: &str) -> String {
 }
 
 fn complete_files(last_word: &str, pos: usize) -> Vec<reedline::Suggestion> {
-    let last_word_owned = last_word.to_string();
+    let word_len = last_word.len();
+    let has_opening_double_quote = last_word.starts_with('"');
+    let has_opening_single_quote = last_word.starts_with('\'');
 
-    let expanded = if last_word_owned.starts_with('~') {
+    let unquoted = if has_opening_double_quote {
+        last_word
+            .strip_prefix('"')
+            .unwrap_or(last_word)
+            .trim_end_matches('"')
+    } else if has_opening_single_quote {
+        last_word
+            .strip_prefix('\'')
+            .unwrap_or(last_word)
+            .trim_end_matches('\'')
+    } else {
+        last_word
+    };
+
+    let unquoted_owned = unquoted.to_string();
+
+    let expanded = if unquoted_owned.starts_with('~') {
         if let Ok(home) = std::env::var("HOME") {
-            last_word_owned.replacen('~', &home, 1)
+            unquoted_owned.replacen('~', &home, 1)
         } else {
-            last_word_owned.clone()
+            unquoted_owned.clone()
         }
     } else {
-        last_word_owned.clone()
+        unquoted_owned.clone()
     };
     let expanded = expand_env_vars(&expanded);
 
@@ -1857,7 +1865,6 @@ fn complete_files(last_word: &str, pos: usize) -> Vec<reedline::Suggestion> {
             return Vec::new();
         }
 
-        let word_len = last_word_owned.len();
         let kind = fuzzy::choose_kind(entries.len());
         let prepared = fuzzy::PreparedQuery::new(&file_prefix);
         let mut scored: Vec<(isize, String, bool)> = entries
@@ -1870,27 +1877,33 @@ fn complete_files(last_word: &str, pos: usize) -> Vec<reedline::Suggestion> {
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         scored.truncate(fuzzy::MAX_RESULTS);
 
-        let user_prefix = match last_word_owned.rfind('/') {
-            Some(idx) => &last_word_owned[..=idx],
+        let user_prefix = match unquoted_owned.rfind('/') {
+            Some(idx) => &unquoted_owned[..=idx],
             None => "",
         };
 
         scored
             .into_iter()
             .map(|(_, name, is_dir)| {
-                let mut full_suggestion = format!("{}{}", user_prefix, name);
+                let mut path_str = format!("{}{}", user_prefix, name);
                 if is_dir {
-                    full_suggestion.push('/');
+                    path_str.push('/');
                 }
-                let final_value = if full_suggestion.contains(' ')
-                    || full_suggestion.contains('\'')
-                    || full_suggestion.contains('"')
-                    || full_suggestion.contains('\\')
+
+                let final_value = if has_opening_single_quote {
+                    format!("'{}", path_str)
+                } else if has_opening_double_quote {
+                    let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+                    format!("\"{}", escaped)
+                } else if path_str.contains(' ')
+                    || path_str.contains('\'')
+                    || path_str.contains('"')
+                    || path_str.contains('\\')
                 {
-                    let escaped = full_suggestion.replace('\\', "\\\\").replace('"', "\\\"");
+                    let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
                     format!("\"{}\"", escaped)
                 } else {
-                    full_suggestion
+                    path_str
                 };
 
                 let desc = file_completion_description(&dir_to_read, &name, is_dir);
@@ -1921,13 +1934,10 @@ fn file_completion_description(dir: &std::path::Path, name: &str, is_dir: bool) 
         return Some(format!("→ {}", target.display()));
     }
 
-    let perm = permission_str(&meta, if meta.is_dir() { 'd' } else { '-' });
-    let ts = modified_time_str(&meta)?;
-
     if is_dir {
         let count = std::fs::read_dir(&path).map(|e| e.count()).unwrap_or(0);
         let label = if count == 1 { "item" } else { "items" };
-        Some(format!("{}│ {:>3} {:<5}│ {}", perm, count, label, ts))
+        Some(format!("{} {}", count, label))
     } else {
         let size = meta.len();
         let size_str = if size < 1024 {
@@ -1939,50 +1949,8 @@ fn file_completion_description(dir: &std::path::Path, name: &str, is_dir: bool) 
         } else {
             format!("{:.1} GB", size as f64 / (1024.0 * 1024.0 * 1024.0))
         };
-        Some(format!("{}│ {:>8}│ {}", perm, size_str, ts))
+        Some(size_str)
     }
-}
-
-fn permission_str(meta: &std::fs::Metadata, type_char: char) -> String {
-    let mode = meta.permissions().mode();
-    let rwx = |shift: u32| -> String {
-        [
-            if mode & (1 << (shift + 2)) != 0 {
-                'r'
-            } else {
-                '-'
-            },
-            if mode & (1 << (shift + 1)) != 0 {
-                'w'
-            } else {
-                '-'
-            },
-            if mode & (1 << shift) != 0 { 'x' } else { '-' },
-        ]
-        .iter()
-        .collect()
-    };
-    format!("{}{}{}{}", type_char, rwx(6), rwx(3), rwx(0))
-}
-
-fn modified_time_str(meta: &std::fs::Metadata) -> Option<String> {
-    let modified = meta.modified().ok()?;
-    let now = std::time::SystemTime::now();
-    let dur = now.duration_since(modified).ok()?;
-    let secs = dur.as_secs();
-    Some(if secs < 60 {
-        "now".to_string()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else if secs < 604800 {
-        format!("{}d ago", secs / 86400)
-    } else {
-        use chrono::{DateTime, Local};
-        let dt: DateTime<Local> = modified.into();
-        dt.format("%b %d").to_string()
-    })
 }
 
 fn get_upstream_keys(upstream: &str, env: &Env) -> Vec<String> {

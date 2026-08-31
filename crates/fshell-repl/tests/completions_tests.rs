@@ -521,11 +521,24 @@ async fn test_dotfile_completion_shows_for_partial_prefix() {
 #[tokio::test]
 async fn test_path_completion_with_pwd_var() {
     let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-    // $PWD is always set and points to a real directory with known content
+    let saved = std::env::var("PWD").ok();
+    let root = env!("CARGO_MANIFEST_DIR");
+    let project_root = std::path::Path::new(root)
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(std::path::Path::new(root));
+    let root_str = project_root.to_string_lossy().to_string();
+    set_var("PWD", &root_str);
+
     let mut c = make_completer();
-    // The current directory is the project root - $PWD/Cargo.toml should exist
     let word = "$PWD/";
     let results = c.complete(word, word.len());
+
+    match saved {
+        Some(v) => set_var("PWD", &v),
+        None => remove_var("PWD"),
+    }
+
     let values: Vec<_> = results.iter().map(|s| &s.value).collect();
     assert!(!results.is_empty(), "should expand $PWD and list files");
     assert!(
@@ -938,5 +951,120 @@ async fn test_completions_update_after_cd() {
     if let Some(orig) = orig_cwd {
         std::env::set_current_dir(orig).ok();
     }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn test_completion_manager_live_typing_and_backspace() {
+    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let env = Env::new();
+    builtins_init(&env);
+    bridge_init(&env);
+
+    let mut comp_mgr = fshell_repl::ftui::completions::CompletionsManager::new(env);
+
+    // 1. User types "echo" and presses Tab
+    comp_mgr.update("echo", 4, true);
+    assert!(comp_mgr.visible);
+    assert!(comp_mgr.session_active);
+    assert!(!comp_mgr.suggestions.is_empty());
+
+    // 2. User deletes 'o' -> line is "ech"
+    comp_mgr.update("ech", 3, false);
+    assert!(comp_mgr.visible);
+    assert!(comp_mgr.session_active);
+    assert!(
+        comp_mgr
+            .suggestions
+            .iter()
+            .any(|s| s.value.starts_with("echo"))
+    );
+
+    // 3. User types non-matching characters "ech_nonexistent_xyz"
+    comp_mgr.update("ech_nonexistent_xyz", 19, false);
+    assert!(!comp_mgr.visible);
+    assert!(comp_mgr.session_active);
+
+    // 4. User backspaces back to "ech" -> completions seamlessly reappear
+    comp_mgr.update("ech", 3, false);
+    assert!(comp_mgr.visible);
+    assert!(comp_mgr.session_active);
+    assert!(
+        comp_mgr
+            .suggestions
+            .iter()
+            .any(|s| s.value.starts_with("echo"))
+    );
+
+    // 5. User deletes all chars -> line is ""
+    comp_mgr.update("", 0, false);
+    assert!(!comp_mgr.visible);
+    assert!(!comp_mgr.session_active);
+    assert!(comp_mgr.suggestions.is_empty());
+}
+
+#[test]
+fn test_longest_common_prefix_multibyte_utf8() {
+    let env = Env::new();
+    let mut comp_mgr = fshell_repl::ftui::completions::CompletionsManager::new(env);
+    comp_mgr.suggestions = vec![
+        reedline::Suggestion {
+            value: "café_latte".to_string(),
+            description: None,
+            extra: None,
+            span: reedline::Span::new(0, 0),
+            append_whitespace: false,
+            style: None,
+            display_override: None,
+            match_indices: None,
+        },
+        reedline::Suggestion {
+            value: "café_mocha".to_string(),
+            description: None,
+            extra: None,
+            span: reedline::Span::new(0, 0),
+            append_whitespace: false,
+            style: None,
+            display_override: None,
+            match_indices: None,
+        },
+    ];
+
+    let lcp = comp_mgr.longest_common_prefix();
+    assert_eq!(lcp, Some("café_".to_string()));
+}
+
+#[tokio::test]
+async fn test_path_completion_with_quoted_drilling() {
+    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = std::env::temp_dir().join("fsh_test_quoted_drill");
+    let _ = std::fs::create_dir_all(&tmp);
+    let sub = tmp.join("my folder");
+    let _ = std::fs::create_dir_all(&sub);
+    let _ = std::fs::write(sub.join("file.txt"), "content");
+
+    let env = Env::new();
+    builtins_init(&env);
+    bridge_init(&env);
+    env.set_cwd(tmp.canonicalize().unwrap());
+
+    let mut c = FshellCompleter { env };
+    let input = "\"my folder/";
+    let res = c.complete(input, input.len());
+
+    assert!(!res.is_empty());
+    for s in &res {
+        assert!(
+            !s.value.contains("\"\""),
+            "Should not double-quote: {}",
+            s.value
+        );
+        assert!(
+            s.value.starts_with("\"my folder/"),
+            "Should preserve quote and path: {}",
+            s.value
+        );
+    }
+
     let _ = std::fs::remove_dir_all(&tmp);
 }
