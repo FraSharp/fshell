@@ -175,7 +175,9 @@ fn show_text_pager(text: &str) {
                             .iter()
                             .enumerate()
                             .filter(|(_, l)| {
-                                crate::tui::strip_ansi_codes(l).to_lowercase().contains(&q)
+                                crate::ftui::ansi::strip_ansi_codes(l)
+                                    .to_lowercase()
+                                    .contains(&q)
                             })
                             .map(|(i, _)| i)
                             .collect();
@@ -191,7 +193,9 @@ fn show_text_pager(text: &str) {
                             .iter()
                             .enumerate()
                             .filter(|(_, l)| {
-                                crate::tui::strip_ansi_codes(l).to_lowercase().contains(&q)
+                                crate::ftui::ansi::strip_ansi_codes(l)
+                                    .to_lowercase()
+                                    .contains(&q)
                             })
                             .map(|(i, _)| i)
                             .collect();
@@ -307,7 +311,7 @@ pub fn print_compact_names(list: &[Val], theme: &fshell_core::theme::Theme) {
     let (term_width, term_height) = crossterm::terminal::size().unwrap_or((80, 24));
     let max_len = entries
         .iter()
-        .map(|e| UnicodeWidthStr::width(crate::tui::strip_ansi_codes(e.name).as_str()))
+        .map(|e| UnicodeWidthStr::width(crate::ftui::ansi::strip_ansi_codes(e.name).as_str()))
         .max()
         .unwrap_or(10);
     let col_width = max_len + 2;
@@ -388,7 +392,7 @@ fn render_table(list: &[Val], out: &mut String, theme: &fshell_core::theme::Them
     for k in &keys {
         widths.insert(
             *k,
-            UnicodeWidthStr::width(crate::tui::strip_ansi_codes(k).as_str()),
+            UnicodeWidthStr::width(crate::ftui::ansi::strip_ansi_codes(k).as_str()),
         );
     }
     let mut formatted_rows: Vec<Vec<(String, bool)>> = Vec::with_capacity(list.len());
@@ -404,12 +408,13 @@ fn render_table(list: &[Val], out: &mut String, theme: &fshell_core::theme::Them
                     },
                     theme,
                 );
-                let cell_w = UnicodeWidthStr::width(crate::tui::strip_ansi_codes(&cell).as_str());
+                let cell_w =
+                    UnicodeWidthStr::width(crate::ftui::ansi::strip_ansi_codes(&cell).as_str());
                 let entry = widths.entry(*k).or_insert(0);
                 if cell_w > *entry {
                     *entry = cell_w;
                 }
-                let stripped = crate::tui::strip_ansi_codes(&cell);
+                let stripped = crate::ftui::ansi::strip_ansi_codes(&cell);
                 let is_numeric = !stripped.is_empty()
                     && stripped
                         .chars()
@@ -444,7 +449,7 @@ fn render_table(list: &[Val], out: &mut String, theme: &fshell_core::theme::Them
             let k = keys[i];
             let width = widths.get(k).unwrap_or(&10);
             let is_right = right_align.contains(k);
-            let cell_w = UnicodeWidthStr::width(crate::tui::strip_ansi_codes(cell).as_str());
+            let cell_w = UnicodeWidthStr::width(crate::ftui::ansi::strip_ansi_codes(cell).as_str());
             if is_right {
                 let pad = width.saturating_sub(cell_w);
                 for _ in 0..pad {
@@ -649,7 +654,7 @@ fn highlight_match(line: &str, query: &str) -> String {
         return line.to_string();
     }
 
-    let plain = crate::tui::strip_ansi_codes(line);
+    let plain = crate::ftui::ansi::strip_ansi_codes(line);
     let q_lower = query.to_lowercase();
     let p_lower = plain.to_lowercase();
 

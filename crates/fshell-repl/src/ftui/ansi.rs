@@ -214,6 +214,27 @@ fn apply_sgr_codes(params: &str, current_style: &mut Style) {
     }
 }
 
+/// Strip ANSI escape sequences from a string.
+pub fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b'
+            && let Some('[') = chars.peek()
+        {
+            let _ = chars.next(); // consume '['
+            for nc in chars.by_ref() {
+                if nc.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        result.push(c);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

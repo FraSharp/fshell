@@ -76,7 +76,6 @@ pub mod prompt;
 pub mod prompt_config;
 pub mod prompt_customizer;
 pub mod theme_ext;
-pub mod tui;
 
 use crate::format::*;
 
@@ -214,10 +213,12 @@ pub fn history_builtin(
             }
         };
 
-        let history_result = tui::run_history_tui(&current_pwd, &current_host, &current_session)?;
+        let history_result =
+            ftui::history_explorer::run_history_tui(&current_pwd, &current_host, &current_session)?;
         let cmd = match history_result {
-            tui::TuiResult::Execute(cmd) | tui::TuiResult::Edit(cmd) => cmd,
-            tui::TuiResult::Cancel => return Ok(()),
+            ftui::history_explorer::TuiResult::Execute(cmd)
+            | ftui::history_explorer::TuiResult::Edit(cmd) => cmd,
+            ftui::history_explorer::TuiResult::Cancel => return Ok(()),
         };
         println!("Executing: {}", cmd);
         let result = tokio::task::block_in_place(|| {
@@ -2304,7 +2305,7 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
             .map(|d| d.join(".splash_disabled").exists())
             .unwrap_or(false);
         if !splash_dismissed {
-            crate::tui::show_splash(&env, config_ok, &config_msg, shell_ok, &shell_msg);
+            crate::ftui::splash::show_splash(&env, config_ok, &config_msg, shell_ok, &shell_msg);
         }
         init_done.notify_one();
     }

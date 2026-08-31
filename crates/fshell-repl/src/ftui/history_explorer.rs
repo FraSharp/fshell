@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+//! Fullscreen interactive SQLite history explorer and execution log viewer.
+
 use crate::history::query_history;
 use chrono::TimeZone;
 use crossterm::{
@@ -11,12 +13,12 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
-use std::io::{self, IsTerminal};
+use std::io;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TuiResult {
@@ -79,189 +81,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub fn show_splash(
-    env: &fshell_engine::Env,
-    config_ok: bool,
-    config_msg: &str,
-    shell_ok: bool,
-    shell_msg: &str,
-) {
-    if fshell_engine::is_test_mode() {
-        return;
-    }
-    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
-        return;
-    }
-
-    let _guard = match TerminalGuard::new() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-
-    let mut stdout = std::io::stdout();
-    let backend = CrosstermBackend::new(&mut stdout);
-    let mut terminal = match Terminal::new(backend) {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-
-    let strict_mode = Some(env.caps.caps.read())
-        .map(|c| c.strict_mode)
-        .unwrap_or(false);
-
-    let version = fshell_engine::exe::full_version();
-    let version = format!("v{version}");
-
-    let _ = terminal.draw(|f| {
-        let area = f.area();
-        let w = area.width.min(64);
-        let h = 14u16;
-        let x = area.width.saturating_sub(w) / 2;
-        let y = area.height.saturating_sub(h) / 2;
-        let centered = Rect::new(x, y, w, h);
-
-        let outer_block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(Line::from(Span::styled(
-                format!(" fshell {version} "),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-
-        let inner = outer_block.inner(centered);
-        f.render_widget(outer_block, centered);
-
-        let cap_style = if strict_mode {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::Rgb(255, 204, 0))
-        };
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(2),
-                Constraint::Min(1),
-                Constraint::Length(2),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(inner);
-
-        let cap_symbol = if strict_mode { "*" } else { "!" };
-        let cap_lines: Vec<Line> = if strict_mode {
-            vec![Line::from(vec![
-                Span::raw("  "),
-                Span::styled(cap_symbol, cap_style.add_modifier(Modifier::BOLD)),
-                Span::raw("  "),
-                Span::styled("capability enforcement is active", cap_style),
-            ])]
-        } else {
-            vec![
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(cap_symbol, cap_style.add_modifier(Modifier::BOLD)),
-                    Span::raw("  "),
-                    Span::styled("running without capability enforcement", cap_style),
-                ]),
-                Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(
-                        "use --strict or 'setopt strict' to enable",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]),
-            ]
-        };
-        f.render_widget(Paragraph::new(cap_lines), chunks[1]);
-
-        let config_line = Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "*",
-                if config_ok {
-                    Style::default().fg(Color::Green)
-                } else {
-                    Style::default().fg(Color::Red)
-                },
-            ),
-            Span::raw("  config:  "),
-            Span::styled(
-                config_msg,
-                if config_ok {
-                    Style::default().fg(Color::White)
-                } else {
-                    Style::default().fg(Color::Red)
-                },
-            ),
-        ]);
-
-        let shell_line = Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "*",
-                if shell_ok {
-                    Style::default().fg(Color::Green)
-                } else {
-                    Style::default().fg(Color::Red)
-                },
-            ),
-            Span::raw("  shell:   "),
-            Span::styled(
-                shell_msg,
-                if shell_ok {
-                    Style::default().fg(Color::White)
-                } else {
-                    Style::default().fg(Color::Red)
-                },
-            ),
-        ]);
-
-        f.render_widget(Paragraph::new(vec![config_line, shell_line]), chunks[3]);
-
-        let key_p = Paragraph::new("press any key to continue  |  d = don't show again")
-            .style(Style::default().fg(Color::Rgb(120, 120, 120)))
-            .alignment(Alignment::Center);
-        f.render_widget(key_p, chunks[5]);
-    });
-
-    loop {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let stdin_fd = std::io::stdin().as_raw_fd();
-            if unsafe { libc::isatty(stdin_fd) } == 0 {
-                break;
-            }
-        }
-        if crossterm::event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
-            match event::read() {
-                Ok(Event::Key(key)) => {
-                    if matches!(key.code, KeyCode::Char('d' | 'D')) {
-                        persist_disable_splash();
-                    }
-                    break;
-                }
-                Ok(Event::Resize(_, _)) => {}
-                _ => break,
-            }
-        }
-    }
-}
-
-fn persist_disable_splash() {
-    let Some(cfg_dir) = fshell_engine::config_dir() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&cfg_dir);
-    let _ = std::fs::write(cfg_dir.join(".splash_disabled"), "");
-}
-
+/// Runs the fullscreen interactive history explorer TUI.
 pub fn run_history_tui(
     current_cwd: &str,
     current_host: &str,
@@ -616,24 +436,4 @@ pub fn run_history_tui(
             }
         }
     }
-}
-
-pub fn strip_ansi_codes(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b'
-            && let Some('[') = chars.peek()
-        {
-            let _ = chars.next(); // consume '['
-            for nc in chars.by_ref() {
-                if nc.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-            continue;
-        }
-        result.push(c);
-    }
-    result
 }
