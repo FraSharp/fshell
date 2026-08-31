@@ -704,3 +704,27 @@ fn test_multicall_ls_pipe_strips_ansi() {
     output.assert_success().assert_stdout_contains("file.txt");
     assert!(!output.stdout.contains("\x1b["));
 }
+
+#[tokio::test]
+async fn test_config_tui_headless_error() {
+    let env = setup_test_env();
+    let res = fshell_engine::run_script("config tui", &env).await;
+    assert!(
+        res.is_err(),
+        "config tui should error in headless mode without REPL"
+    );
+    let err_str = res.unwrap_err().to_string();
+    assert!(
+        err_str
+            .contains("interactive configuration is only available in an interactive REPL session"),
+        "Unexpected error string: {}",
+        err_str
+    );
+}
+
+#[tokio::test]
+async fn test_config_tui_repl_registration() {
+    let env = setup_test_env();
+    fshell_repl::init(&env);
+    assert!(env.get_config_tui_handler().is_some());
+}

@@ -63,6 +63,7 @@ pub mod profiler;
 pub mod prompt;
 pub mod reactive;
 pub mod scope;
+pub use scope::ConfigTuiHandler;
 pub mod special_vars;
 
 impl From<EngineError> for ShellError {
@@ -1752,6 +1753,7 @@ impl Env {
                 builtins: Arc::new(RwLock::new(FxHashMap::default())),
                 aliases: Arc::new(RwLock::new(indexmap::IndexMap::new())),
                 fallback: Arc::new(RwLock::new(None)),
+                config_tui_handler: Arc::new(RwLock::new(None)),
                 builtins_cache: Arc::new(Mutex::new(None)),
                 local_vars: None,
                 cwd: Arc::new(RwLock::new(initial_cwd.clone())),
@@ -1903,6 +1905,7 @@ impl Env {
                 builtins: Arc::new(RwLock::new(FxHashMap::default())),
                 aliases: Arc::new(RwLock::new(indexmap::IndexMap::new())),
                 fallback: Arc::new(RwLock::new(None)),
+                config_tui_handler: Arc::new(RwLock::new(None)),
                 builtins_cache: Arc::new(Mutex::new(None)),
                 local_vars: None,
                 cwd: Arc::new(RwLock::new(initial_cwd.clone())),
@@ -2026,6 +2029,7 @@ impl Env {
                 builtins: self.scope.builtins.clone(),
                 aliases: self.scope.aliases.clone(),
                 fallback: self.scope.fallback.clone(),
+                config_tui_handler: self.scope.config_tui_handler.clone(),
                 builtins_cache: self.scope.builtins_cache.clone(),
                 cwd: self.scope.cwd.clone(),
             },
@@ -2222,6 +2226,34 @@ impl Env {
     pub fn get_fallback_handler(&self) -> Option<FallbackHandler> {
         let reg = self.fallback.read();
         reg.clone()
+    }
+
+    /// Register the interactive configuration TUI handler.
+    pub fn set_config_tui_handler(&self, handler: ConfigTuiHandler) {
+        let mut reg = self.scope.config_tui_handler.write();
+        *reg = Some(handler);
+    }
+
+    /// Get the registered configuration TUI handler, if any.
+    pub fn get_config_tui_handler(&self) -> Option<ConfigTuiHandler> {
+        let reg = self.scope.config_tui_handler.read();
+        reg.clone()
+    }
+
+    /// Launch the interactive configuration TUI.
+    ///
+    /// Suspends session logging so the real terminal TTY is available, executes the handler,
+    /// and restores the terminal context on exit.
+    pub fn run_config_tui(&self) -> Result<(), ShellError> {
+        let handler = self.get_config_tui_handler();
+        if let Some(h) = handler {
+            crate::suspend_session_logging();
+            h(self).map_err(|e| ShellError::from(format!("config tui: {e}")))
+        } else {
+            Err(ShellError::from(
+                "config tui: interactive configuration is only available in an interactive REPL session",
+            ))
+        }
     }
 }
 

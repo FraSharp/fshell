@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use crate::{BuiltinHandler, FallbackHandler, Stmt, Val};
 use fshell_core::Param;
 
-/// Variables, functions, builtins, aliases, and fallback handler.
+pub type ConfigTuiHandler = Arc<dyn Fn(&crate::Env) -> Result<(), String> + Send + Sync>;
+
+/// Variables, functions, builtins, aliases, fallback handler, and interactive config TUI handler.
 #[derive(Clone)]
 pub struct Scope {
     pub vars: Arc<RwLock<FxHashMap<String, Val>>>,
@@ -17,6 +19,7 @@ pub struct Scope {
     pub builtins: Arc<RwLock<FxHashMap<String, BuiltinHandler>>>,
     pub aliases: Arc<RwLock<indexmap::IndexMap<String, String>>>,
     pub fallback: Arc<RwLock<Option<FallbackHandler>>>,
+    pub config_tui_handler: Arc<RwLock<Option<ConfigTuiHandler>>>,
     pub local_vars: Option<Arc<RwLock<FxHashMap<String, Val>>>>,
     pub builtins_cache: Arc<Mutex<Option<Vec<String>>>>,
     pub cwd: Arc<RwLock<std::path::PathBuf>>,

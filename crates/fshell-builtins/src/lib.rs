@@ -413,7 +413,7 @@ mod tests {
         let env = init_test_env();
 
         // Revoke caps for the current directory so the builtin cannot list it.
-        let pwd = std::env::current_dir().unwrap();
+        let pwd = env.cwd();
         {
             let mut caps = env.caps.caps.write();
             caps.strict_mode = true;
@@ -591,6 +591,7 @@ mod tests {
     #[tokio::test]
     async fn test_cd_valid_directory_succeeds() {
         let _lock = CD_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
 
         let tmp = std::fs::canonicalize(std::env::temp_dir())
@@ -648,6 +649,7 @@ mod tests {
     #[tokio::test]
     async fn test_cd_no_args_changes_to_home() {
         let _lock = CD_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::new();
         let _fsh_guard = save_fsh_home();
         let env = init_test_env();
         let home = std::env::var("HOME").unwrap();
@@ -668,7 +670,7 @@ mod tests {
     async fn test_cd_no_capability_returns_permission_denied() {
         let _lock = CD_LOCK.lock().unwrap();
         let env = init_test_env();
-        let pwd = std::env::current_dir().unwrap();
+        let pwd = env.cwd();
 
         // Revoke all caps for the current directory.
         {
@@ -692,6 +694,7 @@ mod tests {
     #[tokio::test]
     async fn test_cd_with_tilde_expands_to_home() {
         let _lock = CD_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
         let home = std::env::var("HOME").unwrap();
         let home_canonical = std::fs::canonicalize(&home).unwrap();
@@ -710,6 +713,7 @@ mod tests {
     #[tokio::test]
     async fn test_cd_preserves_caps_after_movement() {
         let _lock = CD_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
         let old_dir = std::env::current_dir().unwrap();
 
@@ -793,6 +797,12 @@ mod tests {
     struct CwdGuard {
         old_dir: PathBuf,
     }
+    impl CwdGuard {
+        fn new() -> Self {
+            let old_dir = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+            Self { old_dir }
+        }
+    }
     impl Drop for CwdGuard {
         fn drop(&mut self) {
             let _ = std::env::set_current_dir(&self.old_dir);
@@ -818,6 +828,7 @@ mod tests {
     #[tokio::test]
     async fn test_cd_oldpwd_and_smart_fallback() {
         let _lock = CD_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
         {
             let mut caps = env.caps.caps.write();
@@ -895,7 +906,7 @@ mod tests {
 
         // Try CD with a fuzzy argument that doesn't exist on disk
         let (tx3, _rx3) = mpsc::channel(100);
-        cd_builtin(
+        z_builtin(
             None,
             vec![Val::String("target_dir".to_string())],
             &env,
@@ -912,6 +923,7 @@ mod tests {
     #[tokio::test]
     async fn test_z_exact_fallback_and_slash() {
         let _lock = CD_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
         {
             let mut caps = env.caps.caps.write();
@@ -1631,8 +1643,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
 
         let tmp = tempfile::tempdir().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        env.set_cwd(tmp.path().to_path_buf());
 
         std::fs::write(
             tmp.path().join(".env"),
@@ -1657,8 +1668,6 @@ mod tests {
             );
             assert_eq!(vars.get("PORT"), Some(&Val::String("8080".into())));
         }
-
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[tokio::test]

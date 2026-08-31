@@ -25,7 +25,7 @@ fn builtin_echo_empty(c: &mut Criterion) {
             let echo = echo.clone();
             async move {
                 let (tx, _rx) = tokio::sync::mpsc::channel(10);
-                black_box(echo(None, vec![], &e, tx).ok());
+                black_box(echo(None, vec![], &e, tx, None).ok());
             }
         })
     });
@@ -42,7 +42,7 @@ fn builtin_echo_string(c: &mut Criterion) {
             let a = args.clone();
             async move {
                 let (tx, _rx) = tokio::sync::mpsc::channel(10);
-                black_box(echo(None, a, &e, tx).ok());
+                black_box(echo(None, a, &e, tx, None).ok());
             }
         })
     });
@@ -65,7 +65,7 @@ fn builtin_echo_multi(c: &mut Criterion) {
             let a = args.clone();
             async move {
                 let (tx, _rx) = tokio::sync::mpsc::channel(10);
-                black_box(echo(None, a, &e, tx).ok());
+                black_box(echo(None, a, &e, tx, None).ok());
             }
         })
     });
@@ -80,7 +80,7 @@ fn builtin_pwd(c: &mut Criterion) {
             let p = pwd.clone();
             async move {
                 let (tx, _rx) = tokio::sync::mpsc::channel(10);
-                black_box(p(None, vec![], &e, tx).ok());
+                black_box(p(None, vec![], &e, tx, None).ok());
             }
         })
     });
@@ -101,6 +101,7 @@ fn builtin_head_stream(c: &mut Criterion) {
                     vec![Val::String("-n".to_string()), Val::Int(100)],
                     &e,
                     out_tx,
+                    None,
                 );
                 for i in 0..10_000 {
                     let _ = in_tx
@@ -124,7 +125,7 @@ fn builtin_type_found(c: &mut Criterion) {
             let t = type_builtin.clone();
             async move {
                 let (tx, _rx) = tokio::sync::mpsc::channel(10);
-                black_box(t(None, vec![Val::String("ls".to_string())], &e, tx).ok());
+                black_box(t(None, vec![Val::String("ls".to_string())], &e, tx, None).ok());
             }
         })
     });
@@ -145,6 +146,7 @@ fn builtin_type_not_found(c: &mut Criterion) {
                         vec![Val::String("nonexistent_cmd_xyz".to_string())],
                         &e,
                         tx,
+                        None,
                     )
                     .ok(),
                 );

@@ -14,7 +14,6 @@ ai = ["ureq"]
 http = ["ureq"]
 sql = []
 chart = []
-config-tui = ["fshell-config-tui"]
 notify = []
 ff = []
 replace = []
@@ -50,7 +49,6 @@ getrandom = { workspace = true }
 
 # gated deps
 fshell-sandbox = { path = "../fshell-sandbox", optional = true }
-fshell-config-tui = { path = "../fshell-config-tui", optional = true }
 ureq = { workspace = true, optional = true }
 
 [lints]

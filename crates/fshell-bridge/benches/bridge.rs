@@ -27,7 +27,7 @@ fn bridge_external_spawn(c: &mut Criterion) {
             async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel(10);
                 let args = vec![Val::String("hello".to_string())];
-                let _ = fshell_bridge::run_external("echo", args, None, &e, tx, false);
+                let _ = fshell_bridge::run_external("echo", args, None, &e, tx, false, None);
                 while rx.recv().await.is_some() {}
                 black_box(())
             }

@@ -1077,7 +1077,6 @@ dependencies = [
  "crossterm",
  "fshell-bridge",
  "fshell-capabilities",
- "fshell-config-tui",
  "fshell-core",
  "fshell-engine",
  "fshell-hash",
@@ -1117,17 +1116,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "yaml_serde",
-]
-
-[[package]]
-name = "fshell-config-tui"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "fshell-core",
- "fshell-engine",
- "fshell-render",
- "ratatui",
 ]
 
 [[package]]

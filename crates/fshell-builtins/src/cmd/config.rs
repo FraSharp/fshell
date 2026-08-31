@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
-#[cfg(feature = "config-tui")]
-use fshell_config_tui;
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
@@ -788,19 +786,8 @@ pub fn config_builtin(
     };
     match cmd {
         "tui" => {
-            #[cfg(feature = "config-tui")]
-            {
-                fshell_config_tui::run_config_tui(env).map_err(|e| e.to_string())?;
-                Ok(())
-            }
-            #[cfg(not(feature = "config-tui"))]
-            {
-                Err(
-                    "config tui: not available (compile with config-tui feature)"
-                        .to_string()
-                        .into(),
-                )
-            }
+            env.run_config_tui()?;
+            Ok(())
         }
         "list" => config_list(env, tx),
         "get" => {

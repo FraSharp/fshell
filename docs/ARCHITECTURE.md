@@ -42,7 +42,6 @@ this document describes the internal architecture of fshell (`fsh`) — workspac
   - [fshell-git](#fshell-git)
   - [fshell-render](#fshell-render)
   - [fshell-sandbox](#fshell-sandbox)
-  - [fshell-config-tui](#fshell-config-tui)
   - [fshell-panes](#fshell-panes)
   - [fshell-repl](#fshell-repl)
 - [security & sandboxing](#security--sandboxing)
@@ -65,20 +64,20 @@ key architecture traits:
 
 ## workspace map & dependency graph
 
-the workspace is organized into 14 crates with strict dependency layering:
+the workspace is organized into 13 crates with strict dependency layering:
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
 │                           fshell (fsh)                            │
 └─────────────────────────────────┬─────────────────────────────────┘
                                   │
-      ┌───────────────────────────┼───────────────────────────┐
-      │                           │                           │
-┌─────▼───────────┐      ┌────────▼──────────┐      ┌─────────▼────────┐
-│   fshell-repl   │      │ fshell-config-tui │      │   fshell-panes   │
-└─────┬───────────┘      └────────┬──────────┘      └─────────┬────────┘
-      │                           │                           │
-      ├───────────────────────────┴───────────────────────────┤
+      ┌───────────────────────────┴───────────────────────────┐
+      │                                                       │
+┌─────▼───────────┐                                  ┌────────▼────────┐
+│   fshell-repl   │                                  │   fshell-panes  │
+└─────┬───────────┘                                  └─────────┬───────┘
+      │                                                        │
+      ├────────────────────────────────────────────────────────┘
       │
 ┌─────▼───────────┐      ┌───────────────────┐      ┌──────────────────┐
 │  fshell-bridge  │      │  fshell-builtins  │      │   fshell-posix   │
@@ -86,37 +85,29 @@ the workspace is organized into 14 crates with strict dependency layering:
       │                           │                           │
       ├───────────────────────────┼───────────────────────────┤
       │                           │                           │
-      │                  ┌────────▼──────────┐                │
-      │                  │     fshell-ls     │                │
-      │                  └────────┬──────────┘                │
-      │                           │                           │
-      │                  ┌────────▼──────────┐                │
-      │                  │    fshell-git     │                │
-      │                  └────────┬──────────┘                │
-      │                           │                           │
-      ├───────────────────────────┴───────────────────────────┤
+┌─────▼───────────┐      ┌────────▼──────────┐      ┌─────────▼────────┐
+│  fshell-engine  │◄─────┤   fshell-render   │      │ fshell-sandbox   │
+└─────┬───────────┘      └───────────────────┘      └──────────────────┘
       │
-┌─────▼───────────┐      ┌───────────────────┐      ┌──────────────────┐
-│  fshell-render  │      │  fshell-sandbox   │      │  fshell-engine   │
-└─────┬───────────┘      └────────┬──────────┘      └─────────┬────────┘
+      ├───────────────────────────┬───────────────────────────┐
       │                           │                           │
-      ├───────────────────────────┴───────────────────────────┤
+┌─────▼───────────┐      ┌────────▼──────────┐      ┌─────────▼────────┐
+│   fshell-core   │      │    fshell-ls      │      │   fshell-git     │
+└─────┬───────────┘      └────────┬──────────┘      └──────────────────┘
+      │                           │
+      │                  ┌────────▼──────────┐
+      │                  │ fshell-capabilities│
+      │                  └───────────────────┘
       │
-┌─────▼───────────────┐                             ┌─────────▼────────┐
-│ fshell-capabilities │                             │   fshell-hash    │
-└─────┬───────────────┘                             └─────────┬────────┘
-      │                                                       │
-      └───────────────────────────┬───────────────────────────┘
-                                  │
-                         ┌────────▼────────┐
-                         │   fshell-core   │
-                         └─────────────────┘
+┌─────▼───────────┐
+│   fshell-hash   │
+└─────────────────┘
 ```
 
-| crate | role | key dependencies |
+| Crate | Responsibility | Key Dependencies |
 |---|---|---|
-| `fshell-core` | parser, AST, `Val` types, diagnostics, `RwLock` | `ustr`, `indexmap`, `chrono`, `miette` |
-| `fshell-capabilities` | capability token validation and strict-mode checks | `fshell-core` |
+| `fshell-core` | AST definitions, parser, `Val` dynamic type system, `Theme`, diagnostics | `ustr`, `indexmap`, `chrono`, `fshell-hash` |
+| `fshell-capabilities` | capability token issuance, capability set verification, security state | `fshell-core` |
 | `fshell-hash` | sponge hash algorithms, fast hashing helpers | `fshell-core` |
 | `fshell-render` | miette-based graphical / compact / json error renderers | `fshell-core` |
 | `fshell-sandbox` | landlock (linux) and SBPL (macOS) subprocess sandbox hooks | `fshell-core`, `fshell-engine` |
@@ -126,9 +117,8 @@ the workspace is organized into 14 crates with strict dependency layering:
 | `fshell-builtins` | ~117 built-in commands registered into `Env` | `fshell-core`, `fshell-engine`, `fshell-ls`, `fshell-capabilities` |
 | `fshell-bridge` | external command fallback, globbing, path caching | `fshell-core`, `fshell-engine`, `fshell-capabilities` |
 | `fshell-posix` | POSIX/Bash syntax parser and runtime engine | `fshell-core`, `fshell-engine` |
-| `fshell-config-tui` | ratatui-based configuration visual editor | `fshell-core`, `fshell-engine`, `ratatui` |
 | `fshell-panes` | terminal multiplexer library and daemon binaries | `fshell-core`, `fshell-engine`, `crossterm`, `ratatui` |
-| `fshell-repl` | interactive prompt, Reedline line-editor, FTUI, SQLite history | `fshell-engine`, `fshell-builtins`, `fshell-bridge`, `reedline` |
+| `fshell-repl` | interactive prompt, Reedline line-editor, FTUI, config TUI, SQLite history | `fshell-engine`, `fshell-builtins`, `fshell-bridge`, `reedline`, `ratatui` |
 
 ---
 
@@ -387,14 +377,11 @@ implements subprocess sandboxing via OS-level security primitives:
 - **Linux**: Landlock security rules and namespace unsharing.
 - **macOS**: SBPL (Seatbelt) sandbox profiles applied in subprocess `pre_exec` fork hooks.
 
-### fshell-config-tui
-an interactive configuration manager built with Ratatui, allowing users to toggle shell options, configure themes, and edit prompt segments visually.
-
 ### fshell-panes
 terminal multiplexing core supporting split panes, tabbed windows, session attaching, and daemon communication (`fshell-panesd`).
 
 ### fshell-repl
-the interactive terminal frontend. integrates Reedline for line editing, FTUI for TUI rendering, SQLite history storage, fuzzy completion menus, and real-time syntax highlighting.
+the interactive terminal frontend. integrates Reedline for line editing, FTUI for TUI rendering, interactive configuration visual editor (`config tui`), prompt customizer studio, SQLite history storage, fuzzy completion menus, and real-time syntax highlighting.
 
 ---
 

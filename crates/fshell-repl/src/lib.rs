@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::panic))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
 #![allow(clippy::result_large_err)]
 use fshell_core::{Expr, FxIndexMap, Parser, Stmt, Val};
 use fshell_engine::{EngineError, Env, Flow, PipelinePayload, eval_stmt, is_stdout_a_tty};
@@ -63,6 +64,7 @@ use ustr::ustr;
 
 pub mod alias_expansion;
 pub mod autocomplete;
+pub mod config_tui;
 pub mod format;
 pub mod ftui;
 pub mod fuzzy;
@@ -3404,6 +3406,9 @@ fn check_first_run_onboarding(env: &Env) {
 pub fn init(env: &Env) {
     let _ = init_db();
     env.register_builtin("history", std::sync::Arc::new(history_builtin));
+    env.set_config_tui_handler(std::sync::Arc::new(|env| {
+        crate::config_tui::run_config_tui(env)
+    }));
 }
 
 #[cfg(test)]
@@ -3411,7 +3416,9 @@ mod tests {
     #![allow(
         clippy::await_holding_lock,
         clippy::nonminimal_bool,
-        clippy::collapsible_if
+        clippy::collapsible_if,
+        clippy::unwrap_used,
+        clippy::panic
     )]
     use super::*;
     use crate::history::clear_connection_cache;
