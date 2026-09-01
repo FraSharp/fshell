@@ -8,8 +8,8 @@ use crate::{
     render_bar_chart, render_table, run_boundary_operator,
 };
 use crate::{Flow, PipelineFailure};
-use fshell_core::RwLock;
 use fshell_core::ShellError;
+use fshell_core::lock::{Mutex, RwLock};
 use fshell_core::{
     Expr, FshDiag, Parser, Pipeline, PipelineStage, SerializationFormat, Stmt, StringPart,
     TypeConstraint, Val,
@@ -17,8 +17,8 @@ use fshell_core::{
 use fshell_hash::{FxHashMap, FxHashSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use ustr::ustr;
@@ -1876,8 +1876,7 @@ pub async fn execute_pipeline(
                             Val::Map(map) => {
                                 let mut wtr = csv::Writer::from_writer(Vec::new());
                                 let fields = {
-                                    let mut guard =
-                                        lf_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut guard = lf_clone.lock();
                                     if guard.is_none() {
                                         let f = Arc::new(
                                             map.keys()
@@ -1922,8 +1921,7 @@ pub async fn execute_pipeline(
                                         }
                                     };
                                     if fields.is_none() {
-                                        let mut guard =
-                                            lf_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                        let mut guard = lf_clone.lock();
                                         if guard.is_none() {
                                             let f = Arc::new(
                                                 map.keys()

@@ -438,13 +438,7 @@ pub async fn run_ftui_repl(
         {
             let env_cap = env.clone();
             tokio::spawn(async move {
-                let rx = {
-                    let mut guard = match env_cap.caps.cap_prompt_rx.lock() {
-                        Ok(g) => g,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    guard.take()
-                };
+                let rx = env_cap.caps.cap_prompt_rx.lock().take();
                 if let Some(mut rx) = rx {
                     while let Some(req) = rx.recv().await {
                         let _ = crossterm::terminal::disable_raw_mode();
@@ -3336,10 +3330,7 @@ pub async fn run_ftui_repl(
                             .suggestions
                             .iter()
                             .any(|s| s.description.as_ref().is_some_and(|d| d.contains('\t'))))
-                    || prompt_mgr
-                        .widgets
-                        .iter()
-                        .any(|w| *w.is_running.lock().unwrap_or_else(|e| e.into_inner()));
+                    || prompt_mgr.widgets.iter().any(|w| *w.is_running.lock());
 
                 if has_active_animations {
                     redraw = true;

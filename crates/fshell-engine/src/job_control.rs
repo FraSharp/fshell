@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use fshell_core::RwLock;
+use fshell_core::lock::{Condvar, Mutex, RwLock};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Condvar, Mutex};
 
 use crate::Job;
 

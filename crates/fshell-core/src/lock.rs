@@ -4,11 +4,8 @@
 //! Unified synchronization primitives for fshell.
 //! Backed by `parking_lot` for 1-byte, non-poisoning, futex-driven locks.
 
-pub use parking_lot::{
-    Condvar,
-    MappedMutexGuard, MappedRwLockReadGuard, MappedRwLockWriteGuard,
-    Mutex, MutexGuard,
-    Once, OnceState,
-    RwLock, RwLockReadGuard, RwLockWriteGuard,
-};
 pub use parking_lot::lock_api::{RawMutex, RawRwLock};
+pub use parking_lot::{
+    Condvar, MappedMutexGuard, MappedRwLockReadGuard, MappedRwLockWriteGuard, Mutex, MutexGuard,
+    Once, OnceState, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};

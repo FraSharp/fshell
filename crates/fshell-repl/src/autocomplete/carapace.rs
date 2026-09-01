@@ -4,9 +4,10 @@
 //! Background async bridge for Carapace external command completion generator.
 
 use super::types::{CompletionCandidate, CompletionKind, TextSpan};
+use fshell_core::lock::Mutex;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 static CARAPACE_CHECKED: AtomicBool = AtomicBool::new(false);
@@ -68,7 +69,7 @@ pub fn complete_with_carapace_cached(
     if last_word.is_empty() {
         key.push("".to_string());
     }
-    let cache = CARAPACE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = CARAPACE_CACHE.lock();
     let map = cache.as_ref()?;
     let entry = map.get(&key)?;
     if entry.loaded_at.elapsed() >= CARAPACE_CACHE_TTL {
@@ -98,9 +99,7 @@ pub fn spawn_carapace_refresh(words: Vec<String>, last_word: String) {
         key.push("".to_string());
     }
     let key_for_inflight = key.clone();
-    if let Ok(mut inflight) = carapace_in_flight().lock()
-        && !inflight.insert(key_for_inflight.clone())
-    {
+    if !carapace_in_flight().lock().insert(key_for_inflight.clone()) {
         return;
     }
     std::thread::spawn(move || {
@@ -135,9 +134,8 @@ pub fn spawn_carapace_refresh(words: Vec<String>, last_word: String) {
             }
             Some(results)
         })();
-        if let Some(results) = results
-            && let Ok(mut cache) = CARAPACE_CACHE.lock()
-        {
+        if let Some(results) = results {
+            let mut cache = CARAPACE_CACHE.lock();
             if cache.is_none() {
                 *cache = Some(HashMap::new());
             }
@@ -151,8 +149,6 @@ pub fn spawn_carapace_refresh(words: Vec<String>, last_word: String) {
                 );
             }
         }
-        if let Ok(mut inflight) = carapace_in_flight().lock() {
-            inflight.remove(&carapace_args);
-        }
+        carapace_in_flight().lock().remove(&carapace_args);
     });
 }

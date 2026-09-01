@@ -42,6 +42,8 @@ pub fn fork_env_for_subshell(parent: &Env) -> Env {
     child.scope.cwd = std::sync::Arc::new(fshell_core::RwLock::new(parent.cwd()));
     child.posix_traps =
         std::sync::Arc::new(fshell_core::RwLock::new(parent.posix_traps.read().clone()));
+    child.posix_fns =
+        std::sync::Arc::new(fshell_core::RwLock::new(parent.posix_fns.read().clone()));
     child.options = std::sync::Arc::new(fshell_core::RwLock::new(parent.options.read().clone()));
     child
 }

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use fshell_core::RwLock;
+use fshell_core::lock::{Mutex, RwLock};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::CapPromptRequest;
 use fshell_capabilities::CapsRegistry;

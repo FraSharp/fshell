@@ -978,9 +978,7 @@ pub fn eval_expr<'a>(
                     std::fs::write(&path, &out)
                         .map_err(|e| EngineError::from(format!("process substitution: {}", e)))?;
                     let temp_path = tmp.into_temp_path();
-                    if let Ok(mut tf) = env.temp_files.lock() {
-                        tf.push(temp_path);
-                    }
+                    env.temp_files.lock().push(temp_path);
                     Ok(Val::String(path.to_string_lossy().to_string()))
                 }
                 ProcessSubstDirection::Output => {
@@ -1005,9 +1003,7 @@ pub fn eval_expr<'a>(
                         let _ = crate::execute_pipeline(&pipeline_clone, &env_clone, out_tx).await;
                     });
 
-                    if let Ok(mut tf) = env.temp_files.lock() {
-                        tf.push(temp_path);
-                    }
+                    env.temp_files.lock().push(temp_path);
                     Ok(Val::String(path.to_string_lossy().to_string()))
                 }
             },
@@ -2993,25 +2989,24 @@ pub(crate) struct PathCache {
     last_updated: std::time::Instant,
 }
 
-pub(crate) static PATH_CACHE: std::sync::Mutex<Option<PathCache>> = std::sync::Mutex::new(None);
+pub(crate) static PATH_CACHE: fshell_core::lock::Mutex<Option<PathCache>> =
+    fshell_core::lock::Mutex::new(None);
 
 pub(crate) const PATH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Invalidate the PATH cache (e.g. when a cached path turns out to be broken)
 pub fn invalidate_path_cache() {
-    if let Ok(mut cache) = PATH_CACHE.lock() {
-        *cache = None;
-    }
-    if let Ok(mut val_cache) = COMMAND_VALIDATION_CACHE.lock() {
-        val_cache.clear();
-    }
+    let mut cache = PATH_CACHE.lock();
+    *cache = None;
+    let mut val_cache = COMMAND_VALIDATION_CACHE.lock();
+    val_cache.clear();
 }
 
 pub(crate) const COMMAND_CACHE_MAX_SIZE: usize = 256;
 
 pub(crate) static COMMAND_VALIDATION_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<FxHashMap<(String, String), bool>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(FxHashMap::default()));
+    fshell_core::lock::Mutex<FxHashMap<(String, String), bool>>,
+> = std::sync::LazyLock::new(|| fshell_core::lock::Mutex::new(FxHashMap::default()));
 
 /// Like `is_external_command` but backed by a bounded in-memory cache to avoid
 /// scanning PATH on every call. Used by the highlighter and completer on the
@@ -3026,17 +3021,14 @@ pub fn is_external_command_cached(name: &str, env_path: Option<&str>) -> bool {
         .unwrap_or_default();
 
     let cache_key = (name.to_string(), current_path);
-    let cache = COMMAND_VALIDATION_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(cached) = cache.get(&cache_key) {
-        return *cached;
+    {
+        let cache = COMMAND_VALIDATION_CACHE.lock();
+        if let Some(cached) = cache.get(&cache_key) {
+            return *cached;
+        }
     }
-    drop(cache);
     let result = is_external_command(name, Some(&cache_key.1));
-    let mut cache = COMMAND_VALIDATION_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut cache = COMMAND_VALIDATION_CACHE.lock();
     if cache.len() >= COMMAND_CACHE_MAX_SIZE {
         let keys: Vec<(String, String)> = cache
             .keys()
@@ -3168,12 +3160,13 @@ pub(crate) fn start_path_watcher() {
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
                 Ok(_) => {
                     // Filesystem change in a PATH directory — mark cache stale
-                    if let Ok(mut cache) = PATH_CACHE.lock()
-                        && let Some(ref mut c) = *cache
                     {
-                        c.last_updated = std::time::Instant::now()
-                            - PATH_CACHE_TTL
-                            - std::time::Duration::from_secs(1);
+                        let mut cache = PATH_CACHE.lock();
+                        if let Some(ref mut c) = *cache {
+                            c.last_updated = std::time::Instant::now()
+                                - PATH_CACHE_TTL
+                                - std::time::Duration::from_secs(1);
+                        }
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -3184,9 +3177,8 @@ pub(crate) fn start_path_watcher() {
                     }
                     let now = std::time::Instant::now();
                     let fresh = rebuild_path_cache(&os_path, now);
-                    if let Ok(mut cache) = PATH_CACHE.lock() {
-                        *cache = Some(fresh);
-                    }
+                    let mut cache = PATH_CACHE.lock();
+                    *cache = Some(fresh);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -3216,7 +3208,7 @@ pub fn warmup_path_cache(env: Option<&crate::Env>) {
     if current_path.is_empty() {
         return;
     }
-    let mut cache_guard = PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache_guard = PATH_CACHE.lock();
     let needs_rebuild = match &*cache_guard {
         None => true,
         Some(cache) => cache.path != current_path,
@@ -3247,7 +3239,7 @@ pub fn is_external_command(name: &str, env_path: Option<&str>) -> bool {
         return false;
     }
 
-    let mut cache_guard = PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache_guard = PATH_CACHE.lock();
 
     if let Some(ref cache) = *cache_guard
         && cache.path == current_path
@@ -3289,7 +3281,7 @@ pub fn get_path_executables(env_path: Option<&str>) -> Vec<String> {
     if current_path.is_empty() {
         return Vec::new();
     }
-    let mut cache_guard = PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache_guard = PATH_CACHE.lock();
     if let Some(ref cache) = *cache_guard
         && cache.path == current_path
         && cache.last_updated.elapsed() < PATH_CACHE_TTL
@@ -3325,7 +3317,7 @@ pub fn resolve_cached_command_path(name: &str, env_path: Option<&str>) -> Option
         return None;
     }
 
-    let mut cache_guard = PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache_guard = PATH_CACHE.lock();
 
     // If cache exists and PATH matches and is still fresh, use it.
     if let Some(ref cache) = *cache_guard

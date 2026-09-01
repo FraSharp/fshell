@@ -3,10 +3,11 @@
 
 use crate::cpu_dbg;
 use crate::{PromptSnapshot, refresh_prompt_snapshot, render_prompt_template};
+use fshell_core::lock::Mutex;
 use fshell_engine::Env;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // Unified SGR→ratatui parser lives in `ftui::ansi` (A4).
@@ -51,7 +52,7 @@ impl PromptWidget {
     pub fn trigger_update(&self, env: &Env) {
         let is_running = self.is_running.clone();
         {
-            let mut running = is_running.lock().unwrap_or_else(|e| e.into_inner());
+            let mut running = is_running.lock();
             if *running {
                 return;
             }
@@ -94,15 +95,9 @@ impl PromptWidget {
                 Err(e) => format!("parse-error: {}", e),
             };
 
-            if let Ok(mut out) = cached_output.lock() {
-                *out = output;
-            }
-            if let Ok(mut lr) = last_run.lock() {
-                *lr = Some(Instant::now());
-            }
-            if let Ok(mut running) = is_running.lock() {
-                *running = false;
-            }
+            *cached_output.lock() = output;
+            *last_run.lock() = Some(Instant::now());
+            *is_running.lock() = false;
         });
     }
 }
@@ -153,11 +148,7 @@ fn interpolate_template(
     for widget in widgets {
         let placeholder = format!("{{{}}}", widget.name);
         if resolved.contains(&placeholder) {
-            let out = widget
-                .cached_output
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
+            let out = widget.cached_output.lock().clone();
             resolved = resolved.replace(&placeholder, &out);
         }
     }
@@ -218,7 +209,7 @@ impl PromptManager {
             // Trigger updates for widgets that have expired (e.g. run every 5s or if empty)
             for widget in &self.widgets {
                 let should_run = {
-                    let lr = widget.last_run.lock().unwrap_or_else(|e| e.into_inner());
+                    let lr = widget.last_run.lock();
                     match *lr {
                         None => true,
                         Some(last_run) => last_run.elapsed() > Duration::from_secs(5),
@@ -235,21 +226,12 @@ impl PromptManager {
             self.last_known_widget_outputs = self
                 .widgets
                 .iter()
-                .map(|w| {
-                    w.cached_output
-                        .lock()
-                        .map(|g| g.clone())
-                        .unwrap_or_default()
-                })
+                .map(|w| w.cached_output.lock().clone())
                 .collect();
             changed = true;
         } else {
             for (i, w) in self.widgets.iter().enumerate() {
-                let current = w
-                    .cached_output
-                    .lock()
-                    .map(|g| g.clone())
-                    .unwrap_or_default();
+                let current = w.cached_output.lock().clone();
                 if current != self.last_known_widget_outputs[i] {
                     self.last_known_widget_outputs[i] = current;
                     changed = true;
@@ -288,10 +270,7 @@ impl PromptManager {
         }
 
         // Check async widgets
-        let widgets_busy = self
-            .widgets
-            .iter()
-            .any(|w| *w.is_running.lock().unwrap_or_else(|e| e.into_inner()));
+        let widgets_busy = self.widgets.iter().any(|w| *w.is_running.lock());
         if widgets_busy {
             cpu_dbg!("has_active_animations=TRUE: widget(s) busy");
         }

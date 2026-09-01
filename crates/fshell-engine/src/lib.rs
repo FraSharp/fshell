@@ -85,10 +85,11 @@ impl From<EngineError> for ShellError {
     }
 }
 use fshell_core::RwLock;
+use fshell_core::lock::{Condvar, Mutex};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
@@ -199,16 +200,14 @@ fn spawn_fd_logger(
             }
             let _ = log_file.flush();
 
-            if flush_requested.load(Ordering::Relaxed)
-                && let Ok(_guard) = flush_mutex.lock()
-            {
+            if flush_requested.load(Ordering::Relaxed) {
+                let _guard = flush_mutex.lock();
                 flush_notify.notify_all();
             }
         }
         is_writing.store(false, Ordering::SeqCst);
-        if flush_requested.load(Ordering::Relaxed)
-            && let Ok(_guard) = flush_mutex.lock()
-        {
+        if flush_requested.load(Ordering::Relaxed) {
+            let _guard = flush_mutex.lock();
             flush_notify.notify_all();
         }
     })
@@ -370,10 +369,11 @@ impl SessionLogger {
             if pending == 0 && !self.is_writing_stdout.load(Ordering::SeqCst) {
                 break;
             }
-            if let Ok(guard) = self.flush_mutex.lock() {
+            {
+                let mut guard = self.flush_mutex.lock();
                 let _ = self
                     .flush_notify
-                    .wait_timeout(guard, std::time::Duration::from_millis(1));
+                    .wait_for(&mut guard, std::time::Duration::from_millis(1));
             }
         }
         loop {
@@ -384,10 +384,11 @@ impl SessionLogger {
             if pending == 0 && !self.is_writing_stderr.load(Ordering::SeqCst) {
                 break;
             }
-            if let Ok(guard) = self.flush_mutex.lock() {
+            {
+                let mut guard = self.flush_mutex.lock();
                 let _ = self
                     .flush_notify
-                    .wait_timeout(guard, std::time::Duration::from_millis(1));
+                    .wait_for(&mut guard, std::time::Duration::from_millis(1));
             }
         }
         self.flush_requested.store(false, Ordering::SeqCst);
@@ -419,9 +420,8 @@ impl Drop for SessionLogger {
 pub static SESSION_LOGGER: Mutex<Option<SessionLogger>> = Mutex::new(None);
 
 pub fn shutdown_session_logging() {
-    if let Ok(mut guard) = SESSION_LOGGER.lock() {
-        *guard = None;
-    }
+    let mut guard = SESSION_LOGGER.lock();
+    *guard = None;
 }
 
 extern "C" fn cleanup_on_exit() {
@@ -434,9 +434,8 @@ pub fn init_session_logger(log_path: PathBuf) {
     {
         match SessionLogger::new(log_path) {
             Ok(logger) => {
-                if let Ok(mut guard) = SESSION_LOGGER.lock() {
-                    *guard = Some(logger);
-                }
+                let mut guard = SESSION_LOGGER.lock();
+                *guard = Some(logger);
                 unsafe {
                     libc::atexit(cleanup_on_exit);
                 }
@@ -449,29 +448,24 @@ pub fn init_session_logger(log_path: PathBuf) {
 }
 
 pub fn suspend_session_logging() {
-    if let Ok(guard) = SESSION_LOGGER.lock()
-        && let Some(logger) = guard.as_ref()
-    {
+    let guard = SESSION_LOGGER.lock();
+    if let Some(logger) = guard.as_ref() {
         logger.flush();
         logger.restore();
     }
 }
 
 pub fn resume_session_logging() {
-    if let Ok(guard) = SESSION_LOGGER.lock()
-        && let Some(logger) = guard.as_ref()
-    {
+    let guard = SESSION_LOGGER.lock();
+    if let Some(logger) = guard.as_ref() {
         logger.redirect();
     }
 }
 
 pub fn is_session_logging_active() -> bool {
-    if let Ok(guard) = SESSION_LOGGER.lock() {
-        if let Some(logger) = guard.as_ref() {
-            logger.is_redirected.load(Ordering::SeqCst)
-        } else {
-            false
-        }
+    let guard = SESSION_LOGGER.lock();
+    if let Some(logger) = guard.as_ref() {
+        logger.is_redirected.load(Ordering::SeqCst)
     } else {
         false
     }
@@ -511,9 +505,8 @@ pub fn is_stdout_a_tty() -> bool {
         return false;
     }
     use std::io::IsTerminal;
-    if let Ok(guard) = SESSION_LOGGER.lock()
-        && let Some(logger) = guard.as_ref()
-    {
+    let guard = SESSION_LOGGER.lock();
+    if let Some(logger) = guard.as_ref() {
         return unsafe { libc::isatty(logger.orig_stdout) != 0 };
     }
     std::io::stdout().is_terminal()
@@ -524,9 +517,8 @@ pub fn is_stderr_a_tty() -> bool {
         return false;
     }
     use std::io::IsTerminal;
-    if let Ok(guard) = SESSION_LOGGER.lock()
-        && let Some(logger) = guard.as_ref()
-    {
+    let guard = SESSION_LOGGER.lock();
+    if let Some(logger) = guard.as_ref() {
         return unsafe { libc::isatty(logger.orig_stderr) != 0 };
     }
     std::io::stderr().is_terminal()
@@ -542,21 +534,15 @@ pub fn is_interactive_terminal() -> bool {
 /// Returns the original (pre-redirect) stdout file descriptor, if the session
 /// logger is active. This is the real terminal fd, not the logging pipe.
 pub fn orig_stdout_fd() -> Option<std::os::unix::io::RawFd> {
-    if let Ok(guard) = SESSION_LOGGER.lock() {
-        guard.as_ref().map(|l| l.orig_stdout)
-    } else {
-        None
-    }
+    let guard = SESSION_LOGGER.lock();
+    guard.as_ref().map(|l| l.orig_stdout)
 }
 
 /// Returns the original (pre-redirect) stderr file descriptor, if the session
 /// logger is active. This is the real terminal fd, not the logging pipe.
 pub fn orig_stderr_fd() -> Option<std::os::unix::io::RawFd> {
-    if let Ok(guard) = SESSION_LOGGER.lock() {
-        guard.as_ref().map(|l| l.orig_stderr)
-    } else {
-        None
-    }
+    let guard = SESSION_LOGGER.lock();
+    guard.as_ref().map(|l| l.orig_stderr)
 }
 // Lock ordering enforcement — see docs/LOCK-ORDERING.md
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -568,8 +554,9 @@ pub(crate) enum LockLevel {
     Fns = 3,
     Jobs = 4,
     Reactive = 5,
-    Tracked = 6,
-    Options = 7,
+    Caches = 6,
+    Tracked = 7,
+    Options = 8,
 }
 
 #[cfg(debug_assertions)]
@@ -581,6 +568,7 @@ impl LockLevel {
             LockLevel::Fns => "fns",
             LockLevel::Jobs => "jobs",
             LockLevel::Reactive => "reactive",
+            LockLevel::Caches => "caches",
             LockLevel::Tracked => "tracked",
             LockLevel::Options => "options",
         }
@@ -604,7 +592,7 @@ pub(crate) fn check_lock_order(level: LockLevel) {
                 "Lock ordering violation at {loc}:\n  \
                  trying to acquire '{name}' (level {level:?}) after '{last_name}' (level {last:?}).\n  \
                  Order must be: \
-                 caps(1) < vars(2) < fns(3) < jobs(4) < reactive(5) < tracked(6) < options(7)",
+                 caps(1) < vars(2) < fns(3) < jobs(4) < reactive(5) < caches(6) < tracked(7) < options(8)",
                 name = level.name(),
                 last_name = last.name(),
             );
@@ -679,6 +667,13 @@ macro_rules! lock_jobs {
 macro_rules! lock_reactive {
     ($expr:expr) => {
         lock_ordered!($expr, $crate::LockLevel::Reactive)
+    };
+}
+
+#[allow(unused_macros)]
+macro_rules! lock_caches {
+    ($expr:expr) => {
+        lock_ordered!($expr, $crate::LockLevel::Caches)
     };
 }
 
@@ -995,6 +990,7 @@ pub struct Env {
     pub ast_cache: Arc<RwLock<crate::ast_cache::AstCache>>,
     pub special_vars: Arc<special_vars::SpecialVars>,
     pub posix_traps: Arc<RwLock<FxHashMap<Signal, String>>>,
+    pub posix_fns: Arc<RwLock<FxHashMap<String, Arc<dyn std::any::Any + Send + Sync>>>>,
     pub theme: Arc<RwLock<Arc<fshell_core::theme::Theme>>>,
     pub preview_theme: Arc<RwLock<Option<Arc<fshell_core::theme::Theme>>>>,
     pub profiler: Arc<RwLock<crate::profiler::ProfilerState>>,
@@ -1196,9 +1192,7 @@ impl Env {
 
     /// Clear all registered temporary files, unlinking them from disk.
     pub fn clear_temp_files(&self) {
-        if let Ok(mut tf) = self.temp_files.lock() {
-            tf.clear();
-        }
+        self.temp_files.lock().clear();
     }
 
     pub fn ensure_env_populated(&self) {
@@ -1706,12 +1700,11 @@ impl Env {
     }
 
     pub fn log_audit(&self, message: String) {
-        if let Ok(mut log) = self.caps.audit_log.lock() {
-            if log.len() >= 1000 {
-                log.pop_front();
-            }
-            log.push_back(message);
+        let mut log = self.caps.audit_log.lock();
+        if log.len() >= 1000 {
+            log.pop_front();
         }
+        log.push_back(message);
     }
 
     pub fn track_read(&self, path: PathBuf) {
@@ -1813,6 +1806,7 @@ impl Env {
             ast_cache: Arc::new(RwLock::new(crate::ast_cache::AstCache::new(64))),
             special_vars: Arc::new(special_vars::SpecialVars::new()),
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
+            posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
             theme: Arc::new(RwLock::new(Arc::new(
                 fshell_core::theme::Theme::default_theme(),
             ))),
@@ -1967,6 +1961,7 @@ impl Env {
             ast_cache: Arc::new(RwLock::new(crate::ast_cache::AstCache::new(64))),
             special_vars: Arc::new(special_vars::SpecialVars::new()),
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
+            posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
             theme: Arc::new(RwLock::new(Arc::new(
                 fshell_core::theme::Theme::default_theme(),
             ))),
@@ -2054,6 +2049,7 @@ impl Env {
             ast_cache: self.ast_cache.clone(),
             special_vars: self.special_vars.clone(),
             posix_traps: self.posix_traps.clone(),
+            posix_fns: self.posix_fns.clone(),
             theme: self.theme.clone(),
             preview_theme: self.preview_theme.clone(),
             profiler: self.profiler.clone(),
@@ -2066,18 +2062,12 @@ impl Env {
     /// Block until the given job_id is no longer the foreground job.
     /// Uses a Condvar so the thread is parked by the OS (no CPU waste).
     pub fn wait_foreground(&self, job_id: usize) -> Result<(), String> {
-        let mut guard = self
-            .job_control
-            .fg_mutex
-            .lock()
-            .map_err(|_| "Lock poisoned: fg_mutex".to_string())?;
+        let mut guard = self.job_control.fg_mutex.lock();
         while *guard == Some(job_id) {
-            let (new_guard, result) = self
+            let result = self
                 .job_control
                 .fg_cvar
-                .wait_timeout(guard, std::time::Duration::from_secs(86400))
-                .map_err(|_| "Lock poisoned: fg_cvar".to_string())?;
-            guard = new_guard;
+                .wait_for(&mut guard, std::time::Duration::from_secs(86400));
             if result.timed_out() {
                 return Err("Foreground job timed out after 24 hours".to_string());
             }
@@ -2087,11 +2077,7 @@ impl Env {
 
     /// Clear the foreground job and wake any thread waiting on it.
     pub fn clear_foreground(&self, job_id: usize) -> Result<(), String> {
-        let mut guard = self
-            .job_control
-            .fg_mutex
-            .lock()
-            .map_err(|_| "Lock poisoned: fg_mutex".to_string())?;
+        let mut guard = self.job_control.fg_mutex.lock();
         if *guard == Some(job_id) {
             *guard = None;
         }
@@ -2101,20 +2087,12 @@ impl Env {
 
     /// Read the current foreground job ID (if any).
     pub fn foreground_job(&self) -> Option<usize> {
-        *self
-            .job_control
-            .fg_mutex
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        *self.job_control.fg_mutex.lock()
     }
 
     /// Set the foreground job ID (used during job setup).
     pub fn set_foreground_job(&self, job_id: Option<usize>) -> Result<(), String> {
-        let mut guard = self
-            .job_control
-            .fg_mutex
-            .lock()
-            .map_err(|_| "Lock poisoned: fg_mutex".to_string())?;
+        let mut guard = self.job_control.fg_mutex.lock();
         *guard = job_id;
         Ok(())
     }
@@ -2124,10 +2102,7 @@ impl Env {
         let mut reg = self.builtins.write();
         reg.insert(name.to_string(), handler);
         // Invalidate the builtins cache
-        let mut cache = self
-            .builtins_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.builtins_cache.lock();
         *cache = None;
     }
 
@@ -2139,18 +2114,12 @@ impl Env {
             reg.insert(name, handler);
         }
         // Invalidate the builtins cache
-        let mut cache = self
-            .builtins_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.builtins_cache.lock();
         *cache = None;
     }
 
     pub fn invalidate_builtins_cache(&self) {
-        let mut cache = self
-            .builtins_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.builtins_cache.lock();
         *cache = None;
     }
 
@@ -2168,10 +2137,7 @@ impl Env {
 
     /// Return all builtin names (sorted, cached).
     pub fn get_all_builtins(&self) -> Vec<String> {
-        let mut cache = self
-            .builtins_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.builtins_cache.lock();
         if let Some(ref names) = *cache {
             let opts = self.options.read();
             return names
@@ -2292,8 +2258,8 @@ pub fn cache_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-static CACHED_INIT_FSH: std::sync::Mutex<Option<(String, std::time::SystemTime)>> =
-    std::sync::Mutex::new(None);
+static CACHED_INIT_FSH: fshell_core::lock::Mutex<Option<(String, std::time::SystemTime)>> =
+    fshell_core::lock::Mutex::new(None);
 
 pub async fn load_config_script(env: &Env) -> Result<(), String> {
     let _ = load_completions(env);
@@ -2335,9 +2301,7 @@ pub async fn load_config_script(env: &Env) -> Result<(), String> {
     // Fast path: skip re-parsing if same config dir and same mtime
 
     {
-        let cache = CACHED_INIT_FSH
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        let cache = CACHED_INIT_FSH.lock();
         if let Some((ref cached_dir, ref cached_mtime)) = *cache
             && cached_dir == &cfg_dir.to_string_lossy().to_string()
             && Some(*cached_mtime) == current_mtime
@@ -2384,9 +2348,7 @@ pub async fn load_config_script(env: &Env) -> Result<(), String> {
     }
 
     if let Some(mtime) = current_mtime {
-        let mut cache = CACHED_INIT_FSH
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        let mut cache = CACHED_INIT_FSH.lock();
         *cache = Some((cfg_dir.to_string_lossy().to_string(), mtime));
     }
     Ok(())
@@ -2503,13 +2465,7 @@ fn wait_for_job_inner(
             let mut jobs = lock_jobs!(env.job_control.jobs.write());
             jobs.retain(|k, _| *k != pid);
             drop(jobs);
-            let is_foreground = {
-                if let Ok(guard) = env.job_control.fg_mutex.lock() {
-                    *guard == Some(job_id)
-                } else {
-                    false
-                }
-            };
+            let is_foreground = *env.job_control.fg_mutex.lock() == Some(job_id);
             let _ = env.clear_foreground(job_id);
             let exit_code = 1;
             {
@@ -2581,13 +2537,7 @@ fn wait_for_job_inner(
             let mut jobs = lock_jobs!(env.job_control.jobs.write());
             jobs.retain(|k, _| *k != pid);
             drop(jobs);
-            let is_foreground = {
-                if let Ok(guard) = env.job_control.fg_mutex.lock() {
-                    *guard == Some(job_id)
-                } else {
-                    false
-                }
-            };
+            let is_foreground = *env.job_control.fg_mutex.lock() == Some(job_id);
             let _ = env.clear_foreground(job_id);
             {
                 let mut vars = lock_vars!(env.vars.write());

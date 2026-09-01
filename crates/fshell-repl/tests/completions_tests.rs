@@ -3,12 +3,13 @@
 
 use fshell_bridge::init as bridge_init;
 use fshell_builtins::init as builtins_init;
+use fshell_core::lock::Mutex;
 use fshell_core::{Val, remove_var, set_var};
 use fshell_engine::{Env, Job, JobStatus, get_path_executables, invalidate_path_cache};
 use fshell_repl::FshellCompleter;
 use fshell_repl::autocomplete::{Completer, CompletionCandidate, CompletionKind, TextSpan};
 use std::os::unix::fs::PermissionsExt;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 static TEST_CWD_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static TEST_PATH_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -317,7 +318,7 @@ async fn test_variable_completion() {
 
 #[tokio::test]
 async fn test_cd_directory_only_completion() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap();
+    let _guard = TEST_CWD_MUTEX.lock();
     // cd should only complete directories, not files
     // Use a well-known directory that definitely exists
     let mut c = make_completer();
@@ -428,7 +429,7 @@ async fn test_path_completion_with_env_var() {
 
 #[tokio::test]
 async fn test_dotfile_completion_with_alias_prefix() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = TEST_CWD_MUTEX.lock();
     // Full-line test: user types "hx .co" / "hx .com" where hx is an alias.
     // Completer must resolve alias and fall through to file completion.
     let tmp = std::env::temp_dir().join("fsh_compl_alias");
@@ -476,7 +477,7 @@ async fn test_dotfile_completion_with_alias_prefix() {
 
 #[tokio::test]
 async fn test_dotfile_completion_shows_for_partial_prefix() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = TEST_CWD_MUTEX.lock();
     // Create temp dir with a hidden .commandcode dir, then check it appears
     // for both ".co" and ".com" queries — regression: .com must still match.
     let tmp = std::env::temp_dir().join("fsh_compl_dotfile");
@@ -520,7 +521,7 @@ async fn test_dotfile_completion_shows_for_partial_prefix() {
 
 #[tokio::test]
 async fn test_path_completion_with_pwd_var() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = TEST_CWD_MUTEX.lock();
     let saved = std::env::var("PWD").ok();
     let root = env!("CARGO_MANIFEST_DIR");
     let project_root = std::path::Path::new(root)
@@ -550,7 +551,7 @@ async fn test_path_completion_with_pwd_var() {
 
 #[tokio::test]
 async fn test_tui_completions_sequence() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = TEST_CWD_MUTEX.lock();
     let tmp = std::env::temp_dir().join("fsh_compl_tui_seq");
     let _ = std::fs::create_dir_all(&tmp);
     let dotdir = tmp.join(".commandcode");
@@ -642,7 +643,7 @@ async fn test_tui_completions_sequence() {
 
 #[tokio::test]
 async fn test_path_completion_arbo_suggests_arborist() {
-    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let _guard = TEST_PATH_MUTEX.lock();
     let dir = create_temp_bins("arbo_single", &["arborist"]);
     let mut c = make_completer_with_path(&dir);
 
@@ -674,7 +675,7 @@ async fn test_path_completion_arbo_suggests_arborist() {
 
 #[tokio::test]
 async fn test_path_completion_offers_similar_names_popup() {
-    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let _guard = TEST_PATH_MUTEX.lock();
     let dir = create_temp_bins(
         "arbo_multi",
         &["arbor", "arborist", "arborist-cli", "argo", "other-tool"],
@@ -723,7 +724,7 @@ async fn test_path_completion_offers_similar_names_popup() {
 
 #[tokio::test]
 async fn test_path_completion_case_insensitive() {
-    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let _guard = TEST_PATH_MUTEX.lock();
     let dir = create_temp_bins("arbo_case", &["Arborist"]);
     let mut c = make_completer_with_path(&dir);
 
@@ -747,7 +748,7 @@ async fn test_path_completion_case_insensitive() {
 
 #[tokio::test]
 async fn test_path_completion_dedup_against_builtins_and_common() {
-    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let _guard = TEST_PATH_MUTEX.lock();
     // Create PATH bins that shadow a builtin (ls) and a COMMON_EXTERNAL (git)
     let dir = create_temp_bins("arbo_dedup", &["ls", "git", "arborist"]);
     let mut c = make_completer_with_path(&dir);
@@ -787,7 +788,7 @@ async fn test_path_completion_dedup_against_builtins_and_common() {
 
 #[tokio::test]
 async fn test_path_completion_empty_prefix_does_not_dump_path() {
-    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let _guard = TEST_PATH_MUTEX.lock();
     let dir = create_temp_bins("arbo_empty", &["arborist", "zzz-unique-bin-12345"]);
     let mut c = make_completer_with_path(&dir);
 
@@ -821,7 +822,7 @@ async fn test_path_completion_empty_prefix_does_not_dump_path() {
 
 #[tokio::test]
 async fn test_path_completion_not_suggested_when_not_on_path() {
-    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let _guard = TEST_PATH_MUTEX.lock();
     // Create a bin in dir A, but completer PATH points to dir B
     let dir_a = create_temp_bins("arbo_not_on_path_a", &["arborist"]);
     let dir_b = create_temp_bins("arbo_not_on_path_b", &["other-bin"]);
@@ -841,7 +842,7 @@ async fn test_path_completion_not_suggested_when_not_on_path() {
 
 #[tokio::test]
 async fn test_path_completion_env_path_isolation_over_os_path() {
-    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let _guard = TEST_PATH_MUTEX.lock();
     let dir = create_temp_bins("arbo_isolation", &["arborist-isolated-test"]);
     // Point only the shell's $PATH at our dir; OS PATH stays whatever.
     let mut c = make_completer_with_path(&dir);
@@ -868,7 +869,7 @@ async fn test_path_completion_env_path_isolation_over_os_path() {
 
 #[tokio::test]
 async fn test_path_completion_only_on_first_word() {
-    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let _guard = TEST_PATH_MUTEX.lock();
     let dir = create_temp_bins("arbo_first_word", &["arborist"]);
     let mut c = make_completer_with_path(&dir);
 
@@ -893,7 +894,7 @@ async fn test_path_completion_only_on_first_word() {
 
 #[tokio::test]
 async fn test_get_path_executables_direct_happy_and_missing() {
-    let _guard = TEST_PATH_MUTEX.lock().unwrap();
+    let _guard = TEST_PATH_MUTEX.lock();
     let dir = create_temp_bins("arbo_engine", &["arborist", "mytool"]);
     invalidate_path_cache();
 
@@ -911,7 +912,7 @@ async fn test_get_path_executables_direct_happy_and_missing() {
 
 #[tokio::test]
 async fn test_completions_update_after_cd() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap();
+    let _guard = TEST_CWD_MUTEX.lock();
     let orig_cwd = std::env::current_dir().ok();
 
     let tmp = std::env::temp_dir().join("fsh_compl_cd_update");
@@ -956,7 +957,7 @@ async fn test_completions_update_after_cd() {
 
 #[tokio::test]
 async fn test_completion_manager_live_typing_and_backspace() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = TEST_CWD_MUTEX.lock();
     let env = Env::new();
     builtins_init(&env);
     bridge_init(&env);
@@ -1026,7 +1027,7 @@ fn test_longest_common_prefix_multibyte_utf8() {
 
 #[tokio::test]
 async fn test_path_completion_with_quoted_drilling() {
-    let _guard = TEST_CWD_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = TEST_CWD_MUTEX.lock();
     let tmp = std::env::temp_dir().join("fsh_test_quoted_drill");
     let _ = std::fs::create_dir_all(&tmp);
     let sub = tmp.join("my folder");

@@ -231,7 +231,7 @@ async fn eval_compound_list_stream(
     list: &CompoundList,
     env: &Env,
     cfg: &EvalConfig,
-    io_cfg: IoStreamConfig,
+    mut io_cfg: IoStreamConfig,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
     let mut last = 0;
     let mut last_out = None;
@@ -240,8 +240,23 @@ async fn eval_compound_list_stream(
     } else {
         None
     };
-    for item in &list.0 {
-        let (code, out) = eval_and_or_list_stream(&item.0, env, cfg, io_cfg.clone()).await?;
+    for (i, item) in list.0.iter().enumerate() {
+        let step_io = if i == 0 {
+            IoStreamConfig {
+                stdin_bytes: io_cfg.stdin_bytes.clone(),
+                stdin_stream: io_cfg.stdin_stream.take(),
+                stdout_stream: io_cfg.stdout_stream.clone(),
+                capture_stdout: io_cfg.capture_stdout,
+            }
+        } else {
+            IoStreamConfig {
+                stdin_bytes: None,
+                stdin_stream: None,
+                stdout_stream: io_cfg.stdout_stream.clone(),
+                capture_stdout: io_cfg.capture_stdout,
+            }
+        };
+        let (code, out) = eval_and_or_list_stream(&item.0, env, cfg, step_io).await?;
         last = code;
         last_out = out.clone();
         if let (Some(acc), Some(bytes)) = (&mut accumulated, out) {
@@ -261,9 +276,15 @@ async fn eval_and_or_list_stream(
     list: &AndOrList,
     env: &Env,
     cfg: &EvalConfig,
-    io_cfg: IoStreamConfig,
+    mut io_cfg: IoStreamConfig,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
-    let (mut code, mut out) = eval_pipeline_stream(&list.first, env, cfg, io_cfg.clone()).await?;
+    let first_io = IoStreamConfig {
+        stdin_bytes: io_cfg.stdin_bytes.clone(),
+        stdin_stream: io_cfg.stdin_stream.take(),
+        stdout_stream: io_cfg.stdout_stream.clone(),
+        capture_stdout: io_cfg.capture_stdout,
+    };
+    let (mut code, mut out) = eval_pipeline_stream(&list.first, env, cfg, first_io).await?;
     let mut last_out = out.clone();
     let mut accumulated = if io_cfg.capture_stdout {
         let mut v = Vec::new();
@@ -276,11 +297,16 @@ async fn eval_and_or_list_stream(
     };
 
     for and_or in &list.additional {
+        let step_io = IoStreamConfig {
+            stdin_bytes: None,
+            stdin_stream: None,
+            stdout_stream: io_cfg.stdout_stream.clone(),
+            capture_stdout: io_cfg.capture_stdout,
+        };
         match and_or {
             AndOr::And(next) => {
                 if code == 0 {
-                    let (c, next_out) =
-                        eval_pipeline_stream(next, env, cfg, io_cfg.clone()).await?;
+                    let (c, next_out) = eval_pipeline_stream(next, env, cfg, step_io).await?;
                     code = c;
                     last_out = next_out.clone();
                     if let (Some(acc), Some(b)) = (&mut accumulated, next_out) {
@@ -290,8 +316,7 @@ async fn eval_and_or_list_stream(
             }
             AndOr::Or(next) => {
                 if code != 0 {
-                    let (c, next_out) =
-                        eval_pipeline_stream(next, env, cfg, io_cfg.clone()).await?;
+                    let (c, next_out) = eval_pipeline_stream(next, env, cfg, step_io).await?;
                     code = c;
                     last_out = next_out.clone();
                     if let (Some(acc), Some(b)) = (&mut accumulated, next_out) {
@@ -465,11 +490,10 @@ impl RedirectionContext {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct IoStreamConfig {
     pub stdin_bytes: Option<Vec<u8>>,
-    pub stdin_stream:
-        Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<bytes::Bytes>>>>,
+    pub stdin_stream: Option<tokio::sync::mpsc::Receiver<bytes::Bytes>>,
     pub stdout_stream: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
     pub capture_stdout: bool,
 }
@@ -479,7 +503,7 @@ async fn eval_pipeline_stream(
     pipeline: &Pipeline,
     env: &Env,
     cfg: &EvalConfig,
-    io_cfg: IoStreamConfig,
+    mut io_cfg: IoStreamConfig,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
     let bang = pipeline.bang;
 
@@ -498,37 +522,39 @@ async fn eval_pipeline_stream(
         let n = pipeline.seq.len();
         let mut senders: Vec<Option<tokio::sync::mpsc::Sender<bytes::Bytes>>> =
             Vec::with_capacity(n);
-        let mut receivers: Vec<
-            Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<bytes::Bytes>>>>,
-        > = Vec::with_capacity(n);
+        let mut receivers: Vec<Option<tokio::sync::mpsc::Receiver<bytes::Bytes>>> =
+            Vec::with_capacity(n);
 
         for _ in 0..n - 1 {
             let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(32);
             senders.push(Some(tx));
-            receivers.push(Some(std::sync::Arc::new(tokio::sync::Mutex::new(rx))));
+            receivers.push(Some(rx));
         }
 
         let mut handles = Vec::with_capacity(n);
+        let mut prev_rx = io_cfg.stdin_stream.take();
         for (idx, cmd) in pipeline.seq.iter().enumerate() {
             let is_first = idx == 0;
             let is_last = idx == n - 1;
             let sub_env = crate::bridge::fork_env_for_subshell(env);
+            let stage_rx = if is_first {
+                prev_rx.take()
+            } else {
+                receivers[idx - 1].take()
+            };
+            let stage_tx = if is_last {
+                io_cfg.stdout_stream.clone()
+            } else {
+                senders[idx].take()
+            };
             let stage_io = IoStreamConfig {
                 stdin_bytes: if is_first {
                     io_cfg.stdin_bytes.clone()
                 } else {
                     None
                 },
-                stdin_stream: if is_first {
-                    io_cfg.stdin_stream.clone()
-                } else {
-                    receivers[idx - 1].clone()
-                },
-                stdout_stream: if is_last {
-                    io_cfg.stdout_stream.clone()
-                } else {
-                    senders[idx].clone()
-                },
+                stdin_stream: stage_rx,
+                stdout_stream: stage_tx,
                 capture_stdout: is_last && io_cfg.capture_stdout,
             };
 
@@ -646,7 +672,7 @@ async fn eval_command_stream(
                     ),
                 );
             }
-            register_posix_function(&name, body);
+            register_posix_function(env, &name, body);
             Ok((0, None))
         }
         Command::ExtendedTest(expr_cmd, _redirects) => {
@@ -746,24 +772,16 @@ fn file_mtime(path: &str) -> std::time::SystemTime {
         .unwrap_or(std::time::UNIX_EPOCH)
 }
 
-// Global registry for POSIX functions (name -> compound command)
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-
-static POSIX_FNS: OnceLock<Mutex<HashMap<String, CompoundCommand>>> = OnceLock::new();
-
-fn posix_fns() -> &'static Mutex<HashMap<String, CompoundCommand>> {
-    POSIX_FNS.get_or_init(|| Mutex::new(HashMap::new()))
+// Registry for POSIX functions scoped to Env (name -> compound command)
+fn register_posix_function(env: &Env, name: &str, body: CompoundCommand) {
+    let mut m = env.posix_fns.write();
+    m.insert(name.to_string(), std::sync::Arc::new(body));
 }
 
-fn register_posix_function(name: &str, body: CompoundCommand) {
-    if let Ok(mut m) = posix_fns().lock() {
-        m.insert(name.to_string(), body);
-    }
-}
-
-pub fn get_posix_function(name: &str) -> Option<CompoundCommand> {
-    posix_fns().lock().ok().and_then(|m| m.get(name).cloned())
+pub fn get_posix_function(env: &Env, name: &str) -> Option<CompoundCommand> {
+    let m = env.posix_fns.read();
+    m.get(name)
+        .and_then(|arc| arc.downcast_ref::<CompoundCommand>().cloned())
 }
 
 #[async_recursion]
@@ -826,14 +844,23 @@ async fn eval_compound_command_stream(
             } else {
                 None
             };
-            for val in values {
+            let mut prev_stream = io_cfg.stdin_stream;
+            for (i, val) in values.into_iter().enumerate() {
                 {
                     let mut vars = env.vars.write();
                     vars.insert(for_clause.variable_name.clone(), Val::String(val));
                 }
-                match eval_compound_list_stream(&for_clause.body.list, env, cfg, io_cfg.clone())
-                    .await
-                {
+                let step_io = IoStreamConfig {
+                    stdin_bytes: if i == 0 {
+                        io_cfg.stdin_bytes.clone()
+                    } else {
+                        None
+                    },
+                    stdin_stream: if i == 0 { prev_stream.take() } else { None },
+                    stdout_stream: io_cfg.stdout_stream.clone(),
+                    capture_stdout: io_cfg.capture_stdout,
+                };
+                match eval_compound_list_stream(&for_clause.body.list, env, cfg, step_io).await {
                     Ok((code, out)) => {
                         last = code;
                         if let (Some(acc), Some(bytes)) = (&mut accumulated, out) {
@@ -850,18 +877,23 @@ async fn eval_compound_command_stream(
         CompoundCommand::WhileClause(while_clause) | CompoundCommand::UntilClause(while_clause) => {
             let is_until = matches!(compound, CompoundCommand::UntilClause(_));
             let mut last = 0;
-            let mut current_io = io_cfg.clone();
+            let mut current_stdin_bytes = io_cfg.stdin_bytes;
             let mut accumulated = if io_cfg.capture_stdout {
                 Some(Vec::new())
             } else {
                 None
             };
             loop {
+                let cond_io = IoStreamConfig {
+                    stdin_bytes: current_stdin_bytes.clone(),
+                    stdin_stream: None,
+                    stdout_stream: io_cfg.stdout_stream.clone(),
+                    capture_stdout: io_cfg.capture_stdout,
+                };
                 let (cond_code, cond_out) =
-                    eval_compound_list_stream(&while_clause.0, env, cfg, current_io.clone())
-                        .await?;
+                    eval_compound_list_stream(&while_clause.0, env, cfg, cond_io).await?;
                 if let Some(rem) = cond_out {
-                    current_io.stdin_bytes = Some(rem);
+                    current_stdin_bytes = Some(rem);
                 }
                 let should_continue = if is_until {
                     cond_code != 0
@@ -871,9 +903,13 @@ async fn eval_compound_command_stream(
                 if !should_continue {
                     break;
                 }
-                match eval_compound_list_stream(&while_clause.1.list, env, cfg, current_io.clone())
-                    .await
-                {
+                let body_io = IoStreamConfig {
+                    stdin_bytes: current_stdin_bytes.clone(),
+                    stdin_stream: None,
+                    stdout_stream: io_cfg.stdout_stream.clone(),
+                    capture_stdout: io_cfg.capture_stdout,
+                };
+                match eval_compound_list_stream(&while_clause.1.list, env, cfg, body_io).await {
                     Ok((code, out)) => {
                         last = code;
                         if let (Some(acc), Some(bytes)) = (&mut accumulated, out) {
@@ -1094,10 +1130,6 @@ async fn eval_simple_command(
     all_args.extend(args);
     let args = all_args;
 
-    let effective_stdin = redir
-        .stdin_bytes
-        .as_deref()
-        .or(io_cfg.stdin_bytes.as_deref());
     let capture_stdout = io_cfg.capture_stdout || redir.stdout_file.is_some();
 
     let mut saved_prefix_vars: Vec<(String, Option<Val>)> = Vec::new();
@@ -1118,11 +1150,10 @@ async fn eval_simple_command(
         &args,
         &prefix_assignments,
         &redir,
-        effective_stdin,
         capture_stdout,
         env,
         cfg,
-        io_cfg.clone(),
+        io_cfg,
     )
     .await;
 
@@ -1131,13 +1162,22 @@ async fn eval_simple_command(
         "export" | "readonly" | "declare" | "typeset" | "local"
     );
 
-    if !saved_prefix_vars.is_empty() && !is_decl {
+    if is_decl {
+        for (name, _) in prefix_assignments {
+            if let Some(val) = env.vars.read().get(name.as_str()).cloned() {
+                env.set_exported_var(name.as_str(), val);
+            }
+        }
+    } else if !saved_prefix_vars.is_empty() {
         let mut vars = env.vars.write();
         for (name, prev) in saved_prefix_vars {
             if let Some(p) = prev {
                 vars.insert(name, p);
             } else {
                 vars.remove(&name);
+                if let Some(Val::Map(map)) = vars.get_mut("env") {
+                    map.shift_remove(&ustr::ustr(&name));
+                }
             }
         }
     }
@@ -1151,11 +1191,10 @@ async fn eval_simple_command_inner(
     args: &[String],
     prefix_assignments: &[(String, String)],
     redir: &RedirectionContext,
-    effective_stdin: Option<&[u8]>,
     capture_stdout: bool,
     env: &Env,
     cfg: &EvalConfig,
-    io_cfg: IoStreamConfig,
+    mut io_cfg: IoStreamConfig,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
     match cmd_name {
         ":" | "true" => return Ok((0, None)),
@@ -1220,9 +1259,7 @@ async fn eval_simple_command_inner(
             }
             for name in names {
                 if unset_fns_only {
-                    if let Ok(mut m) = posix_fns().lock() {
-                        m.remove(&name);
-                    }
+                    env.posix_fns.write().remove(&name);
                     {
                         let mut fns = env.fns.write();
                         fns.remove(&name);
@@ -1232,9 +1269,7 @@ async fn eval_simple_command_inner(
                 } else {
                     // Default: unset both var and function (bash parity)
                     env.unset_var(&name);
-                    if let Ok(mut m) = posix_fns().lock() {
-                        m.remove(&name);
-                    }
+                    env.posix_fns.write().remove(&name);
                     {
                         let mut fns = env.fns.write();
                         fns.remove(&name);
@@ -1280,10 +1315,13 @@ async fn eval_simple_command_inner(
             return Ok((0, None));
         }
         "read" => {
-            let stdin_bytes_val = if let Some(b) = effective_stdin {
+            let stdin_bytes_val = if let Some(b) = redir
+                .stdin_bytes
+                .as_deref()
+                .or(io_cfg.stdin_bytes.as_deref())
+            {
                 Some(b.to_vec())
-            } else if let Some(stream_mutex) = &io_cfg.stdin_stream {
-                let mut rx = stream_mutex.lock().await;
+            } else if let Some(mut rx) = io_cfg.stdin_stream.take() {
                 rx.recv().await.map(|chunk| chunk.to_vec())
             } else {
                 None
@@ -1498,7 +1536,7 @@ async fn eval_simple_command_inner(
     }
 
     // Check for POSIX shell function
-    if let Some(func_body) = get_posix_function(cmd_name) {
+    if let Some(func_body) = get_posix_function(env, cmd_name) {
         let saved = save_positional(env);
         apply_positional(env, args);
         let fn_cfg = EvalConfig {
@@ -1511,16 +1549,7 @@ async fn eval_simple_command_inner(
     }
 
     // Fallback: subprocess execution with full I/O piping and redirections
-    run_external_command(
-        cmd_name,
-        args,
-        prefix_assignments,
-        redir,
-        effective_stdin,
-        &io_cfg,
-        env,
-    )
-    .await
+    run_external_command(cmd_name, args, prefix_assignments, redir, io_cfg, env).await
 }
 
 fn handle_posix_trap(args: &[String], env: &Env) -> Result<String, PosixError> {
@@ -1740,12 +1769,16 @@ async fn run_external_command(
     args: &[String],
     prefix_assignments: &[(String, String)],
     redir: &RedirectionContext,
-    effective_stdin: Option<&[u8]>,
-    io_cfg: &IoStreamConfig,
+    mut io_cfg: IoStreamConfig,
     env: &Env,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
     use std::process::Stdio;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let effective_stdin = redir
+        .stdin_bytes
+        .as_deref()
+        .or(io_cfg.stdin_bytes.as_deref());
 
     let mut cmd = tokio::process::Command::new(cmd_name);
     cmd.args(args);
@@ -1833,11 +1866,10 @@ async fn run_external_command(
         tokio::spawn(async move {
             let _ = stdin.write_all(&b).await;
         });
-    } else if let Some(stream_mutex) = io_cfg.stdin_stream.clone()
+    } else if let Some(mut rx) = io_cfg.stdin_stream.take()
         && let Some(mut stdin) = child.stdin.take()
     {
         tokio::spawn(async move {
-            let mut rx = stream_mutex.lock().await;
             while let Some(chunk) = rx.recv().await {
                 if stdin.write_all(&chunk).await.is_err() {
                     break;

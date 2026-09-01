@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::lock::Mutex;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 pub const START_MARKER: &str = "# === fsh managed settings ===";
 pub const END_MARKER: &str = "# === end managed settings ===";
@@ -24,9 +24,7 @@ pub fn update_managed_settings(set_lines: &[String]) -> Result<(), String> {
         set_lines
     );
 
-    let _lock = INIT_FSH_LOCK
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let _lock = INIT_FSH_LOCK.lock();
 
     // Read current content on disk (with backup fallback).
     let disk_content = read_with_backup_chain(&init_path);
@@ -53,9 +51,7 @@ pub fn persist_alias(name: &str, expansion: &str) -> Result<(), String> {
     let line = format!("alias {} {}\n", name, fshell_quote(expansion));
     let prefix = format!("alias {} ", name);
 
-    let _lock = INIT_FSH_LOCK
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let _lock = INIT_FSH_LOCK.lock();
 
     let existing = read_with_backup_chain(&init_path);
     let new_content = filter_lines(&existing, |l| !l.trim_start().starts_with(&prefix)) + &line;
@@ -68,9 +64,7 @@ pub fn remove_alias(name: &str) -> Result<(), String> {
     let init_path = init_path()?;
     let prefix = format!("alias {} ", name);
 
-    let _lock = INIT_FSH_LOCK
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let _lock = INIT_FSH_LOCK.lock();
 
     let existing = read_with_backup_chain(&init_path);
     let new_content = filter_lines(&existing, |l| !l.trim_start().starts_with(&prefix));
@@ -87,9 +81,7 @@ pub fn persist_hook(event: &str, fn_name: &str) -> Result<(), String> {
     let init_path = init_path()?;
     let line = format!("hook {} {}\n", event, fn_name);
 
-    let _lock = INIT_FSH_LOCK
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let _lock = INIT_FSH_LOCK.lock();
 
     let existing = read_with_backup_chain(&init_path);
     if existing.lines().any(|l| l.trim() == line.trim()) {
@@ -104,9 +96,7 @@ pub fn remove_hook(event: &str, fn_name: &str) -> Result<(), String> {
     let init_path = init_path()?;
     let prefix = format!("hook {} {}", event, fn_name);
 
-    let _lock = INIT_FSH_LOCK
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let _lock = INIT_FSH_LOCK.lock();
 
     let existing = read_with_backup_chain(&init_path);
     let new_content = filter_lines(&existing, |l| l.trim() != prefix);
@@ -121,9 +111,7 @@ pub fn remove_hook(event: &str, fn_name: &str) -> Result<(), String> {
 pub fn persist_function(formatted: &str) -> Result<(), String> {
     let init_path = init_path()?;
 
-    let _lock = INIT_FSH_LOCK
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let _lock = INIT_FSH_LOCK.lock();
 
     let mut existing = read_with_backup_chain(&init_path);
     if !existing.is_empty() && !existing.ends_with('\n') {

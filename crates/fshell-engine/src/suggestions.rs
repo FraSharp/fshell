@@ -38,23 +38,25 @@ pub fn get_suggested_command(name: &str, env: &Env, env_path: Option<&str>) -> O
         );
     }
     // Check suggestion cache first
-    if let Ok(mut cache_guard) = SUGGESTION_CACHE.lock()
-        && let Some(ref mut cache) = *cache_guard
-        && let Some(cached) = cache.get(name)
     {
-        // Refresh stale cache entry — triggers re-check if the entry is older than 5s
-        if cache.is_stale(name) {
-            // Entry is stale, fall through to recompute
-        } else {
-            if std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1") {
-                eprintln!(
-                    "[cnf_debug] {}:{}: suggestion cache hit {:?}",
-                    file!(),
-                    line!(),
-                    cached
-                );
+        let mut cache_guard = SUGGESTION_CACHE.lock();
+        if let Some(ref mut cache) = *cache_guard
+            && let Some(cached) = cache.get(name)
+        {
+            // Refresh stale cache entry — triggers re-check if the entry is older than 5s
+            if cache.is_stale(name) {
+                // Entry is stale, fall through to recompute
+            } else {
+                if std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1") {
+                    eprintln!(
+                        "[cnf_debug] {}:{}: suggestion cache hit {:?}",
+                        file!(),
+                        line!(),
+                        cached
+                    );
+                }
+                return cached;
             }
-            return cached;
         }
     }
 
@@ -150,12 +152,11 @@ pub fn get_suggested_command(name: &str, env: &Env, env_path: Option<&str>) -> O
         .map(|p| p.to_string())
         .or_else(|| std::env::var("PATH").ok())
         .unwrap_or_default();
-    if !current_path.is_empty()
-        && let Ok(cache_guard) = PATH_CACHE.lock()
-    {
+    if !current_path.is_empty() {
         // Use existing cache only — never rebuild synchronously.
         // The background watcher keeps the cache fresh every 30s.
         let first_char = name.chars().next();
+        let cache_guard = PATH_CACHE.lock();
         if let Some(ref cache) = *cache_guard
             && cache.path == current_path
         {
@@ -181,7 +182,8 @@ pub fn get_suggested_command(name: &str, env: &Env, env_path: Option<&str>) -> O
     }
 
     // Store result in suggestion cache with timestamp
-    if let Ok(mut cache_guard) = SUGGESTION_CACHE.lock() {
+    {
+        let mut cache_guard = SUGGESTION_CACHE.lock();
         cache_guard
             .get_or_insert_with(SuggestionCache::new)
             .insert(name.to_string(), best_cmd.clone());

@@ -424,7 +424,7 @@ async fn test_capability_audit_log() {
     let env = setup_test_env();
 
     // Initially audit log should be empty
-    assert!(env.caps.audit_log.lock().unwrap().is_empty());
+    assert!(env.caps.audit_log.lock().is_empty());
 
     // Run `ls` to trigger an audit log
     let mut parser = Parser::new("ls");
@@ -432,7 +432,7 @@ async fn test_capability_audit_log() {
     eval_stmt(&stmts[0], &env, false).await.unwrap();
 
     // Now audit log should have at least 1 entry
-    let logs = env.caps.audit_log.lock().unwrap().clone();
+    let logs = env.caps.audit_log.lock().clone();
     assert!(!logs.is_empty());
     assert!(logs[0].contains("ReadDir"), "log was: {}", logs[0]);
     assert!(logs[0].contains("GRANTED"), "log was: {}", logs[0]);

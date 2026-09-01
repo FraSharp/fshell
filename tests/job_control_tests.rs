@@ -101,13 +101,13 @@ let jobs_output = (jobs)
 async fn test_foreground_job_state_tracking() {
     let env = setup_test_env();
 
-    assert_eq!(*env.job_control.fg_mutex.lock().unwrap(), None);
+    assert_eq!(*env.job_control.fg_mutex.lock(), None);
 
     env.set_foreground_job(Some(42)).unwrap();
-    assert_eq!(*env.job_control.fg_mutex.lock().unwrap(), Some(42));
+    assert_eq!(*env.job_control.fg_mutex.lock(), Some(42));
 
     env.set_foreground_job(None).unwrap();
-    assert_eq!(*env.job_control.fg_mutex.lock().unwrap(), None);
+    assert_eq!(*env.job_control.fg_mutex.lock(), None);
 }
 
 // ---------------------------------------------------------------------------

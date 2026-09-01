@@ -118,9 +118,7 @@ EXAMPLES:
             provider_override,
             model_override,
         };
-        if let Ok(mut chat) = env.chat_mode.lock() {
-            *chat = Some(config);
-        }
+        *env.chat_mode.lock() = Some(config);
         println!("fsh-ai chat mode. Type '/exit' to quit, '/clear' to reset.");
         return Ok(());
     }
@@ -546,7 +544,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let result = ai_main(None, vec![Val::String("--chat".into())], &env, tx, None);
         assert!(result.is_ok());
-        let chat_mode = env.chat_mode.lock().unwrap();
+        let chat_mode = env.chat_mode.lock();
         assert!(chat_mode.is_some());
     }
 
@@ -556,7 +554,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let result = ai_main(None, vec![], &env, tx, None);
         assert!(result.is_ok());
-        let chat_mode = env.chat_mode.lock().unwrap();
+        let chat_mode = env.chat_mode.lock();
         assert!(chat_mode.is_some());
     }
 
@@ -578,7 +576,7 @@ mod tests {
             None,
         );
         assert!(result.is_ok());
-        let chat_mode = env.chat_mode.lock().unwrap();
+        let chat_mode = env.chat_mode.lock();
         let config = chat_mode.as_ref().unwrap();
         assert_eq!(config.provider_override.as_deref(), Some("ollama"));
         assert_eq!(config.model_override.as_deref(), Some("llama3.2"));

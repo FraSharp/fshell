@@ -29,8 +29,8 @@ pub fn type_posix(args: &[String], env: &Env) -> Result<(i32, String), String> {
         }
 
         // Check functions
-        let is_fn =
-            crate::eval::get_posix_function(name).is_some() || env.fns.read().contains_key(name);
+        let is_fn = crate::eval::get_posix_function(env, name).is_some()
+            || env.fns.read().contains_key(name);
         if is_fn {
             out.push_str(&format!("{} is a function\n", name));
             continue;

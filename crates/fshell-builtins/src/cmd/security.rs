@@ -211,12 +211,7 @@ pub fn caps_audit_builtin(
         return Ok(());
     }
 
-    let logs = env
-        .caps
-        .audit_log
-        .lock()
-        .map_err(|_| "Lock poisoned: audit_log".to_string())?
-        .clone();
+    let logs = env.caps.audit_log.lock().clone();
     tokio::spawn(async move {
         for log in logs {
             let payload = PipelinePayload::Data(Arc::new(Val::String(log)));

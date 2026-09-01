@@ -3,10 +3,11 @@
 
 //! Dynamic `--help` flag extraction, parsing, and caching.
 
+use fshell_core::lock::Mutex;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -80,7 +81,7 @@ fn resolve_binary_path(name: &str) -> Option<PathBuf> {
 
 fn binary_mtime(name: &str) -> Option<u64> {
     let cached_path = {
-        let mut guard = RESOLVED_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = RESOLVED_PATHS.lock();
         let current_hash = path_hash();
         let should_clear = match guard.as_ref() {
             Some((old_hash, _)) => *old_hash != current_hash,
@@ -101,7 +102,7 @@ fn binary_mtime(name: &str) -> Option<u64> {
 
     let path = resolve_binary_path(name)?;
     {
-        let mut guard = RESOLVED_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = RESOLVED_PATHS.lock();
         if let Some((_, map)) = guard.as_mut() {
             map.entry(name.to_string()).or_insert(path.clone());
         }
@@ -489,9 +490,7 @@ pub fn get_completions(name: &str) -> Option<Vec<HelpFlag>> {
 
 pub fn queue_background_parse(name: &str) {
     {
-        let mut debounce = BACKGROUND_PARSE_DEBOUNCE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut debounce = BACKGROUND_PARSE_DEBOUNCE.lock();
         if let Some((prev_name, prev_time)) = &*debounce
             && prev_name == name
             && prev_time.elapsed() < Duration::from_millis(BACKGROUND_PARSE_DEBOUNCE_MS)

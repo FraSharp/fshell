@@ -246,5 +246,5 @@ impl SuggestionCache {
     }
 }
 
-pub(crate) static SUGGESTION_CACHE: std::sync::Mutex<Option<SuggestionCache>> =
-    std::sync::Mutex::new(None);
+pub(crate) static SUGGESTION_CACHE: fshell_core::lock::Mutex<Option<SuggestionCache>> =
+    fshell_core::lock::Mutex::new(None);
