@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Reedline + ratatui REPL for fshell"
+description = "Native FTUI REPL for fshell"
 repository.workspace = true
 
 [features]
@@ -18,7 +18,6 @@ fshell-bridge = { path = "../fshell-bridge" }
 fshell-render = { path = "../fshell-render" }
 fshell-git = { path = "../fshell-git" }
 fshell-hash = { workspace = true }
-reedline = { workspace = true }
 nucleo-matcher = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

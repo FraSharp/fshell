@@ -5,8 +5,8 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use fshell_core::Val;
 use fshell_engine::Env;
+use fshell_repl::autocomplete::Completer;
 use fshell_repl::{FshellCompleter, fuzzy};
-use reedline::Completer;
 
 fn make_completer_with_vars() -> FshellCompleter {
     let env = Env::new();

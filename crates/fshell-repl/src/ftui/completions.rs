@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::FshellCompleter;
+use crate::autocomplete::{Completer, CompletionCandidate, CompletionKind, TextSpan};
 use crate::theme_ext::ThemeColorRatatui;
 use fshell_core::theme::{CompletionsTheme, Theme};
 use fshell_engine::Env;
@@ -10,8 +11,6 @@ use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as NucleoConfig, Matcher, Utf32String};
 use ratatui::style::{Color, Modifier as StyleModifier, Style};
 use ratatui::text::{Line, Span};
-use reedline::{Completer, Suggestion};
-use std::path::Path;
 use std::sync::Arc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -197,16 +196,37 @@ pub enum CompletionLayoutMode {
     Grid { cols: usize, col_width: usize },
 }
 
+impl From<CompletionKind> for CompletionCategory {
+    fn from(kind: CompletionKind) -> Self {
+        match kind {
+            CompletionKind::Directory => CompletionCategory::Directory,
+            CompletionKind::File => CompletionCategory::File,
+            CompletionKind::Builtin => CompletionCategory::Builtin,
+            CompletionKind::UserFunction => CompletionCategory::Function,
+            CompletionKind::ExternalCommand => CompletionCategory::Command,
+            CompletionKind::Keyword => CompletionCategory::Keyword,
+            CompletionKind::PipeOperator => CompletionCategory::Pipeline,
+            CompletionKind::Variable => CompletionCategory::Variable,
+            CompletionKind::Flag => CompletionCategory::Flag,
+            CompletionKind::HelpTopic => CompletionCategory::Keyword,
+            CompletionKind::GitBranch => CompletionCategory::Ref,
+            CompletionKind::Job => CompletionCategory::Job,
+            CompletionKind::Custom("history") => CompletionCategory::History,
+            CompletionKind::Custom(_) => CompletionCategory::Command,
+        }
+    }
+}
+
 /// A categorized suggestion with its group info
 #[derive(Debug, Clone)]
 pub struct CategorizedSuggestion {
-    pub suggestion: Suggestion,
+    pub suggestion: CompletionCandidate,
     pub category: CompletionCategory,
 }
 
 impl CategorizedSuggestion {
-    fn from_suggestion(s: Suggestion) -> Self {
-        let cat = categorize(&s);
+    fn from_suggestion(s: CompletionCandidate) -> Self {
+        let cat = CompletionCategory::from(s.kind);
         Self {
             suggestion: s,
             category: cat,
@@ -214,92 +234,8 @@ impl CategorizedSuggestion {
     }
 }
 
-fn categorize(s: &Suggestion) -> CompletionCategory {
-    let v = &s.value;
-    let desc = s.description.as_deref().unwrap_or("");
-
-    if v.starts_with('$') {
-        return CompletionCategory::Variable;
-    }
-    if v.starts_with('%') {
-        return CompletionCategory::Job;
-    }
-    if v.starts_with("--") || v.starts_with('-') && v.len() > 1 {
-        return CompletionCategory::Flag;
-    }
-    // Path detection: directories end with /, files don't
-    if v.ends_with('/') {
-        return CompletionCategory::Directory;
-    }
-    if v.contains('/') || v.starts_with('.') || v.starts_with('~') {
-        return CompletionCategory::File;
-    }
-    if Path::new(v).exists() {
-        if Path::new(v).is_dir() {
-            return CompletionCategory::Directory;
-        }
-        return CompletionCategory::File;
-    }
-    if desc.contains("History") || desc.contains("use") {
-        return CompletionCategory::History;
-    }
-    if desc.contains("Function") || desc == "User-defined function" {
-        return CompletionCategory::Function;
-    }
-    if desc.contains("Alias") || desc.starts_with("->") {
-        return CompletionCategory::Alias;
-    }
-    if desc == "Keyword" || desc == "keyword" {
-        return CompletionCategory::Keyword;
-    }
-    if desc == "Built-in command" || desc == "built-in" || desc.contains("builtin") {
-        return CompletionCategory::Builtin;
-    }
-    if desc.contains("frecency") || desc.contains("jump") || desc.contains("cd ") {
-        return CompletionCategory::Directory;
-    }
-    if desc.contains("pipeline")
-        || desc.contains("boundary")
-        || matches!(
-            v.as_str(),
-            "filter"
-                | "map"
-                | "sort"
-                | "grep"
-                | "count"
-                | "limit"
-                | "@json"
-                | "@yaml"
-                | "@msgpack"
-                | "@text"
-                | "@csv"
-                | "@table"
-                | "@bar"
-        )
-    {
-        return CompletionCategory::Pipeline;
-    }
-    if desc.contains("ref")
-        || desc.contains("branch")
-        || desc.contains("tag")
-        || desc.contains("git")
-    {
-        return CompletionCategory::Ref;
-    }
-    // If description mentions "command", or common cmd patterns
-    if desc.contains("command") || desc.contains("cmd") {
-        return CompletionCategory::Command;
-    }
-    // Fallback: check known command lists
-    if let Some(cmd) = v.strip_suffix(' ')
-        && crate::COMMON_EXTERNAL_COMMANDS
-            .iter()
-            .any(|(n, _)| *n == cmd)
-    {
-        return CompletionCategory::Command;
-    }
-    // Default to Command for non-path, non-special suggestions
-    CompletionCategory::Command
+fn categorize(s: &CompletionCandidate) -> CompletionCategory {
+    CompletionCategory::from(s.kind)
 }
 
 /// A grouped list of categorized suggestions with index tracking
@@ -312,7 +248,7 @@ pub struct GroupedSuggestions {
 }
 
 impl GroupedSuggestions {
-    fn new(raw: Vec<Suggestion>) -> Self {
+    fn new(raw: Vec<CompletionCandidate>) -> Self {
         let mut items: Vec<CategorizedSuggestion> = raw
             .into_iter()
             .map(CategorizedSuggestion::from_suggestion)
@@ -380,10 +316,10 @@ impl GroupedSuggestions {
 
 pub struct CompletionsManager {
     completer: FshellCompleter,
-    pub suggestions: Vec<Suggestion>,
+    pub suggestions: Vec<CompletionCandidate>,
     pub grouped: Option<GroupedSuggestions>,
     /// Full unfiltered suggestion list from the completer (never mutated by filter)
-    pub all_suggestions: Vec<Suggestion>,
+    pub all_suggestions: Vec<CompletionCandidate>,
     /// Current partial word being filtered against
     pub filter_query: String,
     /// Reusable nucleo matcher instance
@@ -438,57 +374,44 @@ impl CompletionsManager {
             if force_visible {
                 // Tab on empty line — show curated command list
                 let builtins = self.completer.env.get_all_builtins();
-                let mut raw: Vec<reedline::Suggestion> = builtins
+                let mut raw: Vec<CompletionCandidate> = builtins
                     .into_iter()
                     .map(|b| {
-                        let desc = crate::command_description(&b)
-                            .unwrap_or("Built-in command")
-                            .to_string();
-                        reedline::Suggestion {
-                            value: b,
-                            description: Some(desc),
-                            extra: None,
-                            span: reedline::Span::new(0, 0),
-                            append_whitespace: true,
-                            style: None,
-                            display_override: None,
-                            match_indices: None,
-                        }
+                        let desc = crate::autocomplete::command_description(&b)
+                            .unwrap_or("Built-in command");
+                        CompletionCandidate::new(b, CompletionKind::Builtin, TextSpan::new(0, 0))
+                            .with_description(desc)
                     })
                     .collect();
 
-                for (cmd, desc) in crate::COMMON_EXTERNAL_COMMANDS {
+                for (cmd, desc) in crate::autocomplete::COMMON_EXTERNAL_COMMANDS {
                     if !raw.iter().any(|s| s.value == *cmd) {
-                        raw.push(reedline::Suggestion {
-                            value: cmd.to_string(),
-                            description: Some(desc.to_string()),
-                            extra: None,
-                            span: reedline::Span::new(0, 0),
-                            append_whitespace: true,
-                            style: None,
-                            display_override: None,
-                            match_indices: None,
-                        });
+                        raw.push(
+                            CompletionCandidate::new(
+                                cmd.to_string(),
+                                CompletionKind::ExternalCommand,
+                                TextSpan::new(0, 0),
+                            )
+                            .with_description(*desc),
+                        );
                     }
                 }
 
                 if let Ok(entries) = crate::history::query_frequent_by_prefix("", 10) {
                     for (cmd, freq) in &entries {
                         if !raw.iter().any(|s| s.value == *cmd) {
-                            raw.push(reedline::Suggestion {
-                                value: cmd.clone(),
-                                description: Some(format!(
+                            raw.push(
+                                CompletionCandidate::new(
+                                    cmd.clone(),
+                                    CompletionKind::Custom("history"),
+                                    TextSpan::new(0, 0),
+                                )
+                                .with_description(format!(
                                     "History ({} use{})",
                                     freq,
                                     if *freq == 1 { "" } else { "s" }
                                 )),
-                                extra: None,
-                                span: reedline::Span::new(0, 0),
-                                append_whitespace: false,
-                                style: None,
-                                display_override: None,
-                                match_indices: None,
-                            });
+                            );
                         }
                     }
                 }
@@ -648,7 +571,7 @@ impl CompletionsManager {
         );
 
         // Score all items, keep only those that match, and record matched character indices
-        let mut scored: Vec<(u32, usize, Suggestion)> = self
+        let mut scored: Vec<(u32, usize, CompletionCandidate)> = self
             .all_suggestions
             .iter()
             .enumerate()
@@ -718,7 +641,7 @@ impl CompletionsManager {
         self.selected_idx = self.selected_idx.saturating_sub(page_size.max(1));
     }
 
-    pub fn get_selected_suggestion(&self) -> Option<&Suggestion> {
+    pub fn get_selected_suggestion(&self) -> Option<&CompletionCandidate> {
         if self.visible && !self.suggestions.is_empty() {
             self.suggestions.get(self.selected_idx)
         } else {
@@ -939,7 +862,7 @@ impl CompletionsManager {
 
     fn render_grid_cell(
         &self,
-        suggestion: &Suggestion,
+        suggestion: &CompletionCandidate,
         category: CompletionCategory,
         is_selected: bool,
         col_width: usize,
@@ -1019,7 +942,7 @@ impl CompletionsManager {
 
     fn render_list_item(
         &self,
-        suggestion: &Suggestion,
+        suggestion: &CompletionCandidate,
         category: CompletionCategory,
         is_selected: bool,
         max_value_width: usize,
@@ -1182,7 +1105,11 @@ impl CompletionsManager {
         }
     }
 
-    pub fn format_suggestion(&self, suggestion: &Suggestion, is_selected: bool) -> Line<'static> {
+    pub fn format_suggestion(
+        &self,
+        suggestion: &CompletionCandidate,
+        is_selected: bool,
+    ) -> Line<'static> {
         let cat = categorize(suggestion);
         let t = &self.theme;
         let mut spans = Vec::new();
@@ -1228,7 +1155,7 @@ impl CompletionsManager {
 
 /// Legacy format method — kept for backwards compat in tests / non-popup paths
 pub fn format_suggestion_legacy(
-    suggestion: &Suggestion,
+    suggestion: &CompletionCandidate,
     is_selected: bool,
     theme: &CompletionsTheme,
 ) -> Line<'static> {

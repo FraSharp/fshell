@@ -6,7 +6,7 @@ use fshell_builtins::init as builtins_init;
 use fshell_core::{Val, remove_var, set_var};
 use fshell_engine::{Env, Job, JobStatus, get_path_executables, invalidate_path_cache};
 use fshell_repl::FshellCompleter;
-use reedline::Completer;
+use fshell_repl::autocomplete::{Completer, CompletionCandidate, CompletionKind, TextSpan};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{LazyLock, Mutex};
 
@@ -1008,26 +1008,16 @@ fn test_longest_common_prefix_multibyte_utf8() {
     let env = Env::new();
     let mut comp_mgr = fshell_repl::ftui::completions::CompletionsManager::new(env);
     comp_mgr.suggestions = vec![
-        reedline::Suggestion {
-            value: "café_latte".to_string(),
-            description: None,
-            extra: None,
-            span: reedline::Span::new(0, 0),
-            append_whitespace: false,
-            style: None,
-            display_override: None,
-            match_indices: None,
-        },
-        reedline::Suggestion {
-            value: "café_mocha".to_string(),
-            description: None,
-            extra: None,
-            span: reedline::Span::new(0, 0),
-            append_whitespace: false,
-            style: None,
-            display_override: None,
-            match_indices: None,
-        },
+        CompletionCandidate::new(
+            "café_latte".to_string(),
+            CompletionKind::File,
+            TextSpan::new(0, 0),
+        ),
+        CompletionCandidate::new(
+            "café_mocha".to_string(),
+            CompletionKind::File,
+            TextSpan::new(0, 0),
+        ),
     ];
 
     let lcp = comp_mgr.longest_common_prefix();

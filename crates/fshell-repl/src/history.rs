@@ -4,9 +4,6 @@
 use chrono::{TimeZone, Utc};
 use fshell_core::{FxIndexMap, Val};
 use r2d2::ManageConnection;
-use reedline::{
-    CommandLineSearch, HistoryItem as ReedlineHistoryItem, HistorySessionId, SearchQuery,
-};
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -148,93 +145,6 @@ fn get_pool() -> r2d2::Pool<SqliteConnManager> {
 pub fn clear_connection_cache() {
     let mut cache = DB_POOL.lock().unwrap_or_else(|e| e.into_inner());
     *cache = None;
-}
-
-/// Adapter wrapping our SQLite history to satisfy `reedline::History`.
-/// Used by `FshellHinter` to provide history-based inline hints (ghost text).
-pub struct SqliteHistoryAdapter;
-
-impl reedline::History for SqliteHistoryAdapter {
-    fn save(&mut self, _h: ReedlineHistoryItem) -> reedline::Result<ReedlineHistoryItem> {
-        // Hints are read-only; save is not used by the hinter.
-        unimplemented!("SqliteHistoryAdapter::save is not implemented")
-    }
-
-    fn load(&self, _id: reedline::HistoryItemId) -> reedline::Result<ReedlineHistoryItem> {
-        unimplemented!("SqliteHistoryAdapter::load is not implemented")
-    }
-
-    fn count(&self, _query: SearchQuery) -> reedline::Result<i64> {
-        Ok(0)
-    }
-
-    fn search(&self, query: SearchQuery) -> reedline::Result<Vec<ReedlineHistoryItem>> {
-        // We only support prefix search for hints.
-        let prefix = match query.filter.command_line {
-            Some(CommandLineSearch::Prefix(p)) => p,
-            _ => return Ok(Vec::new()),
-        };
-
-        let limit = query.limit.unwrap_or(1);
-
-        with_db_conn(|conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT command FROM history\n                     WHERE command LIKE ?1\n                     ORDER BY timestamp DESC\n                     LIMIT ?2",
-                )
-                .map_err(|e| e.to_string())?;
-            let pattern = format!("{}%", prefix);
-            let rows = stmt
-                .query_map(
-                    params![pattern, limit],
-                    |row| {
-                        let command_line: String = row.get(0)?;
-                        Ok(ReedlineHistoryItem {
-                            id: None,
-                            start_timestamp: None,
-                            command_line,
-                            session_id: None,
-                            hostname: None,
-                            cwd: None,
-                            duration: None,
-                            exit_status: None,
-                            more_info: None,
-                        })
-                    },
-                )
-                .map_err(|e| e.to_string())?;
-            let mut results = Vec::new();
-            for row in rows {
-                results.push(row.map_err(|e| e.to_string())?);
-            }
-            Ok(results)
-        })
-        .map_err(|_| reedline::ReedlineError(reedline::ReedlineErrorVariants::OtherHistoryError("sqlite history search failed")))
-    }
-
-    fn update(
-        &mut self,
-        _id: reedline::HistoryItemId,
-        _updater: &dyn Fn(ReedlineHistoryItem) -> ReedlineHistoryItem,
-    ) -> reedline::Result<()> {
-        unimplemented!("SqliteHistoryAdapter::update is not implemented")
-    }
-
-    fn clear(&mut self) -> reedline::Result<()> {
-        unimplemented!("SqliteHistoryAdapter::clear is not implemented")
-    }
-
-    fn delete(&mut self, _id: reedline::HistoryItemId) -> reedline::Result<()> {
-        unimplemented!("SqliteHistoryAdapter::delete is not implemented")
-    }
-
-    fn sync(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    fn session(&self) -> Option<HistorySessionId> {
-        None
-    }
 }
 
 pub fn with_db_conn<F, R>(f: F) -> Result<R, String>
@@ -574,7 +484,6 @@ mod tests {
     #[test]
     fn test_sqlite_history_flow() {
         let _lock = TEST_DB_LOCK.blocking_lock();
-        clear_connection_cache();
         let temp_dir = std::env::temp_dir();
         let test_db_file = temp_dir.join(format!(
             "fshell_test_hist_{}.db",
@@ -585,6 +494,7 @@ mod tests {
         ));
 
         set_var("FSH_TEST_DB_PATH", &test_db_file.to_string_lossy());
+        clear_connection_cache();
 
         // 1. Init
         init_db().unwrap();

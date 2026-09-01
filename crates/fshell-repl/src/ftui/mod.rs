@@ -112,7 +112,6 @@ use crate::alias_expansion::AliasExpansionState;
 use crate::highlighter::FshellHighlighter;
 use crate::theme_ext::ThemeColorRatatui;
 use fshell_engine::Env;
-use reedline::Hinter;
 
 use agent::AgentModeState;
 use buffer::TextBuffer;
@@ -831,14 +830,7 @@ pub async fn run_ftui_repl(
                         && !text_buf.is_empty()
                     {
                         let current_text = text_buf.text();
-                        let hist_adapter = crate::history::SqliteHistoryAdapter;
-                        let hint = hinter.handle(
-                            &current_text,
-                            current_text.len(),
-                            &hist_adapter,
-                            false, // use_ansi_coloring = false for ratatui styling
-                            &current_dir,
-                        );
+                        let hint = hinter.handle(&current_text, current_text.len(), false);
                         if !hint.is_empty() {
                             current_hint = hint.clone();
                             text_line_spans.push(Span::styled(hint, theme.status.muted.to_style()));
@@ -3937,7 +3929,7 @@ fn get_command_for_cursor(text: &str, cursor_char_idx: usize) -> String {
 fn accept_completion_at_span(
     text_buf: &mut buffer::TextBuffer,
     line: &str,
-    span: reedline::Span,
+    span: crate::autocomplete::TextSpan,
     value: &str,
     append_whitespace: bool,
 ) {
@@ -3971,18 +3963,13 @@ fn byte_offset_to_char_index(s: &str, byte_offset: usize) -> usize {
 pub(crate) fn apply_completion(
     text_buf: &mut buffer::TextBuffer,
     line: &str,
-    suggestion: &reedline::Suggestion,
+    suggestion: &crate::autocomplete::CompletionCandidate,
 ) {
     let span = suggestion.span;
+    let append_ws = suggestion.kind.append_whitespace();
     // A meaningful span has start < end and covers a range that matches the buffer
     if span.start < span.end && span.end <= line.len() {
-        accept_completion_at_span(
-            text_buf,
-            line,
-            span,
-            &suggestion.value,
-            suggestion.append_whitespace,
-        );
+        accept_completion_at_span(text_buf, line, span, &suggestion.value, append_ws);
     } else {
         // Fallback: delete back to word boundary (legacy behavior for suggestions
         // from completers that don't return proper spans)
@@ -3997,7 +3984,7 @@ pub(crate) fn apply_completion(
         for _ in 0..len_to_delete {
             text_buf.delete_left();
         }
-        accept_completion_legacy(text_buf, &suggestion.value, suggestion.append_whitespace);
+        accept_completion_legacy(text_buf, &suggestion.value, append_ws);
     }
 }
 

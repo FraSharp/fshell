@@ -1,14 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use crate::theme_ext::ThemeColorNu;
 use fshell_core::theme::Theme;
 use fshell_engine::Env;
 use fshell_hash::FxHashSet;
 use nu_ansi_term::Style as NuStyle;
-use reedline::{Highlighter, StyledText};
 use std::sync::Arc;
 
-use crate::theme_ext::ThemeColorNu;
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StyledText {
+    pub buffer: Vec<(NuStyle, String)>,
+}
+
+impl StyledText {
+    pub fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    pub fn push(&mut self, pair: (NuStyle, String)) {
+        self.buffer.push(pair);
+    }
+
+    pub fn raw_string(&self) -> String {
+        self.buffer.iter().map(|(_, s)| s.as_str()).collect()
+    }
+}
 
 std::thread_local! {
     static HEREDOC_ACTIVE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -293,8 +310,8 @@ impl FshellHighlighter {
     }
 }
 
-impl Highlighter for FshellHighlighter {
-    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
+impl FshellHighlighter {
+    pub fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
         let mut styled = StyledText::new();
         let s = &self.theme.syntax;
         let comment_style = s.comment.to_style();

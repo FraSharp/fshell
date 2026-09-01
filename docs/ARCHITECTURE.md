@@ -118,7 +118,7 @@ the workspace is organized into 13 crates with strict dependency layering:
 | `fshell-bridge` | external command fallback, globbing, path caching | `fshell-core`, `fshell-engine`, `fshell-capabilities` |
 | `fshell-posix` | POSIX/Bash syntax parser and runtime engine | `fshell-core`, `fshell-engine` |
 | `fshell-panes` | terminal multiplexer library and daemon binaries | `fshell-core`, `fshell-engine`, `crossterm`, `ratatui` |
-| `fshell-repl` | interactive prompt, Reedline line-editor, FTUI, config TUI, SQLite history | `fshell-engine`, `fshell-builtins`, `fshell-bridge`, `reedline`, `ratatui` |
+| `fshell-repl` | interactive prompt, FTUI, native line-editor, completions, config TUI, SQLite history | `fshell-engine`, `fshell-builtins`, `fshell-bridge`, `ratatui` |
 
 ---
 
