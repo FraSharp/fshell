@@ -257,22 +257,16 @@ mod tests {
         clippy::collapsible_if
     )]
     use super::*;
+    use fshell_core::lock::Mutex;
     use fshell_core::{remove_var, set_var};
     use fshell_engine::PipelinePayload;
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use tokio::sync::mpsc;
 
-    struct SafeMutex(Mutex<()>);
-    impl SafeMutex {
-        fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, ()> {
-            Ok(self.0.lock().unwrap_or_else(|e| e.into_inner()))
-        }
-    }
-    static CD_LOCK: SafeMutex = SafeMutex(Mutex::new(()));
+    static CD_LOCK: Mutex<()> = Mutex::new(());
 
     fn setup_with_lock() -> (impl std::ops::Deref<Target = ()>, PathBuf) {
-        let lock = CD_LOCK.lock().unwrap();
+        let lock = CD_LOCK.lock();
         let home = PathBuf::from(std::env::var("HOME").unwrap());
         (lock, home)
     }
@@ -313,13 +307,13 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_absolute_path_passthrough() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         assert_eq!(expand_tilde("/usr/local"), PathBuf::from("/usr/local"));
     }
 
     #[test]
     fn test_expand_tilde_relative_path_passthrough() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         assert_eq!(
             expand_tilde("relative/path"),
             PathBuf::from("relative/path")
@@ -328,26 +322,26 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_user_form_not_expanded() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         // ~user is not a recognised pattern – returned verbatim
         assert_eq!(expand_tilde("~other"), PathBuf::from("~other"));
     }
 
     #[test]
     fn test_expand_tilde_empty_string() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         assert_eq!(expand_tilde(""), PathBuf::from(""));
     }
 
     #[test]
     fn test_expand_tilde_bare_tilde_inside_path_not_expanded() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         assert_eq!(expand_tilde("foo/~/bar"), PathBuf::from("foo/~/bar"));
     }
     // ls builtin
     #[tokio::test]
     async fn test_ls_valid_directory_returns_entries() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -382,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_non_existent_path_returns_error() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, _rx) = mpsc::channel(100);
 
@@ -399,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_non_string_argument_returns_error() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, _rx) = mpsc::channel(100);
 
@@ -409,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_no_capability_returns_permission_denied() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
 
         // Revoke caps for the current directory so the builtin cannot list it.
@@ -433,7 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_no_args_uses_current_dir() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -445,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_with_tilde_expands_to_home() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let home = std::env::var("HOME").unwrap();
         // Grant caps for home because Env::new() only grants caps for cwd.
@@ -463,7 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_with_tilde_slash() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let home = std::env::var("HOME").unwrap();
         env.caps
@@ -480,7 +474,7 @@ mod tests {
     // ls flag tests
     #[tokio::test]
     async fn test_ls_v_flag_does_not_crash() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -492,7 +486,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_v_flag_adds_permissions_field() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -526,7 +520,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_a_flag_does_not_crash() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -538,7 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_combined_flags_does_not_crash() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -550,7 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_double_dash_end_of_options() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -570,7 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ls_v_flag_with_path() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -590,7 +584,7 @@ mod tests {
     // cd builtin
     #[tokio::test]
     async fn test_cd_valid_directory_succeeds() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
 
@@ -648,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cd_no_args_changes_to_home() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let _cwd_guard = CwdGuard::new();
         let _fsh_guard = save_fsh_home();
         let env = init_test_env();
@@ -668,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cd_no_capability_returns_permission_denied() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let pwd = env.cwd();
 
@@ -693,7 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cd_with_tilde_expands_to_home() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
         let home = std::env::var("HOME").unwrap();
@@ -712,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cd_preserves_caps_after_movement() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
         let old_dir = std::env::current_dir().unwrap();
@@ -750,7 +744,7 @@ mod tests {
     // Builtin function handles (dispatch via registry)
     #[tokio::test]
     async fn test_ls_dispatch_via_registry() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let ls = env.get_builtin("ls").unwrap();
         let (tx, mut rx) = mpsc::channel(100);
@@ -766,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cd_dispatch_via_registry() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let env = init_test_env();
         let cd = env.get_builtin("cd").unwrap();
 
@@ -827,7 +821,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cd_oldpwd_and_smart_fallback() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
         {
@@ -922,7 +916,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_z_exact_fallback_and_slash() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let _cwd_guard = CwdGuard::new();
         let env = init_test_env();
         {
@@ -1492,7 +1486,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_setopt_toggle() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let original_config = std::env::var("FSH_CONFIG_DIR").ok();
         let tmp = tempfile::tempdir().unwrap();
         set_var("FSH_CONFIG_DIR", &tmp.path().to_string_lossy());
@@ -1560,7 +1554,7 @@ mod tests {
     // config builtin
     #[tokio::test]
     async fn test_config_set_and_get() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let original_config = std::env::var("FSH_CONFIG_DIR").ok();
         let tmp = tempfile::tempdir().unwrap();
         let cfg_dir = tmp.path().join(".config/fsh");
@@ -1613,7 +1607,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_config_set_persists_to_init_fsh() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let original_config = std::env::var("FSH_CONFIG_DIR").ok();
         let tmp = tempfile::tempdir().unwrap();
         let cfg_dir = tmp.path().join(".config/fsh");
@@ -1672,7 +1666,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_setopt_persists_to_init_fsh() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let original_config = std::env::var("FSH_CONFIG_DIR").ok();
         let tmp = tempfile::tempdir().unwrap();
         let cfg_dir = tmp.path().join(".config/fsh");
@@ -1735,7 +1729,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_setopt_skips_persist_during_init() {
-        let _lock = CD_LOCK.lock().unwrap();
+        let _lock = CD_LOCK.lock();
         let original_config = std::env::var("FSH_CONFIG_DIR").ok();
         let tmp = tempfile::tempdir().unwrap();
         let cfg_dir = tmp.path().join(".config/fsh");

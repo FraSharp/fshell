@@ -5,8 +5,8 @@
 //!
 //! ANSI color codes for terminal output formatting.
 
+use parking_lot::Mutex;
 use std::ops::Deref;
-use std::sync::Mutex;
 
 static DIR_COLOR_STR: Mutex<&'static str> = Mutex::new("\x1b[34m");
 static LINK_COLOR_STR: Mutex<&'static str> = Mutex::new("\x1b[36m");
@@ -19,11 +19,8 @@ pub struct ColorCode {
 impl Deref for ColorCode {
     type Target = str;
     fn deref(&self) -> &Self::Target {
-        if let Ok(guard) = self.cell.lock() {
-            *guard
-        } else {
-            ""
-        }
+        let guard = self.cell.lock();
+        *guard
     }
 }
 
@@ -60,13 +57,10 @@ pub const BOLD: &str = "\x1b[1m";
 
 /// Update color configurations globally for directory listing.
 pub fn set_colors(dir: &str, link: &str, exec: &str) {
-    if let Ok(mut d) = DIR_COLOR_STR.lock() {
-        *d = Box::leak(dir.to_string().into_boxed_str());
-    }
-    if let Ok(mut l) = LINK_COLOR_STR.lock() {
-        *l = Box::leak(link.to_string().into_boxed_str());
-    }
-    if let Ok(mut e) = EXEC_COLOR_STR.lock() {
-        *e = Box::leak(exec.to_string().into_boxed_str());
-    }
+    let mut d = DIR_COLOR_STR.lock();
+    *d = Box::leak(dir.to_string().into_boxed_str());
+    let mut l = LINK_COLOR_STR.lock();
+    *l = Box::leak(link.to_string().into_boxed_str());
+    let mut e = EXEC_COLOR_STR.lock();
+    *e = Box::leak(exec.to_string().into_boxed_str());
 }

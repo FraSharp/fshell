@@ -98,16 +98,15 @@ impl ManageConnection for SqliteConnManager {
     }
 }
 
-use std::sync::Mutex;
+use fshell_core::lock::Mutex;
 
 static DB_POOL: Mutex<Option<r2d2::Pool<SqliteConnManager>>> = Mutex::new(None);
 static RECENT_COMMANDS_CACHE: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
 
 pub fn get_recent_commands_cached() -> std::collections::HashSet<String> {
     {
-        if let Ok(guard) = RECENT_COMMANDS_CACHE.lock()
-            && let Some(ref cached) = *guard
-        {
+        let guard = RECENT_COMMANDS_CACHE.lock();
+        if let Some(ref cached) = *guard {
             return cached.clone();
         }
     }
@@ -115,14 +114,13 @@ pub fn get_recent_commands_cached() -> std::collections::HashSet<String> {
     let entries = query_history(Some(50), None, None, None, None, None).unwrap_or_default();
     let set: std::collections::HashSet<String> = entries.into_iter().map(|e| e.command).collect();
 
-    if let Ok(mut guard) = RECENT_COMMANDS_CACHE.lock() {
-        *guard = Some(set.clone());
-    }
+    let mut guard = RECENT_COMMANDS_CACHE.lock();
+    *guard = Some(set.clone());
     set
 }
 
 fn get_pool() -> r2d2::Pool<SqliteConnManager> {
-    let mut guard = DB_POOL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = DB_POOL.lock();
     if let Some(ref pool) = *guard {
         pool.clone()
     } else {
@@ -143,7 +141,7 @@ fn get_pool() -> r2d2::Pool<SqliteConnManager> {
 }
 
 pub fn clear_connection_cache() {
-    let mut cache = DB_POOL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = DB_POOL.lock();
     *cache = None;
 }
 
@@ -204,7 +202,8 @@ pub fn log_command(
     username: &str,
     session_id: &str,
 ) -> Result<i64, String> {
-    if let Ok(mut guard) = RECENT_COMMANDS_CACHE.lock() {
+    {
+        let mut guard = RECENT_COMMANDS_CACHE.lock();
         *guard = None;
     }
     with_db_conn(|conn| {

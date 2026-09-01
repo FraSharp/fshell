@@ -13,6 +13,7 @@ libc = { workspace = true }
 unicode-width = { workspace = true }
 fshell-git = { path = "../fshell-git" }
 rayon = { workspace = true }
+parking_lot = { workspace = true }
 
 [lints]
 workspace = true

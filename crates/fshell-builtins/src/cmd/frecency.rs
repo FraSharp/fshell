@@ -7,10 +7,10 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use fshell_core::lock::Mutex;
 use miette::SourceSpan;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Instant;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -33,9 +33,7 @@ struct FrecencyCache {
 static FRECENCY_CACHE: Mutex<Option<FrecencyCache>> = Mutex::new(None);
 
 fn get_frecency_db(db_path: &PathBuf) -> Result<FrecencyDb, String> {
-    let mut cache = FRECENCY_CACHE
-        .lock()
-        .map_err(|e| format!("Lock poisoned: FRECENCY_CACHE: {}", e))?;
+    let mut cache = FRECENCY_CACHE.lock();
     if let Some(ref cached) = *cache
         && cached.db_path == *db_path
     {
@@ -58,9 +56,7 @@ fn get_frecency_db(db_path: &PathBuf) -> Result<FrecencyDb, String> {
 }
 
 fn with_frecency_db<T>(db_path: &PathBuf, f: impl FnOnce(&FrecencyDb) -> T) -> Result<T, String> {
-    let mut cache = FRECENCY_CACHE
-        .lock()
-        .map_err(|e| format!("Lock poisoned: FRECENCY_CACHE: {}", e))?;
+    let mut cache = FRECENCY_CACHE.lock();
     if let Some(ref cached) = *cache
         && cached.db_path == *db_path
     {
@@ -137,19 +133,18 @@ pub fn log_frecency_visit(path: &std::path::Path) -> Result<(), ShellError> {
     });
 
     // Update cache with latest state
-    if let Ok(mut cache) = FRECENCY_CACHE.lock() {
-        match cache.as_mut() {
-            Some(cached) => {
-                cached.db = db;
-                cached.db_path = db_path;
-            }
-            None => {
-                *cache = Some(FrecencyCache {
-                    db,
-                    db_path,
-                    _loaded_at: Instant::now(),
-                });
-            }
+    let mut cache = FRECENCY_CACHE.lock();
+    match cache.as_mut() {
+        Some(cached) => {
+            cached.db = db;
+            cached.db_path = db_path;
+        }
+        None => {
+            *cache = Some(FrecencyCache {
+                db,
+                db_path,
+                _loaded_at: Instant::now(),
+            });
         }
     }
 

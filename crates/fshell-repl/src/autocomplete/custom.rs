@@ -4,8 +4,8 @@
 //! Custom command-specific and shell-registry completion resolvers.
 
 use super::types::{CompletionCandidate, CompletionKind, TextSpan};
+use fshell_core::lock::Mutex;
 use fshell_core::{Stmt, Val};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -41,19 +41,17 @@ fn get_cached_external(
     ttl: Duration,
     loader: impl FnOnce() -> Vec<String> + Send + 'static,
 ) -> Vec<String> {
-    let mut needs_update = false;
-    let mut cached_val = None;
-    if let Ok(guard) = cache.lock() {
+    let (needs_update, cached_val) = {
+        let guard = cache.lock();
         if let Some(ref c) = *guard {
             if c.loaded_at.elapsed() < ttl {
                 return c.items.clone();
             }
-            cached_val = Some(c.items.clone());
-            needs_update = true;
+            (true, Some(c.items.clone()))
         } else {
-            needs_update = true;
+            (true, None)
         }
-    }
+    };
     if needs_update
         && updating
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -61,12 +59,11 @@ fn get_cached_external(
     {
         std::thread::spawn(move || {
             let items = loader();
-            if let Ok(mut guard) = cache.lock() {
-                *guard = Some(ExternalCache {
-                    items,
-                    loaded_at: Instant::now(),
-                });
-            }
+            let mut guard = cache.lock();
+            *guard = Some(ExternalCache {
+                items,
+                loaded_at: Instant::now(),
+            });
             updating.store(false, Ordering::SeqCst);
         });
     }
@@ -145,10 +142,8 @@ pub fn git_tags() -> Vec<String> {
 }
 
 pub fn git_tags_cached() -> Vec<String> {
-    let mut needs_update = false;
-    let mut cached_val = None;
-
-    if let Ok(cache) = GIT_TAGS_CACHE.lock() {
+    let (needs_update, cached_val) = {
+        let cache = GIT_TAGS_CACHE.lock();
         if let Some(ref c) = *cache {
             let matches_mtime = std::fs::metadata(".git/HEAD")
                 .and_then(|m| m.modified())
@@ -157,13 +152,12 @@ pub fn git_tags_cached() -> Vec<String> {
             if matches_mtime && c.loaded_at.elapsed() < Duration::from_secs(30) {
                 return c.tags.clone();
             } else {
-                cached_val = Some(c.tags.clone());
-                needs_update = true;
+                (true, Some(c.tags.clone()))
             }
         } else {
-            needs_update = true;
+            (true, None)
         }
-    }
+    };
 
     if needs_update
         && GIT_TAGS_UPDATING
@@ -175,13 +169,12 @@ pub fn git_tags_cached() -> Vec<String> {
             let head_mtime = std::fs::metadata(".git/HEAD")
                 .and_then(|m| m.modified())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            if let Ok(mut cache) = GIT_TAGS_CACHE.lock() {
-                *cache = Some(GitTagsCache {
-                    tags,
-                    loaded_at: Instant::now(),
-                    head_mtime,
-                });
-            }
+            let mut cache = GIT_TAGS_CACHE.lock();
+            *cache = Some(GitTagsCache {
+                tags,
+                loaded_at: Instant::now(),
+                head_mtime,
+            });
             GIT_TAGS_UPDATING.store(false, Ordering::SeqCst);
         });
     }

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::lock::Mutex;
 use fshell_core::prompt_config::{
     ColorSpec, PromptConfig, SegmentConfig, SegmentType, SeparatorStyle,
 };
 use fshell_git::repo::Repository;
 use nu_ansi_term::{Color, Style};
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -21,9 +21,8 @@ struct GitStatusCacheEntry {
 static GIT_STATUS_CACHE: Mutex<Option<GitStatusCacheEntry>> = Mutex::new(None);
 
 pub fn clear_git_status_cache() {
-    if let Ok(mut cache) = GIT_STATUS_CACHE.lock() {
-        *cache = None;
-    }
+    let mut cache = GIT_STATUS_CACHE.lock();
+    *cache = None;
 }
 
 struct CachedSegment {
@@ -50,18 +49,14 @@ static HOST_UPDATING: AtomicBool = AtomicBool::new(false);
 static CUSTOM_SEGMENT_UPDATING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 pub fn clear_segment_cache() {
-    if let Ok(mut cache) = SEGMENT_CACHE.lock() {
-        *cache = None;
-    }
-    if let Ok(mut cache) = SEGMENT_HOST_CACHE.lock() {
-        *cache = None;
-    }
-    if let Ok(mut cache) = CUSTOM_SEGMENT_CACHE.lock() {
-        *cache = None;
-    }
-    if let Ok(mut updating) = CUSTOM_SEGMENT_UPDATING.lock() {
-        *updating = None;
-    }
+    let mut cache = SEGMENT_CACHE.lock();
+    *cache = None;
+    let mut cache = SEGMENT_HOST_CACHE.lock();
+    *cache = None;
+    let mut cache = CUSTOM_SEGMENT_CACHE.lock();
+    *cache = None;
+    let mut updating = CUSTOM_SEGMENT_UPDATING.lock();
+    *updating = None;
 }
 
 pub struct PromptSegment {
@@ -102,9 +97,8 @@ pub fn get_rich_git_status(pwd: &str) -> Option<RichGitStatus> {
     let git_dir = match git_dir {
         Some(d) => d,
         None => {
-            if let Ok(mut cache) = GIT_STATUS_CACHE.lock() {
-                *cache = None;
-            }
+            let mut cache = GIT_STATUS_CACHE.lock();
+            *cache = None;
             let elapsed = _timer.elapsed();
             if elapsed > std::time::Duration::from_millis(1)
                 && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
@@ -126,44 +120,44 @@ pub fn get_rich_git_status(pwd: &str) -> Option<RichGitStatus> {
         .and_then(|m| m.modified().ok());
 
     // Fast path: cache hit with matching mtimes
-    if let Ok(cache) = GIT_STATUS_CACHE.lock()
-        && let Some(ref entry) = *cache
-        && entry.pwd == pwd
-        && entry.head_mtime == head_mtime
-        && entry.index_mtime == index_mtime
     {
-        let elapsed = _timer.elapsed();
-        if elapsed > std::time::Duration::from_millis(1)
-            && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
+        let cache = GIT_STATUS_CACHE.lock();
+        if let Some(ref entry) = *cache
+            && entry.pwd == pwd
+            && entry.head_mtime == head_mtime
+            && entry.index_mtime == index_mtime
         {
-            eprintln!(
-                "[cpu_dbg] [prompt] get_rich_git_status: cache HIT, took {:?}",
-                elapsed
-            );
+            let elapsed = _timer.elapsed();
+            if elapsed > std::time::Duration::from_millis(1)
+                && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
+            {
+                eprintln!(
+                    "[cpu_dbg] [prompt] get_rich_git_status: cache HIT, took {:?}",
+                    elapsed
+                );
+            }
+            return entry.status.clone();
         }
-        return entry.status.clone();
     }
 
     // Cache miss: read stale status if available
-    let stale_status = GIT_STATUS_CACHE
-        .lock()
-        .ok()
-        .and_then(|cache| cache.as_ref().map(|e| e.status.clone()))
-        .flatten();
+    let stale_status = {
+        let cache = GIT_STATUS_CACHE.lock();
+        cache.as_ref().and_then(|e| e.status.clone())
+    };
 
     // Trigger non-blocking async update if not currently fetching
     if !GIT_UPDATING.swap(true, Ordering::SeqCst) {
         let pwd_owned = pwd.to_string();
         std::thread::spawn(move || {
             let result = get_rich_git_status_uncached(&pwd_owned);
-            if let Ok(mut cache) = GIT_STATUS_CACHE.lock() {
-                *cache = Some(GitStatusCacheEntry {
-                    pwd: pwd_owned,
-                    status: result,
-                    head_mtime,
-                    index_mtime,
-                });
-            }
+            let mut cache = GIT_STATUS_CACHE.lock();
+            *cache = Some(GitStatusCacheEntry {
+                pwd: pwd_owned,
+                status: result,
+                head_mtime,
+                index_mtime,
+            });
             GIT_UPDATING.store(false, Ordering::SeqCst);
         });
     }
@@ -174,7 +168,8 @@ pub fn get_rich_git_status(pwd: &str) -> Option<RichGitStatus> {
 
     // First load in session: compute synchronously once
     let result = get_rich_git_status_uncached(pwd);
-    if let Ok(mut cache) = GIT_STATUS_CACHE.lock() {
+    {
+        let mut cache = GIT_STATUS_CACHE.lock();
         *cache = Some(GitStatusCacheEntry {
             pwd: pwd.to_string(),
             status: result.clone(),
@@ -331,21 +326,18 @@ fn compute_segment_value(
             {
                 Some(host)
             } else {
-                let mut needs_update = false;
-                let mut cached_val = None;
-
-                if let Ok(cache) = SEGMENT_HOST_CACHE.lock() {
+                let (needs_update, cached_val) = {
+                    let cache = SEGMENT_HOST_CACHE.lock();
                     if let Some(ref entry) = *cache {
                         if entry.cached_at.elapsed() < HOST_CACHE_TTL {
                             return Some(entry.value.clone());
                         } else {
-                            cached_val = Some(entry.value.clone());
-                            needs_update = true;
+                            (true, Some(entry.value.clone()))
                         }
                     } else {
-                        needs_update = true;
+                        (true, None)
                     }
-                }
+                };
 
                 if needs_update
                     && HOST_UPDATING
@@ -358,12 +350,11 @@ fn compute_segment_value(
                             .ok()
                             .and_then(|o| String::from_utf8(o.stdout).ok())
                             .map(|s| s.trim().to_string());
-                        if let Ok(mut cache) = SEGMENT_HOST_CACHE.lock() {
-                            *cache = host.map(|h| CachedSegment {
-                                value: h,
-                                cached_at: Instant::now(),
-                            });
-                        }
+                        let mut cache = SEGMENT_HOST_CACHE.lock();
+                        *cache = host.map(|h| CachedSegment {
+                            value: h,
+                            cached_at: Instant::now(),
+                        });
                         HOST_UPDATING.store(false, Ordering::SeqCst);
                     });
                 }
@@ -453,21 +444,18 @@ fn compute_segment_value(
             .ok()
             .or_else(|| std::env::var("AWS_DEFAULT_PROFILE").ok()),
         SegmentType::Kube => {
-            let mut needs_update = false;
-            let mut cached_val = None;
-
-            if let Ok(cache) = SEGMENT_CACHE.lock() {
+            let (needs_update, cached_val) = {
+                let cache = SEGMENT_CACHE.lock();
                 if let Some(ref entry) = *cache {
                     if entry.cached_at.elapsed() < KUBE_CACHE_TTL {
                         return Some(entry.value.clone());
                     } else {
-                        cached_val = Some(entry.value.clone());
-                        needs_update = true;
+                        (true, Some(entry.value.clone()))
                     }
                 } else {
-                    needs_update = true;
+                    (true, None)
                 }
-            }
+            };
 
             if needs_update
                 && KUBE_UPDATING
@@ -482,12 +470,11 @@ fn compute_segment_value(
                         .and_then(|o| String::from_utf8(o.stdout).ok())
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty());
-                    if let Ok(mut cache) = SEGMENT_CACHE.lock() {
-                        *cache = value.map(|v| CachedSegment {
-                            value: v,
-                            cached_at: Instant::now(),
-                        });
-                    }
+                    let mut cache = SEGMENT_CACHE.lock();
+                    *cache = value.map(|v| CachedSegment {
+                        value: v,
+                        cached_at: Instant::now(),
+                    });
                     KUBE_UPDATING.store(false, Ordering::SeqCst);
                 });
             }
@@ -520,7 +507,8 @@ fn compute_segment_value(
             let mut needs_update = false;
             let mut cached_val = None;
 
-            if let Ok(mut cache) = CUSTOM_SEGMENT_CACHE.lock() {
+            {
+                let mut cache = CUSTOM_SEGMENT_CACHE.lock();
                 if cache.is_none() {
                     *cache = Some(HashMap::new());
                 }
@@ -540,7 +528,8 @@ fn compute_segment_value(
 
             if needs_update {
                 let mut already_updating = false;
-                if let Ok(mut updating) = CUSTOM_SEGMENT_UPDATING.lock() {
+                {
+                    let mut updating = CUSTOM_SEGMENT_UPDATING.lock();
                     if updating.is_none() {
                         *updating = Some(HashSet::new());
                     }
@@ -567,22 +556,24 @@ fn compute_segment_value(
                                 .map(|s| s.trim().to_string())
                         });
 
-                        if let Ok(mut cache) = CUSTOM_SEGMENT_CACHE.lock()
-                            && let Some(map) = cache.as_mut()
                         {
-                            map.insert(
-                                cmd_clone.clone(),
-                                CustomSegmentCacheEntry {
-                                    value,
-                                    loaded_at: Instant::now(),
-                                },
-                            );
+                            let mut cache = CUSTOM_SEGMENT_CACHE.lock();
+                            if let Some(map) = cache.as_mut() {
+                                map.insert(
+                                    cmd_clone.clone(),
+                                    CustomSegmentCacheEntry {
+                                        value,
+                                        loaded_at: Instant::now(),
+                                    },
+                                );
+                            }
                         }
 
-                        if let Ok(mut updating) = CUSTOM_SEGMENT_UPDATING.lock()
-                            && let Some(set) = updating.as_mut()
                         {
-                            set.remove(&cmd_clone);
+                            let mut updating = CUSTOM_SEGMENT_UPDATING.lock();
+                            if let Some(set) = updating.as_mut() {
+                                set.remove(&cmd_clone);
+                            }
                         }
                     });
                 }

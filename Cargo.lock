@@ -1216,6 +1216,7 @@ version = "0.1.0"
 dependencies = [
  "fshell-git",
  "libc",
+ "parking_lot",
  "rayon",
  "terminal_size",
  "unicode-width 0.2.2",

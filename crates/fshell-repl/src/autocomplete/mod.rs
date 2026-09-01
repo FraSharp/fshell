@@ -17,8 +17,8 @@ pub use self::types::*;
 
 use crate::fuzzy;
 use crate::history;
+use fshell_core::lock::Mutex;
 use fshell_engine::Env;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 struct FrecencyCache {
@@ -233,7 +233,7 @@ impl Completer for FshellCompleter {
         // z: frecency jump completions
         if is_z {
             let scored = {
-                let mut cache = Z_FRECENCY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                let mut cache = Z_FRECENCY_CACHE.lock();
                 let needs_rebuild = match &*cache {
                     None => true,
                     Some(c) => c.loaded_at.elapsed() >= Z_FRECENCY_TTL,

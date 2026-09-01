@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::lock::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 struct AliasStateInner {
@@ -41,7 +41,7 @@ impl AliasExpansionState {
         start_pos: usize,
         end_pos: usize,
     ) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         inner.last_expansion = Some((alias_name.to_string(), expansion.to_string()));
         inner
             .recently_expanded
@@ -50,12 +50,12 @@ impl AliasExpansionState {
     }
 
     pub fn clear_undo(&self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         inner.last_expansion = None;
     }
 
     pub fn check_undo(&self, current_line: &str, cursor_pos: usize) -> Option<String> {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = self.inner.lock();
         let (alias_name, expansion) = inner.last_expansion.as_ref()?;
 
         let expansion_end = cursor_pos;
@@ -67,7 +67,7 @@ impl AliasExpansionState {
     }
 
     pub fn active_expansions(&self) -> Vec<(usize, usize, String)> {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         if let Some(ts) = inner.feedback_expires
             && Instant::now() > ts
         {
@@ -78,23 +78,23 @@ impl AliasExpansionState {
     }
 
     pub fn is_alias(&self, name: &str) -> bool {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = self.inner.lock();
         inner.registered_aliases.contains_key(name)
     }
 
     pub fn clear_feedback(&self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         inner.recently_expanded.clear();
         inner.feedback_expires = None;
     }
 
     pub fn update_registered(&self, aliases: HashMap<String, String>) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         inner.registered_aliases = aliases;
     }
 
     pub fn aliases_changed(&self, env_aliases: &[(String, String)]) -> bool {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = self.inner.lock();
         if inner.registered_aliases.len() != env_aliases.len() {
             return true;
         }

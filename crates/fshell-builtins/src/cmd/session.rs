@@ -372,20 +372,13 @@ fn format_age(age: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fshell_core::lock::{Mutex, MutexGuard};
     use fshell_core::{remove_var, set_var};
     use fshell_engine::Env;
-    use std::sync::Mutex;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
 
-    /// Serialises tests that modify environment variables.
-    struct SafeMutex(Mutex<()>);
-    impl SafeMutex {
-        fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, ()> {
-            Ok(self.0.lock().unwrap_or_else(|e| e.into_inner()))
-        }
-    }
-    static SESSION_LOCK: SafeMutex = SafeMutex(Mutex::new(()));
+    static SESSION_LOCK: Mutex<()> = Mutex::new(());
 
     fn init_env() -> Env {
         Env::new()
@@ -397,11 +390,11 @@ mod tests {
     struct SessionDir {
         _dir: TempDir,
         _prev: Option<String>,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: MutexGuard<'static, ()>,
     }
 
     fn setup() -> SessionDir {
-        let _lock = SESSION_LOCK.lock().unwrap();
+        let _lock = SESSION_LOCK.lock();
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var("FSH_CONFIG_DIR").ok();
         set_var("FSH_CONFIG_DIR", &dir.path().to_string_lossy());

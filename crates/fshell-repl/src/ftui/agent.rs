@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_core::lock::Mutex;
 use fshell_engine::Env;
-use std::sync::Mutex;
 
 pub struct AgentModeState {
     pub active: bool,
@@ -64,7 +64,7 @@ impl AgentModeState {
         let handle = tokio::spawn(async move {
             let result = query_ai_backend(&prompt_clone, &env_clone).await;
             // Only publish if this is still the latest query (avoid stale overwrite after cancel).
-            let mut guard = AGENT_RESULT.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = AGENT_RESULT.lock();
             if guard.as_ref().is_none_or(|(prev_qid, _)| *prev_qid < qid) {
                 *guard = Some((qid, result));
             }

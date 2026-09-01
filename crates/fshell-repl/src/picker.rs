@@ -9,9 +9,9 @@ use crossterm::{
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use fshell_core::lock::Mutex;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Instant;
 
 struct GitPickerCachedData {
@@ -519,13 +519,21 @@ pub fn run_unified_picker(current_pwd: &str) -> Option<String> {
 
     // 4 & 5. Git branches & commits (cached, 5 min TTL)
     {
-        if let Ok(cache) = GIT_PICKER_CACHE.lock()
-            && let Some(ref data) = *cache
-            && data.pwd == current_pwd
-            && data.cached_at.elapsed() < GIT_PICKER_TTL
-        {
-            items.extend(data.branches.iter().cloned());
-            items.extend(data.commits.iter().cloned());
+        let cached_hit = {
+            let cache = GIT_PICKER_CACHE.lock();
+            if let Some(ref data) = *cache
+                && data.pwd == current_pwd
+                && data.cached_at.elapsed() < GIT_PICKER_TTL
+            {
+                Some((data.branches.clone(), data.commits.clone()))
+            } else {
+                None
+            }
+        };
+
+        if let Some((branches, commits)) = cached_hit {
+            items.extend(branches);
+            items.extend(commits);
         } else {
             let mut new_branches: Vec<(String, String, i64)> = Vec::new();
             let mut new_commits: Vec<(String, String, i64)> = Vec::new();
@@ -582,14 +590,13 @@ pub fn run_unified_picker(current_pwd: &str) -> Option<String> {
                 }
             }
 
-            if let Ok(mut cache) = GIT_PICKER_CACHE.lock() {
-                *cache = Some(GitPickerCachedData {
-                    pwd: current_pwd.to_string(),
-                    cached_at: Instant::now(),
-                    branches: new_branches,
-                    commits: new_commits,
-                });
-            }
+            let mut cache = GIT_PICKER_CACHE.lock();
+            *cache = Some(GitPickerCachedData {
+                pwd: current_pwd.to_string(),
+                cached_at: Instant::now(),
+                branches: new_branches,
+                commits: new_commits,
+            });
         }
     }
 
