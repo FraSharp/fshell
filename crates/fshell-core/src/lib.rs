@@ -14,6 +14,7 @@ pub mod env_utils;
 pub mod extended_glob;
 pub mod glob_utils;
 pub mod linter;
+pub mod lock;
 pub mod lock_utils;
 pub mod parser;
 pub mod presets;
@@ -34,7 +35,7 @@ pub use env_utils::{ThreadSafeEnv, expand_tilde, expand_tilde_str, get_var, remo
 pub use glob_utils::{
     determine_base_dir, expand_brace_range, expand_braces, expand_glob, expand_glob_with_options,
 };
-pub use lock_utils::RwLock;
+pub use lock::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use parser::{ParseError, Parser};
 pub use prompt_config::{ColorSpec, PromptConfig, SegmentConfig, SegmentType, SeparatorStyle};
 pub use shell_error::ShellError;
