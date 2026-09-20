@@ -75,6 +75,32 @@ macro_rules! cpu_dbg {
     };
 }
 
+/// Keep FTUI command timing diagnostics out of the live terminal. Raw-mode
+/// rendering owns stdout/stderr, so opt-in diagnostics must use a file sink.
+pub(crate) fn ftui_debug_log(msg: std::fmt::Arguments) {
+    if std::env::var("FSH_CNF_DEBUG").as_deref() != Ok("1") {
+        return;
+    }
+    use std::io::Write;
+    let path = format!(
+        "{}/fsh_ftui_debug.log",
+        std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string())
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(
+            file,
+            "[{}] [pid={}] {}",
+            chrono::Local::now().format("%H:%M:%S%.3f"),
+            std::process::id(),
+            msg
+        );
+    }
+}
+
 struct CommandRunningGuard<'a> {
     flag: &'a AtomicBool,
 }
@@ -3350,7 +3376,7 @@ pub async fn run_ftui_repl(
                     status_bar.update_git(Some(gs.branch.clone()), !gs.clean, gs.ahead, gs.behind);
                 }
                 if ftui_debug {
-                    eprintln!(
+                    ftui_debug_log(format_args!(
                         "[cnf_debug] {}:{}: FTUI exec: disable={:?} refresh={:?} prompt={:?} exec={:?} reraw={:?}",
                         file!(),
                         line!(),
@@ -3359,7 +3385,7 @@ pub async fn run_ftui_repl(
                         t_prompt,
                         t_exec,
                         t_reraw
-                    );
+                    ));
                 }
             }
 
