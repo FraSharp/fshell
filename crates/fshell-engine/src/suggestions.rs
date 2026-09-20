@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use crate::{Env, PATH_CACHE, SUGGESTION_CACHE, SuggestionCache, resolve_config_dir};
+use crate::glob::SuggestionCache;
+use crate::{Env, PATH_CACHE, resolve_config_dir};
 use fshell_core::Val;
 
 pub(crate) fn levenshtein_distance(s1: &str, s2: &str) -> usize {
@@ -39,7 +40,7 @@ pub fn get_suggested_command(name: &str, env: &Env, env_path: Option<&str>) -> O
     }
     // Check suggestion cache first
     {
-        let mut cache_guard = SUGGESTION_CACHE.lock();
+        let mut cache_guard = env.suggestion_cache.lock();
         if let Some(ref mut cache) = *cache_guard
             && let Some(cached) = cache.get(name)
         {
@@ -197,7 +198,7 @@ pub fn get_suggested_command(name: &str, env: &Env, env_path: Option<&str>) -> O
 
     // Store result in suggestion cache with timestamp
     {
-        let mut cache_guard = SUGGESTION_CACHE.lock();
+        let mut cache_guard = env.suggestion_cache.lock();
         cache_guard
             .get_or_insert_with(SuggestionCache::new)
             .insert(name.to_string(), best_cmd.clone());

@@ -251,6 +251,3 @@ impl SuggestionCache {
         self.access_order.push(key);
     }
 }
-
-pub(crate) static SUGGESTION_CACHE: fshell_core::lock::Mutex<Option<SuggestionCache>> =
-    fshell_core::lock::Mutex::new(None);

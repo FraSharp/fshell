@@ -988,6 +988,7 @@ pub struct Env {
     pub is_captured: bool,
     pub completions: Arc<RwLock<fshell_hash::FxHashMap<String, fshell_core::CommandCompletion>>>,
     pub ast_cache: Arc<RwLock<crate::ast_cache::AstCache>>,
+    pub(crate) suggestion_cache: Arc<Mutex<Option<crate::glob::SuggestionCache>>>,
     pub special_vars: Arc<special_vars::SpecialVars>,
     pub posix_traps: Arc<RwLock<FxHashMap<Signal, String>>>,
     pub posix_fns: Arc<RwLock<FxHashMap<String, Arc<dyn std::any::Any + Send + Sync>>>>,
@@ -1798,6 +1799,7 @@ impl Env {
             is_captured: false,
             completions: Arc::new(RwLock::new(fshell_hash::FxHashMap::default())),
             ast_cache: Arc::new(RwLock::new(crate::ast_cache::AstCache::new(64))),
+            suggestion_cache: Arc::new(Mutex::new(None)),
             special_vars: Arc::new(special_vars::SpecialVars::new()),
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
             posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
@@ -1953,6 +1955,7 @@ impl Env {
             is_captured: false,
             completions: Arc::new(RwLock::new(fshell_hash::FxHashMap::default())),
             ast_cache: Arc::new(RwLock::new(crate::ast_cache::AstCache::new(64))),
+            suggestion_cache: Arc::new(Mutex::new(None)),
             special_vars: Arc::new(special_vars::SpecialVars::new()),
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
             posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
@@ -2041,6 +2044,7 @@ impl Env {
             is_captured: self.is_captured,
             completions: self.completions.clone(),
             ast_cache: self.ast_cache.clone(),
+            suggestion_cache: self.suggestion_cache.clone(),
             special_vars: self.special_vars.clone(),
             posix_traps: self.posix_traps.clone(),
             posix_fns: self.posix_fns.clone(),
@@ -3123,7 +3127,6 @@ impl Env {
         }
     }
 }
-pub(crate) use glob::{SUGGESTION_CACHE, SuggestionCache};
 pub(crate) use pipeline::{collect_pipeline_silent, val_type_precedence};
 fn topological_sort(
     nodes: &std::collections::HashSet<String>,

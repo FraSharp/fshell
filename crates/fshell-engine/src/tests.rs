@@ -87,6 +87,22 @@ mod tests {
     }
 
     #[test]
+    fn suggestion_cache_is_scoped_to_each_environment() {
+        let first = Env::new();
+        first.register_builtin("cache_only_builtin", Arc::new(|_, _, _, _, _| Ok(())));
+        assert_eq!(
+            get_suggested_command("cache_only_builti", &first, None),
+            Some("cache_only_builtin".to_string())
+        );
+
+        let second = Env::new();
+        assert_ne!(
+            get_suggested_command("cache_only_builti", &second, None),
+            Some("cache_only_builtin".to_string())
+        );
+    }
+
+    #[test]
     fn finalize_no_failures_keeps_last_exit_code() {
         let (ec, err) = pipeline_finalize(Vec::new(), 7, false);
         assert_eq!(ec, 7);
