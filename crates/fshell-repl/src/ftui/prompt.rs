@@ -107,6 +107,7 @@ pub struct PromptAnimation {
     pub name: String,
     pub frames: Vec<String>,
     pub frame_rate_ms: u64,
+    started_at: Instant,
 }
 
 impl PromptAnimation {
@@ -114,8 +115,16 @@ impl PromptAnimation {
         if self.frames.is_empty() {
             return String::new();
         }
-        let total_ms = Instant::now().elapsed().as_millis() as u64;
-        let index = ((total_ms / self.frame_rate_ms) % self.frames.len() as u64) as usize;
+        self.frame_at(self.started_at.elapsed())
+    }
+
+    fn frame_at(&self, elapsed: Duration) -> String {
+        if self.frames.is_empty() {
+            return String::new();
+        }
+        let frame_rate_ms = self.frame_rate_ms.max(1);
+        let index = ((elapsed.as_millis() as u64 / frame_rate_ms) % self.frames.len() as u64)
+            as usize;
         self.frames[index].clone()
     }
 }
@@ -177,6 +186,7 @@ impl PromptManager {
                 .map(|s| s.to_string())
                 .collect(),
             frame_rate_ms: 80,
+            started_at: Instant::now(),
         }];
 
         Self {
@@ -466,5 +476,24 @@ mod tests {
         let spans = ansi_to_spans("\x1b[38;2;255;128;0mcoral\x1b[0m");
         assert_eq!(spans.len(), 1, "got {} spans: {:#?}", spans.len(), spans);
         assert_eq!(spans[0].content, "coral");
+    }
+
+    #[test]
+    fn test_prompt_animation_uses_stable_clock() {
+        let animation = PromptAnimation {
+            name: "test".to_string(),
+            frames: vec!["a".to_string(), "b".to_string()],
+            frame_rate_ms: 1,
+            started_at: Instant::now(),
+        };
+
+        assert_eq!(animation.frame_at(Duration::ZERO), "a");
+        assert_eq!(animation.frame_at(Duration::from_millis(1)), "b");
+
+        let zero_rate = PromptAnimation {
+            frame_rate_ms: 0,
+            ..animation
+        };
+        assert_eq!(zero_rate.frame_at(Duration::ZERO), "a");
     }
 }
