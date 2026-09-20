@@ -46,6 +46,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_path_expands_home_relative_paths() {
+        let env = Env::new();
+        let home = env.home_dir();
+
+        assert_eq!(env.resolve_path("~"), home);
+        assert_eq!(
+            env.resolve_path("~/.ssh/known_hosts"),
+            home.join(".ssh/known_hosts")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn command_lookup_resolves_relative_path_entries_in_logical_cwd() {

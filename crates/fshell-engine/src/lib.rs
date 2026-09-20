@@ -1144,8 +1144,13 @@ impl Env {
     /// shell-owned filesystem operations must resolve relative paths explicitly.
     pub fn resolve_path<P: AsRef<std::path::Path>>(&self, path: P) -> PathBuf {
         let path = path.as_ref();
+        let path = match path.to_str() {
+            Some("~") => self.home_dir(),
+            Some(path) if path.starts_with("~/") => self.home_dir().join(&path[2..]),
+            _ => path.to_path_buf(),
+        };
         if path.is_absolute() {
-            path.to_path_buf()
+            path
         } else {
             self.cwd().join(path)
         }
