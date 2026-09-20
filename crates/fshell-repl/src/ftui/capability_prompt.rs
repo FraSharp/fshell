@@ -69,7 +69,7 @@ async fn handle_request(
     request: &CapPromptRequest,
     session_active: Arc<AtomicBool>,
 ) -> CapPromptResponse {
-    let Ok(_cooked_mode) = CookedModeGuard::enter(session_active) else {
+    let Ok(_cooked_mode) = CookedModeGuard::enter(session_active.clone()) else {
         return CapPromptResponse::Deny;
     };
 
@@ -79,13 +79,11 @@ async fn handle_request(
     );
     let _ = io::stderr().flush();
 
-    let line = tokio::task::spawn_blocking(|| {
-        let mut line = String::new();
-        let _ = io::stdin().read_line(&mut line);
-        line
-    })
-    .await
-    .unwrap_or_default();
+    let input_active = session_active.clone();
+    let line = tokio::task::spawn_blocking(move || read_line_while_active(&input_active))
+        .await
+        .unwrap_or(None)
+        .unwrap_or_default();
 
     match line.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => CapPromptResponse::GrantOnce,
@@ -97,6 +95,53 @@ async fn handle_request(
             CapPromptResponse::GrantAlways
         }
         _ => CapPromptResponse::Deny,
+    }
+}
+
+/// Read one cooked-mode input line without leaving an uninterruptible reader
+/// behind when the prompt task is cancelled. Reading one byte at a time avoids
+/// consuming a second pasted line that belongs to the main REPL prompt.
+fn read_line_while_active(active: &AtomicBool) -> Option<String> {
+    let mut bytes = Vec::new();
+    loop {
+        if !active.load(Ordering::Acquire) {
+            return None;
+        }
+
+        let mut pollfd = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut pollfd, 1, 50) };
+        if result < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return None;
+        }
+        if result == 0 {
+            continue;
+        }
+        if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return None;
+        }
+
+        let mut byte = [0_u8; 1];
+        let count = unsafe {
+            libc::read(
+                libc::STDIN_FILENO,
+                byte.as_mut_ptr().cast::<libc::c_void>(),
+                byte.len(),
+            )
+        };
+        if count <= 0 {
+            return None;
+        }
+        bytes.push(byte[0]);
+        if byte[0] == b'\n' || byte[0] == b'\r' {
+            return Some(String::from_utf8_lossy(&bytes).into_owned());
+        }
     }
 }
 
