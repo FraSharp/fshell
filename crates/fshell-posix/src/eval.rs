@@ -2106,8 +2106,10 @@ fn eval_unary_primary(op: &str, val: &str, env: &Env) -> bool {
                 false
             }
         }
-        "-s" => std::fs::metadata(val).map(|m| m.len() > 0).unwrap_or(false),
-        "-h" | "-L" => std::path::Path::new(val).is_symlink(),
+        "-s" => std::fs::metadata(path())
+            .map(|m| m.len() > 0)
+            .unwrap_or(false),
+        "-h" | "-L" => path().is_symlink(),
         _ => false,
     }
 }
