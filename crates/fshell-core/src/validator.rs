@@ -65,7 +65,7 @@ fn count_word(input: &str, word: &str) -> usize {
 }
 
 fn looks_like_posix_shell(input: &str) -> bool {
-    let trimmed = input.trim_start();
+    let mut trimmed = input.trim_start();
     if let Some(first_line) = trimmed.lines().next()
         && let Some(rest) = first_line.strip_prefix("#!")
         && let Some(shell) = rest.split_whitespace().next()
@@ -78,26 +78,37 @@ fn looks_like_posix_shell(input: &str) -> bool {
             return true;
         }
     }
-    if is_word(input, "function") && input.contains("()") {
+
+    // Only inspect the first command word.  Looking for `if`, `for`, `do`,
+    // and friends anywhere in the input classifies ordinary arguments such as
+    // `echo "for do"` as POSIX control flow and incorrectly requests a
+    // continuation prompt.
+    if let Some(first_line) = trimmed.lines().next()
+        && first_line.trim_start().starts_with("#!")
+    {
+        trimmed = trimmed[first_line.len()..].trim_start();
+    }
+    let first_word = trimmed
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | '{'))
+        .find(|word| !word.is_empty())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if first_word == "function" && trimmed.contains("()") {
         return true;
     }
-    if is_word(input, "then")
-        || is_word(input, "fi")
-        || is_word(input, "esac")
-        || is_word(input, "case")
-    {
-        if (is_word(input, "if") && (is_word(input, "then") || is_word(input, "fi")))
-            || (is_word(input, "case") && is_word(input, "esac"))
-        {
-            return true;
-        }
+    if first_word == "if" && (is_word(trimmed, "then") || is_word(trimmed, "fi")) {
+        return true;
     }
-    let has_do = is_word(input, "do");
-    let has_done = is_word(input, "done");
+    if first_word == "case" && is_word(trimmed, "esac") {
+        return true;
+    }
+    let has_do = is_word(trimmed, "do");
+    let has_done = is_word(trimmed, "done");
     if has_do && has_done {
         return true;
     }
-    if has_do && (is_word(input, "for") || is_word(input, "while") || is_word(input, "until")) {
+    if has_do && matches!(first_word.as_str(), "for" | "while" | "until") {
         return true;
     }
     false
@@ -213,6 +224,22 @@ pub fn validate_input(input: &str) -> ValidationResult {
     }
 
     if end_pos > 0 {
+        let expression_context = {
+            let first = input
+                .trim_start()
+                .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | '{'))
+                .find(|word| !word.is_empty())
+                .unwrap_or_default();
+            matches!(
+                first,
+                "let" | "local" | "if" | "while" | "match" | "return" | "for" | "until"
+            ) || input
+                .trim_start()
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || matches!(c, '$' | '(' | '[' | '!'))
+        };
+
         if end_pos >= 2 && chars[end_pos - 2] == '&' && chars[end_pos - 1] == '&' {
             return ValidationResult::Incomplete { prompt_hint: "and" };
         }
@@ -230,7 +257,8 @@ pub fn validate_input(input: &str) -> ValidationResult {
             };
         }
 
-        if end_pos >= 2
+        if expression_context
+            && end_pos >= 2
             && (chars[end_pos - 2] == '+'
                 || chars[end_pos - 2] == '-'
                 || chars[end_pos - 2] == '*'
@@ -262,49 +290,16 @@ pub fn validate_input(input: &str) -> ValidationResult {
             };
         }
 
-        if last_char == ',' {
-            return ValidationResult::Incomplete {
-                prompt_hint: "comma",
-            };
-        }
-
-        if (last_char == '+' || last_char == '*' || last_char == '=')
-            && (end_pos == 1
-                || (chars[end_pos - 2] != '+'
-                    && chars[end_pos - 2] != '-'
-                    && chars[end_pos - 2] != '*'
-                    && chars[end_pos - 2] != '/'))
+        if expression_context
+            && matches!(last_char, '+' | '*' | '=')
+            && !(end_pos >= 2
+                && ((last_char == '+' && chars[end_pos - 2] == '+')
+                    || (last_char == '*' && chars[end_pos - 2] == '*')
+                    || (last_char == '=' && chars[end_pos - 2] == '=')))
         {
-            // Exception: `find ... -exec ... {} +` ends with `+` but is complete.
-            // The `+` is a standalone find terminator after `}`, not a trailing `let x = 1 +`.
-            if last_char == '+' {
-                let mut idx = end_pos - 1;
-                // idx points to '+', step back over whitespace
-                if idx > 0 {
-                    idx -= 1;
-                    while idx > 0 && chars[idx].is_whitespace() {
-                        idx -= 1;
-                    }
-                    // chars[idx] is the last non-whitespace char before '+'
-                    // If it's `}` (as in `{} +`), it's find's terminator -> complete
-                    if chars[idx] == '}' {
-                        // Check that we actually have `{}` before it (find pattern)
-                        // Walk back one more to see `{` - not strictly needed, `}` alone is enough
-                    } else {
-                        return ValidationResult::Incomplete {
-                            prompt_hint: "operator",
-                        };
-                    }
-                } else {
-                    return ValidationResult::Incomplete {
-                        prompt_hint: "operator",
-                    };
-                }
-            } else {
-                return ValidationResult::Incomplete {
-                    prompt_hint: "operator",
-                };
-            }
+            return ValidationResult::Incomplete {
+                prompt_hint: "operator",
+            };
         }
 
         // Check trailing keywords and tokens
@@ -719,6 +714,11 @@ mod tests {
     #[test]
     fn test_validate_complete_commands() {
         assert_eq!(validate_input("echo hello"), ValidationResult::Complete);
+        assert_eq!(validate_input("echo foo*"), ValidationResult::Complete);
+        assert_eq!(validate_input("echo foo,"), ValidationResult::Complete);
+        assert_eq!(validate_input("echo foo="), ValidationResult::Complete);
+        assert_eq!(validate_input("echo for do"), ValidationResult::Complete);
+        assert_eq!(validate_input("echo if then"), ValidationResult::Complete);
         assert_eq!(
             validate_input("let x = 42; echo $x"),
             ValidationResult::Complete

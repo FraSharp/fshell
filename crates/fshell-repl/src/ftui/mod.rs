@@ -2545,6 +2545,11 @@ pub async fn run_ftui_repl(
                                         if !trimmed.is_empty() {
                                             let validation =
                                                 fshell_core::validate_input(&command_line);
+                                            let is_last_line = {
+                                                let chars = text_buf.chars();
+                                                let cursor = text_buf.cursor();
+                                                !chars.iter().skip(cursor).any(|&c| c == '\n')
+                                            };
                                             match validation {
                                                 fshell_core::ValidationResult::Incomplete {
                                                     ..
@@ -2555,6 +2560,23 @@ pub async fn run_ftui_repl(
                                                     );
                                                     text_buf.insert_char('\n');
                                                     for _ in 0..(indent * 4) {
+                                                        text_buf.insert_char(' ');
+                                                    }
+                                                    in_continuation = true;
+                                                    redraw = true;
+                                                    continue;
+                                                }
+                                                _ if !is_last_line
+                                                    && command_line.contains('\n') =>
+                                                {
+                                                    history_index = None;
+                                                    let indent =
+                                                        fshell_core::compute_indent_depth_at(
+                                                            &command_line,
+                                                            Some(text_buf.cursor()),
+                                                        );
+                                                    text_buf.insert_char('\n');
+                                                    for _ in 0..(indent * 2) {
                                                         text_buf.insert_char(' ');
                                                     }
                                                     in_continuation = true;

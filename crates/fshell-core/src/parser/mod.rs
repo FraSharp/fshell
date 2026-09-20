@@ -2307,6 +2307,57 @@ mod tests {
     }
 
     #[test]
+    fn test_command_words_do_not_become_operations_or_member_access() {
+        assert_echo_args("2026-09-20", &["2026-09-20"]);
+        assert_echo_args("1+2", &["1+2"]);
+        assert_echo_args("13.32.09.png", &["13.32.09.png"]);
+        assert_echo_args("foo.bar", &["foo.bar"]);
+        assert_echo_args(r"foo\ bar", &["foo bar"]);
+    }
+
+    #[test]
+    fn test_escaped_path_with_spaces_is_one_command_argument() {
+        let input = r"ls /var/folders/nw/n7d16zv95_9fyvhl5n57v7hh0000gn/T/TemporaryItems/NSIRD_screencaptureui_K3f6Md/Screenshot\ 2026-09-20\ at\ 13.32.09.png";
+        let stmts = Parser::new(input).parse_statements().unwrap();
+        let Stmt::Expr(expr) = stmts[0].unpack() else {
+            panic!("expected command expression");
+        };
+        let Expr::Pipeline(pipeline) = expr.unpack() else {
+            panic!("expected pipeline");
+        };
+        let PipelineStage::CommandCall { args, .. } = &pipeline.stages[0] else {
+            panic!("expected command call");
+        };
+        assert_eq!(args.len(), 1, "expected one path argument, got {args:?}");
+        assert_eq!(
+            args[0],
+            Expr::String(vec![StringPart::Lit(
+                "/var/folders/nw/n7d16zv95_9fyvhl5n57v7hh0000gn/T/TemporaryItems/NSIRD_screencaptureui_K3f6Md/Screenshot 2026-09-20 at 13.32.09.png".to_string()
+            )])
+        );
+    }
+
+    #[test]
+    fn test_escaped_redirection_path_is_one_argument() {
+        let stmts = Parser::new(r"echo data > /tmp/output\ file.txt")
+            .parse_statements()
+            .unwrap();
+        let Stmt::Expr(expr) = stmts[0].unpack() else {
+            panic!("expected command expression");
+        };
+        let Expr::Pipeline(pipeline) = expr.unpack() else {
+            panic!("expected pipeline");
+        };
+        assert!(pipeline.stages.iter().any(|stage| matches!(
+            stage,
+            PipelineStage::Write {
+                path: Expr::String(parts),
+                ..
+            } if parts == &vec![StringPart::Lit("/tmp/output file.txt".to_string())]
+        )));
+    }
+
+    #[test]
     fn test_brace_expansion_adjacent_to_word() {
         // `file{1,2}` expands to file1 file2, like bash — `{` directly after
         // an identifier must be part of the word, not a map-literal separator.

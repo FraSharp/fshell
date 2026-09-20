@@ -1492,29 +1492,11 @@ impl Parser {
                 })
             }
             "grep" if !has_flag => {
-                let saved_redirect = self.redirect_mode;
-                let saved_arg = self.cmd_arg_mode;
-                self.redirect_mode = true;
-                self.cmd_arg_mode = true;
-                let mut pattern = self.parse_expr_with_pipeline(false)?;
-                self.redirect_mode = saved_redirect;
-                self.cmd_arg_mode = saved_arg;
-                if let Expr::Ident(id) = pattern {
-                    pattern = Expr::String(vec![StringPart::Lit(id)]);
-                }
+                let pattern = self.parse_command_arg()?;
                 Ok(PipelineStage::Grep { pattern })
             }
             "mark" if !has_flag => {
-                let saved_redirect = self.redirect_mode;
-                let saved_arg = self.cmd_arg_mode;
-                self.redirect_mode = true;
-                self.cmd_arg_mode = true;
-                let mut pattern = self.parse_expr_with_pipeline(false)?;
-                self.redirect_mode = saved_redirect;
-                self.cmd_arg_mode = saved_arg;
-                if let Expr::Ident(id) = pattern {
-                    pattern = Expr::String(vec![StringPart::Lit(id)]);
-                }
+                let pattern = self.parse_command_arg()?;
                 Ok(PipelineStage::Mark { pattern })
             }
             "count" => Ok(PipelineStage::Count),
@@ -1550,7 +1532,7 @@ impl Parser {
                         || c == '}'
                         || c == ')'
                         || c == '&'
-                        || c == '#'
+                        || (c == '#' && (self.pos == 0 || self.input[self.pos - 1].is_whitespace()))
                     {
                         break;
                     }
@@ -1575,13 +1557,18 @@ impl Parser {
                     {
                         break;
                     }
-                    let saved_redirect = self.redirect_mode;
-                    let saved_arg = self.cmd_arg_mode;
-                    self.redirect_mode = true;
-                    self.cmd_arg_mode = true;
-                    let mut arg = self.parse_expr_with_pipeline(false)?;
-                    self.redirect_mode = saved_redirect;
-                    self.cmd_arg_mode = saved_arg;
+                    let mut arg = if self.command_arg_has_spaced_operator() {
+                        let saved_redirect = self.redirect_mode;
+                        let saved_arg = self.cmd_arg_mode;
+                        self.redirect_mode = true;
+                        self.cmd_arg_mode = true;
+                        let parsed = self.parse_expr_with_pipeline(false);
+                        self.redirect_mode = saved_redirect;
+                        self.cmd_arg_mode = saved_arg;
+                        parsed?
+                    } else {
+                        self.parse_command_arg()?
+                    };
                     if (name == "export" || name == "unset")
                         && let Expr::Ident(id) = arg
                     {

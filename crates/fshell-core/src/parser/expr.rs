@@ -603,13 +603,32 @@ impl Parser {
     pub(crate) fn parse_bare_path_or_string(&mut self) -> Result<Expr, ParseError> {
         let mut path = String::new();
         while let Some(c) = self.peek() {
-            if c.is_alphanumeric()
+            if c == '\\' {
+                self.next_char();
+                match self.next_char() {
+                    Some('\n') => {}
+                    Some('\r') => {
+                        if self.peek() == Some('\n') {
+                            self.next_char();
+                        }
+                    }
+                    Some(escaped) if escaped.is_whitespace() => path.push(escaped),
+                    Some(escaped) => {
+                        path.push('\\');
+                        path.push(escaped);
+                    }
+                    None => {
+                        return Err(ParseError::UnexpectedEof {
+                            span: self.current_span(),
+                        });
+                    }
+                }
+            } else if c.is_alphanumeric()
                 || c == '_'
                 || c == '-'
                 || c == '/'
                 || c == '.'
                 || c == '~'
-                || c == '\\'
                 || c == '*'
                 || c == '?'
                 || c == '['
@@ -638,6 +657,222 @@ impl Parser {
             });
         }
         Ok(Expr::String(vec![StringPart::Lit(path)]))
+    }
+
+    /// Parse one unquoted command argument.
+    ///
+    /// Command words are not expressions.  In particular, `2026-09-20`,
+    /// `1+2`, and `file.name` are ordinary arguments and must not be reduced
+    /// to arithmetic or member-access expressions.  Explicit expansions and
+    /// quoted strings still use the expression parser so command arguments can
+    /// contain variables, substitutions, and interpolation.
+    pub(crate) fn parse_command_arg(&mut self) -> Result<Expr, ParseError> {
+        let mut parts = Vec::new();
+        let mut literal = String::new();
+        let mut brace_depth = 0usize;
+        let mut had_quoted_segment = false;
+        let mut saw_segment = false;
+
+        let flush_literal = |parts: &mut Vec<StringPart>, literal: &mut String| {
+            if !literal.is_empty() {
+                parts.push(StringPart::Lit(std::mem::take(literal)));
+            }
+        };
+
+        while let Some(c) = self.peek() {
+            if c.is_whitespace()
+                || matches!(c, '|' | ';' | '&' | ')')
+                || (c == '}' && brace_depth == 0)
+                || ((c == '<' || c == '>')
+                    && !(self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '('))
+                || (c == '#' && (self.pos == 0 || self.input[self.pos - 1].is_whitespace()))
+            {
+                break;
+            }
+
+            saw_segment = true;
+            match c {
+                '\\' => {
+                    self.next_char();
+                    match self.next_char() {
+                        Some('\n') => {}
+                        Some('\r') => {
+                            if self.peek() == Some('\n') {
+                                self.next_char();
+                            }
+                        }
+                        Some(escaped) if escaped.is_whitespace() => literal.push(escaped),
+                        Some(escaped) => {
+                            // Keep unknown escapes intact for regexes and other
+                            // command arguments; escaped whitespace is the one
+                            // case where the backslash is syntactic.
+                            literal.push('\\');
+                            literal.push(escaped);
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                span: self.current_span(),
+                            });
+                        }
+                    }
+                }
+                '"' => {
+                    had_quoted_segment = true;
+                    flush_literal(&mut parts, &mut literal);
+                    let quoted = self.parse_string_literal()?;
+                    match quoted {
+                        Expr::String(quoted_parts) => parts.extend(quoted_parts),
+                        other => parts.push(StringPart::Expr(Box::new(other))),
+                    }
+                }
+                '\'' => {
+                    self.next_char();
+                    let mut quoted = String::new();
+                    loop {
+                        match self.next_char() {
+                            Some('\'') => break,
+                            Some(ch) => quoted.push(ch),
+                            None => {
+                                return Err(ParseError::UnexpectedEof {
+                                    span: self.current_span(),
+                                });
+                            }
+                        }
+                    }
+                    literal.push_str(&quoted);
+                }
+                '$' => {
+                    let is_expansion = self.pos + 1 < self.input.len()
+                        && (matches!(
+                            self.input[self.pos + 1],
+                            '{' | '(' | '\'' | '?' | '#' | '@' | '*' | '$'
+                        ) || self.input[self.pos + 1].is_ascii_digit()
+                            || self.input[self.pos + 1].is_ascii_alphabetic()
+                            || self.input[self.pos + 1] == '_');
+                    if !is_expansion {
+                        self.next_char();
+                        literal.push('$');
+                        continue;
+                    }
+                    flush_literal(&mut parts, &mut literal);
+                    let saved_arg = self.cmd_arg_mode;
+                    self.cmd_arg_mode = false;
+                    let expansion = self.parse_primary_expr()?;
+                    self.cmd_arg_mode = saved_arg;
+                    match expansion {
+                        Expr::String(expanded_parts) => parts.extend(expanded_parts),
+                        other => parts.push(StringPart::Expr(Box::new(other))),
+                    }
+                }
+                '<' | '>' if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '(' => {
+                    flush_literal(&mut parts, &mut literal);
+                    let saved_arg = self.cmd_arg_mode;
+                    self.cmd_arg_mode = false;
+                    let expansion = self.parse_primary_expr()?;
+                    self.cmd_arg_mode = saved_arg;
+                    parts.push(StringPart::Expr(Box::new(expansion)));
+                }
+                '(' if parts.is_empty() && literal.is_empty() => {
+                    let saved_arg = self.cmd_arg_mode;
+                    self.cmd_arg_mode = false;
+                    let expression = self.parse_primary_expr()?;
+                    self.cmd_arg_mode = saved_arg;
+                    parts.push(StringPart::Expr(Box::new(expression)));
+                }
+                '{' if parts.is_empty() && literal.is_empty() && !self.is_brace_expansion() => {
+                    // Preserve fshell map literals as structured command arguments.
+                    let saved_arg = self.cmd_arg_mode;
+                    self.cmd_arg_mode = false;
+                    let map = self.parse_primary_expr()?;
+                    self.cmd_arg_mode = saved_arg;
+                    return Ok(map);
+                }
+                _ => literal.push(self.next_char().ok_or_else(|| ParseError::UnexpectedEof {
+                    span: self.current_span(),
+                })?),
+            }
+            if c == '{' {
+                brace_depth += 1;
+            } else if c == '}' {
+                brace_depth = brace_depth.saturating_sub(1);
+            }
+        }
+
+        flush_literal(&mut parts, &mut literal);
+        if parts.is_empty() {
+            if saw_segment {
+                return Ok(Expr::String(Vec::new()));
+            }
+            return Err(ParseError::SyntaxError {
+                message: "Expected command argument".to_string(),
+                span: self.current_span(),
+            });
+        }
+        if !had_quoted_segment && parts.len() == 1 {
+            if let Some(only) = parts.pop() {
+                match only {
+                    StringPart::Expr(expr) => return Ok(*expr),
+                    StringPart::Lit(value) => {
+                        if value == "true" {
+                            return Ok(Expr::Bool(true));
+                        }
+                        if value == "false" {
+                            return Ok(Expr::Bool(false));
+                        }
+                        if value == "null" {
+                            return Ok(Expr::Null);
+                        }
+                        let numeric = value.replace('_', "");
+                        if !numeric.is_empty() && !value.ends_with('_') {
+                            if let Ok(integer) = numeric.parse::<i64>() {
+                                return Ok(Expr::Int(integer));
+                            }
+                            if (numeric.contains('.')
+                                || numeric.contains('e')
+                                || numeric.contains('E'))
+                                && let Ok(float) = numeric.parse::<f64>()
+                            {
+                                return Ok(Expr::Float(float));
+                            }
+                        }
+                        parts.push(StringPart::Lit(value));
+                    }
+                }
+            }
+        }
+        Ok(Expr::String(parts))
+    }
+
+    /// Preserve the language's explicit, whitespace-delimited expression
+    /// arguments (for example `echo 1 + 2`) without treating compact command
+    /// words such as `2026-09-20` as arithmetic.
+    pub(crate) fn command_arg_has_spaced_operator(&self) -> bool {
+        let mut p = self.pos;
+        while p < self.input.len()
+            && !self.input[p].is_whitespace()
+            && !matches!(self.input[p], '|' | ';' | '&' | '<' | '>' | ')' | '}')
+        {
+            p += 1;
+        }
+        if p == self.pos || p >= self.input.len() || !self.input[p].is_whitespace() {
+            return false;
+        }
+        while p < self.input.len() && self.input[p].is_whitespace() {
+            p += 1;
+        }
+        let op_len = if p + 1 < self.input.len()
+            && matches!(
+                (self.input[p], self.input[p + 1]),
+                ('=' | '!', '=') | ('&', '&') | ('|', '|')
+            ) {
+            2
+        } else if p < self.input.len() && matches!(self.input[p], '+' | '-' | '*' | '/') {
+            1
+        } else {
+            return false;
+        };
+        p += op_len;
+        p < self.input.len() && self.input[p].is_whitespace()
     }
 
     pub(crate) fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
