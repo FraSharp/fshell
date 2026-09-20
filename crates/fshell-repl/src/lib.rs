@@ -107,10 +107,7 @@ pub fn history_builtin(
             } else if s == "--stats" {
                 stats = true;
             } else if s == "--cwd" {
-                let current_pwd = std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| "/".to_string());
-                filter_cwd = Some(current_pwd);
+                filter_cwd = Some(env.cwd().to_string_lossy().into_owned());
             } else if s == "--session" {
                 let vars = env.vars.read();
                 if let Some(Val::String(sess)) = vars.get("FSH_SESSION_ID") {
@@ -197,9 +194,7 @@ pub fn history_builtin(
         && (interactive || (args.is_empty() && is_terminal && !has_pipe_input));
 
     if go_interactive {
-        let current_pwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string());
+        let current_pwd = env.cwd().to_string_lossy().to_string();
 
         let current_host = get_hostname();
 
@@ -799,7 +794,7 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
             Err(e) => (false, e),
         };
         fshell_engine::warmup_path_cache(Some(&env));
-        autocomplete::prewarm_completions();
+        autocomplete::prewarm_completions(&env);
         let splash_dismissed = fshell_engine::config_dir()
             .map(|d| d.join(".splash_disabled").exists())
             .unwrap_or(false);
@@ -980,7 +975,7 @@ fn try_bare_dir_cd(input: &str, env: &Env, tx: fshell_engine::PipeSender) -> boo
 
     // Expand tilde and build the candidate path.
     let expanded: std::path::PathBuf = if let Some(rest) = stripped.strip_prefix('~') {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = env.home_dir().to_string_lossy().into_owned();
         if stripped == "~" {
             std::path::PathBuf::from(home)
         } else {
@@ -1887,7 +1882,7 @@ fn check_first_run_onboarding(env: &Env) {
         return;
     }
 
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = env.home_dir().to_string_lossy().into_owned();
     let fshell_bin = std::path::PathBuf::from(&home).join(".fshell/bin");
     let local_bin = std::path::PathBuf::from(&home).join(".local/bin");
     let marker = std::path::PathBuf::from(&home).join(".fshell/.multicall_setup_done");

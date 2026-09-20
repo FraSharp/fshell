@@ -631,7 +631,7 @@ pub fn get_custom_completions(
             } else if words.len() >= 2 {
                 let sub = words[1];
                 if sub == "run" {
-                    let scripts = npm_scripts();
+                    let scripts = npm_scripts(&env.cwd());
                     add_dynamic_suggestions(
                         scripts,
                         CompletionKind::ExternalCommand,
@@ -819,8 +819,8 @@ pub fn get_custom_completions(
     Some(suggestions)
 }
 
-fn npm_scripts() -> Vec<String> {
-    let mut path = std::env::current_dir().unwrap_or_default();
+fn npm_scripts(cwd: &std::path::Path) -> Vec<String> {
+    let mut path = cwd.to_path_buf();
     for _ in 0..5 {
         let pkg = path.join("package.json");
         if pkg.exists() {
@@ -902,15 +902,19 @@ fn kube_pods() -> Vec<String> {
     )
 }
 
-pub fn prewarm_completions() {
-    if fshell_engine::is_external_command_cached("docker", None) {
+pub fn prewarm_completions(env: &fshell_engine::Env) {
+    let env_path = env.vars.read().get("PATH").and_then(|value| match value {
+        Val::String(path) => Some(path.clone()),
+        _ => None,
+    });
+    if fshell_engine::is_external_command_cached_at("docker", env_path.as_deref(), &env.cwd()) {
         docker_containers();
         docker_images();
     }
-    if fshell_engine::is_external_command_cached("kubectl", None) {
+    if fshell_engine::is_external_command_cached_at("kubectl", env_path.as_deref(), &env.cwd()) {
         kube_pods();
     }
-    if fshell_engine::is_external_command_cached("brew", None) {
+    if fshell_engine::is_external_command_cached_at("brew", env_path.as_deref(), &env.cwd()) {
         brew_installed();
     }
 }
