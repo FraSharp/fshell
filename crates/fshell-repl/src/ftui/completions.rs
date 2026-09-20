@@ -9,6 +9,7 @@ use fshell_engine::Env;
 use lscolors::{LsColors, Style as LsStyle};
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as NucleoConfig, Matcher, Utf32String};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier as StyleModifier, Style};
 use ratatui::text::{Line, Span};
 use std::sync::Arc;
@@ -649,6 +650,50 @@ impl CompletionsManager {
         }
     }
 
+    /// Resolve a mouse position inside the rendered popup to a suggestion.
+    ///
+    /// The popup renderer emits item rows only; category metadata is used for
+    /// styling and sorting, not as additional display rows. Keeping this
+    /// mapping beside the renderer prevents input handling from inventing
+    /// header rows that are not actually on screen.
+    pub fn suggestion_index_at(
+        &self,
+        area: Rect,
+        layout: CompletionLayoutMode,
+        scroll_offset: usize,
+        column: u16,
+        row: u16,
+    ) -> Option<usize> {
+        let right = area.x.saturating_add(area.width);
+        let bottom = area.y.saturating_add(area.height);
+        let inner_x = area.x.saturating_add(1);
+        let inner_y = area.y.saturating_add(1);
+        if column < inner_x
+            || column >= right.saturating_sub(1)
+            || row < inner_y
+            || row >= bottom.saturating_sub(1)
+        {
+            return None;
+        }
+
+        let display_row = scroll_offset + row.saturating_sub(inner_y) as usize;
+        let index = match layout {
+            CompletionLayoutMode::List => display_row,
+            CompletionLayoutMode::Grid { cols, col_width } => {
+                if cols == 0 || col_width == 0 {
+                    return None;
+                }
+                let display_col = column.saturating_sub(inner_x) as usize / col_width;
+                if display_col >= cols {
+                    return None;
+                }
+                display_row.saturating_mul(cols).saturating_add(display_col)
+            }
+        };
+
+        (index < self.suggestions.len()).then_some(index)
+    }
+
     pub fn clear(&mut self) {
         self.suggestions.clear();
         self.all_suggestions.clear();
@@ -1276,5 +1321,43 @@ mod tests {
         mgr.update("echo è à é", 10, false);
         let partial2 = extract_partial_word("echo è à é", 10);
         assert_eq!(partial2, "é");
+    }
+
+    #[test]
+    fn test_popup_mouse_mapping_matches_rendered_rows() {
+        let env = fshell_engine::Env::new();
+        let mut mgr = CompletionsManager::new(env);
+        mgr.suggestions = ["one", "two", "three"]
+            .into_iter()
+            .map(|value| {
+                CompletionCandidate::new(
+                    value.to_string(),
+                    CompletionKind::ExternalCommand,
+                    TextSpan::new(0, value.len()),
+                )
+            })
+            .collect();
+
+        let area = Rect::new(2, 3, 20, 5);
+        assert_eq!(
+            mgr.suggestion_index_at(area, CompletionLayoutMode::List, 0, 3, 4),
+            Some(0)
+        );
+        assert_eq!(
+            mgr.suggestion_index_at(area, CompletionLayoutMode::List, 1, 3, 4),
+            Some(1)
+        );
+        assert_eq!(
+            mgr.suggestion_index_at(area, CompletionLayoutMode::List, 0, 2, 4),
+            None
+        );
+
+        let grid = CompletionLayoutMode::Grid {
+            cols: 2,
+            col_width: 5,
+        };
+        assert_eq!(mgr.suggestion_index_at(area, grid, 0, 3, 4), Some(0));
+        assert_eq!(mgr.suggestion_index_at(area, grid, 0, 8, 4), Some(1));
+        assert_eq!(mgr.suggestion_index_at(area, grid, 0, 3, 5), Some(2));
     }
 }

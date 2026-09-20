@@ -504,6 +504,10 @@ pub async fn run_ftui_repl(
 
         cpu_dbg!("--- entering input_loop ---");
         // 2. Interactive input entry loop
+        let mut completion_popup: Option<(
+            Rect,
+            crate::ftui::completions::CompletionLayoutMode,
+        )> = None;
         'input_loop: loop {
             input_iter += 1;
 
@@ -1448,6 +1452,7 @@ pub async fn run_ftui_repl(
                                 let list_area = comp_area;
 
                                 let layout = comp_mgr.compute_layout_mode(popup_w);
+                                completion_popup = Some((comp_area, layout));
                                 let selected_row = match layout {
                                     crate::ftui::completions::CompletionLayoutMode::Grid {
                                         cols,
@@ -2007,90 +2012,22 @@ pub async fn run_ftui_repl(
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
-                                    // Map mouse click to a completion item index and accept it.
-                                    // `comp_area` is recomputed on every draw; we recompute the same
-                                    // mapping here from terminal size + cursor geometry so clicks are
-                                    // handled without storing extra UI state between event and draw.
-                                    let term_size = terminal
-                                        .as_ref()
-                                        .and_then(|t| t.size().ok())
-                                        .unwrap_or(ratatui::layout::Size::new(80, 24));
-                                    let prompt_left = prompt_mgr.render_prompt_left(false);
-                                    let prompt_len = prompt_left.width() as u16;
-                                    let cursor_col =
-                                        text_buf.char_index_to_column(text_buf.cursor());
-                                    let visual_cursor_col =
-                                        cursor_col.saturating_sub(text_scroll_offset);
-                                    let max_w = term_size.width.saturating_sub(2);
-                                    let popup_w = if term_size.width >= 120 {
-                                        ((term_size.width as f64 * 0.5) as u16)
-                                            .clamp(50, 75)
-                                            .min(max_w)
+                                    if let Some((popup_area, layout)) = completion_popup
+                                        && let Some(index) = comp_mgr.suggestion_index_at(
+                                            popup_area,
+                                            layout,
+                                            comp_mgr.scroll_offset,
+                                            column,
+                                            row,
+                                        )
+                                        && let Some(s) = comp_mgr.suggestions.get(index).cloned()
+                                    {
+                                        let line = text_buf.text();
+                                        apply_completion(&mut text_buf, &line, &s);
+                                        comp_mgr.clear();
+                                        redraw = true;
                                     } else {
-                                        (term_size.width / 2 + term_size.width / 4)
-                                            .clamp(40, 65)
-                                            .min(max_w)
-                                    };
-                                    let popup_x = (prompt_len + visual_cursor_col as u16).min(
-                                        term_size.width.saturating_sub(popup_w).saturating_sub(1),
-                                    );
-                                    let popup_area_y = {
-                                        // Popup is rendered inside `popup_area` which is the second
-                                        // chunk below `prompt_line`. In single-line mode prompt_line
-                                        // is 1 row, so popup starts at cursor_y + 1. Recompute.
-                                        let multi_line_count: u16 =
-                                            if text_buf.text().contains('\n') {
-                                                text_buf.text().split('\n').count().max(1) as u16
-                                            } else {
-                                                1
-                                            };
-                                        // Approximate prompt_y from terminal height and viewport;
-                                        // fallback to safe_cursor_position if available.
-                                        safe_cursor_position()
-                                            .map(|(_, y)| y + multi_line_count)
-                                            .unwrap_or(
-                                                term_size
-                                                    .height
-                                                    .saturating_sub(popup_w)
-                                                    .saturating_sub(2),
-                                            )
-                                    };
-                                    // Click must be inside the popup rect to count.
-                                    let inside_x = column >= popup_x && column < popup_x + popup_w;
-                                    let inside_y = row >= popup_area_y;
-                                    if inside_x && inside_y {
-                                        // List is rendered with a 1-row border on top, so first
-                                        // display line is at popup_area_y + 1. Visible rows exclude
-                                        // top+bottom borders (2 rows).
-                                        let clicked_display_row =
-                                            row.saturating_sub(popup_area_y + 1) as usize;
-                                        let flat_idx = comp_mgr.scroll_offset + clicked_display_row;
-                                        // Convert flat display index (header lines included) to raw suggestion index.
-                                        if let Some(raw_idx) =
-                                            flat_to_raw_index(&comp_mgr, flat_idx)
-                                        {
-                                            if let Some(s) =
-                                                comp_mgr.suggestions.get(raw_idx).cloned()
-                                            {
-                                                let line = text_buf.text();
-                                                apply_completion(&mut text_buf, &line, &s);
-                                                comp_mgr.clear();
-                                                redraw = true;
-                                            } else {
-                                                redraw = true;
-                                            }
-                                        } else {
-                                            // Clicked on a header line — select first item in that group.
-                                            if let Some(raw_idx) =
-                                                flat_header_next_item(&comp_mgr, flat_idx)
-                                            {
-                                                comp_mgr.selected_idx = raw_idx;
-                                                // Keep scroll_offset stable; just update selection highlight.
-                                                redraw = true;
-                                            }
-                                        }
-                                    } else {
-                                        // Click outside popup but completions visible: keep popup, don't steal cursor.
+                                        // Click outside the actual popup or on its border.
                                         redraw = true;
                                     }
                                 } else {
@@ -4032,43 +3969,6 @@ fn append_completion_tail(text_buf: &mut buffer::TextBuffer, value: &str, append
     } else if append_whitespace && !value.ends_with(' ') {
         text_buf.insert_char(' ');
     }
-}
-
-/// Map a flat display index (including group header rows) to a raw suggestion
-/// index. Returns `None` if `flat_idx` corresponds to a header row.
-fn flat_to_raw_index(mgr: &completions::CompletionsManager, flat_idx: usize) -> Option<usize> {
-    let grouped = mgr.grouped.as_ref()?;
-    let sizes = grouped.group_sizes();
-    let mut flat = 0usize;
-    let mut seen = 0usize;
-    for &count in &sizes {
-        if flat == flat_idx {
-            return None; // header
-        }
-        flat += 1; // header
-        if flat_idx >= flat && flat_idx < flat + count {
-            return Some(seen + (flat_idx - flat));
-        }
-        flat += count;
-        seen += count;
-    }
-    None
-}
-
-/// When a header row is clicked, select the first item of that group.
-fn flat_header_next_item(mgr: &completions::CompletionsManager, flat_idx: usize) -> Option<usize> {
-    let grouped = mgr.grouped.as_ref()?;
-    let sizes = grouped.group_sizes();
-    let mut flat = 0usize;
-    let mut seen = 0usize;
-    for &count in &sizes {
-        if flat == flat_idx && count > 0 {
-            return Some(seen);
-        }
-        flat += 1 + count;
-        seen += count;
-    }
-    None
 }
 
 fn is_dir_expanded(path: &str) -> bool {
