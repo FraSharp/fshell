@@ -60,6 +60,10 @@ impl IgnoreRules {
         IgnoreRules { patterns }
     }
 
+    pub fn extend(&mut self, other: IgnoreRules) {
+        self.patterns.extend(other.patterns);
+    }
+
     pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
         let path_str = path.to_string_lossy();
         let mut ignored = false;

@@ -180,7 +180,8 @@ impl Repository {
     }
 
     fn read_from_pack(&self, idx_path: &Path, oid: &[u8; 20]) -> Result<ParsedObject, Error> {
-        let data = fs::read(idx_path)?;
+        let file = fs::File::open(idx_path)?;
+        let data = unsafe { memmap2::Mmap::map(&file)? };
         if data.len() < 1028 {
             return Err(Error::InvalidObject("pack index too small".into()));
         }

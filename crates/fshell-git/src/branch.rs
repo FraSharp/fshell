@@ -62,7 +62,7 @@ impl Repository {
             .ok_or(crate::repo::Error::InvalidRef("not on a branch".into()))?;
 
         match self.find_upstream(branch_name)? {
-            Some((_, upstream_oid)) => self.ahead_behind_oids(&upstream_oid, &head.oid),
+            Some((_, upstream_oid)) => self.ahead_behind_oids(&head.oid, &upstream_oid),
             None => Ok((0, 0)),
         }
     }
@@ -76,48 +76,37 @@ impl Repository {
             return Ok((0, 0));
         }
 
-        let local_set = self.reachable_commits(local)?;
-        let remote_set = self.reachable_commits(remote)?;
+        const FLAG_LOCAL: u8 = 1;
+        const FLAG_REMOTE: u8 = 2;
 
-        let ahead = local_set
-            .keys()
-            .filter(|k| !remote_set.contains_key(*k))
-            .count() as u32;
-        let behind = remote_set
-            .keys()
-            .filter(|k| !local_set.contains_key(*k))
-            .count() as u32;
+        let mut flags: FxHashMap<[u8; 20], u8> = FxHashMap::default();
+        let mut queue: VecDeque<[u8; 20]> = VecDeque::new();
 
-        Ok((ahead, behind))
-    }
+        flags.insert(*local, FLAG_LOCAL);
+        queue.push_back(*local);
 
-    fn reachable_commits(
-        &self,
-        start: &[u8; 20],
-    ) -> Result<FxHashMap<[u8; 20], ()>, crate::repo::Error> {
-        let mut visited = FxHashMap::default();
-        let mut queue = VecDeque::new();
-
-        queue.push_back(*start);
-        visited.insert(*start, ());
+        flags.insert(*remote, FLAG_REMOTE);
+        queue.push_back(*remote);
 
         while let Some(oid) = queue.pop_front() {
-            match self.read_commit(&oid) {
-                Ok(commit) => {
-                    for parent in &commit.parents {
-                        if !visited.contains_key(parent) {
-                            visited.insert(*parent, ());
-                            queue.push_back(*parent);
-                        }
+            let curr_flag = *flags.get(&oid).unwrap_or(&0);
+
+            if let Ok(commit) = self.read_commit(&oid) {
+                for parent in commit.parents {
+                    let old_flag = flags.get(&parent).copied().unwrap_or(0);
+                    let new_flag = old_flag | curr_flag;
+                    if new_flag != old_flag {
+                        flags.insert(parent, new_flag);
+                        queue.push_back(parent);
                     }
-                }
-                Err(_) => {
-                    // Object not found (maybe shallow clone or packfile delta)
                 }
             }
         }
 
-        Ok(visited)
+        let ahead = flags.values().filter(|&&f| f == FLAG_LOCAL).count() as u32;
+        let behind = flags.values().filter(|&&f| f == FLAG_REMOTE).count() as u32;
+
+        Ok((ahead, behind))
     }
 }
 

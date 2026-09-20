@@ -121,7 +121,14 @@ impl Repository {
                 }
 
                 if is_dir {
-                    let nested_ignore = self.collect_ignore_rules(&path);
+                    let nested_ignore = if path.join(".gitignore").is_file() {
+                        let mut rules = ignore.clone();
+                        let local_rules = self.load_ignore_rules(&path);
+                        rules.extend(local_rules);
+                        rules
+                    } else {
+                        ignore.clone()
+                    };
                     self.scan_untracked(&path, index, &nested_ignore, map)?;
                 } else if index.get(relative).is_none() && !map.contains_key(relative) {
                     map.insert(relative.to_path_buf(), Status::Added);

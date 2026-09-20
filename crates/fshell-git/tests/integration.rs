@@ -146,3 +146,46 @@ fn real_repo_ahead_behind() {
     assert_eq!(ahead, 0);
     assert_eq!(behind, 0);
 }
+
+#[test]
+fn real_repo_ahead_nonzero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    git(dir, &["init", "-b", "main"]);
+    fs::write(dir.join("a.txt"), "a").unwrap();
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-m", "init"]);
+
+    let remote_dir = tmp.path().join("remote");
+    git(
+        dir,
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git(dir, &["fetch", "origin"]);
+
+    // Update origin/main ref manually
+    let head_oid = Repository::discover(dir).unwrap().head().unwrap().oid;
+    let git_dir = dir.join(".git");
+    fs::create_dir_all(git_dir.join("refs/remotes/origin")).unwrap();
+    fs::write(
+        git_dir.join("refs/remotes/origin/main"),
+        format!("{}\n", hex::encode(head_oid)),
+    )
+    .unwrap();
+    fs::write(
+        git_dir.join("config"),
+        "[branch \"main\"]\n    remote = origin\n    merge = refs/heads/main\n",
+    )
+    .unwrap();
+
+    // Now add a commit to local main so it's 1 ahead
+    fs::write(dir.join("b.txt"), "b").unwrap();
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-m", "second"]);
+
+    let repo = Repository::discover(dir).unwrap();
+    let (ahead, behind) = repo.ahead_behind().unwrap();
+    assert_eq!(ahead, 1);
+    assert_eq!(behind, 0);
+}
