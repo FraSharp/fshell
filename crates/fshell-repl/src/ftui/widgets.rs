@@ -593,7 +593,8 @@ pub fn execute_widget(widget_name: &str, ctx: &mut WidgetContext<'_>) -> WidgetA
                             let line = ctx.text_buf.text();
                             super::apply_completion(ctx.text_buf, &line, s);
                         }
-                        ctx.comp_mgr.clear();
+                        ctx.comp_mgr
+                            .refresh_after_completion(&ctx.text_buf.text(), ctx.text_buf.cursor());
                     } else if !ctx.comp_mgr.prefix_accepted {
                         if let Some(prefix) = ctx.comp_mgr.longest_common_prefix() {
                             let line = ctx.text_buf.text();
@@ -609,20 +610,16 @@ pub fn execute_widget(widget_name: &str, ctx: &mut WidgetContext<'_>) -> WidgetA
                                 super::append_slash_if_dir(ctx.text_buf, &prefix);
                                 ctx.comp_mgr.prefix_accepted = true;
                             } else {
-                                ctx.comp_mgr.active_selection = true;
                                 ctx.comp_mgr.prefix_accepted = true;
                             }
                         } else {
-                            ctx.comp_mgr.active_selection = true;
                             ctx.comp_mgr.prefix_accepted = true;
                         }
                     } else {
-                        ctx.comp_mgr.active_selection = true;
                         ctx.comp_mgr.select_next();
                     }
                 }
             } else {
-                ctx.comp_mgr.active_selection = true;
                 ctx.comp_mgr.select_next();
             }
             WidgetAction::Redraw
@@ -630,7 +627,6 @@ pub fn execute_widget(widget_name: &str, ctx: &mut WidgetContext<'_>) -> WidgetA
         "reverse-menu-complete" => {
             *ctx.history_index = None;
             if ctx.comp_mgr.visible && !ctx.comp_mgr.suggestions.is_empty() {
-                ctx.comp_mgr.active_selection = true;
                 ctx.comp_mgr.select_prev();
             }
             WidgetAction::Redraw
@@ -816,5 +812,73 @@ mod tests {
         execute_widget("backward-kill-line", &mut ctx);
         assert_eq!(ctx.text_buf.text(), "line 1\n");
         assert_eq!(last_kill.as_deref(), Some("echo è à é"));
+    }
+
+    #[test]
+    fn test_expand_or_complete_first_selection_available_immediately() {
+        let mut buf = TextBuffer::new();
+        buf.insert_str("ech");
+        buf.move_to_end();
+
+        let env = Env::new();
+        fshell_builtins::init(&env);
+        fshell_bridge::init(&env);
+
+        let mut mode = KeyMapMode::Emacs;
+        let mut hist_mgr = HistoryManager::new();
+        let mut comp_mgr = CompletionsManager::new(env.clone());
+        let mut explorer = WidgetExplorerManager::new();
+        let current_dir = "/tmp";
+        let hostname = "test".to_string();
+        let session_id = "test".to_string();
+        let mut help_visible = false;
+        let mut last_kill = None;
+        let current_hint = String::new();
+        let mut history_index = None;
+        let mut filtered_history = Vec::new();
+        let mut temp_input = String::new();
+
+        let mut ctx = WidgetContext {
+            text_buf: &mut buf,
+            env: &env,
+            keymap_mode: &mut mode,
+            history_mgr: &mut hist_mgr,
+            comp_mgr: &mut comp_mgr,
+            widget_explorer: &mut explorer,
+            current_dir,
+            hostname: &hostname,
+            session_id: &session_id,
+            help_visible: &mut help_visible,
+            last_kill: &mut last_kill,
+            current_hint: &current_hint,
+            history_index: &mut history_index,
+            filtered_history: &mut filtered_history,
+            temp_input: &mut temp_input,
+        };
+
+        // First Tab: brings up completions
+        let action = execute_widget("expand-or-complete", &mut ctx);
+        assert!(matches!(action, WidgetAction::Redraw));
+        assert!(ctx.comp_mgr.visible);
+        assert!(ctx.comp_mgr.suggestions.len() >= 2);
+        assert_eq!(ctx.comp_mgr.selected_idx, 0);
+
+        // First selected candidate must be retrievable immediately for Enter key acceptance
+        let selected = ctx.comp_mgr.get_selected_suggestion();
+        assert!(selected.is_some());
+        assert_eq!(selected.unwrap().value, ctx.comp_mgr.suggestions[0].value);
+
+        // Second Tab: advances to candidate 1
+        let action2 = execute_widget("expand-or-complete", &mut ctx);
+        assert!(matches!(action2, WidgetAction::Redraw));
+        assert_eq!(ctx.comp_mgr.selected_idx, 1);
+        let selected2 = ctx.comp_mgr.get_selected_suggestion();
+        assert!(selected2.is_some());
+        assert_eq!(selected2.unwrap().value, ctx.comp_mgr.suggestions[1].value);
+
+        // Reverse menu complete: goes back to candidate 0
+        let action3 = execute_widget("reverse-menu-complete", &mut ctx);
+        assert!(matches!(action3, WidgetAction::Redraw));
+        assert_eq!(ctx.comp_mgr.selected_idx, 0);
     }
 }

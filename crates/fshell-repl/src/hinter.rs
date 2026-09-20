@@ -278,15 +278,19 @@ mod tests {
 
     #[test]
     fn test_hinter_complete_hint() {
-        let mut h = FshellHinter::default();
-        h.current_hint = "uild --release".to_string();
+        let h = FshellHinter {
+            current_hint: "uild --release".to_string(),
+            ..Default::default()
+        };
         assert_eq!(h.complete_hint(), "uild --release");
     }
 
     #[test]
     fn test_hinter_next_hint_token() {
-        let mut h = FshellHinter::default();
-        h.current_hint = "build --release".to_string();
+        let h = FshellHinter {
+            current_hint: "build --release".to_string(),
+            ..Default::default()
+        };
         assert_eq!(h.next_hint_token(), "build");
     }
 

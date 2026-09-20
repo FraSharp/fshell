@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::unnecessary_to_owned,
+    clippy::manual_contains
+)]
+
 use fshell_bridge::init as bridge_init;
 use fshell_builtins::init as builtins_init;
 use fshell_core::lock::Mutex;
@@ -1057,5 +1064,60 @@ async fn test_path_completion_with_quoted_drilling() {
         );
     }
 
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn test_first_selected_completion_candidate_available_for_enter() {
+    let _guard = TEST_CWD_MUTEX.lock();
+    let tmp = std::env::temp_dir().join(format!(
+        "fsh_test_first_sel_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let _ = std::fs::write(tmp.join("pat_alpha"), "alpha");
+    let _ = std::fs::write(tmp.join("pat_beta"), "beta");
+
+    let env = Env::new();
+    builtins_init(&env);
+    bridge_init(&env);
+    let orig_cwd = env.cwd();
+    let canonical = tmp.canonicalize().unwrap();
+    env.set_cwd(canonical.clone());
+
+    let mut comp_mgr = fshell_repl::ftui::completions::CompletionsManager::new(env.clone());
+    comp_mgr.update("ls pat", 6, true);
+
+    assert!(comp_mgr.visible, "completion popup must be visible");
+    assert!(
+        comp_mgr.suggestions.len() >= 2,
+        "must have at least 2 suggestions"
+    );
+    assert_eq!(
+        comp_mgr.selected_idx, 0,
+        "first candidate must be selected at index 0"
+    );
+
+    // The selected candidate must be immediately accessible (for Enter key acceptance)
+    let selected = comp_mgr.get_selected_suggestion();
+    assert!(
+        selected.is_some(),
+        "first selected suggestion must not be None"
+    );
+    let first_val = selected.unwrap().value.clone();
+    assert!(first_val.starts_with("pat_"));
+
+    // Applying completion to buffer must succeed without requiring navigation first
+    let mut buf = fshell_repl::ftui::buffer::TextBuffer::new();
+    buf.insert_str("ls pat");
+    let line = buf.text();
+    fshell_repl::ftui::apply_completion(&mut buf, &line, selected.unwrap());
+    assert_eq!(buf.text(), format!("ls {} ", first_val));
+
+    // Cleanup
+    env.set_cwd(orig_cwd);
     let _ = std::fs::remove_dir_all(&tmp);
 }

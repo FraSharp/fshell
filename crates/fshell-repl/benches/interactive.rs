@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-#![allow(deprecated, clippy::all)]
+#![allow(deprecated, clippy::all, clippy::unwrap_used)]
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use fshell_core::Val;
 use fshell_engine::Env;

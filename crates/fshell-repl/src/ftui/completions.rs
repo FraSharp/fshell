@@ -330,7 +330,6 @@ pub struct CompletionsManager {
     pub visible: bool,
     pub session_active: bool,
     pub lscolors: LsColors,
-    pub active_selection: bool,
     /// True when the longest common prefix has already been filled in by a previous Tab
     pub prefix_accepted: bool,
     pub theme: Arc<Theme>,
@@ -350,7 +349,6 @@ impl CompletionsManager {
             visible: false,
             session_active: false,
             lscolors: LsColors::from_env().unwrap_or_default(),
-            active_selection: false,
             prefix_accepted: false,
             theme: Arc::new(Theme::default_theme()),
         }
@@ -361,7 +359,6 @@ impl CompletionsManager {
     }
 
     pub fn update(&mut self, line: &str, cursor_pos: usize, force_visible: bool) {
-        self.active_selection = false;
         if force_visible {
             self.session_active = true;
         }
@@ -702,7 +699,6 @@ impl CompletionsManager {
         self.scroll_offset = 0;
         self.visible = false;
         self.session_active = false;
-        self.active_selection = false;
         self.prefix_accepted = false;
     }
 
@@ -714,9 +710,6 @@ impl CompletionsManager {
             self.selected_idx = 0;
             self.scroll_offset = 0;
             self.update(new_line, cursor_char_pos, true);
-            if self.visible && !self.suggestions.is_empty() {
-                self.active_selection = true;
-            }
         } else {
             self.clear();
         }

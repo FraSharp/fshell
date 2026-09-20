@@ -4,8 +4,8 @@
 pub mod agent;
 pub mod ansi;
 pub mod buffer;
-pub mod capture;
 pub mod capability_prompt;
+pub mod capture;
 pub mod clipboard;
 pub mod completions;
 pub mod cursor;
@@ -198,9 +198,7 @@ pub async fn run_ftui_repl(
     let mut _raw_session = match raw::Session::enter() {
         Ok(session) => Some(Box::new(session)),
         Err(error) => {
-            eprintln!(
-                "\r\n\x1b[1;31merror:\x1b[0m FTUI requires a raw terminal session: {error}"
-            );
+            eprintln!("\r\n\x1b[1;31merror:\x1b[0m FTUI requires a raw terminal session: {error}");
             return;
         }
     };
@@ -270,7 +268,6 @@ pub async fn run_ftui_repl(
     const ANCHORED_OUTPUT_SAFETY_CAP: usize = 2000;
     let mut drag_anchor: Option<usize> = None;
     let anchor_output = std::env::var("FSH_REPL_ANCHOR_OUTPUT").as_deref() == Ok("1");
-
     let capability_prompt = capability_prompt::CapabilityPromptTask::spawn(&env);
 
     'repl_loop: loop {
@@ -308,7 +305,9 @@ pub async fn run_ftui_repl(
         // the session for its entire lifetime; command execution may only
         // borrow a scoped suspend guard for a real interactive child.
         current_dir = env.cwd().to_string_lossy().to_string();
-        prompt_mgr.refresh_snapshot(&current_dir);
+        if prompt_mgr.cached_snapshot.pwd != current_dir {
+            prompt_mgr.refresh_snapshot(&current_dir);
+        }
 
         if mouse_mgr.mode != MouseMode::Disabled {
             mouse_mgr.is_captured = false;
@@ -355,10 +354,8 @@ pub async fn run_ftui_repl(
 
         cpu_dbg!("--- entering input_loop ---");
         // 2. Interactive input entry loop
-        let mut completion_popup: Option<(
-            Rect,
-            crate::ftui::completions::CompletionLayoutMode,
-        )> = None;
+        let mut completion_popup: Option<(Rect, crate::ftui::completions::CompletionLayoutMode)> =
+            None;
         'input_loop: loop {
             input_iter += 1;
 
@@ -393,7 +390,7 @@ pub async fn run_ftui_repl(
                 cpu_dbg!("cancellation flag set — breaking repl_loop");
                 break 'repl_loop;
             }
-            // Poll for background AI agent results
+            // Poll for background AI agent results owned by this session.
             if let Some(res) = agent_state.take_result() {
                 agent_state.is_loading = false;
                 match res {
@@ -758,7 +755,6 @@ pub async fn run_ftui_repl(
                     let animated_cursor = cursor_state.get_render_pos(&cursor_config);
 
                     let mut relative_cursor_y = 0u16;
-
                     if term
                         .draw(|f| {
                             let prompt_h = if multi_line_count > 1 {
@@ -2119,19 +2115,16 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             KeyCode::Tab => {
-                                comp_mgr.active_selection = true;
                                 comp_mgr.select_next();
                                 redraw = true;
                                 continue;
                             }
                             KeyCode::BackTab => {
-                                comp_mgr.active_selection = true;
                                 comp_mgr.select_prev();
                                 redraw = true;
                                 continue;
                             }
                             KeyCode::Down => {
-                                comp_mgr.active_selection = true;
                                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
                                 let layout = comp_mgr.compute_layout_mode(term_w);
                                 match layout {
@@ -2149,7 +2142,6 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             KeyCode::Up => {
-                                comp_mgr.active_selection = true;
                                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
                                 let layout = comp_mgr.compute_layout_mode(term_w);
                                 match layout {
@@ -2167,7 +2159,6 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             KeyCode::PageDown => {
-                                comp_mgr.active_selection = true;
                                 let page_size =
                                     (current_viewport_height.saturating_sub(2)).max(1) as usize;
                                 comp_mgr.page_down(page_size);
@@ -2175,14 +2166,13 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             KeyCode::PageUp => {
-                                comp_mgr.active_selection = true;
                                 let page_size =
                                     (current_viewport_height.saturating_sub(2)).max(1) as usize;
                                 comp_mgr.page_up(page_size);
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Right if comp_mgr.active_selection => {
+                            KeyCode::Right => {
                                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
                                 let layout = comp_mgr.compute_layout_mode(term_w);
                                 match layout {
@@ -2206,7 +2196,7 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Left if comp_mgr.active_selection => {
+                            KeyCode::Left => {
                                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
                                 let layout = comp_mgr.compute_layout_mode(term_w);
                                 if matches!(
@@ -2218,7 +2208,7 @@ pub async fn run_ftui_repl(
                                     continue;
                                 }
                             }
-                            KeyCode::Enter if comp_mgr.active_selection => {
+                            KeyCode::Enter => {
                                 if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
                                     let line = text_buf.text().clone();
                                     apply_completion(&mut text_buf, &line, &s);
@@ -2228,7 +2218,7 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Char(' ') if comp_mgr.active_selection => {
+                            KeyCode::Char(' ') => {
                                 if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
                                     let line = text_buf.text().clone();
                                     apply_completion(&mut text_buf, &line, &s);
@@ -2278,6 +2268,8 @@ pub async fn run_ftui_repl(
                                     filtered_history: &mut filtered_history,
                                     temp_input: &mut temp_input,
                                 };
+                                let prev_text = ctx.text_buf.text();
+                                let prev_cursor = ctx.text_buf.cursor();
                                 match widgets::execute_widget(widget_name, &mut ctx) {
                                     widgets::WidgetAction::AcceptLine => {
                                         help_visible = false;
@@ -2370,7 +2362,10 @@ pub async fn run_ftui_repl(
                                         continue;
                                     }
                                     widgets::WidgetAction::Redraw => {
-                                        if comp_mgr.session_active {
+                                        if comp_mgr.session_active
+                                            && (text_buf.text() != prev_text
+                                                || text_buf.cursor() != prev_cursor)
+                                        {
                                             comp_mgr.update(
                                                 &text_buf.text(),
                                                 text_buf.cursor(),
@@ -3052,26 +3047,23 @@ pub async fn run_ftui_repl(
                                                 // Keep completions visible for next Tab
                                             } else {
                                                 // No extension — just show popup
-                                                comp_mgr.active_selection = true;
                                                 comp_mgr.prefix_accepted = true;
                                             }
                                         } else {
                                             // No common prefix, just show popup
-                                            comp_mgr.active_selection = true;
                                             comp_mgr.prefix_accepted = true;
                                         }
                                     } else {
                                         // Prefix already accepted, now cycle
-                                        comp_mgr.active_selection = true;
                                         comp_mgr.select_next();
                                     }
                                 }
                             } else {
                                 // Already visible — cycle through
-                                comp_mgr.active_selection = true;
                                 comp_mgr.select_next();
                             }
                             redraw = true;
+                            continue;
                         }
                         KeyCode::Char(c)
                             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
@@ -3125,7 +3117,6 @@ pub async fn run_ftui_repl(
         }
         // Dropping the inline viewport does not change the session terminal
         // state; the session owner remains responsible for raw mode.
-
         if exit_repl {
             // Drop the inline viewport first so the exit doesn't leave the
             // alternate row range half-drawn, then restore the session.
@@ -3369,7 +3360,9 @@ pub async fn run_ftui_repl(
                     break 'repl_loop;
                 }
                 status_bar.end_command_timer();
-                let snap = crate::refresh_prompt_snapshot(&env, &current_dir);
+                current_dir = env.cwd().to_string_lossy().to_string();
+                prompt_mgr.refresh_snapshot(&current_dir);
+                let snap = &prompt_mgr.cached_snapshot;
                 status_bar.set_exit_code(snap.exit_code);
                 status_bar.set_job_count(snap.job_count);
                 if let Some(ref gs) = snap.git_status {
@@ -3633,7 +3626,7 @@ fn byte_offset_to_char_index(s: &str, byte_offset: usize) -> usize {
 
 /// Dispatch function: use span-aware completion when the suggestion has a valid span,
 /// otherwise fall back to the legacy word-boundary approach.
-pub(crate) fn apply_completion(
+pub fn apply_completion(
     text_buf: &mut buffer::TextBuffer,
     line: &str,
     suggestion: &crate::autocomplete::CompletionCandidate,
