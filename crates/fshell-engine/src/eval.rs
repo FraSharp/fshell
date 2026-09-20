@@ -2109,32 +2109,20 @@ async fn eval_stmt_inner(
                 }
             } else {
                 let path_buf = std::path::PathBuf::from(&path_str);
-                let metadata =
-                    tokio::fs::metadata(&path_buf)
-                        .await
-                        .map_err(|e| EngineError::IoError {
-                            message: format!("Failed to stat {:?}: {}", path_str, e),
-                            span: None,
-                        })?;
-                let mtime = metadata
-                    .modified()
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let content = tokio::fs::read_to_string(&path_buf).await.map_err(|e| {
+                    EngineError::IoError {
+                        message: format!("Failed to read {:?}: {}", path_str, e),
+                        span: None,
+                    }
+                })?;
+                let content_hash = fshell_hash::fhash256(content.as_bytes());
 
-                let cached_stmts = {
+                let mut stmts = match {
                     let mut cache = env.ast_cache.write();
-                    cache.get_by_path(&path_buf, mtime)
-                };
-
-                let mut stmts = match cached_stmts {
+                    cache.get_by_path(&path_buf, content_hash)
+                } {
                     Some(stmts) => stmts,
                     None => {
-                        let content = tokio::fs::read_to_string(&path_buf).await.map_err(|e| {
-                            EngineError::IoError {
-                                message: format!("Failed to read {:?}: {}", path_str, e),
-                                span: None,
-                            }
-                        })?;
-                        let hash = fshell_hash::fhash256(content.as_bytes());
                         let mut parser = fshell_core::Parser::new(&content);
                         let stmts = match parser.parse_statements() {
                             Ok(stmts) => stmts,
@@ -2156,7 +2144,7 @@ async fn eval_stmt_inner(
                         };
                         {
                             let mut cache = env.ast_cache.write();
-                            cache.insert(path_buf.clone(), mtime, hash, stmts.clone());
+                            cache.insert(path_buf.clone(), content_hash, stmts.clone());
                         }
                         stmts
                     }

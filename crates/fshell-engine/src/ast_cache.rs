@@ -5,60 +5,60 @@ use fshell_core::Stmt;
 use fshell_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::time::SystemTime;
+
+struct CacheEntry {
+    content_hash: [u8; 32],
+    stmts: Vec<Stmt>,
+}
 
 pub struct AstCache {
-    path_mtimes: FxHashMap<PathBuf, (SystemTime, [u8; 32])>,
-    ast_map: FxHashMap<[u8; 32], Vec<Stmt>>,
-    hash_to_path: FxHashMap<[u8; 32], PathBuf>,
-    lru_keys: VecDeque<[u8; 32]>,
+    entries: FxHashMap<PathBuf, CacheEntry>,
+    lru_keys: VecDeque<PathBuf>,
     max_size: usize,
 }
 
 impl AstCache {
     pub fn new(max_size: usize) -> Self {
         Self {
-            path_mtimes: FxHashMap::default(),
-            ast_map: FxHashMap::default(),
-            hash_to_path: FxHashMap::default(),
+            entries: FxHashMap::default(),
             lru_keys: VecDeque::new(),
             max_size,
         }
     }
 
-    pub fn get_by_path(&mut self, path: &PathBuf, current_mtime: SystemTime) -> Option<Vec<Stmt>> {
-        if let Some(&(cached_mtime, hash)) = self.path_mtimes.get(path)
-            && cached_mtime == current_mtime
-            && let Some(stmts) = self.ast_map.get(&hash)
+    pub fn get_by_path(&mut self, path: &PathBuf, content_hash: [u8; 32]) -> Option<Vec<Stmt>> {
+        if let Some(entry) = self.entries.get(path)
+            && entry.content_hash == content_hash
         {
-            // Update LRU: move hash to the back of lru_keys
-            if let Some(pos) = self.lru_keys.iter().position(|&h| h == hash) {
+            let stmts = entry.stmts.clone();
+            if let Some(pos) = self.lru_keys.iter().position(|key| key == path) {
                 self.lru_keys.remove(pos);
             }
-            self.lru_keys.push_back(hash);
-            return Some(stmts.clone());
+            self.lru_keys.push_back(path.clone());
+            return Some(stmts);
         }
         None
     }
 
-    pub fn insert(&mut self, path: PathBuf, mtime: SystemTime, hash: [u8; 32], stmts: Vec<Stmt>) {
-        self.path_mtimes.insert(path.clone(), (mtime, hash));
-        self.ast_map.insert(hash, stmts);
-        self.hash_to_path.insert(hash, path);
+    pub fn insert(&mut self, path: PathBuf, content_hash: [u8; 32], stmts: Vec<Stmt>) {
+        self.entries.insert(
+            path.clone(),
+            CacheEntry {
+                content_hash,
+                stmts,
+            },
+        );
 
         // Update LRU
-        if let Some(pos) = self.lru_keys.iter().position(|&h| h == hash) {
+        if let Some(pos) = self.lru_keys.iter().position(|key| key == &path) {
             self.lru_keys.remove(pos);
         }
-        self.lru_keys.push_back(hash);
+        self.lru_keys.push_back(path);
 
         // Eviction
-        while self.ast_map.len() > self.max_size {
-            if let Some(oldest_hash) = self.lru_keys.pop_front() {
-                self.ast_map.remove(&oldest_hash);
-                if let Some(oldest_path) = self.hash_to_path.remove(&oldest_hash) {
-                    self.path_mtimes.remove(&oldest_path);
-                }
+        while self.entries.len() > self.max_size {
+            if let Some(oldest_path) = self.lru_keys.pop_front() {
+                self.entries.remove(&oldest_path);
             } else {
                 break;
             }
@@ -66,9 +66,7 @@ impl AstCache {
     }
 
     pub fn clear(&mut self) {
-        self.path_mtimes.clear();
-        self.ast_map.clear();
-        self.hash_to_path.clear();
+        self.entries.clear();
         self.lru_keys.clear();
     }
 }
@@ -76,24 +74,21 @@ impl AstCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn test_ast_cache_basic() {
         let mut cache = AstCache::new(2);
         let path = PathBuf::from("test.fsh");
-        let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
         let hash = [1u8; 32];
         let stmts = vec![];
 
-        cache.insert(path.clone(), t1, hash, stmts.clone());
+        cache.insert(path.clone(), hash, stmts.clone());
 
         // Cache hit
-        assert!(cache.get_by_path(&path, t1).is_some());
+        assert!(cache.get_by_path(&path, hash).is_some());
 
-        // Miss due to changed mtime
-        let t2 = SystemTime::UNIX_EPOCH + Duration::from_secs(20);
-        assert!(cache.get_by_path(&path, t2).is_none());
+        // Miss due to changed content
+        assert!(cache.get_by_path(&path, [2u8; 32]).is_none());
 
         // Cache eviction: max size 2
         let p2 = PathBuf::from("test2.fsh");
@@ -101,12 +96,43 @@ mod tests {
         let h2 = [2u8; 32];
         let h3 = [3u8; 32];
 
-        cache.insert(p2.clone(), t1, h2, vec![]);
-        cache.insert(p3.clone(), t1, h3, vec![]);
+        cache.insert(p2.clone(), h2, vec![]);
+        cache.insert(p3.clone(), h3, vec![]);
 
         // "test.fsh" (oldest) should be evicted
-        assert!(cache.get_by_path(&path, t1).is_none());
-        assert!(cache.get_by_path(&p2, t1).is_some());
-        assert!(cache.get_by_path(&p3, t1).is_some());
+        assert!(cache.get_by_path(&path, hash).is_none());
+        assert!(cache.get_by_path(&p2, h2).is_some());
+        assert!(cache.get_by_path(&p3, h3).is_some());
+    }
+
+    #[test]
+    fn test_same_content_hash_on_distinct_paths_has_independent_entries() {
+        let mut cache = AstCache::new(2);
+        let first = PathBuf::from("first.fsh");
+        let second = PathBuf::from("second.fsh");
+        let hash = [7u8; 32];
+
+        cache.insert(first.clone(), hash, vec![]);
+        cache.insert(second.clone(), hash, vec![]);
+
+        assert!(cache.get_by_path(&first, hash).is_some());
+        assert!(cache.get_by_path(&second, hash).is_some());
+    }
+
+    #[test]
+    fn test_replacing_path_does_not_leave_stale_lru_entry() {
+        let mut cache = AstCache::new(1);
+        let path = PathBuf::from("changed.fsh");
+
+        cache.insert(path.clone(), [1u8; 32], vec![]);
+        cache.insert(path.clone(), [2u8; 32], vec![]);
+        cache.insert(PathBuf::from("other.fsh"), [3u8; 32], vec![]);
+
+        assert!(cache.get_by_path(&path, [2u8; 32]).is_none());
+        assert!(
+            cache
+                .get_by_path(&PathBuf::from("other.fsh"), [3u8; 32])
+                .is_some()
+        );
     }
 }
