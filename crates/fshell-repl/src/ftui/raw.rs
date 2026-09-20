@@ -41,6 +41,8 @@ pub struct SignalGuard;
 impl SignalGuard {
     #[cfg(unix)]
     pub fn install() -> std::io::Result<Self> {
+        DID_SUSPEND.store(false, Ordering::Relaxed);
+        GOT_SIGHUP.store(false, Ordering::Relaxed);
         let mut guard = Self {
             previous: Vec::with_capacity(3),
         };
@@ -110,6 +112,8 @@ impl SignalGuard {
 #[cfg(unix)]
 impl Drop for SignalGuard {
     fn drop(&mut self) {
+        DID_SUSPEND.store(false, Ordering::Relaxed);
+        GOT_SIGHUP.store(false, Ordering::Relaxed);
         unsafe {
             for &(signal, ref previous) in self.previous.iter().rev() {
                 let _ = libc::sigaction(signal, previous, std::ptr::null_mut());
