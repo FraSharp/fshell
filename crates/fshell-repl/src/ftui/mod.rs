@@ -356,24 +356,19 @@ pub async fn run_ftui_repl(
                 break 'repl_loop;
             }
             // Poll for background AI agent results
-            {
-                let mut res_guard = agent::AGENT_RESULT.lock();
-                if let Some((qid, res)) = res_guard.take()
-                    && qid == agent_state.query_id
-                {
-                    agent_state.is_loading = false;
-                    match res {
-                        Ok(cmd) => {
-                            agent_state.result_command = Some(cmd.clone());
-                            text_buf.clear();
-                            text_buf.insert_str(&cmd);
-                        }
-                        Err(err) => {
-                            agent_state.error_msg = Some(err);
-                        }
+            if let Some(res) = agent_state.take_result() {
+                agent_state.is_loading = false;
+                match res {
+                    Ok(cmd) => {
+                        agent_state.result_command = Some(cmd.clone());
+                        text_buf.clear();
+                        text_buf.insert_str(&cmd);
                     }
-                    redraw = true;
+                    Err(err) => {
+                        agent_state.error_msg = Some(err);
+                    }
                 }
+                redraw = true;
             }
 
             // Update prompt timers / background widgets (triggers at most every 1s internally)

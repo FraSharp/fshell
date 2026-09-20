@@ -3,6 +3,10 @@
 
 use fshell_core::lock::Mutex;
 use fshell_engine::Env;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 pub struct AgentModeState {
     pub active: bool,
@@ -12,6 +16,8 @@ pub struct AgentModeState {
     pub error_msg: Option<String>,
     pub query_id: usize,
     active_handle: Option<tokio::task::JoinHandle<()>>,
+    result: Arc<Mutex<Option<Result<String, String>>>>,
+    generation: Arc<AtomicUsize>,
 }
 
 impl Default for AgentModeState {
@@ -30,6 +36,8 @@ impl AgentModeState {
             error_msg: None,
             query_id: 0,
             active_handle: None,
+            result: Arc::new(Mutex::new(None)),
+            generation: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -42,7 +50,13 @@ impl AgentModeState {
         self.is_loading = false;
         self.result_command = None;
         self.error_msg = None;
-        self.query_id = 0;
+        self.query_id = self.query_id.wrapping_add(1);
+        self.generation.store(self.query_id, Ordering::Release);
+        self.result.lock().take();
+    }
+
+    pub fn take_result(&self) -> Option<Result<String, String>> {
+        self.result.lock().take()
     }
 
     pub fn trigger_query(&mut self, user_prompt: &str, env: &Env) {
@@ -55,25 +69,36 @@ impl AgentModeState {
         if let Some(h) = self.active_handle.take() {
             h.abort();
         }
-        self.query_id += 1;
+        self.query_id = self.query_id.wrapping_add(1);
         let qid = self.query_id;
+        self.generation.store(qid, Ordering::Release);
+        self.result.lock().take();
 
         let prompt_clone = user_prompt.to_string();
         let env_clone = env.clone();
+        let result_slot = self.result.clone();
+        let generation = self.generation.clone();
 
         let handle = tokio::spawn(async move {
             let result = query_ai_backend(&prompt_clone, &env_clone).await;
-            // Only publish if this is still the latest query (avoid stale overwrite after cancel).
-            let mut guard = AGENT_RESULT.lock();
-            if guard.as_ref().is_none_or(|(prev_qid, _)| *prev_qid < qid) {
-                *guard = Some((qid, result));
+            // A cancelled spawn_blocking request may still finish later. The
+            // generation check prevents it from publishing into a newer query.
+            if generation.load(Ordering::Acquire) == qid {
+                *result_slot.lock() = Some(result);
             }
         });
         self.active_handle = Some(handle);
     }
 }
 
-pub static AGENT_RESULT: Mutex<Option<(usize, Result<String, String>)>> = Mutex::new(None);
+impl Drop for AgentModeState {
+    fn drop(&mut self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(handle) = self.active_handle.take() {
+            handle.abort();
+        }
+    }
+}
 
 #[cfg(feature = "ai")]
 async fn query_ai_backend(prompt: &str, env: &Env) -> Result<String, String> {
