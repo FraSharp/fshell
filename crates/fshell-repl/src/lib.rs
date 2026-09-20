@@ -1483,8 +1483,14 @@ pub(crate) async fn handle_line_generic(
                             while let Some(payload) = rx.recv().await {
                                 match payload {
                                     PipelinePayload::Data(v) => {
-                                        if !matches!(&*v, Val::Map(_)) {
-                                            print_item_streaming(&v, &theme);
+                                        if !matches!(&*v, Val::Map(_))
+                                            && let Err(error) = print_item_streaming_async(
+                                                (*v).clone(),
+                                                theme.clone(),
+                                            )
+                                            .await
+                                        {
+                                            eprintln!("output formatter error: {error}");
                                         }
                                         vals.push((*v).clone());
                                     }
@@ -1532,7 +1538,14 @@ pub(crate) async fn handle_line_generic(
                                 if pipeline.stages.len() == 1 && !has_permissions && has_name_key {
                                     print_compact_names(&vals, &theme);
                                 } else {
-                                    print_value_beautifully(&Val::List(vals), &theme);
+                                    if let Err(error) = print_value_beautifully_async(
+                                        Val::List(vals),
+                                        theme.clone(),
+                                    )
+                                    .await
+                                    {
+                                        eprintln!("output formatter error: {error}");
+                                    }
                                 }
                             }
                             let last_ec = *env.prompt.last_exit_code.read();
@@ -1563,7 +1576,12 @@ pub(crate) async fn handle_line_generic(
                                                 println!("{} =", line_trimmed);
                                             }
                                             let theme = env.active_theme();
-                                            print_value_beautifully(&val, &theme);
+                                            if let Err(error) =
+                                                print_value_beautifully_async(val, theme.clone())
+                                                    .await
+                                            {
+                                                eprintln!("output formatter error: {error}");
+                                            }
                                         } else {
                                             let theme = env.active_theme();
                                             println!(
@@ -1836,8 +1854,12 @@ fn repl_display_stmt<'a>(
                     while let Some(payload) = rx.recv().await {
                         match payload {
                             PipelinePayload::Data(v) => {
-                                if !matches!(&*v, Val::Map(_)) {
-                                    print_item_streaming(&v, &theme);
+                                if !matches!(&*v, Val::Map(_))
+                                    && let Err(error) =
+                                        print_item_streaming_async((*v).clone(), theme.clone())
+                                            .await
+                                {
+                                    eprintln!("output formatter error: {error}");
                                 }
                                 vals.push((*v).clone());
                             }
@@ -1866,7 +1888,11 @@ fn repl_display_stmt<'a>(
                         if pipeline.stages.len() == 1 && !has_permissions {
                             print_compact_names(&vals, &theme);
                         } else {
-                            print_value_beautifully(&Val::List(vals), &theme);
+                            if let Err(error) =
+                                print_value_beautifully_async(Val::List(vals), theme.clone()).await
+                            {
+                                eprintln!("output formatter error: {error}");
+                            }
                         }
                     }
                     let last_ec = *env.prompt.last_exit_code.read();

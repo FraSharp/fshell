@@ -6,6 +6,7 @@ use chrono::{Local, Utc};
 use fshell_core::Val;
 use std::fmt::Write;
 use std::io::IsTerminal;
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 use ustr::ustr;
 
@@ -352,6 +353,17 @@ pub fn print_value_beautifully(val: &Val, theme: &fshell_core::theme::Theme) {
     }
 }
 
+/// Render a value without blocking the async REPL runtime while a pager or
+/// other fullscreen formatter waits for terminal input.
+pub async fn print_value_beautifully_async(
+    val: Val,
+    theme: Arc<fshell_core::theme::Theme>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || print_value_beautifully(&val, &theme))
+        .await
+        .map_err(|error| format!("value formatter task failed: {error}"))
+}
+
 fn render_table(list: &[Val], out: &mut String, theme: &fshell_core::theme::Theme) {
     let mut keys = Vec::new();
     let mut keys_seen = std::collections::HashSet::new();
@@ -625,6 +637,17 @@ pub fn print_item_streaming(val: &Val, theme: &fshell_core::theme::Theme) {
             print_value_beautifully(other, theme);
         }
     }
+}
+
+/// Async boundary for streaming output. The synchronous formatter may enter
+/// the fullscreen pager, so it must not run on the REPL runtime thread.
+pub async fn print_item_streaming_async(
+    val: Val,
+    theme: Arc<fshell_core::theme::Theme>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || print_item_streaming(&val, &theme))
+        .await
+        .map_err(|error| format!("streaming formatter task failed: {error}"))
 }
 
 fn highlight_match(line: &str, query: &str) -> String {
