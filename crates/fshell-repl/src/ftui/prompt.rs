@@ -36,6 +36,7 @@ pub struct PromptWidget {
     pub cached_output: Arc<Mutex<String>>,
     pub is_running: Arc<Mutex<bool>>,
     pub last_run: Arc<Mutex<Option<Instant>>>,
+    active_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl PromptWidget {
@@ -46,10 +47,18 @@ impl PromptWidget {
             cached_output: Arc::new(Mutex::new(String::new())),
             is_running: Arc::new(Mutex::new(false)),
             last_run: Arc::new(Mutex::new(None)),
+            active_handle: None,
         }
     }
 
-    pub fn trigger_update(&self, env: &Env) {
+    pub fn trigger_update(&mut self, env: &Env) {
+        if let Some(handle) = self.active_handle.take()
+            && !handle.is_finished()
+        {
+            self.active_handle = Some(handle);
+            return;
+        }
+
         let is_running = self.is_running.clone();
         {
             let mut running = is_running.lock();
@@ -64,7 +73,10 @@ impl PromptWidget {
         let last_run = self.last_run.clone();
         let env_clone = env.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            let _running_guard = RunningFlagGuard {
+                flag: is_running.clone(),
+            };
             let mut parser = fshell_core::Parser::new(&cmd);
             let output = match parser.parse_statements() {
                 Ok(stmts) => {
@@ -97,8 +109,26 @@ impl PromptWidget {
 
             *cached_output.lock() = output;
             *last_run.lock() = Some(Instant::now());
-            *is_running.lock() = false;
         });
+        self.active_handle = Some(handle);
+    }
+}
+
+impl Drop for PromptWidget {
+    fn drop(&mut self) {
+        if let Some(handle) = self.active_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+struct RunningFlagGuard {
+    flag: Arc<Mutex<bool>>,
+}
+
+impl Drop for RunningFlagGuard {
+    fn drop(&mut self) {
+        *self.flag.lock() = false;
     }
 }
 
@@ -217,7 +247,7 @@ impl PromptManager {
             changed = true;
 
             // Trigger updates for widgets that have expired (e.g. run every 5s or if empty)
-            for widget in &self.widgets {
+            for widget in &mut self.widgets {
                 let should_run = {
                     let lr = widget.last_run.lock();
                     match *lr {
