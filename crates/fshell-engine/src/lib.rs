@@ -1744,6 +1744,7 @@ impl Env {
                 vars: Arc::new(RwLock::new(FxHashMap::default())),
                 fns: Arc::new(RwLock::new(FxHashMap::default())),
                 builtins: Arc::new(RwLock::new(FxHashMap::default())),
+                async_builtins: Arc::new(RwLock::new(FxHashMap::default())),
                 aliases: Arc::new(RwLock::new(indexmap::IndexMap::new())),
                 fallback: Arc::new(RwLock::new(None)),
                 config_tui_handler: Arc::new(RwLock::new(None)),
@@ -1898,6 +1899,7 @@ impl Env {
                 vars: Arc::new(RwLock::new(FxHashMap::default())),
                 fns: Arc::new(RwLock::new(FxHashMap::default())),
                 builtins: Arc::new(RwLock::new(FxHashMap::default())),
+                async_builtins: Arc::new(RwLock::new(FxHashMap::default())),
                 aliases: Arc::new(RwLock::new(indexmap::IndexMap::new())),
                 fallback: Arc::new(RwLock::new(None)),
                 config_tui_handler: Arc::new(RwLock::new(None)),
@@ -2024,6 +2026,7 @@ impl Env {
                 vars: self.scope.vars.clone(),
                 fns: self.scope.fns.clone(),
                 builtins: self.scope.builtins.clone(),
+                async_builtins: self.scope.async_builtins.clone(),
                 aliases: self.scope.aliases.clone(),
                 fallback: self.scope.fallback.clone(),
                 config_tui_handler: self.scope.config_tui_handler.clone(),
@@ -2109,6 +2112,32 @@ impl Env {
         *cache = None;
     }
 
+    /// Register an asynchronous builtin handler.
+    ///
+    /// Async handlers run on the engine runtime and may safely await other
+    /// engine operations. They are intended for builtins whose behavior is
+    /// inherently asynchronous, such as interactive interfaces that launch a
+    /// nested command or perform async I/O. Synchronous handlers remain the
+    /// right choice for ordinary blocking builtins and continue to run on the
+    /// blocking pool.
+    pub fn register_async_builtin<F, Fut>(&self, name: &str, handler: F)
+    where
+        F: Fn(Option<PipeStream>, Vec<Val>, Env, PipeSender, Option<SourceSpan>) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: Future<Output = Result<(), ShellError>> + Send + 'static,
+    {
+        let handler: AsyncBuiltinHandler = Arc::new(move |input, args, env, output, span| {
+            Box::pin(handler(input, args, env, output, span))
+        });
+        self.async_builtins
+            .write()
+            .insert(name.to_string(), handler);
+        let mut cache = self.builtins_cache.lock();
+        *cache = None;
+    }
+
     /// Register many builtins in a single write-lock acquisition. Dramatically
     /// faster than calling `register_builtin` 70+ times in a row.
     pub fn register_builtins(&self, builtins: Vec<(String, BuiltinHandler)>) {
@@ -2138,6 +2167,18 @@ impl Env {
         reg.get(name).cloned()
     }
 
+    /// Look up an asynchronous builtin handler by name.
+    pub fn get_async_builtin(&self, name: &str) -> Option<AsyncBuiltinHandler> {
+        {
+            let opts = self.options.read();
+            if opts.disabled_builtins.iter().any(|d| d == name) {
+                return None;
+            }
+        }
+        let reg = self.async_builtins.read();
+        reg.get(name).cloned()
+    }
+
     /// Return all builtin names (sorted, cached).
     pub fn get_all_builtins(&self) -> Vec<String> {
         let mut cache = self.builtins_cache.lock();
@@ -2151,6 +2192,13 @@ impl Env {
         }
         let reg = self.builtins.read();
         let mut names: Vec<String> = reg.keys().cloned().collect();
+        let async_reg = self.async_builtins.read();
+        names.extend(
+            async_reg
+                .keys()
+                .filter(|name| !reg.contains_key(*name))
+                .cloned(),
+        );
         names.sort();
         *cache = Some(names.clone());
 
@@ -2764,6 +2812,19 @@ pub type BuiltinHandler = Arc<
             PipeSender,
             Option<SourceSpan>,
         ) -> Result<(), ShellError>
+        + Send
+        + Sync,
+>;
+
+#[allow(clippy::type_complexity)]
+pub type AsyncBuiltinHandler = Arc<
+    dyn Fn(
+            Option<PipeStream>,
+            Vec<Val>,
+            Env,
+            PipeSender,
+            Option<SourceSpan>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ShellError>> + Send>>
         + Send
         + Sync,
 >;

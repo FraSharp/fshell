@@ -1017,6 +1017,41 @@ pub async fn execute_pipeline(
                                 // Restore inline env vars
                                 restore_inline_env(&env_clone, saved_env_values, saved_top_values);
                             });
+                        } else if let Some(handler) = env_clone.get_async_builtin(&name) {
+                            let handler_span = if span.is_empty() { None } else { Some(span) };
+                            let stage_cancel = cancel_rx.clone();
+                            let cancel = cancel_tx.clone();
+                            tokio::spawn(async move {
+                                if *stage_cancel.borrow() {
+                                    return;
+                                }
+                                match handler(
+                                    current_rx,
+                                    evaluated_args,
+                                    env_clone.clone(),
+                                    out_tx.clone(),
+                                    handler_span,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        if env_clone.is_last_stage {
+                                            let is_pipefail = env_clone.options.read().pipefail;
+                                            let mut ec = env_clone.prompt.last_exit_code.write();
+                                            if !is_pipefail || *ec == 0 {
+                                                *ec = 0;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = cancel.send(true);
+                                        env_clone.report_stage_error();
+                                        let diag = FshDiag::new(e);
+                                        let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
+                                    }
+                                }
+                                restore_inline_env(&env_clone, saved_env_values, saved_top_values);
+                            });
                         } else if let Some(handler) = env_clone.get_builtin(&name) {
                             let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();

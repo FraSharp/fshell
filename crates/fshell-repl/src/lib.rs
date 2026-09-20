@@ -84,6 +84,97 @@ use crate::format::*;
 
 use history::{get_hostname, init_db, log_command, query_history, update_history_entry};
 
+#[derive(Default)]
+struct HistoryOptions {
+    interactive: bool,
+    stats: bool,
+    filter_exit: Option<i64>,
+    filter_cwd: Option<String>,
+    filter_session: Option<String>,
+    filter_host: Option<String>,
+    limit: Option<usize>,
+    search_query: Option<String>,
+}
+
+fn parse_history_options(
+    args: &[Val],
+    env: &Env,
+) -> Result<HistoryOptions, fshell_core::ShellError> {
+    let mut options = HistoryOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        if let Val::String(s) = &args[i] {
+            if s == "-i" || s == "--interactive" {
+                options.interactive = true;
+            } else if s == "--stats" {
+                options.stats = true;
+            } else if s == "--cwd" {
+                options.filter_cwd = Some(env.cwd().to_string_lossy().into_owned());
+            } else if s == "--session" {
+                let vars = env.vars.read();
+                if let Some(Val::String(sess)) = vars.get("FSH_SESSION_ID") {
+                    options.filter_session = Some(sess.clone());
+                }
+            } else if s == "--global" {
+                options.filter_cwd = None;
+                options.filter_session = None;
+            } else if s == "--host" {
+                options.filter_host = Some(get_hostname());
+            } else if s == "--exit" && i + 1 < args.len() {
+                i += 1;
+                if let Val::Int(code) = args[i] {
+                    options.filter_exit = Some(code);
+                } else if let Val::String(code_str) = &args[i]
+                    && let Ok(code) = code_str.parse::<i64>()
+                {
+                    options.filter_exit = Some(code);
+                }
+            } else if s == "--limit" && i + 1 < args.len() {
+                i += 1;
+                if let Val::Int(limit) = args[i] {
+                    if limit < 0 {
+                        return Err(format!(
+                            "--limit requires a non-negative integer, got {}",
+                            limit
+                        )
+                        .into());
+                    }
+                    options.limit = Some(limit as usize);
+                } else if let Val::String(limit) = &args[i]
+                    && let Ok(limit) = limit.parse::<usize>()
+                {
+                    options.limit = Some(limit);
+                }
+            } else if s.starts_with('-') {
+                return Err(format!("Unknown option: {}", s).into());
+            } else {
+                options.search_query = Some(s.clone());
+            }
+        }
+        i += 1;
+    }
+    Ok(options)
+}
+
+fn stats_value(stats: history::HistoryStats) -> Val {
+    let mut map = FxIndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
+    map.insert(ustr("total_commands"), Val::Int(stats.total_commands));
+    map.insert(ustr("unique_commands"), Val::Int(stats.unique_commands));
+    map.insert(ustr("success_rate_percent"), Val::Float(stats.success_rate));
+    let top_commands = stats
+        .top_commands
+        .into_iter()
+        .map(|(command, count)| {
+            let mut entry = FxIndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
+            entry.insert(ustr("command"), Val::String(command));
+            entry.insert(ustr("count"), Val::Int(count));
+            Val::Map(entry)
+        })
+        .collect();
+    map.insert(ustr("top_commands"), Val::List(top_commands));
+    Val::Map(map)
+}
+
 pub fn history_builtin(
     _in_rx: Option<fshell_engine::PipeStream>,
     args: Vec<Val>,
@@ -91,141 +182,106 @@ pub fn history_builtin(
     tx: fshell_engine::PipeSender,
     _span: Option<miette::SourceSpan>,
 ) -> Result<(), fshell_core::ShellError> {
-    let mut interactive = false;
-    let mut stats = false;
-    let mut filter_exit: Option<i64> = None;
-    let mut filter_cwd: Option<String> = None;
-    let mut filter_session: Option<String> = None;
-    let mut filter_host: Option<String> = None;
-    let mut limit: Option<usize> = None;
-    let mut search_query: Option<String> = None;
+    let options = parse_history_options(&args, env)?;
 
-    let mut i = 0;
-    while i < args.len() {
-        if let Val::String(s) = &args[i] {
-            if s == "-i" || s == "--interactive" {
-                interactive = true;
-            } else if s == "--stats" {
-                stats = true;
-            } else if s == "--cwd" {
-                filter_cwd = Some(env.cwd().to_string_lossy().into_owned());
-            } else if s == "--session" {
-                let vars = env.vars.read();
-                if let Some(Val::String(sess)) = vars.get("FSH_SESSION_ID") {
-                    filter_session = Some(sess.clone());
-                }
-            } else if s == "--global" {
-                filter_cwd = None;
-                filter_session = None;
-            } else if s == "--host" {
-                let host = get_hostname();
-                filter_host = Some(host);
-            } else if s == "--exit" && i + 1 < args.len() {
-                i += 1;
-                if let Val::Int(code) = args[i] {
-                    filter_exit = Some(code);
-                } else if let Val::String(code_str) = &args[i]
-                    && let Ok(code) = code_str.parse::<i64>()
-                {
-                    filter_exit = Some(code);
-                }
-            } else if s == "--limit" && i + 1 < args.len() {
-                i += 1;
-                if let Val::Int(lim) = args[i] {
-                    if lim < 0 {
-                        return Err(format!(
-                            "--limit requires a non-negative integer, got {}",
-                            lim
-                        )
-                        .into());
-                    }
-                    limit = Some(lim as usize);
-                } else if let Val::String(lim_str) = &args[i]
-                    && let Ok(lim) = lim_str.parse::<usize>()
-                {
-                    limit = Some(lim);
-                }
-            } else if s.starts_with('-') {
-                return Err(format!("Unknown option: {}", s).into());
-            } else {
-                search_query = Some(s.clone());
-            }
-        }
-        i += 1;
-    }
-
-    if stats {
+    if options.stats {
         let stats_data = std::thread::spawn(history::get_stats)
             .join()
             .unwrap_or_else(|_| Err("Background thread panicked".to_string()))?;
-        let mut m = FxIndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
-        m.insert(ustr("total_commands"), Val::Int(stats_data.total_commands));
-        m.insert(
-            ustr("unique_commands"),
-            Val::Int(stats_data.unique_commands),
-        );
-        m.insert(
-            ustr("success_rate_percent"),
-            Val::Float(stats_data.success_rate),
-        );
-
-        let top_cmds: Vec<Val> = stats_data
-            .top_commands
-            .into_iter()
-            .map(|(cmd, count)| {
-                let mut tm = FxIndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
-                tm.insert(ustr("command"), Val::String(cmd));
-                tm.insert(ustr("count"), Val::Int(count));
-                Val::Map(tm)
-            })
-            .collect();
-        m.insert(ustr("top_commands"), Val::List(top_cmds));
-
-        let payload = std::sync::Arc::new(Val::Map(m));
-        let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            let _ = tx_clone.send(PipelinePayload::Data(payload)).await;
-        });
+        tx.blocking_send(PipelinePayload::Data(std::sync::Arc::new(stats_value(
+            stats_data,
+        ))))
+        .map_err(|_| "history: output channel closed".to_string())?;
         return Ok(());
     }
 
     let is_terminal = !fshell_engine::is_test_mode() && is_stdout_a_tty();
     let has_pipe_input = _in_rx.is_some();
     let go_interactive = !fshell_engine::is_test_mode()
-        && (interactive || (args.is_empty() && is_terminal && !has_pipe_input));
+        && (options.interactive || (args.is_empty() && is_terminal && !has_pipe_input));
+
+    if go_interactive {
+        return Err("history: interactive mode requires the async handler".into());
+    } else {
+        let search_query = options.search_query.clone();
+        let filter_cwd = options.filter_cwd.clone();
+        let filter_session = options.filter_session.clone();
+        let filter_host = options.filter_host.clone();
+        let entries = std::thread::spawn(move || {
+            query_history(
+                options.limit,
+                search_query.as_deref(),
+                filter_cwd.as_deref(),
+                filter_session.as_deref(),
+                filter_host.as_deref(),
+                options.filter_exit,
+            )
+        })
+        .join()
+        .unwrap_or_else(|_| Err("Background thread panicked".to_string()))?;
+
+        for entry in entries {
+            if tx
+                .blocking_send(PipelinePayload::Data(std::sync::Arc::new(entry.to_val())))
+                .is_err()
+            {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn history_async_builtin(
+    _in_rx: Option<fshell_engine::PipeStream>,
+    args: Vec<Val>,
+    env: Env,
+    tx: fshell_engine::PipeSender,
+    _span: Option<miette::SourceSpan>,
+) -> Result<(), fshell_core::ShellError> {
+    let options = parse_history_options(&args, &env)?;
+    if options.stats {
+        let stats = tokio::task::spawn_blocking(history::get_stats)
+            .await
+            .map_err(|e| format!("history: stats task failed: {e}"))??;
+        tx.send(PipelinePayload::Data(std::sync::Arc::new(stats_value(
+            stats,
+        ))))
+        .await
+        .map_err(|_| "history: output channel closed".to_string())?;
+        return Ok(());
+    }
+
+    let is_terminal = !fshell_engine::is_test_mode() && is_stdout_a_tty();
+    let has_pipe_input = _in_rx.is_some();
+    let go_interactive = !fshell_engine::is_test_mode()
+        && (options.interactive || (args.is_empty() && is_terminal && !has_pipe_input));
 
     if go_interactive {
         let current_pwd = env.cwd().to_string_lossy().to_string();
-
         let current_host = get_hostname();
-
         let current_session = {
             let vars = env.vars.read();
-            if let Some(Val::String(sess)) = vars.get("FSH_SESSION_ID") {
-                sess.clone()
-            } else {
-                "unknown".to_string()
+            match vars.get("FSH_SESSION_ID") {
+                Some(Val::String(session)) => session.clone(),
+                _ => "unknown".to_string(),
             }
         };
-
-        let history_result =
-            ftui::history_explorer::run_history_tui(&current_pwd, &current_host, &current_session)?;
+        let history_result = tokio::task::spawn_blocking(move || {
+            ftui::history_explorer::run_history_tui(&current_pwd, &current_host, &current_session)
+        })
+        .await
+        .map_err(|e| format!("history: TUI task failed: {e}"))??;
         let cmd = match history_result {
             ftui::history_explorer::TuiResult::Execute(cmd)
             | ftui::history_explorer::TuiResult::Edit(cmd) => cmd,
             ftui::history_explorer::TuiResult::Cancel => return Ok(()),
         };
         println!("Executing: {}", cmd);
-        let result = tokio::task::block_in_place(|| {
-            let handle = tokio::runtime::Handle::current();
-            handle.block_on(fshell_engine::run_script(&cmd, env))
-        });
-        match result {
+        match fshell_engine::run_script(&cmd, &env).await {
             Ok(Flow::Normal) | Ok(Flow::ConditionFalse) => {}
-            Ok(Flow::Exit(code)) => {
-                // History `Execute` requesting an exit — respect it.
-                std::process::exit(code);
-            }
+            Ok(Flow::Exit(code)) => env.set_exit_code(code as i64),
             Ok(flow) => {
                 let msg = flow
                     .stray_message()
@@ -238,35 +294,34 @@ pub fn history_builtin(
                 env.set_exit_code(1);
             }
         }
-    } else {
-        let search_query = search_query.clone();
-        let filter_cwd = filter_cwd.clone();
-        let filter_session = filter_session.clone();
-        let filter_host = filter_host.clone();
-        let entries = std::thread::spawn(move || {
-            query_history(
-                limit,
-                search_query.as_deref(),
-                filter_cwd.as_deref(),
-                filter_session.as_deref(),
-                filter_host.as_deref(),
-                filter_exit,
-            )
-        })
-        .join()
-        .unwrap_or_else(|_| Err("Background thread panicked".to_string()))?;
-
-        let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            for entry in entries {
-                let val = std::sync::Arc::new(entry.to_val());
-                if tx_clone.send(PipelinePayload::Data(val)).await.is_err() {
-                    break;
-                }
-            }
-        });
+        return Ok(());
     }
 
+    let search_query = options.search_query.clone();
+    let filter_cwd = options.filter_cwd.clone();
+    let filter_session = options.filter_session.clone();
+    let filter_host = options.filter_host.clone();
+    let entries = tokio::task::spawn_blocking(move || {
+        query_history(
+            options.limit,
+            search_query.as_deref(),
+            filter_cwd.as_deref(),
+            filter_session.as_deref(),
+            filter_host.as_deref(),
+            options.filter_exit,
+        )
+    })
+    .await
+    .map_err(|e| format!("history: query task failed: {e}"))??;
+    for entry in entries {
+        if tx
+            .send(PipelinePayload::Data(std::sync::Arc::new(entry.to_val())))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
     Ok(())
 }
 
@@ -1906,6 +1961,7 @@ fn check_first_run_onboarding(env: &Env) {
 pub fn init(env: &Env) {
     let _ = init_db();
     env.register_builtin("history", std::sync::Arc::new(history_builtin));
+    env.register_async_builtin("history", history_async_builtin);
     env.set_config_tui_handler(std::sync::Arc::new(|env| {
         crate::config_tui::run_config_tui(env)
     }));
