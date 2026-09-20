@@ -74,40 +74,6 @@ macro_rules! cpu_dbg {
     };
 }
 
-/// Legacy per-command guard, still used as the fallback when the session-wide
-/// `raw::Session` path is disabled (FSH_RAW_SESSION=0). New code should prefer
-/// `raw::Session` + `SuspendGuard`.
-struct TuiGuard;
-
-impl TuiGuard {
-    fn new() -> Self {
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::cursor::DisableBlinking,
-            crossterm::event::EnableBracketedPaste,
-            crossterm::event::EnableFocusChange,
-            crossterm::event::EnableMouseCapture,
-        );
-        Self
-    }
-}
-
-impl Drop for TuiGuard {
-    fn drop(&mut self) {
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
-            crossterm::event::DisableBracketedPaste,
-            crossterm::event::DisableFocusChange,
-            crossterm::event::DisableMouseCapture,
-            crossterm::cursor::Show,
-            crossterm::cursor::EnableBlinking,
-        );
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        let _ = crossterm::terminal::disable_raw_mode();
-    }
-}
-
 use crate::alias_expansion::AliasExpansionState;
 use crate::highlighter::FshellHighlighter;
 use crate::theme_ext::ThemeColorRatatui;
@@ -136,83 +102,6 @@ use statusbar::{StatusBar, StatusBarWidget};
 //
 // We use a static volatile flag (AtomicBool is fine for x86/x64).
 // sigprocmask blocks SIGTSTP/SIGCONT during the critical section.
-#[cfg(unix)]
-static DID_SUSPEND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Flag set by the real SIGHUP signal handler. Checked by the REPL input loop
-/// to exit cleanly when the controlling terminal is lost. We need a real signal
-/// handler (not tokio::signal) because the single-threaded tokio runtime can't
-/// poll its signal futures while crossterm::event::poll() blocks the thread.
-#[cfg(unix)]
-static GOT_SIGHUP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(unix)]
-fn install_sigtstp_handler() {
-    unsafe {
-        install_sigaction(libc::SIGTSTP, sigtstp_action as *const () as usize);
-        install_sigaction(libc::SIGCONT, sigcont_action as *const () as usize);
-        install_sigaction(libc::SIGHUP, sighup_action as *const () as usize);
-    }
-}
-
-#[cfg(unix)]
-unsafe fn install_sigaction(sig: libc::c_int, handler: usize) {
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handler as libc::sighandler_t;
-        sa.sa_flags = 0;
-        libc::sigemptyset(&mut sa.sa_mask);
-        let _ = libc::sigaddset(&mut sa.sa_mask, sig);
-        if sig == libc::SIGTSTP {
-            let _ = libc::sigaddset(&mut sa.sa_mask, libc::SIGCONT);
-        }
-        libc::sigaction(sig, &sa, std::ptr::null_mut());
-    }
-}
-
-#[cfg(unix)]
-extern "C" fn sighup_action(_sig: i32) {
-    // SAFETY: AtomicBool::store and libc::_exit are async-signal-safe on all POSIX platforms.
-    GOT_SIGHUP.store(true, std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        libc::_exit(0);
-    }
-}
-
-#[cfg(unix)]
-extern "C" fn sigtstp_action(_sig: i32) {
-    // Use only async-signal-safe ops: write(), sigaction/signal, raise().
-    // Must not call malloc/tcsetattr. We temporarily install SIG_DFL,
-    // raise, then restore via sigaction (which is async-signal-safe).
-    unsafe {
-        let fd = libc::STDOUT_FILENO;
-        let seq = b"\x1b[?25h\x1b[?1000l\x1b[?2004l";
-        libc::write(fd, seq.as_ptr() as *const _, seq.len());
-        DID_SUSPEND.store(true, std::sync::atomic::Ordering::Relaxed);
-        // Atomically swap to DFL and suspend. Use sigaction to avoid
-        // the `signal` re-install race — save old action and restore it.
-        let mut old_sa: libc::sigaction = std::mem::zeroed();
-        let mut dfl: libc::sigaction = std::mem::zeroed();
-        dfl.sa_sigaction = libc::SIG_DFL;
-        libc::sigemptyset(&mut dfl.sa_mask);
-        libc::sigaction(libc::SIGTSTP, &dfl, &mut old_sa);
-        libc::raise(libc::SIGTSTP);
-        libc::sigaction(libc::SIGTSTP, &old_sa, std::ptr::null_mut());
-    }
-}
-
-#[cfg(unix)]
-extern "C" fn sigcont_action(_sig: i32) {
-    // Nothing to do here. The event loop checks DID_SUSPEND after
-    // every poll to re-init the terminal. We cannot safely call
-    // enable_raw_mode() from a signal handler.
-    //
-    // signal-safety note: Atomic store is implementation-defined safe
-    // on x86/x64 but not on all architectures. We rely on the fact that
-    // sigtstp_action already set DID_SUSPEND before raising SIGTSTP.
-    // This handler mainly exists so SIGCONT doesn't kill us.
-}
-
 #[allow(clippy::collapsible_if)]
 pub async fn run_ftui_repl(
     mut env: Env,
@@ -220,54 +109,26 @@ pub async fn run_ftui_repl(
     init_done: Arc<Notify>,
     clear_screen: bool,
 ) {
-    // Install panic hook to restore terminal state on panic.
-    // This is a safety net: TuiGuard::Drop handles normal cleanup during
-    // unwinding, but the default panic hook prints to stderr which may be
-    // garbled in the alternate screen. This hook ensures a clean restore
-    // and a readable panic message.
-    {
-        let default_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            // Safe to write to stdout in the panic hook even if pipe is broken
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::event::DisableBracketedPaste,
-                crossterm::event::DisableFocusChange,
-                crossterm::event::DisableMouseCapture,
-                crossterm::cursor::Show,
-                crossterm::cursor::EnableBlinking,
+    // These guards own process-global state for exactly the lifetime of the
+    // interactive session. Their Drop implementations restore the previous
+    // signal/panic configuration even when the REPL returns early.
+    let _panic_hook = raw::PanicHookGuard::install();
+    let _signal_guard = match raw::SignalGuard::install() {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!(
+                "\r\n\x1b[1;31merror:\x1b[0m cannot install terminal signal handlers: {error}"
             );
-            let _ = crossterm::terminal::disable_raw_mode();
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-            // Call the default hook to print the actual panic message
-            default_hook(info);
-        }));
-    }
-
-    // Install SIGTSTP handler (Bug 5.2): mark DID_SUSPEND on SIGTSTP/SIGCONT.
-    // The event loop checks this flag to re-init terminal state after resume.
-    #[cfg(unix)]
-    install_sigtstp_handler();
-
-    // Session-wide raw mode (A2 rewrite, now default — A/B via
-    // `FSH_RAW_SESSION=0`): enter raw once for the whole interactive
-    // session. Child commands that need a real terminal (vim, less, ssh, …)
-    // borrow a SuspendGuard which drops raw for the duration of the command
-    // and re-enters on Drop — even on panic/ctrl-c. Set
-    // `FSH_RAW_SESSION=0` to fall back to legacy per-command toggle.
-    let mut _raw_session: Option<Box<raw::Session>> = if std::env::var("FSH_RAW_SESSION").as_deref()
-        == Ok("0")
-    {
-        None
-    } else {
-        match raw::Session::enter() {
-            Ok(s) => Some(Box::new(s)),
-            Err(e) => {
-                eprintln!(
-                    "\r\n\x1b[1;31merror:\x1b[0m FTUI raw session failed: {e} — falling back to per-command raw"
-                );
-                None
-            }
+            return;
+        }
+    };
+    let mut _raw_session = match raw::Session::enter() {
+        Ok(session) => Some(Box::new(session)),
+        Err(error) => {
+            eprintln!(
+                "\r\n\x1b[1;31merror:\x1b[0m FTUI requires a raw terminal session: {error}"
+            );
+            return;
         }
     };
 
@@ -356,7 +217,7 @@ pub async fn run_ftui_repl(
         // auxiliary modes. With a session-wide `raw::Session` the per-command
         // re-enable below is skipped (raw never left).
         #[cfg(unix)]
-        if DID_SUSPEND.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        if raw::SignalGuard::suspended() {
             if let Some(s) = _raw_session.as_deref() {
                 s.reenter_raw();
             } else {
@@ -368,26 +229,11 @@ pub async fn run_ftui_repl(
             }
         }
 
-        // 1. Prepare terminal for this interactive step.
-        //
-        // With `FSH_RAW_SESSION=1` raw is already held by `raw::Session` for
-        // the whole session — no per-command toggle, so no garble from
-        // enable/disable interleaving with child output. Without the flag we
-        // keep the legacy per-command behavior so the pane rewrite can be
-        // A/B'd. A2's complete migration (raw always session-wide) will
-        // remove this branch.
+        // 1. Prepare terminal for this interactive step. Raw mode is owned by
+        // the session for its entire lifetime; command execution may only
+        // borrow a scoped suspend guard for a real interactive child.
         current_dir = env.cwd().to_string_lossy().to_string();
         prompt_mgr.refresh_snapshot(&current_dir);
-
-        let _guard: Option<TuiGuard> = if _raw_session.is_some() {
-            None
-        } else {
-            if let Err(e) = crossterm::terminal::enable_raw_mode() {
-                eprintln!("\r\n\x1b[1;31merror:\x1b[0m FTUI failed to enable raw mode: {e}");
-                break 'repl_loop;
-            }
-            Some(TuiGuard::new())
-        };
 
         if mouse_mgr.mode != MouseMode::Disabled {
             mouse_mgr.is_captured = false;
@@ -530,7 +376,7 @@ pub async fn run_ftui_repl(
 
             // TTY health / signal checks
             #[cfg(unix)]
-            if GOT_SIGHUP.load(Ordering::Relaxed) {
+            if raw::SignalGuard::hup_received() {
                 cpu_dbg!("GOT_SIGHUP — breaking repl_loop");
                 break 'repl_loop;
             }
@@ -1811,7 +1657,7 @@ pub async fn run_ftui_repl(
                         use std::io::ErrorKind;
                         if e.kind() == ErrorKind::Interrupted {
                             #[cfg(unix)]
-                            if GOT_SIGHUP.load(Ordering::Relaxed) {
+                            if raw::SignalGuard::hup_received() {
                                 cpu_dbg!(
                                     "GOT_SIGHUP inside EINTR event::poll — breaking repl_loop"
                                 );
@@ -1825,11 +1671,9 @@ pub async fn run_ftui_repl(
                             }
                             // Check if we need to re-init terminal (Bug 5.2)
                             #[cfg(unix)]
-                            if DID_SUSPEND.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            if raw::SignalGuard::suspended() {
                                 if let Some(s) = _raw_session.as_deref() {
                                     s.reenter_raw();
-                                } else {
-                                    let _ = crossterm::terminal::enable_raw_mode();
                                 }
                                 redraw = true;
                             }
@@ -1844,7 +1688,7 @@ pub async fn run_ftui_repl(
             let poll_elapsed = poll_start.elapsed();
             if !polled {
                 #[cfg(unix)]
-                if GOT_SIGHUP.load(Ordering::Relaxed) {
+                if raw::SignalGuard::hup_received() {
                     cpu_dbg!("GOT_SIGHUP (in !polled path) — breaking repl_loop");
                     break 'repl_loop;
                 }
@@ -1862,7 +1706,7 @@ pub async fn run_ftui_repl(
 
             if polled {
                 #[cfg(unix)]
-                if GOT_SIGHUP.load(Ordering::Relaxed) {
+                if raw::SignalGuard::hup_received() {
                     cpu_dbg!("GOT_SIGHUP before event::read — breaking repl_loop");
                     break 'repl_loop;
                 }
@@ -1879,7 +1723,7 @@ pub async fn run_ftui_repl(
                             use std::io::ErrorKind;
                             if e.kind() == ErrorKind::Interrupted {
                                 #[cfg(unix)]
-                                if GOT_SIGHUP.load(Ordering::Relaxed) {
+                                if raw::SignalGuard::hup_received() {
                                     cpu_dbg!(
                                         "GOT_SIGHUP in event::read Err(Interrupted) — breaking repl_loop"
                                     );
@@ -1892,11 +1736,9 @@ pub async fn run_ftui_repl(
                                     break 'repl_loop;
                                 }
                                 #[cfg(unix)]
-                                if DID_SUSPEND.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                if raw::SignalGuard::suspended() {
                                     if let Some(s) = _raw_session.as_deref() {
                                         s.reenter_raw();
-                                    } else {
-                                        let _ = crossterm::terminal::enable_raw_mode();
                                     }
                                 }
                                 continue;
@@ -3318,12 +3160,8 @@ pub async fn run_ftui_repl(
             }
             drop(t);
         }
-        // With session-wide raw (`FSH_RAW_SESSION=1`) the inline viewport is
-        // dropped but raw/auxiliary modes stay on — only the legacy
-        // per-command path did `TuiGuard::drop` → `disable_raw_mode` here.
-        if _guard.is_some() {
-            drop(_guard);
-        }
+        // Dropping the inline viewport does not change the session terminal
+        // state; the session owner remains responsible for raw mode.
 
         if exit_repl {
             // Drop the inline viewport first so the exit doesn't leave the
@@ -3457,25 +3295,21 @@ pub async fn run_ftui_repl(
             } else {
                 let ftui_debug = std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1");
                 let ftui_start = std::time::Instant::now();
-                // Fullscreen apps (vim, less, …) and legacy non-raw-session
-                // still need a cooked PTY. In raw-session mode use the session's
-                // SuspendGuard so raw is re-entered even on panic/ctrl-c.
-                let _suspend: Option<raw::SuspendGuard<'_>> = if let Some(s) =
-                    _raw_session.as_deref()
-                {
-                    match s.suspend() {
-                        Ok(g) => Some(g),
-                        Err(e) => {
+                // Fullscreen apps (vim, less, …) receive a cooked terminal
+                // through this scoped guard. A failed transition is a session
+                // failure: continuing would expose the child to a partially
+                // configured terminal and make restoration nondeterministic.
+                let _suspend = match _raw_session.as_deref() {
+                    Some(session) => match session.suspend() {
+                        Ok(guard) => guard,
+                        Err(error) => {
                             eprintln!(
-                                "\r\n\x1b[1;33mwarn:\x1b[0m raw suspend failed: {e} — continuing with legacy toggle"
+                                "\r\n\x1b[1;31merror:\x1b[0m cannot suspend the terminal for command execution: {error}"
                             );
-                            let _ = crossterm::terminal::disable_raw_mode();
-                            None
+                            break 'repl_loop;
                         }
-                    }
-                } else {
-                    let _ = crossterm::terminal::disable_raw_mode();
-                    None
+                    },
+                    None => break 'repl_loop,
                 };
                 let t_disable = ftui_start.elapsed();
                 let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -3563,7 +3397,7 @@ pub async fn run_ftui_repl(
                 let t_prompt = ftui_start.elapsed();
 
                 let is_fullscreen = margins::is_fullscreen_app(&trimmed);
-                let is_suspended_cmd = _suspend.is_some();
+                let is_suspended_cmd = true;
 
                 let _margin_guard =
                     if !is_suspended_cmd && !is_fullscreen && status_bar.visible && term_h > 4 {
@@ -3628,15 +3462,9 @@ pub async fn run_ftui_repl(
                     let _ = h.await;
                 }
                 let t_exec = ftui_start.elapsed();
-                let was_suspended = _suspend.is_some();
                 let is_exit = handle_result.is_err();
                 drop(_suspend);
-                let t_reraw = if was_suspended {
-                    ftui_start.elapsed()
-                } else {
-                    let _ = crossterm::terminal::enable_raw_mode();
-                    ftui_start.elapsed()
-                };
+                let t_reraw = ftui_start.elapsed();
 
                 if is_exit {
                     if _raw_session.is_some() {
@@ -3665,12 +3493,8 @@ pub async fn run_ftui_repl(
                 }
             }
 
-            // Ensure the command output did not end in the middle of a line, which would corrupt the layout.
-            // In session-wide raw (`FSH_RAW_SESSION=1`) the raw state is still on here and
-            // `safe_cursor_position` would block asking the terminal; skip.
-            if _raw_session.is_none() {
-                let _ = crossterm::terminal::enable_raw_mode();
-            }
+            // The suspend guard has restored the session-owned raw state before
+            // we inspect the cursor or begin the next prompt.
             if let Some((cursor_x, _)) = safe_cursor_position() {
                 if cursor_x > 0 {
                     let _ = crossterm::execute!(
