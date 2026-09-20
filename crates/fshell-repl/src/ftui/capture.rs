@@ -7,11 +7,21 @@ use std::os::fd::FromRawFd;
 
 // Gate: set FSH_REPL_ANCHOR_DEBUG=1 for capture debug logs
 fn anchor_debug(msg: impl std::fmt::Display) {
-    if std::env::var("FSH_REPL_ANCHOR_DEBUG").as_deref() == Ok("1")
-        && let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty")
+    if std::env::var("FSH_REPL_ANCHOR_DEBUG").as_deref() != Ok("1") {
+        return;
+    }
+
+    let path = format!(
+        "{}/fsh_anchor_debug.log",
+        std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string())
+    );
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
     {
         use std::io::Write;
-        let _ = writeln!(tty, "[capture] {}", msg);
+        let _ = writeln!(log, "[capture] {}", msg);
     }
 }
 
