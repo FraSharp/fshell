@@ -2490,6 +2490,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_single_quoted_args_are_raw_strings() {
+        // Single quotes are raw strings and must not be retyped to Bool/Int/Null
+        // the way unquoted bare words are.
+        for src in [
+            "echo 'true'",
+            "echo 'false'",
+            "echo 'null'",
+            "echo '123'",
+            "echo '3.14'",
+        ] {
+            let stmts = Parser::new(src).parse_statements().unwrap();
+            let Stmt::Expr(expr) = stmts[0].unpack() else {
+                panic!("{src}: expected expression statement");
+            };
+            let Expr::Pipeline(pipeline) = expr.unpack() else {
+                panic!("{src}: expected pipeline");
+            };
+            let PipelineStage::CommandCall { args, .. } = &pipeline.stages[0] else {
+                panic!("{src}: expected command call");
+            };
+            assert!(
+                matches!(&args[0], Expr::String(parts)
+                    if matches!(parts.as_slice(), [StringPart::Lit(_)])),
+                "{src}: quoted argument must stay a string, got {:?}",
+                args[0]
+            );
+        }
+    }
+
     fn last_stage_of(src: &str) -> PipelineStage {
         let stmts = Parser::new(src).parse_statements().unwrap();
         let pipeline = match stmts.first().map(|s| s.unpack()) {

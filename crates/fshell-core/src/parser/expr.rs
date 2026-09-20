@@ -728,6 +728,10 @@ impl Parser {
                     }
                 }
                 '\'' => {
+                    // A quoted segment marks the argument as an explicit string, so
+                    // the literal-coercion pass below must not retype it (single
+                    // quotes are raw strings, exactly like double quotes).
+                    had_quoted_segment = true;
                     self.next_char();
                     let mut quoted = String::new();
                     loop {
