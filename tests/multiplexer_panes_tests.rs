@@ -97,6 +97,7 @@ fn test_ipc_client_and_daemon_message_roundtrip() {
         session_name: "dev_session".to_string(),
         cols: 120,
         rows: 40,
+        shell: None,
     };
     let frame = Frame::from_client(&client_msg);
     let decoded_client = frame.into_client().unwrap();
