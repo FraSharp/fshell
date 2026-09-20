@@ -5,7 +5,6 @@ use crate::ftui::statusbar::{StatusBar, StatusBarWidget};
 use fshell_core::theme::Theme;
 use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
 use std::io::Write;
-use std::time::Duration;
 
 /// RAII guard that locks terminal scrolling margins using DECSTBM (\x1b[1;limit_row r)
 /// and restores full-screen scrolling (\x1b[r) when dropped.
@@ -170,62 +169,6 @@ pub fn render_persistent_status_bar(
         });
 
         // ESC 8: Restore cursor position
-        let _ = write!(stdout, "\x1b8");
-        let _ = stdout.flush();
-    }
-}
-
-/// Real-time tick render for background status updates during long command execution.
-pub fn render_status_bar_live_tick(
-    status_bar: &StatusBar,
-    theme: &Theme,
-    elapsed: Duration,
-    _init_term_w: u16,
-    _init_term_h: u16,
-) {
-    let (term_w, term_h) = crossterm::terminal::size().unwrap_or((_init_term_w, _init_term_h));
-    if term_h <= 4 || !status_bar.visible {
-        return;
-    }
-
-    // Dynamic window resize check: re-issue DECSTBM scroll region if height changed.
-    // Re-issuing it on *every* tick (200 ms) during a long-running command that is
-    // actively printing is the source of the "status bar garbles command output"
-    // interleave — the scroll-region rewrite lands mid-output. Only re-issue when
-    // the terminal height actually changed since the last tick.
-    static LAST_SCROLL_H: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-    if term_h > 4 && LAST_SCROLL_H.swap(term_h, std::sync::atomic::Ordering::Relaxed) != term_h {
-        let limit_row = term_h - 2;
-        let mut stdout = std::io::stdout();
-        let _ = write!(stdout, "\x1b7\x1b[1;{}r\x1b8", limit_row);
-        let _ = stdout.flush();
-    }
-
-    let mut updated_sb = status_bar.clone();
-    updated_sb.last_command_elapsed = Some(elapsed);
-
-    let stdout = std::io::stdout();
-    let backend = CrosstermBackend::new(stdout);
-    if let Ok(mut st) = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Fixed(ratatui::layout::Rect::new(0, term_h - 2, term_w, 2)),
-        },
-    ) {
-        let mut stdout = std::io::stdout();
-        let _ = write!(stdout, "\x1b7");
-        let _ = stdout.flush();
-
-        let _ = st.draw(|f| {
-            f.render_widget(
-                StatusBarWidget {
-                    status_bar: &updated_sb,
-                    theme,
-                },
-                f.area(),
-            );
-        });
-
         let _ = write!(stdout, "\x1b8");
         let _ = stdout.flush();
     }
