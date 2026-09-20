@@ -210,7 +210,11 @@ impl Completer for FshellCompleter {
                 }
             });
             !(is_builtin || is_alias || is_fn)
-                && fshell_engine::is_external_command_cached(cmd, env_path.as_deref())
+                && fshell_engine::is_external_command_cached_at(
+                    cmd,
+                    env_path.as_deref(),
+                    &self.env.cwd(),
+                )
         } else {
             false
         };
@@ -566,7 +570,11 @@ impl Completer for FshellCompleter {
                     let fns = self.env.fns.read();
                     fns.contains_key(cmd)
                 }
-                || fshell_engine::is_external_command_cached(cmd, env_path.as_deref());
+                || fshell_engine::is_external_command_cached_at(
+                    cmd,
+                    env_path.as_deref(),
+                    &self.env.cwd(),
+                );
             if is_cmd {
                 let file_word = if starting_new_arg { "" } else { last_word };
                 return complete_files_at(file_word, pos, &self.env.cwd());
@@ -633,7 +641,8 @@ impl Completer for FshellCompleter {
                     _ => None,
                 })
             };
-            let candidates = fshell_engine::get_path_executables(env_path.as_deref());
+            let candidates =
+                fshell_engine::get_path_executables_at(env_path.as_deref(), &self.env.cwd());
             for exe in candidates {
                 if exe.to_lowercase().starts_with(&last_word_lower) {
                     if suggestions.iter().any(|s| s.value == exe) {

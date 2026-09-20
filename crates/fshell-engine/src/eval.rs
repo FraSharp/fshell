@@ -3020,17 +3020,57 @@ pub(crate) static COMMAND_VALIDATION_CACHE: std::sync::LazyLock<
     fshell_core::lock::Mutex<FxHashMap<(String, String), bool>>,
 > = std::sync::LazyLock::new(|| fshell_core::lock::Mutex::new(FxHashMap::default()));
 
+/// Resolve relative entries in a shell PATH against the shell's logical cwd.
+///
+/// The process cwd is shared by every `Env` in the process and therefore cannot
+/// be used for command lookup. Empty entries retain the normal PATH meaning of
+/// the current directory. An entirely empty PATH remains empty so callers can
+/// distinguish it from a PATH containing an empty entry.
+pub fn normalize_path_for_cwd(path: &str, cwd: &std::path::Path) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    path.split(':')
+        .map(|entry| {
+            if entry.is_empty() {
+                return cwd.to_string_lossy().into_owned();
+            }
+            let entry_path = std::path::Path::new(entry);
+            if entry_path.is_absolute() {
+                entry_path.to_string_lossy().into_owned()
+            } else {
+                cwd.join(entry_path).to_string_lossy().into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 /// Like `is_external_command` but backed by a bounded in-memory cache to avoid
 /// scanning PATH on every call. Used by the highlighter and completer on the
 /// keystroke path.
 pub fn is_external_command_cached(name: &str, env_path: Option<&str>) -> bool {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    is_external_command_cached_at(name, env_path, &cwd)
+}
+
+/// Like [`is_external_command_cached`] with an explicit logical cwd.
+pub fn is_external_command_cached_at(
+    name: &str,
+    env_path: Option<&str>,
+    cwd: &std::path::Path,
+) -> bool {
     if name.is_empty() {
         return false;
     }
-    let current_path = env_path
-        .map(|p| p.to_string())
-        .or_else(|| std::env::var("PATH").ok())
-        .unwrap_or_default();
+    let current_path = normalize_path_for_cwd(
+        env_path
+            .map(|p| p.to_string())
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default()
+            .as_str(),
+        cwd,
+    );
 
     let cache_key = (name.to_string(), current_path);
     {
@@ -3039,7 +3079,7 @@ pub fn is_external_command_cached(name: &str, env_path: Option<&str>) -> bool {
             return *cached;
         }
     }
-    let result = is_external_command(name, Some(&cache_key.1));
+    let result = is_external_command_at(name, Some(&cache_key.1), cwd);
     let mut cache = COMMAND_VALIDATION_CACHE.lock();
     if cache.len() >= COMMAND_CACHE_MAX_SIZE {
         let keys: Vec<(String, String)> = cache
@@ -3217,6 +3257,11 @@ pub fn warmup_path_cache(env: Option<&crate::Env>) {
         })
         .or_else(|| std::env::var("PATH").ok())
         .unwrap_or_default();
+    let cwd = env
+        .map(|e| e.cwd())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let current_path = normalize_path_for_cwd(&current_path, &cwd);
     if current_path.is_empty() {
         return;
     }
@@ -3232,6 +3277,12 @@ pub fn warmup_path_cache(env: Option<&crate::Env>) {
 }
 
 pub fn is_external_command(name: &str, env_path: Option<&str>) -> bool {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    is_external_command_at(name, env_path, &cwd)
+}
+
+/// Check command availability using an explicit logical cwd.
+pub fn is_external_command_at(name: &str, env_path: Option<&str>, cwd: &std::path::Path) -> bool {
     let cnf_debug = std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1");
     if cnf_debug {
         eprintln!(
@@ -3243,10 +3294,14 @@ pub fn is_external_command(name: &str, env_path: Option<&str>) -> bool {
             std::time::Instant::now()
         );
     }
-    let current_path = env_path
-        .map(|p| p.to_string())
-        .or_else(|| std::env::var("PATH").ok())
-        .unwrap_or_default();
+    let current_path = normalize_path_for_cwd(
+        env_path
+            .map(|p| p.to_string())
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default()
+            .as_str(),
+        cwd,
+    );
     if current_path.is_empty() {
         return false;
     }
@@ -3285,11 +3340,21 @@ pub fn is_external_command(name: &str, env_path: Option<&str>) -> bool {
 /// up without blocking. `env_path` should be the shell's `$PATH` when
 /// available to avoid skew vs the OS environment.
 pub fn get_path_executables(env_path: Option<&str>) -> Vec<String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    get_path_executables_at(env_path, &cwd)
+}
+
+/// Return executable names from PATH resolved against an explicit logical cwd.
+pub fn get_path_executables_at(env_path: Option<&str>, cwd: &std::path::Path) -> Vec<String> {
     start_path_watcher();
-    let current_path = env_path
-        .map(|p| p.to_string())
-        .or_else(|| std::env::var("PATH").ok())
-        .unwrap_or_default();
+    let current_path = normalize_path_for_cwd(
+        env_path
+            .map(|p| p.to_string())
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default()
+            .as_str(),
+        cwd,
+    );
     if current_path.is_empty() {
         return Vec::new();
     }
@@ -3311,6 +3376,16 @@ pub fn get_path_executables(env_path: Option<&str>) -> Vec<String> {
 /// Returns the resolved full path for a command name, using the PATH cache.
 /// Returns None if the command is not found on PATH.
 pub fn resolve_cached_command_path(name: &str, env_path: Option<&str>) -> Option<String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    resolve_cached_command_path_at(name, env_path, &cwd)
+}
+
+/// Resolve a command using PATH entries interpreted in an explicit logical cwd.
+pub fn resolve_cached_command_path_at(
+    name: &str,
+    env_path: Option<&str>,
+    cwd: &std::path::Path,
+) -> Option<String> {
     let cnf_debug = std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1");
     if cnf_debug {
         eprintln!(
@@ -3321,10 +3396,14 @@ pub fn resolve_cached_command_path(name: &str, env_path: Option<&str>) -> Option
             env_path
         );
     }
-    let current_path = env_path
-        .map(|p| p.to_string())
-        .or_else(|| std::env::var("PATH").ok())
-        .unwrap_or_default();
+    let current_path = normalize_path_for_cwd(
+        env_path
+            .map(|p| p.to_string())
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default()
+            .as_str(),
+        cwd,
+    );
     if current_path.is_empty() {
         return None;
     }

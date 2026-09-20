@@ -46,6 +46,38 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn command_lookup_resolves_relative_path_entries_in_logical_cwd() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let tool = bin.join("logical-tool");
+        std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let normalized = normalize_path_for_cwd("bin", tmp.path());
+        assert_eq!(normalized, bin.to_string_lossy());
+        assert!(is_external_command_at(
+            "logical-tool",
+            Some("bin"),
+            tmp.path()
+        ));
+        assert_eq!(
+            resolve_cached_command_path_at("logical-tool", Some("bin"), tmp.path()),
+            Some(tool.to_string_lossy().into_owned())
+        );
+    }
+
+    #[test]
+    fn command_lookup_treats_empty_path_components_as_logical_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let normalized = normalize_path_for_cwd(":/usr/bin", tmp.path());
+        assert_eq!(normalized, format!("{}:/usr/bin", tmp.path().display()));
+    }
+
     #[test]
     fn finalize_no_failures_keeps_last_exit_code() {
         let (ec, err) = pipeline_finalize(Vec::new(), 7, false);

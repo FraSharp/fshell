@@ -88,7 +88,11 @@ impl FshellHighlighter {
                     None
                 }
             });
-            return fshell_engine::is_external_command_cached(token, env_path.as_deref());
+            return fshell_engine::is_external_command_cached_at(
+                token,
+                env_path.as_deref(),
+                &env.cwd(),
+            );
         }
         false
     }

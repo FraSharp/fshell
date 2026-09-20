@@ -965,7 +965,7 @@ fn try_bare_dir_cd(input: &str, env: &Env, tx: fshell_engine::PipeSender) -> boo
         }
     });
 
-    if fshell_engine::is_external_command_cached(first_token, env_path.as_deref()) {
+    if fshell_engine::is_external_command_cached_at(first_token, env_path.as_deref(), &env.cwd()) {
         return false;
     }
 
@@ -1147,7 +1147,11 @@ pub(crate) async fn handle_line_generic(
             if (is_d || is_e)
                 && env.get_builtin(first_token).is_none()
                 && !env.fns.read().contains_key(first_token)
-                && !fshell_engine::is_external_command_cached(first_token, env_path.as_deref())
+                && !fshell_engine::is_external_command_cached_at(
+                    first_token,
+                    env_path.as_deref(),
+                    &env.cwd(),
+                )
                 && !first_token.contains('/')
                 && !std::path::Path::new(first_token).exists()
             {

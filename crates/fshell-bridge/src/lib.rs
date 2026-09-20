@@ -7,7 +7,7 @@ use crate::cmdnotfound::{lookup_cached, spawn_background_search};
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
-use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload, resolve_cached_command_path};
+use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload, resolve_cached_command_path_at};
 use miette::SourceSpan;
 use std::io::Write;
 use std::os::unix::io::FromRawFd;
@@ -363,7 +363,7 @@ pub fn run_external(
             })
         });
         let path_resolve_start = std::time::Instant::now();
-        let resolved = resolve_cached_command_path(name, env_path.as_deref())
+        let resolved = resolve_cached_command_path_at(name, env_path.as_deref(), &env.cwd())
             .unwrap_or_else(|| name.to_string());
         if cnf_debug {
             eprintln!(
@@ -387,7 +387,7 @@ pub fn run_external(
             // Invalidate stale cache
             fshell_engine::invalidate_path_cache();
             // Retry with fresh cache
-            resolve_cached_command_path(name, env_path.as_deref())
+            resolve_cached_command_path_at(name, env_path.as_deref(), &env.cwd())
                 .unwrap_or_else(|| name.to_string())
         } else {
             resolved

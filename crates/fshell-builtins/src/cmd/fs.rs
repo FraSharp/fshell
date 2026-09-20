@@ -1595,8 +1595,12 @@ fn type_one(name: &str, env: &Env) -> Val {
             }
         })
     });
-    if fshell_engine::is_external_command(name, env_path.as_deref()) {
-        let path = find_in_path(name);
+    let normalized_path =
+        fshell_engine::normalize_path_for_cwd(env_path.as_deref().unwrap_or_default(), &env.cwd());
+    if fshell_engine::is_external_command_at(name, Some(&normalized_path), &env.cwd()) {
+        let path =
+            fshell_engine::resolve_cached_command_path_at(name, Some(&normalized_path), &env.cwd())
+                .map(std::path::PathBuf::from);
         let mut m = indexmap::IndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
         m.insert(ustr::ustr("name"), Val::String(name.to_string()));
         m.insert(ustr::ustr("type"), Val::String("external".to_string()));
@@ -1615,30 +1619,6 @@ fn type_one(name: &str, env: &Env) -> Val {
         m.insert(ustr::ustr("type"), Val::String("not-found".to_string()));
         m
     })
-}
-
-fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            let path = std::path::Path::new(dir).join(name);
-            if path.is_file() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(metadata) = path.metadata()
-                        && metadata.permissions().mode() & 0o111 != 0
-                    {
-                        return Some(path);
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    return Some(path);
-                }
-            }
-        }
-    }
-    None
 }
 
 pub fn pwd_builtin(

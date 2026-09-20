@@ -4,7 +4,7 @@
 use crate::{
     CapAction, EngineError, Env, PendingSuggestion, PipeSender, PipeStream, PipelinePayload,
     SuggestionMode, cmp_vals, decode_csv_input, eval_expr, eval_stmt, expand_alias_with_args,
-    expand_globs, get_suggested_command, is_external_command, pipeline_channel_size,
+    expand_globs, get_suggested_command, is_external_command_at, pipeline_channel_size,
     render_bar_chart, render_table, run_boundary_operator,
 };
 use crate::{Flow, PipelineFailure};
@@ -421,7 +421,8 @@ pub async fn execute_pipeline(
                                 }
                             })
                         });
-                        let is_external = is_external_command(&name, env_path.as_deref());
+                        let is_external =
+                            is_external_command_at(&name, env_path.as_deref(), &env_clone.cwd());
                         !(is_user_fn || is_builtin || is_external)
                     } else {
                         false
@@ -754,9 +755,13 @@ pub async fn execute_pipeline(
                             let is_valid = {
                                 let is_user_fn = function_exists(&env_clone, &name);
                                 let is_builtin = env_clone.get_builtin(&name).is_some();
-                                let is_external = is_external_command(&name, env_path.as_deref());
-                                let is_path =
-                                    name.contains('/') || std::path::Path::new(&name).exists();
+                                let is_external = is_external_command_at(
+                                    &name,
+                                    env_path.as_deref(),
+                                    &env_clone.cwd(),
+                                );
+                                let is_path = name.contains('/')
+                                    || env_clone.resolve_path(&name).exists();
                                 is_user_fn || is_builtin || is_external || is_path
                             };
                             if cnf_debug {
