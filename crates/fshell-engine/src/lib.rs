@@ -3034,6 +3034,17 @@ pub(crate) use eval::{
 };
 
 impl Env {
+    /// Return the shell's HOME value, falling back to the host environment
+    /// only before the shell has initialized its environment map.
+    pub fn home_dir(&self) -> PathBuf {
+        if let Some(Val::String(home)) = self.vars.read().get("HOME") {
+            return PathBuf::from(home);
+        }
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"))
+    }
+
     /// Set a shell variable without exporting to the environment.
     pub fn set_shell_var(&self, key: &str, val: Val) {
         if let Some(ref locals) = self.local_vars {

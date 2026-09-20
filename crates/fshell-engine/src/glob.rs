@@ -16,7 +16,13 @@ pub fn expand_globs(args: Vec<Val>, env: &Env) -> Result<Vec<Val>, String> {
 
     for arg in args {
         if let Val::String(s) = arg {
-            let tilde_expanded = fshell_core::expand_tilde_str(&s);
+            let tilde_expanded = if s == "~" {
+                env.home_dir().to_string_lossy().into_owned()
+            } else if let Some(rest) = s.strip_prefix("~/") {
+                env.home_dir().join(rest).to_string_lossy().into_owned()
+            } else {
+                s
+            };
             let braced = expand_braces(&tilde_expanded);
             for pattern in braced {
                 let globbed = fshell_core::glob_utils::expand_glob_with_options(

@@ -313,7 +313,7 @@ pub fn expand_word(
                 expanded.push_str(&val);
             }
             WordPiece::TildeExpansion(te) => {
-                let home = std::env::var("HOME").unwrap_or_default();
+                let home = env.home_dir().to_string_lossy().into_owned();
                 match te {
                     word::TildeExpr::Home => expanded.push_str(&home),
                     word::TildeExpr::UserHome(_) => expanded.push_str(&home),

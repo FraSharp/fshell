@@ -1428,7 +1428,7 @@ async fn eval_simple_command_inner(
         "cd" => {
             let target = args.first().map(|s| s.as_str()).unwrap_or("");
             let path = if target.is_empty() {
-                std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
+                env.home_dir().to_string_lossy().into_owned()
             } else if target == "-" {
                 let vars = env.vars.read();
                 vars.get("OLDPWD")

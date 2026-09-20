@@ -760,8 +760,8 @@ pub async fn execute_pipeline(
                                     env_path.as_deref(),
                                     &env_clone.cwd(),
                                 );
-                                let is_path = name.contains('/')
-                                    || env_clone.resolve_path(&name).exists();
+                                let is_path =
+                                    name.contains('/') || env_clone.resolve_path(&name).exists();
                                 is_user_fn || is_builtin || is_external || is_path
                             };
                             if cnf_debug {
@@ -2295,14 +2295,13 @@ pub async fn execute_pipeline(
                 };
 
                 let path_str = if path_val == "~" {
-                    std::env::var("HOME").unwrap_or(path_val)
+                    env_clone.home_dir().to_string_lossy().into_owned()
                 } else if let Some(rest) = path_val.strip_prefix("~/") {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    if home.is_empty() {
-                        path_val
-                    } else {
-                        format!("{}/{}", home, rest)
-                    }
+                    env_clone
+                        .home_dir()
+                        .join(rest)
+                        .to_string_lossy()
+                        .into_owned()
                 } else {
                     path_val
                 };

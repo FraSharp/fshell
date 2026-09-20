@@ -79,6 +79,14 @@ mod tests {
     }
 
     #[test]
+    fn home_dir_reads_shell_home_without_mutating_process_environment() {
+        let env = Env::new();
+        env.set_shell_var("HOME", Val::String("/logical/home".to_string()));
+
+        assert_eq!(env.home_dir(), std::path::Path::new("/logical/home"));
+    }
+
+    #[test]
     fn finalize_no_failures_keeps_last_exit_code() {
         let (ec, err) = pipeline_finalize(Vec::new(), 7, false);
         assert_eq!(ec, 7);

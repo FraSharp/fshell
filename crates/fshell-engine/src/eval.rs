@@ -2039,14 +2039,9 @@ async fn eval_stmt_inner(
             };
             // Expand tilde in path
             let path_str = if path_str == "~" {
-                std::env::var("HOME").unwrap_or(path_str)
+                env.home_dir().to_string_lossy().into_owned()
             } else if let Some(rest) = path_str.strip_prefix("~/") {
-                let home = std::env::var("HOME").unwrap_or_default();
-                if home.is_empty() {
-                    path_str
-                } else {
-                    format!("{}/{}", home, rest)
-                }
+                env.home_dir().join(rest).to_string_lossy().into_owned()
             } else {
                 path_str
             };
