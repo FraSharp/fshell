@@ -30,6 +30,26 @@ mod tests {
         assert!(matches!(result, Ok(Flow::Exit(42))));
     }
 
+    #[tokio::test]
+    async fn async_builtin_runs_on_the_engine_runtime() {
+        let env = Env::new();
+        env.register_async_builtin(
+            "async_set",
+            |_input, _args, env, _output, _span| async move {
+                env.set_shell_var("ASYNC_BUILTIN_RAN", Val::Bool(true));
+                Ok(())
+            },
+        );
+
+        let result = run_script("async_set", &env).await;
+
+        assert!(matches!(result, Ok(Flow::Normal)));
+        assert_eq!(
+            env.vars.read().get("ASYNC_BUILTIN_RAN").cloned(),
+            Some(Val::Bool(true))
+        );
+    }
+
     #[test]
     fn logical_cwd_does_not_mutate_process_cwd() {
         let process_cwd = std::env::current_dir().unwrap();
