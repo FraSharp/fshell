@@ -161,7 +161,7 @@ impl Parser {
         match c {
             '+' => {
                 self.next_char();
-                Some((BinOp::Add, 3))
+                Some((BinOp::Add, 4))
             }
             '-' => {
                 if self.pos + 1 < self.input.len()
@@ -176,26 +176,26 @@ impl Parser {
                     return None;
                 }
                 self.next_char();
-                Some((BinOp::Sub, 3))
+                Some((BinOp::Sub, 4))
             }
             '*' => {
                 self.next_char();
-                Some((BinOp::Mul, 4))
+                Some((BinOp::Mul, 5))
             }
             '/' => {
                 if self.cmd_arg_mode {
                     return None;
                 }
                 self.next_char();
-                Some((BinOp::Div, 4))
+                Some((BinOp::Div, 5))
             }
             '=' if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '=' => {
                 self.pos += 2;
-                Some((BinOp::Eq, 2))
+                Some((BinOp::Eq, 3))
             }
             '!' if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '=' => {
                 self.pos += 2;
-                Some((BinOp::Neq, 2))
+                Some((BinOp::Neq, 3))
             }
             '<' => {
                 if (self.redirect_mode || self.cmd_arg_mode)
@@ -210,7 +210,7 @@ impl Parser {
                 } else {
                     BinOp::Lt
                 };
-                Some((op, 2))
+                Some((op, 3))
             }
             '>' => {
                 if (self.redirect_mode || self.cmd_arg_mode)
@@ -228,7 +228,7 @@ impl Parser {
                 } else {
                     BinOp::Gt
                 };
-                Some((op, 2))
+                Some((op, 3))
             }
             '~' => {
                 // In command-arg mode `~` is part of a literal bare word
@@ -237,7 +237,7 @@ impl Parser {
                     return None;
                 }
                 self.next_char();
-                Some((BinOp::ReMatch, 1))
+                Some((BinOp::ReMatch, 3))
             }
             _ => None,
         }
@@ -558,7 +558,9 @@ impl Parser {
                 } else {
                     BinOp::Or
                 };
-                let prec = 1;
+                // `and` binds tighter than `or`, matching every comparable
+                // language: `a or b and c` parses as `a or (b and c)`.
+                let prec = if ident == "and" { 2 } else { 1 };
                 if prec < min_prec {
                     self.pos = before_whitespace;
                     break;

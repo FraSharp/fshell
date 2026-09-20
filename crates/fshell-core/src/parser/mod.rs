@@ -2432,6 +2432,65 @@ mod tests {
     }
 
     #[test]
+    fn test_and_binds_tighter_than_or() {
+        // `a or b and c` must parse as `a or (b and c)`, not `(a or b) and c`.
+        let mut p = Parser::new("let x = a or b and c");
+        let stmts = p.parse_statements().unwrap();
+        assert_eq!(stmts.len(), 1);
+        let Stmt::Let { expr, .. } = stmts[0].unpack() else {
+            panic!("Expected Stmt::Let");
+        };
+        match expr.unpack() {
+            Expr::BinaryOp {
+                op: BinOp::Or,
+                lhs,
+                rhs,
+            } => {
+                assert_eq!(lhs.unpack(), &Expr::Ident("a".to_string()));
+                assert!(
+                    matches!(
+                        rhs.unpack(),
+                        Expr::BinaryOp {
+                            op: BinOp::And,
+                            ..
+                        }
+                    ),
+                    "expected `and` to bind tighter than `or`, got {:?}",
+                    rhs
+                );
+            }
+            other => panic!("Expected `or` at the root, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_comparison_binds_tighter_than_boolean_operators() {
+        // `a == 1 and b == 2` must parse as `(a == 1) and (b == 2)`.
+        let mut p = Parser::new("let x = a == 1 and b == 2");
+        let stmts = p.parse_statements().unwrap();
+        let Stmt::Let { expr, .. } = stmts[0].unpack() else {
+            panic!("Expected Stmt::Let");
+        };
+        match expr.unpack() {
+            Expr::BinaryOp {
+                op: BinOp::And,
+                lhs,
+                rhs,
+            } => {
+                assert!(matches!(
+                    lhs.unpack(),
+                    Expr::BinaryOp { op: BinOp::Eq, .. }
+                ));
+                assert!(matches!(
+                    rhs.unpack(),
+                    Expr::BinaryOp { op: BinOp::Eq, .. }
+                ));
+            }
+            other => panic!("Expected `and` at the root, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_quoted_brace_interp_bare_ident_is_variable_ref() {
         // `"a{b}"` — a bare identifier inside `{...}` string interpolation is a
         // variable reference, not a command-call pipeline ("Command not found: b").
