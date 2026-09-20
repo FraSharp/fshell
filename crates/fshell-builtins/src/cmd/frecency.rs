@@ -275,9 +275,10 @@ pub fn z_builtin(
     // Check if it's "-" first
     let is_dash = args.len() == 1 && matches!(&args[0], Val::String(s) if s == "-");
     if is_dash {
-        let oldpwd = match std::env::var("OLDPWD") {
-            Ok(o) => PathBuf::from(o),
-            Err(_) => return Err("z: OLDPWD not set".to_string().into()),
+        let oldpwd = match env.vars.read().get("OLDPWD") {
+            Some(Val::String(path)) => PathBuf::from(path),
+            Some(value) => PathBuf::from(value.to_text()),
+            None => return Err("z: OLDPWD not set".to_string().into()),
         };
         let _ = tx.try_send(PipelinePayload::Data(Arc::new(Val::String(
             oldpwd.display().to_string(),

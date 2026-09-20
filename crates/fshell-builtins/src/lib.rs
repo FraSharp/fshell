@@ -830,6 +830,7 @@ mod tests {
         }
 
         let old_dir = env.cwd();
+        let host_oldpwd = std::env::var("OLDPWD").ok();
 
         let tmp_root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         let dummy_home = tmp_root.join("fshell_dummy_home_cd_test");
@@ -864,10 +865,7 @@ mod tests {
         .unwrap();
 
         // Check OLDPWD
-        assert_eq!(
-            std::env::var("OLDPWD").unwrap(),
-            old_dir.to_string_lossy().to_string()
-        );
+        assert_eq!(std::env::var("OLDPWD").ok(), host_oldpwd);
 
         assert_eq!(
             env.vars.read().get("OLDPWD").unwrap().clone(),

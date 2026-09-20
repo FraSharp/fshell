@@ -737,9 +737,10 @@ pub fn cd_builtin(
     };
 
     if raw_path.to_str() == Some("-") {
-        let oldpwd = match std::env::var("OLDPWD") {
-            Ok(o) => PathBuf::from(o),
-            Err(_) => return Err("cd: OLDPWD not set".to_string().into()),
+        let oldpwd = match env.vars.read().get("OLDPWD") {
+            Some(Val::String(path)) => PathBuf::from(path),
+            Some(value) => PathBuf::from(value.to_text()),
+            None => return Err("cd: OLDPWD not set".to_string().into()),
         };
         let _ = tx.try_send(PipelinePayload::Data(Arc::new(Val::String(
             oldpwd.display().to_string(),
