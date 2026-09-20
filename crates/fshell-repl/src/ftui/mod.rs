@@ -3177,8 +3177,8 @@ pub async fn run_ftui_repl(
                 drop(capture_state);
                 if !capture_ok {
                     let msg = capture_err.unwrap_or_else(|| "capture failed".to_string());
-                    // Surface capture failure instead of silently showing empty output (R6).
-                    eprintln!("\r\x1b[33m[capture] {msg} — output not captured\x1b[0m");
+                    // Surface capture failure through the anchored renderer;
+                    // direct stderr would corrupt the raw FTUI viewport.
                     captured.push(format!("[capture failed: {msg}]"));
                 }
                 // Split multiline commands into separate lines so viewport height accounting is correct (ghost fix).
