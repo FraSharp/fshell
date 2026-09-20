@@ -1133,22 +1133,27 @@ fn is_action_allowed(
 impl Env {
     /// Get the logical current working directory for this environment.
     pub fn cwd(&self) -> PathBuf {
-        let p = self.scope.cwd.read().clone();
-        if p.exists() {
-            p
+        self.scope.cwd.read().clone()
+    }
+
+    /// Resolve a path relative to this environment's logical working directory.
+    ///
+    /// Shell environments are cloneable and may execute concurrently. The
+    /// process-global working directory cannot represent that model safely, so
+    /// shell-owned filesystem operations must resolve relative paths explicitly.
+    pub fn resolve_path<P: AsRef<std::path::Path>>(&self, path: P) -> PathBuf {
+        let path = path.as_ref();
+        if path.is_absolute() {
+            path.to_path_buf()
         } else {
-            std::env::current_dir()
-                .ok()
-                .filter(|d| d.exists())
-                .unwrap_or_else(|| PathBuf::from("/"))
+            self.cwd().join(path)
         }
     }
 
     /// Set the logical current working directory for this environment,
-    /// synchronizing the process working directory and PWD environment variable.
+    /// synchronizing the PWD environment variable.
     pub fn set_cwd(&self, new_cwd: PathBuf) {
         *self.scope.cwd.write() = new_cwd.clone();
-        let _ = std::env::set_current_dir(&new_cwd);
         let pwd_str = new_cwd.to_string_lossy().to_string();
         {
             let mut vars = lock_vars!(self.vars.write());
@@ -1396,15 +1401,13 @@ impl Env {
                 | CapAction::WriteFile(p)
                 | CapAction::ReadDir(p)
                 | CapAction::WriteDir(p) => {
+                    if p.is_relative() {
+                        *p = self.resolve_path(&*p);
+                    }
                     if let Ok(canonical) = p.canonicalize() {
                         *p = canonical;
                     } else {
-                        let abs_path = if p.is_relative() {
-                            self.cwd().join(&p)
-                        } else {
-                            p.clone()
-                        };
-                        *p = clean_path(&abs_path);
+                        *p = clean_path(p);
                     }
                 }
                 _ => {}
@@ -1598,11 +1601,7 @@ impl Env {
         append: bool,
         truncate: bool,
     ) -> Result<fshell_capabilities::CapFile, EngineError> {
-        let abs_path = if path.is_relative() {
-            self.cwd().join(path)
-        } else {
-            path.to_path_buf()
-        };
+        let abs_path = self.resolve_path(path);
         let clean = clean_path(&abs_path);
         if read {
             self.enforce_capability("file_read", CapAction::ReadFile(clean.clone()))?;
@@ -1626,11 +1625,7 @@ impl Env {
         read: bool,
         write: bool,
     ) -> Result<fshell_capabilities::CapDir, EngineError> {
-        let abs_path = if path.is_relative() {
-            self.cwd().join(path)
-        } else {
-            path.to_path_buf()
-        };
+        let abs_path = self.resolve_path(path);
         let clean = clean_path(&abs_path);
         if read {
             self.enforce_capability("dir_read", CapAction::ReadDir(clean.clone()))?;
@@ -1711,10 +1706,9 @@ impl Env {
         if !self.reactive.tracking_active.load(Ordering::Acquire) {
             return;
         }
+        let path = self.resolve_path(path);
         if let Some(set) = self.reactive.tracked_reads.write().as_mut() {
-            if path.is_absolute() {
-                set.insert(path);
-            } else if let Ok(abs_path) = path.canonicalize() {
+            if let Ok(abs_path) = path.canonicalize() {
                 set.insert(abs_path);
             } else {
                 set.insert(path);

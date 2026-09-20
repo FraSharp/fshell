@@ -31,6 +31,22 @@ mod tests {
     }
 
     #[test]
+    fn logical_cwd_does_not_mutate_process_cwd() {
+        let process_cwd = std::env::current_dir().unwrap();
+        let logical_cwd = tempfile::tempdir().unwrap();
+        let env = Env::new();
+
+        env.set_cwd(logical_cwd.path().to_path_buf());
+
+        assert_eq!(env.cwd(), logical_cwd.path());
+        assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+        assert_eq!(
+            env.resolve_path("relative.txt"),
+            logical_cwd.path().join("relative.txt")
+        );
+    }
+
+    #[test]
     fn finalize_no_failures_keeps_last_exit_code() {
         let (ec, err) = pipeline_finalize(Vec::new(), 7, false);
         assert_eq!(ec, 7);

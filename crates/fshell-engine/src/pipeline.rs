@@ -2122,9 +2122,9 @@ pub async fn execute_pipeline(
                         continue;
                     }
                 };
-                let path_buf = std::path::PathBuf::from(&path_val);
-                if let Err(e) =
-                    env_clone.enforce_capability("write_redirect", CapAction::WriteFile(path_buf))
+                let path_buf = env_clone.resolve_path(&path_val);
+                if let Err(e) = env_clone
+                    .enforce_capability("write_redirect", CapAction::WriteFile(path_buf.clone()))
                 {
                     env_clone.report_stage_error();
                     let _ = out_tx.send(PipelinePayload::Structured(e.into())).await;
@@ -2133,8 +2133,7 @@ pub async fn execute_pipeline(
                 let noclobber = env_clone.options.read().noclobber;
                 let is_dev_null = path_val == "/dev/null"
                     || path_val.ends_with('/') && path_val.trim_end_matches('/') == "/dev/null";
-                if noclobber && !append && !is_dev_null && std::path::Path::new(&path_val).exists()
-                {
+                if noclobber && !append && !is_dev_null && path_buf.exists() {
                     env_clone.report_stage_error();
                     let _ = out_tx
                         .send(PipelinePayload::Structured(
@@ -2151,7 +2150,7 @@ pub async fn execute_pipeline(
                     } else {
                         opts.truncate(true);
                     }
-                    let mut file = match opts.open(&path_val).await {
+                    let mut file = match opts.open(&path_buf).await {
                         Ok(f) => f,
                         Err(e) => {
                             env_clone.report_stage_error();
@@ -2302,7 +2301,7 @@ pub async fn execute_pipeline(
                 } else {
                     path_val
                 };
-                let path_buf = std::path::PathBuf::from(&path_str);
+                let path_buf = env_clone.resolve_path(&path_str);
                 if let Err(e) = env_clone
                     .enforce_capability("read_redirect", CapAction::ReadFile(path_buf.clone()))
                 {

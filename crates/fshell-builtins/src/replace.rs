@@ -143,7 +143,7 @@ async fn process_glob(
         (".".to_string(), pattern.to_string())
     };
 
-    let base_path = std::path::PathBuf::from(&base_dir);
+    let base_path = env.resolve_path(&base_dir);
     if !base_path.exists() {
         return Err(BuiltinError::FileNotFound {
             cmd: "replace".into(),
@@ -158,7 +158,7 @@ async fn process_glob(
     env.track_read(base_path);
 
     // Walk the directory tree and match the glob
-    for entry in walkdir::WalkDir::new(&base_dir)
+    for entry in walkdir::WalkDir::new(&base_path)
         .max_depth(32)
         .follow_links(false)
     {
@@ -191,7 +191,7 @@ async fn process_file(
     env: &Env,
     tx: &PipeSender,
 ) -> Result<(), ShellError> {
-    let file_path = std::path::PathBuf::from(path);
+    let file_path = env.resolve_path(path);
 
     // Capability checks
     env.enforce_capability("replace", CapAction::ReadFile(file_path.clone()))?;

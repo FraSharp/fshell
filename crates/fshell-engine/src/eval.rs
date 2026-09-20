@@ -2050,15 +2050,28 @@ async fn eval_stmt_inner(
             } else {
                 path_str
             };
+            let source_path = if path_str.starts_with("http://") || path_str.starts_with("https://")
+            {
+                None
+            } else {
+                Some(env.resolve_path(&path_str))
+            };
             // POSIX fast-path: if the file looks like a POSIX script (shebang or bash constructs),
             // try fshell-posix engine first when available (registered via posix handler).
             let use_posix_engine = !*bash
-                && std::fs::read_to_string(&path_str)
+                && source_path
+                    .as_ref()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
                     .map(|c| crate::login::looks_like_posix(&c))
                     .unwrap_or(false);
             if use_posix_engine && let Some(handler) = crate::posix_handler() {
+                let Some(source_path) = source_path.as_ref() else {
+                    return Err(EngineError::from(
+                        "source URL cannot use the POSIX file engine",
+                    ));
+                };
                 let content =
-                    std::fs::read_to_string(&path_str).map_err(|e| EngineError::IoError {
+                    std::fs::read_to_string(source_path).map_err(|e| EngineError::IoError {
                         message: format!("Failed to read {:?}: {}", path_str, e),
                         span: None,
                     })?;
@@ -2096,12 +2109,16 @@ async fn eval_stmt_inner(
                 return Ok(Flow::Normal);
             }
             if *bash {
-                let content = tokio::fs::read_to_string(&path_str).await.map_err(|e| {
-                    EngineError::IoError {
-                        message: format!("Failed to read {:?}: {}", path_str, e),
-                        span: None,
-                    }
-                })?;
+                let path = source_path
+                    .as_ref()
+                    .ok_or_else(|| EngineError::from("source --bash does not support URLs"))?;
+                let content =
+                    tokio::fs::read_to_string(path)
+                        .await
+                        .map_err(|e| EngineError::IoError {
+                            message: format!("Failed to read {:?}: {}", path_str, e),
+                            span: None,
+                        })?;
                 if let Some(handler) = crate::posix_handler() {
                     let (code, _) = handler(content, Vec::new(), env.clone(), false).await?;
                     env.set_exit_code(code as i64);
@@ -2112,7 +2129,8 @@ async fn eval_stmt_inner(
                     ));
                 }
             } else {
-                let path_buf = std::path::PathBuf::from(&path_str);
+                let path_buf = source_path
+                    .ok_or_else(|| EngineError::from("source URL requires a local source mode"))?;
                 let content = tokio::fs::read_to_string(&path_buf).await.map_err(|e| {
                     EngineError::IoError {
                         message: format!("Failed to read {:?}: {}", path_str, e),

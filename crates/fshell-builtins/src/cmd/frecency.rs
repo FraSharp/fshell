@@ -292,7 +292,7 @@ pub fn z_builtin(
     if args.len() == 1
         && let Val::String(ref s) = args[0]
     {
-        let expanded = expand_tilde(s);
+        let expanded = env.resolve_path(expand_tilde(s));
         if expanded.is_dir()
             && let Ok(target_path) = std::fs::canonicalize(&expanded)
         {
@@ -534,7 +534,7 @@ pub fn zi_builtin(
         selected_path
     };
 
-    let target = PathBuf::from(target_path);
+    let target = env.resolve_path(target_path);
     crate::utils::change_dir_and_update_caps(&target, env)?;
     let _ = log_frecency_visit(&target);
 

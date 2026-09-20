@@ -4,41 +4,40 @@
 use brush_parser::ast as brush_ast;
 
 /// Evaluate a POSIX test(1) expression (brush's TestExpr) against Env.
-pub fn eval_test_expr(expr: &brush_ast::TestExpr, _env: &fshell_engine::Env) -> bool {
+pub fn eval_test_expr(expr: &brush_ast::TestExpr, env: &fshell_engine::Env) -> bool {
     match expr {
         brush_ast::TestExpr::False => false,
         brush_ast::TestExpr::Literal(s) => !s.is_empty(),
-        brush_ast::TestExpr::And(a, b) => eval_test_expr(a, _env) && eval_test_expr(b, _env),
-        brush_ast::TestExpr::Or(a, b) => eval_test_expr(a, _env) || eval_test_expr(b, _env),
-        brush_ast::TestExpr::Not(inner) => !eval_test_expr(inner, _env),
-        brush_ast::TestExpr::Parenthesized(inner) => eval_test_expr(inner, _env),
-        brush_ast::TestExpr::UnaryTest(op, val) => eval_unary_test(op, val),
-        brush_ast::TestExpr::BinaryTest(op, left, right) => eval_binary_test(op, left, right),
+        brush_ast::TestExpr::And(a, b) => eval_test_expr(a, env) && eval_test_expr(b, env),
+        brush_ast::TestExpr::Or(a, b) => eval_test_expr(a, env) || eval_test_expr(b, env),
+        brush_ast::TestExpr::Not(inner) => !eval_test_expr(inner, env),
+        brush_ast::TestExpr::Parenthesized(inner) => eval_test_expr(inner, env),
+        brush_ast::TestExpr::UnaryTest(op, val) => eval_unary_test(op, val, env),
+        brush_ast::TestExpr::BinaryTest(op, left, right) => eval_binary_test(op, left, right, env),
     }
 }
 
-fn eval_unary_test(op: &brush_ast::UnaryPredicate, val: &str) -> bool {
+fn eval_unary_test(op: &brush_ast::UnaryPredicate, val: &str, env: &fshell_engine::Env) -> bool {
+    let path = || env.resolve_path(val);
     match op {
         brush_ast::UnaryPredicate::StringHasNonZeroLength => !val.is_empty(),
         brush_ast::UnaryPredicate::StringHasZeroLength => val.is_empty(),
-        brush_ast::UnaryPredicate::FileExists => std::path::Path::new(val).exists(),
-        brush_ast::UnaryPredicate::FileExistsAndIsRegularFile => {
-            std::path::Path::new(val).is_file()
-        }
-        brush_ast::UnaryPredicate::FileExistsAndIsDir => std::path::Path::new(val).is_dir(),
-        brush_ast::UnaryPredicate::FileExistsAndIsReadable => std::fs::metadata(val)
+        brush_ast::UnaryPredicate::FileExists => path().exists(),
+        brush_ast::UnaryPredicate::FileExistsAndIsRegularFile => path().is_file(),
+        brush_ast::UnaryPredicate::FileExistsAndIsDir => path().is_dir(),
+        brush_ast::UnaryPredicate::FileExistsAndIsReadable => std::fs::metadata(path())
             .map(|m| !m.permissions().readonly())
             .unwrap_or(false),
         brush_ast::UnaryPredicate::FileExistsAndIsWritable => {
-            std::fs::metadata(val)
+            std::fs::metadata(path())
                 .map(|m| !m.permissions().readonly())
                 .unwrap_or(false)
-                || !std::path::Path::new(val).exists()
+                || !path().exists()
         }
         brush_ast::UnaryPredicate::FileExistsAndIsExecutable => {
             #[cfg(unix)]
             {
-                std::fs::metadata(val)
+                std::fs::metadata(path())
                     .map(|m| {
                         use std::os::unix::fs::PermissionsExt;
                         m.permissions().mode() & 0o111 != 0
@@ -50,15 +49,20 @@ fn eval_unary_test(op: &brush_ast::UnaryPredicate, val: &str) -> bool {
                 false
             }
         }
-        brush_ast::UnaryPredicate::FileExistsAndIsNotZeroLength => {
-            std::fs::metadata(val).map(|m| m.len() > 0).unwrap_or(false)
-        }
-        brush_ast::UnaryPredicate::FileExistsAndIsSymlink => std::path::Path::new(val).is_symlink(),
+        brush_ast::UnaryPredicate::FileExistsAndIsNotZeroLength => std::fs::metadata(path())
+            .map(|m| m.len() > 0)
+            .unwrap_or(false),
+        brush_ast::UnaryPredicate::FileExistsAndIsSymlink => path().is_symlink(),
         _ => false,
     }
 }
 
-fn eval_binary_test(op: &brush_ast::BinaryPredicate, left: &str, right: &str) -> bool {
+fn eval_binary_test(
+    op: &brush_ast::BinaryPredicate,
+    left: &str,
+    right: &str,
+    env: &fshell_engine::Env,
+) -> bool {
     match op {
         brush_ast::BinaryPredicate::StringExactlyMatchesString
         | brush_ast::BinaryPredicate::StringExactlyMatchesPattern => left == right,
@@ -82,13 +86,13 @@ fn eval_binary_test(op: &brush_ast::BinaryPredicate, left: &str, right: &str) ->
             parse_int(left) >= parse_int(right)
         }
         brush_ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot => {
-            file_mtime(left) > file_mtime(right)
+            file_mtime(&env.resolve_path(left)) > file_mtime(&env.resolve_path(right))
         }
         brush_ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes => {
-            file_mtime(left) < file_mtime(right)
+            file_mtime(&env.resolve_path(left)) < file_mtime(&env.resolve_path(right))
         }
         brush_ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers => {
-            file_mtime(left) == file_mtime(right)
+            file_mtime(&env.resolve_path(left)) == file_mtime(&env.resolve_path(right))
         }
     }
 }
@@ -97,7 +101,7 @@ fn parse_int(s: &str) -> i64 {
     s.trim().parse::<i64>().unwrap_or(0)
 }
 
-fn file_mtime(path: &str) -> std::time::SystemTime {
+fn file_mtime(path: &std::path::Path) -> std::time::SystemTime {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .unwrap_or(std::time::UNIX_EPOCH)

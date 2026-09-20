@@ -66,7 +66,7 @@ pub fn ff_builtin(
     }
 
     // 3. Check capability on the search root
-    let search_root = std::path::PathBuf::from(&config.path);
+    let search_root = env.resolve_path(&config.path);
     if !search_root.exists() {
         return Err(BuiltinError::FileNotFound {
             cmd: "ff".into(),
@@ -79,6 +79,7 @@ pub fn ff_builtin(
     env.track_read(search_root);
 
     // 4. Run the search
+    config.path = search_root.to_string_lossy().into_owned();
     let config_arc = Arc::new(config);
     let tx_clone = tx.clone();
     tokio::spawn(async move {

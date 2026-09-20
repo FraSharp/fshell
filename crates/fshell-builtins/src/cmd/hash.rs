@@ -7,7 +7,6 @@ use fshell_core::Val;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use miette::SourceSpan;
 use std::io::Read;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 pub fn hash_builtin(
@@ -154,7 +153,7 @@ pub fn hash_builtin(
             }
         } else {
             for file in files {
-                let path = PathBuf::from(&file);
+                let path = env_clone.resolve_path(&file);
                 if env_clone
                     .enforce_capability("hash", CapAction::ReadFile(path.clone()))
                     .is_err()

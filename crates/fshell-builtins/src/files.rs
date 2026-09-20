@@ -20,7 +20,7 @@ pub fn files_builtin(
         _ => ".".to_string(),
     };
 
-    let path = crate::utils::expand_tilde(&path_str);
+    let path = env.resolve_path(crate::utils::expand_tilde(&path_str));
     let path = std::fs::canonicalize(&path).unwrap_or(path);
 
     env.enforce_capability("files", CapAction::ReadDir(path.clone()))?;

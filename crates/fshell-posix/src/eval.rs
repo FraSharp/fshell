@@ -683,31 +683,34 @@ fn eval_extended_test(expr: &ExtendedTestExpr, env: &Env) -> bool {
         ExtendedTestExpr::Parenthesized(inner) => eval_extended_test(inner, env),
         ExtendedTestExpr::UnaryTest(op, word) => {
             let val = expand_word(&word.value, env, &ExpansionConfig::default(), &[]).join(" ");
-            eval_unary_extended(op, &val)
+            eval_unary_extended(op, &val, env)
         }
         ExtendedTestExpr::BinaryTest(op, left, right) => {
             let lv = expand_word(&left.value, env, &ExpansionConfig::default(), &[]).join(" ");
             let rv = expand_word(&right.value, env, &ExpansionConfig::default(), &[]).join(" ");
-            eval_binary_extended(op, &lv, &rv)
+            eval_binary_extended(op, &lv, &rv, env)
         }
     }
 }
 
-fn eval_unary_extended(op: &brush_parser::ast::UnaryPredicate, val: &str) -> bool {
+fn eval_unary_extended(op: &brush_parser::ast::UnaryPredicate, val: &str, env: &Env) -> bool {
+    let path = || env.resolve_path(val);
     match op {
         brush_parser::ast::UnaryPredicate::StringHasZeroLength => val.is_empty(),
         brush_parser::ast::UnaryPredicate::StringHasNonZeroLength => !val.is_empty(),
-        brush_parser::ast::UnaryPredicate::FileExists => std::path::Path::new(val).exists(),
-        brush_parser::ast::UnaryPredicate::FileExistsAndIsRegularFile => {
-            std::path::Path::new(val).is_file()
+        brush_parser::ast::UnaryPredicate::FileExists => path().exists(),
+        brush_parser::ast::UnaryPredicate::FileExistsAndIsRegularFile => path().is_file(),
+        brush_parser::ast::UnaryPredicate::FileExistsAndIsDir => path().is_dir(),
+        brush_parser::ast::UnaryPredicate::FileExistsAndIsReadable => {
+            path_access(&path(), libc::R_OK)
         }
-        brush_parser::ast::UnaryPredicate::FileExistsAndIsDir => std::path::Path::new(val).is_dir(),
-        brush_parser::ast::UnaryPredicate::FileExistsAndIsReadable => path_access(val, libc::R_OK),
-        brush_parser::ast::UnaryPredicate::FileExistsAndIsWritable => path_access(val, libc::W_OK),
+        brush_parser::ast::UnaryPredicate::FileExistsAndIsWritable => {
+            path_access(&path(), libc::W_OK)
+        }
         brush_parser::ast::UnaryPredicate::FileExistsAndIsExecutable => {
             #[cfg(unix)]
             {
-                std::fs::metadata(val)
+                std::fs::metadata(path())
                     .map(|m| {
                         use std::os::unix::fs::PermissionsExt;
                         m.permissions().mode() & 0o111 != 0
@@ -723,7 +726,12 @@ fn eval_unary_extended(op: &brush_parser::ast::UnaryPredicate, val: &str) -> boo
     }
 }
 
-fn eval_binary_extended(op: &brush_parser::ast::BinaryPredicate, left: &str, right: &str) -> bool {
+fn eval_binary_extended(
+    op: &brush_parser::ast::BinaryPredicate,
+    left: &str,
+    right: &str,
+    env: &Env,
+) -> bool {
     match op {
         brush_parser::ast::BinaryPredicate::StringExactlyMatchesString
         | brush_parser::ast::BinaryPredicate::StringExactlyMatchesPattern => left == right,
@@ -750,16 +758,16 @@ fn eval_binary_extended(op: &brush_parser::ast::BinaryPredicate, left: &str, rig
         brush_parser::ast::BinaryPredicate::LeftSortsBeforeRight => left < right,
         brush_parser::ast::BinaryPredicate::LeftSortsAfterRight => left > right,
         brush_parser::ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot => {
-            file_mtime(left) > file_mtime(right)
+            file_mtime(&env.resolve_path(left)) > file_mtime(&env.resolve_path(right))
         }
         brush_parser::ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes => {
-            file_mtime(left) < file_mtime(right)
+            file_mtime(&env.resolve_path(left)) < file_mtime(&env.resolve_path(right))
         }
         _ => false,
     }
 }
 
-fn file_mtime(path: &str) -> std::time::SystemTime {
+fn file_mtime(path: &std::path::Path) -> std::time::SystemTime {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .unwrap_or(std::time::UNIX_EPOCH)
@@ -1473,6 +1481,7 @@ async fn eval_simple_command_inner(
                 return Ok((0, None));
             }
             let mut cmd = std::process::Command::new(&args[0]);
+            cmd.current_dir(env.cwd());
             if args.len() > 1 {
                 cmd.args(&args[1..]);
             }
@@ -1508,7 +1517,8 @@ async fn eval_simple_command_inner(
         "fg" | "bg" => return Ok((1, None)),
         "dot" | "." | "source" => {
             if let Some(path) = args.first() {
-                let content = std::fs::read_to_string(path).map_err(|e| {
+                let source_path = env.resolve_path(path);
+                let content = std::fs::read_to_string(&source_path).map_err(|e| {
                     PosixError::Engine(EngineError::IoError {
                         message: format!("{}: {}: {}", cmd_name, path, e),
                         span: None,
@@ -2011,7 +2021,7 @@ fn eval_test_args(args: &[String], env: &Env) -> bool {
             if clean_args[0] == "!" {
                 clean_args[1].is_empty()
             } else {
-                eval_unary_primary(&clean_args[0], &clean_args[1])
+                eval_unary_primary(&clean_args[0], &clean_args[1], env)
             }
         }
         3 => {
@@ -2063,8 +2073,9 @@ fn is_binary_primary(op: &str) -> bool {
     )
 }
 
-fn path_access(path: &str, mode: libc::c_int) -> bool {
-    let c_path = match std::ffi::CString::new(path) {
+fn path_access(path: &std::path::Path, mode: libc::c_int) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
         Ok(p) => p,
         Err(_) => return false,
     };
@@ -2072,20 +2083,21 @@ fn path_access(path: &str, mode: libc::c_int) -> bool {
     unsafe { libc::access(c_path.as_ptr(), mode) == 0 }
 }
 
-fn eval_unary_primary(op: &str, val: &str) -> bool {
+fn eval_unary_primary(op: &str, val: &str, env: &Env) -> bool {
+    let path = || env.resolve_path(val);
     match op {
         "-n" => !val.is_empty(),
         "-z" => val.is_empty(),
-        "-e" | "-a" => std::path::Path::new(val).exists(),
-        "-f" => std::path::Path::new(val).is_file(),
-        "-d" => std::path::Path::new(val).is_dir(),
-        "-r" => path_access(val, libc::R_OK),
-        "-w" => path_access(val, libc::W_OK),
+        "-e" | "-a" => path().exists(),
+        "-f" => path().is_file(),
+        "-d" => path().is_dir(),
+        "-r" => path_access(&path(), libc::R_OK),
+        "-w" => path_access(&path(), libc::W_OK),
         "-x" => {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::metadata(val)
+                std::fs::metadata(path())
                     .map(|m| m.permissions().mode() & 0o111 != 0)
                     .unwrap_or(false)
             }

@@ -797,7 +797,7 @@ pub fn pushd_builtin(
                 .maybe_with_span(span));
             }
         };
-        let target = std::path::PathBuf::from(top_str);
+        let target = env.resolve_path(top_str);
 
         stack.insert(0, Val::String(current_dir.to_string_lossy().to_string()));
         vars.insert("DIRSTACK".to_string(), Val::List(stack));
@@ -816,7 +816,7 @@ pub fn pushd_builtin(
                 .maybe_with_span(span));
             }
         };
-        let target = std::fs::canonicalize(expand_tilde(&target_arg))
+        let target = std::fs::canonicalize(env.resolve_path(expand_tilde(&target_arg)))
             .map_err(|e| format!("pushd: {}: {}", target_arg, e))?;
 
         stack.insert(0, Val::String(current_dir.to_string_lossy().to_string()));
@@ -861,7 +861,7 @@ pub fn popd_builtin(
             .maybe_with_span(span));
         }
     };
-    let target = std::path::PathBuf::from(top_str);
+    let target = env.resolve_path(top_str);
 
     vars.insert("DIRSTACK".to_string(), Val::List(stack));
     drop(vars);
@@ -970,7 +970,7 @@ pub fn extract_builtin(
         }
     };
 
-    let raw_path = expand_tilde(archive_path_str);
+    let raw_path = env.resolve_path(expand_tilde(archive_path_str));
     let archive_path = std::fs::canonicalize(&raw_path)
         .map_err(|e| format!("Invalid archive path {:?}: {}", raw_path, e))?;
     env.enforce_capability("extract", CapAction::ReadFile(archive_path.clone()))?;
@@ -1173,7 +1173,7 @@ fn resolve_canonical_paths(
 ) -> Result<Vec<PathBuf>, ShellError> {
     let mut canonical = Vec::new();
     for p in paths {
-        let raw = expand_tilde(p);
+        let raw = env.resolve_path(expand_tilde(p));
         let path = std::fs::canonicalize(&raw).map_err(|e| format!("Invalid path {raw:?}: {e}"))?;
         check_read_file(env, cmd, path.clone())?;
         canonical.push(path);
@@ -1681,7 +1681,7 @@ pub fn watch_builtin(
     }
 
     let raw_path = if !path_args.is_empty() {
-        expand_tilde(&path_args[0])
+        env.resolve_path(expand_tilde(&path_args[0]))
     } else {
         env.cwd()
     };

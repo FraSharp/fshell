@@ -313,7 +313,7 @@ pub fn which_builtin(
 
         let mut found = false;
         for dir in current_path.split(':') {
-            let path = std::path::Path::new(dir).join(&name);
+            let path = env.resolve_path(dir).join(&name);
             if path.is_file() {
                 #[cfg(unix)]
                 {
@@ -560,7 +560,7 @@ impl<'a> TestParser<'a> {
                 .next()
                 .ok_or_else(|| format!("test: missing argument after {}", first_ref))?;
             let path_str = val_to_display_string(path_val);
-            let path = std::path::Path::new(&path_str);
+            let path = self.env.resolve_path(&path_str);
             match first_ref {
                 "-e" => {
                     return Ok(path.exists());
@@ -1175,7 +1175,7 @@ pub fn sleep_builtin(
 pub fn lint_builtin(
     _in_rx: Option<PipeStream>,
     args: Vec<Val>,
-    _env: &Env,
+    env: &Env,
     tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
@@ -1184,8 +1184,9 @@ pub fn lint_builtin(
     } else {
         match &args[0] {
             Val::String(s) => {
-                if std::path::Path::new(s).exists() {
-                    std::fs::read_to_string(s)
+                let path = env.resolve_path(s);
+                if path.exists() {
+                    std::fs::read_to_string(&path)
                         .map_err(|e| format!("lint: failed to read {}: {}", s, e))?
                 } else {
                     s.clone()
