@@ -541,10 +541,13 @@ async fn run_ls_utility(args: &[String]) -> i32 {
     });
 
     match fshell_builtins::ls_builtin(None, converted, &env, tx, None) {
-        Ok(_) => {
-            consumer.await.ok();
-            0
-        }
+        Ok(_) => match consumer.await {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("fsh: ls output consumer failed: {e}");
+                1
+            }
+        },
         Err(e) => {
             eprintln!("ls: {}", e.message);
             1
