@@ -35,7 +35,7 @@ use ratatui::{
     },
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Notify;
 use unicode_width::UnicodeWidthChar;
@@ -3312,7 +3312,7 @@ pub async fn run_ftui_repl(
                     None => break 'repl_loop,
                 };
                 let t_disable = ftui_start.elapsed();
-                let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+                let (_, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
                 prompt_mgr.refresh_snapshot(&current_dir);
                 let t_refresh = ftui_start.elapsed();
                 let final_ansi = prompt_mgr.render_prompt_final_ansi();
@@ -3396,51 +3396,6 @@ pub async fn run_ftui_repl(
                 status_bar.start_command_timer();
                 let t_prompt = ftui_start.elapsed();
 
-                let is_fullscreen = margins::is_fullscreen_app(&trimmed);
-                let is_suspended_cmd = true;
-
-                let _margin_guard =
-                    if !is_suspended_cmd && !is_fullscreen && status_bar.visible && term_h > 4 {
-                        let guard = margins::MarginGuard::new(term_h);
-                        margins::render_persistent_status_bar(
-                            &mut status_terminal,
-                            &status_bar,
-                            &theme,
-                            term_w,
-                            term_h,
-                        );
-                        Some(guard)
-                    } else {
-                        None
-                    };
-
-                let is_ticker_running = Arc::new(AtomicBool::new(true));
-                let is_ticker_running_clone = is_ticker_running.clone();
-
-                let ticker_handle = if _margin_guard.is_some() && !is_suspended_cmd {
-                    let status_bar_snap = status_bar.clone();
-                    let theme_snap = theme.clone();
-                    Some(tokio::spawn(async move {
-                        let mut interval = tokio::time::interval(Duration::from_millis(200));
-                        let start = std::time::Instant::now();
-                        while is_ticker_running_clone.load(Ordering::Relaxed) {
-                            interval.tick().await;
-                            if !is_ticker_running_clone.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            margins::render_status_bar_live_tick(
-                                &status_bar_snap,
-                                &theme_snap,
-                                start.elapsed(),
-                                term_w,
-                                term_h,
-                            );
-                        }
-                    }))
-                } else {
-                    None
-                };
-
                 use futures::FutureExt;
                 env.is_command_running.store(true, Ordering::SeqCst);
                 let handle_fut = std::panic::AssertUnwindSafe(crate::handle_line_generic(
@@ -3457,10 +3412,6 @@ pub async fn run_ftui_repl(
                     }
                 };
                 env.is_command_running.store(false, Ordering::SeqCst);
-                is_ticker_running.store(false, Ordering::Relaxed);
-                if let Some(h) = ticker_handle {
-                    let _ = h.await;
-                }
                 let t_exec = ftui_start.elapsed();
                 let is_exit = handle_result.is_err();
                 drop(_suspend);
