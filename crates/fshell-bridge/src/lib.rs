@@ -743,6 +743,7 @@ pub fn run_external(
 
     let pid = child.id() as i32;
     let output_cancelled = Arc::new(AtomicBool::new(false));
+    let mut io_tasks = Vec::new();
     if debug_fg {
         eprintln!("[FSH_DEBUG_FG] parent: child spawned pid={}", pid);
     }
@@ -803,7 +804,7 @@ pub fn run_external(
         };
         let mut async_stdin = tokio::fs::File::from_std(std_stdin);
         let cmd_name = name.to_string();
-        tokio::spawn(async move {
+        io_tasks.push(tokio::spawn(async move {
             while let Some(payload) = rx.recv().await {
                 match payload {
                     PipelinePayload::Data(val_arc) => {
@@ -820,7 +821,7 @@ pub fn run_external(
                     PipelinePayload::Structured(_) => {}
                 }
             }
-        });
+        }));
     }
 
     // Capture process stdout & stream line-by-line (when stdout was piped)
@@ -840,7 +841,7 @@ pub fn run_external(
         let env_clone = env.clone();
         let is_structured = structured::is_known_structured_command(&name_owned, &args_strs);
         let output_cancelled_clone = output_cancelled.clone();
-        tokio::spawn(async move {
+        io_tasks.push(tokio::spawn(async move {
             use structured::{ParseResult, ParseState};
             use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
@@ -951,7 +952,7 @@ pub fn run_external(
                     }
                 }
             }
-        });
+        }));
     }
 
     // Capture stderr errors (when stderr was piped)
@@ -967,7 +968,7 @@ pub fn run_external(
         let tx_diag = tx.clone();
         let stderr_limit = env.options.read().stderr_max_bytes;
         let output_cancelled_clone = output_cancelled.clone();
-        tokio::spawn(async move {
+        io_tasks.push(tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let mut err_str = String::with_capacity(4096);
             let mut limited = async_stderr.take(stderr_limit as u64);
@@ -998,7 +999,7 @@ pub fn run_external(
                     terminate_process_group(pid);
                 }
             }
-        });
+        }));
     }
 
     // Synchronously wait for child exit to capture exit code deterministically.
@@ -1009,6 +1010,22 @@ pub fn run_external(
     // does not stall the async executor. I/O forwarding tasks remain async
     // and continue to drain pipes concurrently.
     let _exit_code = fshell_engine::wait_for_job_sync(env, pid, job_id, &cmd_str, is_interactive);
+
+    // The synchronous bridge API cannot await Tokio tasks directly: it is also
+    // used by callers already running on a Tokio worker thread. Keep the
+    // process wait synchronous, but retain and observe every I/O task so a
+    // panic in a producer/consumer task is not silently detached.
+    if !io_tasks.is_empty() {
+        let task_env = env.clone();
+        tokio::spawn(async move {
+            for task in io_tasks {
+                if let Err(error) = task.await {
+                    task_env.report_stage_error();
+                    eprintln!("external command I/O task failed: {error}");
+                }
+            }
+        });
+    }
 
     if cnf_debug {
         eprintln!(
