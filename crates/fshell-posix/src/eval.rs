@@ -648,7 +648,12 @@ async fn eval_command_stream(
                             span: None,
                         })
                     })?;
-                let _ = file.write_all(bytes);
+                file.write_all(bytes).map_err(|e| {
+                    PosixError::Engine(EngineError::IoError {
+                        message: format!("{}: {}", path.display(), e),
+                        span: None,
+                    })
+                })?;
             }
             let ret_out = if io_cfg.capture_stdout && redir.stdout_file.is_none() {
                 out
