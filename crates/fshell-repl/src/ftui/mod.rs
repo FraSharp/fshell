@@ -36,7 +36,7 @@ use ratatui::{
     },
 };
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
 use unicode_width::UnicodeWidthChar;
@@ -73,6 +73,40 @@ macro_rules! cpu_dbg {
     ($($arg:tt)*) => {
         $crate::ftui::cpu_dbg_log(format_args!($($arg)*))
     };
+}
+
+struct CommandRunningGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl<'a> CommandRunningGuard<'a> {
+    fn new(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self { flag }
+    }
+}
+
+impl Drop for CommandRunningGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
+struct CaptureStateGuard<'a> {
+    env: &'a mut Env,
+}
+
+impl<'a> CaptureStateGuard<'a> {
+    fn new(env: &'a mut Env) -> Self {
+        env.is_captured = true;
+        Self { env }
+    }
+}
+
+impl Drop for CaptureStateGuard<'_> {
+    fn drop(&mut self) {
+        self.env.is_captured = false;
+    }
 }
 
 use crate::alias_expansion::AliasExpansionState;
@@ -3151,32 +3185,26 @@ pub async fn run_ftui_repl(
                     use std::io::Write;
                     let _ = writeln!(tty, "[anchor] executing anchored: {}", trimmed);
                 }
-                env.is_captured = true;
+                let capture_state = CaptureStateGuard::new(&mut env);
                 let mut guard = capture::CaptureGuard::new();
                 let capture_ok = guard.ok();
                 let capture_err = guard.error().map(|s| s.to_string());
                 status_bar.start_command_timer();
-                env.is_command_running.store(true, Ordering::SeqCst);
-                use futures::FutureExt;
-                let handle_fut = std::panic::AssertUnwindSafe(crate::handle_line_generic(
-                    &env,
+                let command_running =
+                    CommandRunningGuard::new(&capture_state.env.is_command_running);
+                let handle_result = crate::handle_line_generic(
+                    &*capture_state.env,
                     &trimmed,
                     &current_dir,
                     &session_id,
-                ));
-                let handle_result = match handle_fut.catch_unwind().await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        eprintln!("\n\x1b[1;33mnotice:\x1b[0m FTUI recovered from panic.");
-                        Ok(())
-                    }
-                };
-                env.is_command_running.store(false, Ordering::SeqCst);
+                )
+                .await;
+                drop(command_running);
                 // Flush stdout so any buffered output reaches the pipe before we close it
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
                 let mut captured = guard.finish();
-                env.is_captured = false;
+                drop(capture_state);
                 if !capture_ok {
                     let msg = capture_err.unwrap_or_else(|| "capture failed".to_string());
                     // Surface capture failure instead of silently showing empty output (R6).
@@ -3329,22 +3357,10 @@ pub async fn run_ftui_repl(
                 status_bar.start_command_timer();
                 let t_prompt = ftui_start.elapsed();
 
-                use futures::FutureExt;
-                env.is_command_running.store(true, Ordering::SeqCst);
-                let handle_fut = std::panic::AssertUnwindSafe(crate::handle_line_generic(
-                    &env,
-                    &trimmed,
-                    &current_dir,
-                    &session_id,
-                ));
-                let handle_result = match handle_fut.catch_unwind().await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        eprintln!("\n\x1b[1;33mnotice:\x1b[0m FTUI recovered from panic.");
-                        Ok(())
-                    }
-                };
-                env.is_command_running.store(false, Ordering::SeqCst);
+                let command_running = CommandRunningGuard::new(&env.is_command_running);
+                let handle_result =
+                    crate::handle_line_generic(&env, &trimmed, &current_dir, &session_id).await;
+                drop(command_running);
                 let t_exec = ftui_start.elapsed();
                 let is_exit = handle_result.is_err();
                 drop(_suspend);
