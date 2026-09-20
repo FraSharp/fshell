@@ -1857,61 +1857,139 @@ async fn run_external_command(
         })
     })?;
 
-    if let Some(bytes) = effective_stdin
+    let stdin_task = if let Some(bytes) = effective_stdin
         && let Some(mut stdin) = child.stdin.take()
     {
         let b = bytes.to_vec();
-        tokio::spawn(async move {
-            let _ = stdin.write_all(&b).await;
-        });
+        Some(tokio::spawn(async move { stdin.write_all(&b).await }))
     } else if let Some(mut rx) = io_cfg.stdin_stream.take()
         && let Some(mut stdin) = child.stdin.take()
     {
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             while let Some(chunk) = rx.recv().await {
-                if stdin.write_all(&chunk).await.is_err() {
-                    break;
-                }
+                stdin.write_all(&chunk).await?;
             }
-        });
-    }
+            Ok(())
+        }))
+    } else {
+        None
+    };
 
-    let stdout_pump = if let Some(tx) = io_cfg.stdout_stream.clone()
+    let mut stdout_pump = if let Some(tx) = io_cfg.stdout_stream.clone()
         && let Some(mut stdout) = child.stdout.take()
     {
-        let handle = tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let mut buf = vec![0u8; 64 * 1024];
-            while let Ok(n) = stdout.read(&mut buf).await {
+            loop {
+                let n = stdout.read(&mut buf).await.map_err(StdoutPumpError::Io)?;
                 if n == 0 {
                     break;
                 }
                 let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
                 if tx.send(chunk).await.is_err() {
-                    break;
+                    return Err(StdoutPumpError::DownstreamClosed);
                 }
             }
-        });
-        Some(handle)
+            Ok(Vec::new())
+        }))
+    } else if let Some(mut stdout) = child.stdout.take() {
+        Some(tokio::spawn(async move {
+            let mut output = Vec::new();
+            stdout
+                .read_to_end(&mut output)
+                .await
+                .map_err(StdoutPumpError::Io)?;
+            Ok(output)
+        }))
     } else {
         None
     };
 
-    let output = child.wait_with_output().await.map_err(|e| {
+    let mut completed_stdout_pump = None;
+    let status = if let Some(stdout_pump) = stdout_pump.as_mut() {
+        tokio::select! {
+            result = child.wait() => result,
+            pump = stdout_pump => {
+                let should_kill = !matches!(&pump, Ok(Ok(_)));
+                if should_kill {
+                    let _ = child.start_kill();
+                }
+                completed_stdout_pump = Some(pump);
+                child.wait().await
+            }
+        }
+    } else {
+        child.wait().await
+    }
+    .map_err(|e| {
         PosixError::Engine(EngineError::IoError {
             message: format!("{}: {}", cmd_name, e),
             span: None,
         })
     })?;
 
-    if let Some(handle) = stdout_pump {
-        let _ = handle.await;
+    let captured_stdout = if let Some(pump) = completed_stdout_pump {
+        match pump {
+            Ok(Ok(output)) => Some(output),
+            Ok(Err(StdoutPumpError::DownstreamClosed)) => None,
+            Ok(Err(StdoutPumpError::Io(e))) => {
+                return Err(PosixError::Engine(EngineError::IoError {
+                    message: format!("{}: {}", cmd_name, e),
+                    span: None,
+                }));
+            }
+            Err(e) => {
+                return Err(PosixError::Engine(EngineError::IoError {
+                    message: format!("{} output task failed: {}", cmd_name, e),
+                    span: None,
+                }));
+            }
+        }
+    } else if let Some(stdout_pump) = stdout_pump {
+        match stdout_pump.await {
+            Ok(Ok(output)) => Some(output),
+            Ok(Err(StdoutPumpError::DownstreamClosed)) => None,
+            Ok(Err(StdoutPumpError::Io(e))) => {
+                return Err(PosixError::Engine(EngineError::IoError {
+                    message: format!("{}: {}", cmd_name, e),
+                    span: None,
+                }));
+            }
+            Err(e) => {
+                return Err(PosixError::Engine(EngineError::IoError {
+                    message: format!("{} output task failed: {}", cmd_name, e),
+                    span: None,
+                }));
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(stdin_task) = stdin_task {
+        match stdin_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Ok(Err(e)) => {
+                return Err(PosixError::Engine(EngineError::IoError {
+                    message: format!("{} stdin: {}", cmd_name, e),
+                    span: None,
+                }));
+            }
+            Err(e) => {
+                return Err(PosixError::Engine(EngineError::IoError {
+                    message: format!("{} stdin task failed: {}", cmd_name, e),
+                    span: None,
+                }));
+            }
+        }
     }
 
-    let code = output.status.code().unwrap_or(127);
+    let code = status.code().unwrap_or(127);
     env.set_exit_code(code as i64);
 
     if io_cfg.capture_stdout && redir.stdout_file.is_none() && io_cfg.stdout_stream.is_none() {
-        Ok((code, Some(output.stdout)))
+        Ok((code, captured_stdout))
     } else {
         Ok((code, None))
     }
