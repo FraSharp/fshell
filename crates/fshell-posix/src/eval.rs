@@ -1768,6 +1768,11 @@ async fn run_external_command(
     use std::process::Stdio;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    enum StdoutPumpError {
+        DownstreamClosed,
+        Io(std::io::Error),
+    }
+
     let effective_stdin = redir
         .stdin_bytes
         .as_deref()
