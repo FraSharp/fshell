@@ -2121,10 +2121,12 @@ async fn eval_stmt_inner(
                 })?;
                 let content_hash = fshell_hash::fhash256(content.as_bytes());
 
-                let mut stmts = match {
+                let cached_stmts = {
                     let mut cache = env.ast_cache.write();
                     cache.get_by_path(&path_buf, content_hash)
-                } {
+                };
+
+                let mut stmts = match cached_stmts {
                     Some(stmts) => stmts,
                     None => {
                         let mut parser = fshell_core::Parser::new(&content);
