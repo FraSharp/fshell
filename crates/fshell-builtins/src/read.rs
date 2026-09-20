@@ -132,7 +132,10 @@ async fn read_line_standard(timeout_secs: Option<u64>) -> Result<String, String>
         let stdin = io::stdin();
         let mut reader = BufReader::new(stdin);
         let mut line = String::new();
-        let _ = reader.read_line(&mut line).await;
+        reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read: failed to read stdin: {e}"))?;
         // Trim trailing newline
         if line.ends_with('\n') {
             line.pop();
@@ -140,16 +143,16 @@ async fn read_line_standard(timeout_secs: Option<u64>) -> Result<String, String>
         if line.ends_with('\r') {
             line.pop();
         }
-        line
+        Ok::<String, String>(line)
     };
 
     if let Some(t) = timeout_secs {
         match timeout(Duration::from_secs(t), read_fut).await {
-            Ok(res) => Ok(res),
+            Ok(res) => res,
             Err(_) => Ok(String::new()), // timeout returns empty string
         }
     } else {
-        Ok(read_fut.await)
+        read_fut.await
     }
 }
 
