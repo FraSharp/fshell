@@ -1448,11 +1448,15 @@ impl Parser {
         inline_env: Vec<(String, Expr)>,
     ) -> Result<PipelineStage, ParseError> {
         match name.as_str() {
-            "filter" => {
+            // A reserved pipeline keyword immediately followed by a `-flag` is an
+            // external command call, not the built-in stage (e.g. `sort -n`,
+            // `grep -E`, `map -x`). `hash` is exempt: its own flags (`-a`, `-o`,
+            // `--per-record`) are part of the stage.
+            "filter" if !has_flag => {
                 let condition = self.parse_expr_with_pipeline(false)?;
                 Ok(PipelineStage::Filter { condition })
             }
-            "map" => {
+            "map" if !has_flag => {
                 let mut projections = Vec::new();
                 loop {
                     self.skip_whitespace();
@@ -1499,7 +1503,7 @@ impl Parser {
                 let pattern = self.parse_command_arg()?;
                 Ok(PipelineStage::Mark { pattern })
             }
-            "count" => Ok(PipelineStage::Count),
+            "count" if !has_flag => Ok(PipelineStage::Count),
             "hash" if self.is_subsequent_stage => self.parse_hash_stage(),
             "limit" if !has_flag => {
                 let saved_redirect = self.redirect_mode;

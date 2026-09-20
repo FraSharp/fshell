@@ -2490,6 +2490,50 @@ mod tests {
         }
     }
 
+    fn last_stage_of(src: &str) -> PipelineStage {
+        let stmts = Parser::new(src).parse_statements().unwrap();
+        let pipeline = match stmts.first().map(|s| s.unpack()) {
+            Some(Stmt::Expr(e)) => match e.unpack() {
+                Expr::Pipeline(p) => p.clone(),
+                other => panic!("{src}: expected pipeline, got {other:?}"),
+            },
+            other => panic!("{src}: expected expression statement, got {other:?}"),
+        };
+        pipeline.stages.last().unwrap().clone()
+    }
+
+    #[test]
+    fn test_pipeline_keyword_with_flag_is_external_command() {
+        // Documented rule: a reserved stage keyword immediately followed by a
+        // `-flag` is an external command, not the built-in stage.
+        for (src, expected) in [
+            ("ps | map -x", "map"),
+            ("ps | filter -x", "filter"),
+            ("ps | count --help", "count"),
+            ("ps | limit -1", "limit"),
+            ("ps | grep -E", "grep"),
+        ] {
+            let stage = last_stage_of(src);
+            assert!(
+                matches!(&stage, PipelineStage::CommandCall { name, .. } if name == expected),
+                "{src}: expected external command `{expected}`, got {stage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pipeline_keyword_without_flag_is_stage() {
+        assert!(matches!(last_stage_of("ps | count"), PipelineStage::Count));
+        assert!(matches!(
+            last_stage_of("ps | map pid command"),
+            PipelineStage::Map { .. }
+        ));
+        assert!(matches!(
+            last_stage_of("ps | limit 10"),
+            PipelineStage::Limit { .. }
+        ));
+    }
+
     #[test]
     fn test_quoted_brace_interp_bare_ident_is_variable_ref() {
         // `"a{b}"` — a bare identifier inside `{...}` string interpolation is a
