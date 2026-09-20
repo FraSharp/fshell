@@ -1165,7 +1165,8 @@ async fn eval_simple_command(
 
     if is_decl {
         for (name, _) in prefix_assignments {
-            if let Some(val) = env.vars.read().get(name.as_str()).cloned() {
+            let val = env.vars.read().get(name.as_str()).cloned();
+            if let Some(val) = val {
                 env.set_exported_var(name.as_str(), val);
             }
         }
