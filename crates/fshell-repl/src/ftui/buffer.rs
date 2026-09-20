@@ -515,7 +515,10 @@ impl TextBuffer {
 
         // Insert wrap: open + selected + close
         let wrapped = format!("{}{}{}", open, selected, close);
-        let wrapped_len = wrapped.len();
+        // Buffer positions are character indices, never UTF-8 byte offsets.
+        // Using `String::len()` here makes wrapping a non-ASCII selection place
+        // the cursor and auto-close markers past the end of the buffer.
+        let wrapped_len = wrapped.chars().count();
         let ins_op = EditOp::Insert {
             pos: lo,
             text: wrapped,
@@ -534,7 +537,7 @@ impl TextBuffer {
         ) {
             let closer_idx = lo + wrapped_len - 1;
             let opener_idx = lo;
-            let delta = wrapped_len.saturating_sub(selected.len());
+            let delta = wrapped_len.saturating_sub(selected.chars().count());
             // Don't shift existing auto-inserted pairs since the entire operation
             // replaced a range starting at `lo`.
             for pair in self.auto_inserted_pairs.iter_mut() {
@@ -1209,6 +1212,22 @@ mod tests {
         // Cursor should be after the closing ')' at the end (len 13)
         assert_eq!(buf.cursor(), 13, "cursor should be after ')'");
         assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn test_wrap_unicode_selection_uses_character_indices() {
+        let mut buf = TextBuffer::new();
+        buf.insert_str("café 👋");
+        buf.set_cursor(3);
+        buf.start_selection();
+        buf.set_cursor(4);
+        buf.extend_selection();
+
+        buf.insert_char('(');
+
+        assert_eq!(buf.text(), "caf(é) 👋");
+        assert_eq!(buf.cursor(), 6);
+        assert!(buf.cursor() <= buf.len());
     }
 
     #[test]
