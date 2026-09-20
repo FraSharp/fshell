@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::Read;
 use std::os::fd::FromRawFd;
 
 // Gate: set FSH_REPL_ANCHOR_DEBUG=1 for capture debug logs
@@ -23,17 +23,17 @@ pub(crate) enum CaptureStatus {
     PipeFailed,
 }
 
-/// A RAII guard that redirects stdout/stderr to separate pipes and reads
-/// captured output. Uses independent pipes for stdout and stderr to prevent
-/// deadlock: if one pipe buffer fills up (e.g. stderr with debug output),
-/// the other (stdout) can still drain independently.
+/// A RAII guard that redirects stdout and stderr to one shared pipe.
+///
+/// A single continuously drained pipe is sufficient to avoid deadlock and,
+/// unlike separate pipes, preserves the kernel's write order between the two
+/// streams. This is the only ordering that a terminal user could observe.
 ///
 /// On drop, stdout and stderr are restored to their original descriptors.
 pub(crate) struct CaptureGuard {
     saved_stdout: Option<i32>,
     saved_stderr: Option<i32>,
-    stdout_reader: Option<std::thread::JoinHandle<Vec<String>>>,
-    stderr_reader: Option<std::thread::JoinHandle<Vec<String>>>,
+    reader: Option<std::thread::JoinHandle<Vec<String>>>,
     finished: bool,
     status: CaptureStatus,
     error_msg: Option<String>,
@@ -63,27 +63,31 @@ fn make_pipe() -> Option<(i32, i32)> {
     }
 }
 
-/// Spawn a reader thread that reads lines from `read_fd` and collects them.
+/// Spawn a reader thread that drains the shared pipe until all writers close.
+///
+/// Reading bytes to completion before splitting lines preserves empty lines
+/// and handles output that does not end with a newline. The capture consumer
+/// owns presentation policy; the transport must not silently discard data.
 fn spawn_reader_thread(read_fd: i32) -> std::thread::JoinHandle<Vec<String>> {
-    let mut reader = BufReader::new(unsafe { File::from_raw_fd(read_fd) });
+    let mut reader = unsafe { File::from_raw_fd(read_fd) };
     std::thread::spawn(move || {
-        let mut collected = Vec::new();
-        let mut buf = String::new();
+        let mut bytes = Vec::new();
         loop {
-            buf.clear();
-            match reader.read_line(&mut buf) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let trimmed = strip_ansi_escapes(buf.trim_end_matches('\n'));
-                    if !trimmed.is_empty() {
-                        collected.push(trimmed);
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+            match reader.read_to_end(&mut bytes) {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Vec::new(),
             }
         }
-        collected
+
+        let mut lines = bytes
+            .split(|byte| *byte == b'\n')
+            .map(|line| strip_ansi_escapes(&String::from_utf8_lossy(line)))
+            .collect::<Vec<_>>();
+        if bytes.last() == Some(&b'\n') {
+            lines.pop();
+        }
+        lines
     })
 }
 
@@ -110,16 +114,17 @@ impl CaptureGuard {
             return Self {
                 saved_stdout: None,
                 saved_stderr: None,
-                stdout_reader: None,
-                stderr_reader: None,
+                reader: None,
                 finished: false,
                 status: CaptureStatus::DupFailed,
                 error_msg: Some(format!("capture dup failed: {err}")),
             };
         }
 
-        // Create separate pipes for stdout and stderr to prevent deadlock
-        let (stdout_read, stdout_write) = match make_pipe() {
+        // One shared pipe preserves stdout/stderr ordering while the reader
+        // thread drains it continuously, so neither stream can fill a pipe
+        // buffer and deadlock the command.
+        let (reader_fd, writer_fd) = match make_pipe() {
             Some(p) => p,
             None => {
                 let err = std::io::Error::last_os_error();
@@ -130,29 +135,7 @@ impl CaptureGuard {
                 return Self {
                     saved_stdout: None,
                     saved_stderr: None,
-                    stdout_reader: None,
-                    stderr_reader: None,
-                    finished: false,
-                    status: CaptureStatus::PipeFailed,
-                    error_msg: Some(format!("capture pipe failed: {err}")),
-                };
-            }
-        };
-        let (stderr_read, stderr_write) = match make_pipe() {
-            Some(p) => p,
-            None => {
-                let err = std::io::Error::last_os_error();
-                unsafe {
-                    libc::close(stdout_read);
-                    libc::close(stdout_write);
-                    libc::close(saved_stdout);
-                    libc::close(saved_stderr);
-                }
-                return Self {
-                    saved_stdout: None,
-                    saved_stderr: None,
-                    stdout_reader: None,
-                    stderr_reader: None,
+                    reader: None,
                     finished: false,
                     status: CaptureStatus::PipeFailed,
                     error_msg: Some(format!("capture pipe failed: {err}")),
@@ -160,61 +143,40 @@ impl CaptureGuard {
             }
         };
 
-        // Dup the read ends to stable fds so they survive dup2 redirecting 1/2
-        let stdout_reader_fd = unsafe { libc::dup(stdout_read) };
-        let stderr_reader_fd = unsafe { libc::dup(stderr_read) };
+        // Redirect both descriptors to the same writer. Check every dup2 so a
+        // partially installed capture cannot be reported as successful.
+        let stdout_redirected = unsafe { libc::dup2(writer_fd, libc::STDOUT_FILENO) } >= 0;
+        let stderr_redirected =
+            stdout_redirected && unsafe { libc::dup2(writer_fd, libc::STDERR_FILENO) } >= 0;
         unsafe {
-            libc::close(stdout_read);
-            libc::close(stderr_read);
+            libc::close(writer_fd);
         }
-
-        if stdout_reader_fd < 0 || stderr_reader_fd < 0 {
+        if !stdout_redirected || !stderr_redirected {
             let err = std::io::Error::last_os_error();
-            anchor_debug(format!("dup() of pipe read ends failed: {err}"));
+            anchor_debug(format!("dup2() capture redirect failed: {err}"));
             unsafe {
-                libc::close(stdout_write);
-                libc::close(stderr_write);
+                libc::close(reader_fd);
+                libc::dup2(saved_stdout, libc::STDOUT_FILENO);
+                libc::dup2(saved_stderr, libc::STDERR_FILENO);
                 libc::close(saved_stdout);
                 libc::close(saved_stderr);
-            }
-            if stdout_reader_fd >= 0 {
-                unsafe {
-                    libc::close(stdout_reader_fd);
-                }
-            }
-            if stderr_reader_fd >= 0 {
-                unsafe {
-                    libc::close(stderr_reader_fd);
-                }
             }
             return Self {
                 saved_stdout: None,
                 saved_stderr: None,
-                stdout_reader: None,
-                stderr_reader: None,
+                reader: None,
                 finished: false,
                 status: CaptureStatus::DupFailed,
-                error_msg: Some(format!("capture dup failed: {err}")),
+                error_msg: Some(format!("capture redirect failed: {err}")),
             };
         }
 
-        // Redirect stdout → stdout_write, stderr → stderr_write
-        unsafe {
-            libc::dup2(stdout_write, libc::STDOUT_FILENO);
-            libc::dup2(stderr_write, libc::STDERR_FILENO);
-            libc::close(stdout_write);
-            libc::close(stderr_write);
-        }
-
-        // Spawn reader threads
-        let stdout_reader = Some(spawn_reader_thread(stdout_reader_fd));
-        let stderr_reader = Some(spawn_reader_thread(stderr_reader_fd));
+        let reader = Some(spawn_reader_thread(reader_fd));
 
         Self {
             saved_stdout: Some(saved_stdout),
             saved_stderr: Some(saved_stderr),
-            stdout_reader,
-            stderr_reader,
+            reader,
             finished: false,
             status: CaptureStatus::Ok,
             error_msg: None,
@@ -239,20 +201,10 @@ impl CaptureGuard {
             }
         }
 
-        let mut all_lines = Vec::new();
-
-        if let Some(handle) = self.stdout_reader.take()
-            && let Ok(lines) = handle.join()
-        {
-            all_lines.extend(lines);
-        }
-        if let Some(handle) = self.stderr_reader.take()
-            && let Ok(lines) = handle.join()
-        {
-            all_lines.extend(lines);
-        }
-
-        all_lines
+        self.reader
+            .take()
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default()
     }
 }
 
@@ -272,10 +224,7 @@ impl Drop for CaptureGuard {
                     libc::close(saved_stderr);
                 }
             }
-            if let Some(handle) = self.stdout_reader.take() {
-                let _ = handle.join();
-            }
-            if let Some(handle) = self.stderr_reader.take() {
+            if let Some(handle) = self.reader.take() {
                 let _ = handle.join();
             }
         }
@@ -283,25 +232,22 @@ impl Drop for CaptureGuard {
 }
 
 fn strip_ansi_escapes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            while let Some(&c) = chars.peek() {
-                match c {
-                    'A'..='Z' | 'a'..='z' => {
-                        chars.next();
-                        break;
-                    }
-                    _ => {
-                        chars.next();
-                    }
-                }
-            }
-        } else {
-            out.push(ch);
-        }
+    String::from_utf8_lossy(&strip_ansi_escapes::strip(s.as_bytes())).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi_escapes;
+
+    #[test]
+    fn strips_sgr_and_preserves_empty_lines() {
+        let captured = "\x1b[31mred\x1b[0m\n\nplain";
+        assert_eq!(
+            captured
+                .split('\n')
+                .map(strip_ansi_escapes)
+                .collect::<Vec<_>>(),
+            ["red", "", "plain"]
+        );
     }
-    out
 }

@@ -1300,6 +1300,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "strip-ansi-escapes",
  "tempfile",
  "tokio",
  "toml_edit",

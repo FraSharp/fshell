@@ -40,6 +40,7 @@ lscolors = { workspace = true }
 futures = { workspace = true }
 arboard = { workspace = true }
 base64 = { workspace = true }
+strip-ansi-escapes = { workspace = true }
 
 [lints]
 workspace = true
@@ -51,4 +52,3 @@ criterion = { workspace = true }
 [[bench]]
 name = "interactive"
 harness = false
-

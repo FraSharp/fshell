@@ -97,6 +97,7 @@ fshell-posix = { workspace = true }
 [workspace.dependencies]
 fshell-hash = { path = "crates/fshell-hash" }
 fshell-posix = { path = "crates/fshell-posix" }
+strip-ansi-escapes = "0.2.1"
 tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "net", "signal", "process", "fs", "time", "io-util", "io-std", "sync", "macros"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.150"
@@ -176,7 +177,6 @@ fshell-hash = { workspace = true }
 fshell-panes = { path = "crates/fshell-panes" }
 ratatui = { workspace = true }
 proptest = { workspace = true }
-
 
 
 
