@@ -212,10 +212,10 @@ fn get_rich_git_status_uncached(pwd: &str) -> Option<RichGitStatus> {
     if discover_elapsed > std::time::Duration::from_millis(5)
         && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
     {
-        eprintln!(
+        crate::ftui::cpu_dbg_log(format_args!(
             "[cpu_dbg] [prompt] get_rich_git_status_uncached: discover took {:?} for pwd={:?}",
             discover_elapsed, pwd
-        );
+        ));
     }
 
     let head = repo.head().ok()?;
@@ -232,11 +232,11 @@ fn get_rich_git_status_uncached(pwd: &str) -> Option<RichGitStatus> {
     if status_elapsed > std::time::Duration::from_millis(5)
         && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
     {
-        eprintln!(
+        crate::ftui::cpu_dbg_log(format_args!(
             "[cpu_dbg] [prompt] get_rich_git_status_uncached: repo.status() took {:?}, found {} entries",
             status_elapsed,
             statuses.len()
-        );
+        ));
     }
     let mut modified = 0u32;
     let mut untracked = 0u32;
@@ -256,10 +256,10 @@ fn get_rich_git_status_uncached(pwd: &str) -> Option<RichGitStatus> {
     if total_elapsed > std::time::Duration::from_millis(10)
         && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
     {
-        eprintln!(
+        crate::ftui::cpu_dbg_log(format_args!(
             "[cpu_dbg] [prompt] get_rich_git_status_uncached: TOTAL {:?} for pwd={:?} branch={}",
             total_elapsed, pwd, branch
-        );
+        ));
     }
 
     Some(RichGitStatus {

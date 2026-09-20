@@ -437,10 +437,10 @@ pub fn refresh_prompt_snapshot(env: &Env, pwd: &str) -> PromptSnapshot {
     if git_elapsed > std::time::Duration::from_millis(5)
         && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
     {
-        eprintln!(
+        ftui::cpu_dbg_log(format_args!(
             "[cpu_dbg] [lib] get_rich_git_status took {:?} for pwd={:?}",
             git_elapsed, pwd
-        );
+        ));
     }
     let branch = git_status.as_ref().map(|g| g.branch.clone());
 
@@ -448,10 +448,10 @@ pub fn refresh_prompt_snapshot(env: &Env, pwd: &str) -> PromptSnapshot {
     if total_elapsed > std::time::Duration::from_millis(20)
         && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
     {
-        eprintln!(
+        ftui::cpu_dbg_log(format_args!(
             "[cpu_dbg] [lib] refresh_prompt_snapshot took {:?} for pwd={:?}",
             total_elapsed, pwd
-        );
+        ));
     }
 
     PromptSnapshot {
