@@ -120,22 +120,30 @@ pub fn complete_files_at(
     let expanded = expand_env_vars(&expanded);
 
     let raw_path = std::path::PathBuf::from(&expanded);
-    let path = if raw_path.is_absolute() {
-        raw_path
+    let (search_dir, file_prefix) = if expanded.is_empty() {
+        // An empty argument means "the current directory".  Treating it as
+        // `cwd.join("")` and then taking that path's parent turns the cwd
+        // itself into a filename prefix, which makes `ls <Tab>` complete the
+        // cwd name from its parent instead of listing the cwd's entries.
+        (cwd.to_path_buf(), String::new())
     } else {
-        cwd.join(raw_path)
-    };
-    let (search_dir, file_prefix) = if expanded.ends_with('/') {
-        (path, String::new())
-    } else if let Some(parent) = path.parent() {
-        let prefix = path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("")
-            .to_string();
-        (parent.to_path_buf(), prefix)
-    } else {
-        (std::path::PathBuf::from("."), expanded.clone())
+        let path = if raw_path.is_absolute() {
+            raw_path
+        } else {
+            cwd.join(raw_path)
+        };
+        if expanded.ends_with('/') {
+            (path, String::new())
+        } else if let Some(parent) = path.parent() {
+            let prefix = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("")
+                .to_string();
+            (parent.to_path_buf(), prefix)
+        } else {
+            (std::path::PathBuf::from("."), expanded.clone())
+        }
     };
 
     let dir_to_read = if search_dir.as_os_str().is_empty() {

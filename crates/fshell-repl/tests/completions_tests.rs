@@ -83,6 +83,75 @@ async fn test_builtin_prefix_completion() {
 }
 
 #[tokio::test]
+async fn test_empty_path_argument_lists_the_current_directory() {
+    let _guard = TEST_CWD_MUTEX.lock();
+    let root =
+        std::env::temp_dir().join(format!("fsh_empty_path_completion_{}", std::process::id()));
+    let current = root.join("current");
+    let child = current.join("fshell-public");
+    let parent_entry = root.join("current-sibling");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(child.join("README.md"), b"completion regression").unwrap();
+    std::fs::create_dir_all(&parent_entry).unwrap();
+
+    let env = Env::new();
+    {
+        let mut opts = env.options.write();
+        opts.sandbox_mode = "off".to_string();
+    }
+    builtins_init(&env);
+    bridge_init(&env);
+    env.set_cwd(current.clone());
+
+    let mut completer = FshellCompleter { env };
+    let results = completer.complete("ls ", 3);
+    let values: Vec<&str> = results
+        .iter()
+        .map(|candidate| candidate.value.as_str())
+        .collect();
+
+    assert!(
+        values.contains(&"fshell-public/"),
+        "empty path argument should list cwd entries, got {values:?}"
+    );
+    assert!(
+        !values.contains(&"current/"),
+        "empty path argument must not complete the cwd name from its parent, got {values:?}"
+    );
+
+    let mut manager =
+        fshell_repl::ftui::completions::CompletionsManager::new(completer.env.clone());
+    manager.update("ls ", 3, true);
+    assert_eq!(manager.suggestions.len(), 1);
+    let suggestion = manager.suggestions[0].clone();
+    let mut buffer = fshell_repl::ftui::buffer::TextBuffer::new();
+    buffer.insert_str("ls ");
+    let line = buffer.text();
+    fshell_repl::ftui::apply_completion(&mut buffer, &line, &suggestion);
+    manager.refresh_after_completion(&buffer.text(), buffer.cursor());
+
+    assert_eq!(buffer.text(), "ls fshell-public/");
+    assert!(
+        manager.visible,
+        "directory completion should open its child list"
+    );
+    assert!(
+        manager
+            .suggestions
+            .iter()
+            .any(|candidate| candidate.value == "fshell-public/README.md"),
+        "drilling into the accepted directory should list its children, got {:?}",
+        manager
+            .suggestions
+            .iter()
+            .map(|candidate| &candidate.value)
+            .collect::<Vec<_>>()
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn test_builtin_exact_match_ranked_first() {
     let mut c = make_completer();
     let results = c.complete("ls", 2);
