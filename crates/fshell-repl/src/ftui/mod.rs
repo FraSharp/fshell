@@ -109,6 +109,18 @@ impl Drop for CaptureStateGuard<'_> {
     }
 }
 
+async fn poll_terminal_event(timeout: Duration) -> std::io::Result<Option<Event>> {
+    tokio::task::spawn_blocking(move || {
+        if event::poll(timeout)? {
+            event::read().map(Some)
+        } else {
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("terminal input task failed: {error}")))?
+}
+
 use crate::alias_expansion::AliasExpansionState;
 use crate::highlighter::FshellHighlighter;
 use crate::theme_ext::ThemeColorRatatui;
@@ -1612,23 +1624,19 @@ pub async fn run_ftui_repl(
 
             let poll_start = std::time::Instant::now();
             let polled = loop {
-                match event::poll(poll_timeout) {
-                    Ok(has_event) => break has_event,
+                match poll_terminal_event(poll_timeout).await {
+                    Ok(event) => break event,
                     Err(e) => {
                         // EINTR on signal reception: retry or exit on SIGHUP/cancellation
                         use std::io::ErrorKind;
                         if e.kind() == ErrorKind::Interrupted {
                             #[cfg(unix)]
                             if raw::SignalGuard::hup_received() {
-                                cpu_dbg!(
-                                    "GOT_SIGHUP inside EINTR event::poll — breaking repl_loop"
-                                );
+                                cpu_dbg!("GOT_SIGHUP inside terminal input — breaking repl_loop");
                                 break 'repl_loop;
                             }
                             if env.job_control.cancellation.load(Ordering::Relaxed) {
-                                cpu_dbg!(
-                                    "cancellation inside EINTR event::poll — breaking repl_loop"
-                                );
+                                cpu_dbg!("cancellation inside terminal input — breaking repl_loop");
                                 break 'repl_loop;
                             }
                             // Check if we need to re-init terminal (Bug 5.2)
@@ -1641,14 +1649,14 @@ pub async fn run_ftui_repl(
                             }
                             continue;
                         }
-                        cpu_dbg!("event::poll returned error (non-EINTR): {:?}", e);
+                        cpu_dbg!("terminal input returned error: {:?}", e);
                         break 'repl_loop;
                     }
                 }
             };
 
             let poll_elapsed = poll_start.elapsed();
-            if !polled {
+            if polled.is_none() {
                 #[cfg(unix)]
                 if raw::SignalGuard::hup_received() {
                     cpu_dbg!("GOT_SIGHUP (in !polled path) — breaking repl_loop");
@@ -1662,11 +1670,11 @@ pub async fn run_ftui_repl(
                         poll_elapsed,
                         has_active_animations
                     );
-                    std::thread::sleep(Duration::from_millis(50));
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
 
-            if polled {
+            if let Some(event) = polled {
                 #[cfg(unix)]
                 if raw::SignalGuard::hup_received() {
                     cpu_dbg!("GOT_SIGHUP before event::read — breaking repl_loop");
@@ -1677,39 +1685,6 @@ pub async fn run_ftui_repl(
                     cpu_dbg!("cancellation flag set before event::read — breaking repl_loop");
                     break 'repl_loop;
                 }
-
-                let event = loop {
-                    match event::read() {
-                        Ok(e) => break e,
-                        Err(e) => {
-                            use std::io::ErrorKind;
-                            if e.kind() == ErrorKind::Interrupted {
-                                #[cfg(unix)]
-                                if raw::SignalGuard::hup_received() {
-                                    cpu_dbg!(
-                                        "GOT_SIGHUP in event::read Err(Interrupted) — breaking repl_loop"
-                                    );
-                                    break 'repl_loop;
-                                }
-                                if env.job_control.cancellation.load(Ordering::Relaxed) {
-                                    cpu_dbg!(
-                                        "cancellation in event::read Err(Interrupted) — breaking repl_loop"
-                                    );
-                                    break 'repl_loop;
-                                }
-                                #[cfg(unix)]
-                                if raw::SignalGuard::suspended() {
-                                    if let Some(s) = _raw_session.as_deref() {
-                                        s.reenter_raw();
-                                    }
-                                }
-                                continue;
-                            }
-                            cpu_dbg!("event::read returned error (non-EINTR): {:?}", e);
-                            break 'repl_loop;
-                        }
-                    }
-                };
 
                 if let Event::Resize(_, _) = event {
                     let now = std::time::Instant::now();
