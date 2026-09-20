@@ -190,6 +190,7 @@ let next_lvl = ($CONFIG_LVL + 1)
 async fn test_handoff_cwd_synchronization() {
     let cwd_guard = CwdGuard::new_temp();
     let env = setup_test_env();
+    let process_cwd = std::env::current_dir().unwrap();
 
     let target_dir = cwd_guard.path().canonicalize().unwrap();
     let sub = target_dir.join("handoff_target");
@@ -214,10 +215,7 @@ async fn test_handoff_cwd_synchronization() {
     env.set_cwd(std::path::PathBuf::from(&state.cwd));
 
     assert_eq!(env.cwd().canonicalize().unwrap(), sub_canon);
-    assert_eq!(
-        std::env::current_dir().unwrap().canonicalize().unwrap(),
-        sub_canon
-    );
+    assert_eq!(std::env::current_dir().unwrap(), process_cwd);
     assert_eq!(
         env.vars.read().get("PWD").unwrap(),
         &Val::String(sub_canon.to_string_lossy().to_string())
