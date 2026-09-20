@@ -1902,17 +1902,17 @@ async fn run_external_command(
             }
             Ok(Vec::new())
         }))
-    } else if let Some(mut stdout) = child.stdout.take() {
-        Some(tokio::spawn(async move {
-            let mut output = Vec::new();
-            stdout
-                .read_to_end(&mut output)
-                .await
-                .map_err(StdoutPumpError::Io)?;
-            Ok(output)
-        }))
     } else {
-        None
+        child.stdout.take().map(|mut stdout| {
+            tokio::spawn(async move {
+                let mut output = Vec::new();
+                stdout
+                    .read_to_end(&mut output)
+                    .await
+                    .map_err(StdoutPumpError::Io)?;
+                Ok(output)
+            })
+        })
     };
 
     let mut completed_stdout_pump = None;
