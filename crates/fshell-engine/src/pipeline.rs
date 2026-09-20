@@ -23,6 +23,10 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use ustr::ustr;
 
+fn function_exists(env: &Env, name: &str) -> bool {
+    env.fns.read().contains_key(name) || env.posix_fns.read().contains_key(name)
+}
+
 /// Boundary conversion used by stage handlers: raw bytes become one String Val
 /// per non-empty line (a payload with no newline stays whole) to preserve
 /// streaming semantics.
@@ -400,7 +404,7 @@ pub async fn execute_pipeline(
                         false
                     };
                     if has_cell || has_var {
-                        let is_user_fn = env_clone.fns.read().contains_key(&name);
+                        let is_user_fn = function_exists(&env_clone, &name);
                         let is_builtin = env.get_builtin(&name).is_some();
                         let env_path = Some(env_clone.vars.read()).and_then(|vars| {
                             vars.get("env").and_then(|v| {
@@ -481,7 +485,7 @@ pub async fn execute_pipeline(
                     if !env_clone.prompt.alias_suppressed.load(Ordering::Relaxed)
                         && let Some(expansion) = env_clone.get_alias(&name)
                         && env_clone.get_builtin(&name).is_none()
-                        && !env_clone.fns.read().contains_key(&name)
+                        && !function_exists(&env_clone, &name)
                     {
                         let env_for_alias = env_clone.clone();
                         let out_tx_alias = out_tx.clone();
@@ -593,7 +597,7 @@ pub async fn execute_pipeline(
                         if !env_clone.options.read().quiet_aliases
                             && env_clone.get_alias(&name).is_some()
                             && (env_clone.get_builtin(&name).is_some()
-                                || env_clone.fns.read().contains_key(&name))
+                                || function_exists(&env_clone, &name))
                         {
                             let _ = out_tx
                                 .send(PipelinePayload::Structured(
@@ -748,7 +752,7 @@ pub async fn execute_pipeline(
                             });
                             let dym_start = std::time::Instant::now();
                             let is_valid = {
-                                let is_user_fn = env_clone.fns.read().contains_key(&name);
+                                let is_user_fn = function_exists(&env_clone, &name);
                                 let is_builtin = env_clone.get_builtin(&name).is_some();
                                 let is_external = is_external_command(&name, env_path.as_deref());
                                 let is_path =
@@ -868,47 +872,48 @@ pub async fn execute_pipeline(
                             }
                         }
 
-                        // Check user-defined functions (single-lock read to avoid TOCTOU)
+                        // POSIX functions have their own explicit registry.
+                        // They must not be represented as native AST functions
+                        // with a synthetic comment body.
+                        let is_posix_fn = env_clone.posix_fns.read().contains_key(&name);
+                        if is_posix_fn && let Some(handler) = crate::posix_handler() {
+                            tokio::spawn(async move {
+                                let evaluated_arg_strs: Vec<String> = evaluated_args
+                                    .iter()
+                                    .map(|v| match v {
+                                        Val::String(s) => s.clone(),
+                                        other => other.to_text(),
+                                    })
+                                    .collect();
+                                let cmd_script = format!("{} \"$@\"", name);
+                                match handler(
+                                    cmd_script,
+                                    evaluated_arg_strs,
+                                    env_clone.clone(),
+                                    true,
+                                )
+                                .await
+                                {
+                                    Ok((_code, Some(bytes))) => {
+                                        let _ =
+                                            out_tx.send(PipelinePayload::Bytes(bytes.into())).await;
+                                    }
+                                    Ok((_code, None)) => {}
+                                    Err(e) => {
+                                        env_clone.report_stage_error();
+                                        let _ = out_tx
+                                            .send(PipelinePayload::Structured(e.to_string().into()))
+                                            .await;
+                                    }
+                                }
+                            });
+                            return Ok(());
+                        }
+
+                        // Check native user-defined functions (single-lock
+                        // read to avoid TOCTOU between lookup and body capture).
                         let user_fn = env_clone.fns.read().get(&name).cloned();
                         if let Some((params, _ret_type, body)) = user_fn {
-                            let is_posix_fn = body.len() == 1
-                                && matches!(body[0].unpack(), Stmt::Comment(s) if s.starts_with("posix fn "));
-                            if is_posix_fn && let Some(handler) = crate::posix_handler() {
-                                tokio::spawn(async move {
-                                    let evaluated_arg_strs: Vec<String> = evaluated_args
-                                        .iter()
-                                        .map(|v| match v {
-                                            Val::String(s) => s.clone(),
-                                            other => other.to_text(),
-                                        })
-                                        .collect();
-                                    let cmd_script = format!("{} \"$@\"", name);
-                                    match handler(
-                                        cmd_script,
-                                        evaluated_arg_strs,
-                                        env_clone.clone(),
-                                        true,
-                                    )
-                                    .await
-                                    {
-                                        Ok((_code, Some(bytes))) => {
-                                            let _ = out_tx
-                                                .send(PipelinePayload::Bytes(bytes.into()))
-                                                .await;
-                                        }
-                                        Ok((_code, None)) => {}
-                                        Err(e) => {
-                                            env_clone.report_stage_error();
-                                            let _ = out_tx
-                                                .send(PipelinePayload::Structured(
-                                                    e.to_string().into(),
-                                                ))
-                                                .await;
-                                        }
-                                    }
-                                });
-                                return Ok(());
-                            }
                             tokio::spawn(async move {
                                 let _fn_guard = crate::profiler::ProfilerState::guard(
                                     &env_clone.profiler,

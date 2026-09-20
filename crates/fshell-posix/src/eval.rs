@@ -665,18 +665,6 @@ async fn eval_command_stream(
         Command::Function(func_def) => {
             let name = func_def.fname.value.clone();
             let body = func_def.body.0.clone();
-            let func_name = name.clone();
-            {
-                let mut m = env.fns.write();
-                m.insert(
-                    func_name,
-                    (
-                        Vec::new(),
-                        None,
-                        vec![fshell_core::Stmt::Comment(format!("posix fn {}", name))],
-                    ),
-                );
-            }
             register_posix_function(env, &name, body);
             Ok((0, None))
         }

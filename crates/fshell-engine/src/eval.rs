@@ -1739,6 +1739,10 @@ async fn eval_stmt_inner(
             ret_type,
             body,
         } => {
+            // Native and POSIX functions have separate representations. A
+            // native definition replaces a same-named POSIX function without
+            // encoding the distinction in a synthetic comment statement.
+            env.posix_fns.write().remove(name);
             let mut fns = env.fns.write();
             fns.insert(
                 name.clone(),

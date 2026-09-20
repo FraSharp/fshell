@@ -191,6 +191,8 @@ async fn posix_function_definition_and_call() {
     let env = setup_posix_env();
     let code = run_posix("myfunc() { echo hello; }; myfunc", &env).await;
     assert_eq!(code, 0);
+    assert!(env.posix_fns.read().contains_key("myfunc"));
+    assert!(!env.fns.read().contains_key("myfunc"));
 }
 
 #[tokio::test]

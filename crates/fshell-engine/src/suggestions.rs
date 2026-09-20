@@ -127,6 +127,20 @@ pub fn get_suggested_command(name: &str, env: &Env, env_path: Option<&str>) -> O
             );
         }
     }
+    {
+        let posix_fns_guard = env.posix_fns.read();
+        for func in posix_fns_guard.keys() {
+            let dist = levenshtein_distance(name, func);
+            update_best(
+                func,
+                dist,
+                1,
+                &mut best_cmd,
+                &mut best_dist,
+                &mut best_priority,
+            );
+        }
+    }
 
     // 3. Check aliases (priority 2)
     let alias_count;
