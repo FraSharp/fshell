@@ -166,8 +166,8 @@ impl CaptureGuard {
             anchor_debug(format!("dup2() capture redirect failed: {err}"));
             unsafe {
                 libc::close(reader_fd);
-                libc::dup2(saved_stdout, libc::STDOUT_FILENO);
-                libc::dup2(saved_stderr, libc::STDERR_FILENO);
+                let _ = libc::dup2(saved_stdout, libc::STDOUT_FILENO);
+                let _ = libc::dup2(saved_stderr, libc::STDERR_FILENO);
                 libc::close(saved_stdout);
                 libc::close(saved_stderr);
             }
@@ -202,11 +202,12 @@ impl CaptureGuard {
             (self.saved_stdout.take(), self.saved_stderr.take())
         {
             unsafe {
-                libc::close(libc::STDOUT_FILENO);
-                libc::close(libc::STDERR_FILENO);
-                libc::dup2(saved_stdout, libc::STDOUT_FILENO);
+                // dup2 replaces the target atomically. Closing fd 1/2 first
+                // creates a race where another thread can observe EBADF or
+                // reuse the descriptor before restoration completes.
+                let _ = libc::dup2(saved_stdout, libc::STDOUT_FILENO);
                 libc::close(saved_stdout);
-                libc::dup2(saved_stderr, libc::STDERR_FILENO);
+                let _ = libc::dup2(saved_stderr, libc::STDERR_FILENO);
                 libc::close(saved_stderr);
             }
         }
@@ -226,11 +227,9 @@ impl Drop for CaptureGuard {
                 (self.saved_stdout.take(), self.saved_stderr.take())
             {
                 unsafe {
-                    libc::close(libc::STDOUT_FILENO);
-                    libc::close(libc::STDERR_FILENO);
-                    libc::dup2(saved_stdout, libc::STDOUT_FILENO);
+                    let _ = libc::dup2(saved_stdout, libc::STDOUT_FILENO);
                     libc::close(saved_stdout);
-                    libc::dup2(saved_stderr, libc::STDERR_FILENO);
+                    let _ = libc::dup2(saved_stderr, libc::STDERR_FILENO);
                     libc::close(saved_stderr);
                 }
             }
