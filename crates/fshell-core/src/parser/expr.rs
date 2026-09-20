@@ -1883,6 +1883,43 @@ impl Parser {
                     current_lit.push_str(&self.parse_escape_seq()?);
                 }
                 Some('$') => {
+                    // Handle command substitution $(...) and arithmetic $((...)) inside double quotes.
+                    // These must be interpolated (e.g. "a $(echo hi) b") rather than left literal.
+                    if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '(' {
+                        if !current_lit.is_empty() {
+                            parts.push(StringPart::Lit(std::mem::take(&mut current_lit)));
+                        }
+                        self.next_char(); // consume '$'
+                        // Check for arithmetic expansion $((...))
+                        if self.peek() == Some('(')
+                            && self.pos + 1 < self.input.len()
+                            && self.input[self.pos + 1] == '('
+                        {
+                            let saved_pos = self.pos;
+                            self.next_char(); // first '('
+                            self.next_char(); // second '('
+                            let inner_res = self.parse_expr();
+                            if let Ok(inner) = inner_res {
+                                self.skip_whitespace();
+                                if self.peek() == Some(')') {
+                                    self.next_char();
+                                    self.skip_whitespace();
+                                    if self.peek() == Some(')') {
+                                        self.next_char();
+                                        parts.push(StringPart::Expr(Box::new(
+                                            Expr::ArithmeticExpansion(Box::new(inner)),
+                                        )));
+                                        continue;
+                                    }
+                                }
+                            }
+                            self.pos = saved_pos;
+                        }
+                        // Command substitution $(...)
+                        let expr = self.parse_cmd_substitution()?;
+                        parts.push(StringPart::Expr(Box::new(expr)));
+                        continue;
+                    }
                     self.next_char();
                     if !current_lit.is_empty() {
                         parts.push(StringPart::Lit(std::mem::take(&mut current_lit)));

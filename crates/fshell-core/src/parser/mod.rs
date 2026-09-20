@@ -1419,6 +1419,36 @@ mod tests {
     }
 
     #[test]
+    fn test_double_quoted_command_and_arithmetic_expansions() {
+        let stmts = Parser::new(r#"echo "before $(echo hi) $((1 + 2)) after""#)
+            .parse_statements()
+            .unwrap();
+        let Stmt::Expr(expr) = stmts[0].unpack() else {
+            panic!("expected expression statement");
+        };
+        let Expr::Pipeline(pipeline) = expr.unpack() else {
+            panic!("expected pipeline");
+        };
+        let PipelineStage::CommandCall { args, .. } = &pipeline.stages[0] else {
+            panic!("expected command call");
+        };
+        let Expr::String(parts) = args[0].unpack() else {
+            panic!("expected interpolated string");
+        };
+        assert!(matches!(&parts[0], StringPart::Lit(value) if value == "before "));
+        assert!(matches!(
+            &parts[1],
+            StringPart::Expr(expr) if matches!(expr.unpack(), Expr::InlinePipeline(_))
+        ));
+        assert!(matches!(&parts[2], StringPart::Lit(value) if value == " "));
+        assert!(matches!(
+            &parts[3],
+            StringPart::Expr(expr) if matches!(expr.unpack(), Expr::ArithmeticExpansion(_))
+        ));
+        assert!(matches!(&parts[4], StringPart::Lit(value) if value == " after"));
+    }
+
+    #[test]
     fn test_heredoc_basic() {
         let stmts = Parser::new("let x = <<EOF\nhello world\nEOF\n")
             .parse_statements()
