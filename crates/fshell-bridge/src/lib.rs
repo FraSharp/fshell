@@ -989,15 +989,14 @@ pub fn run_external(
                     total + stderr_limit
                 ));
             }
-            if !err_str.is_empty() {
-                if tx_diag
+            if !err_str.is_empty()
+                && tx_diag
                     .send(PipelinePayload::Structured(err_str.into()))
                     .await
                     .is_err()
-                    && !output_cancelled_clone.swap(true, Ordering::AcqRel)
-                {
-                    terminate_process_group(pid);
-                }
+                && !output_cancelled_clone.swap(true, Ordering::AcqRel)
+            {
+                terminate_process_group(pid);
             }
         }));
     }
