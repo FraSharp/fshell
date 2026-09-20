@@ -174,6 +174,47 @@ pub fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
 }
 
+/// Enter the terminal state expected by a line-oriented prompt or a child
+/// process. This is the only cooked-mode transition used by FTUI.
+pub(crate) fn enter_cooked_mode() -> std::io::Result<()> {
+    let mut out = std::io::stdout();
+    out.flush()?;
+    out.write_all(b"\x1b[=0u")?;
+    crossterm::execute!(
+        out,
+        crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableFocusChange,
+        crossterm::event::DisableMouseCapture,
+        crossterm::cursor::Show,
+        crossterm::cursor::EnableBlinking,
+    )?;
+    out.flush()?;
+    crossterm::terminal::disable_raw_mode()
+}
+
+/// Enter the complete raw terminal state owned by an interactive FTUI
+/// session. Keeping this transition in one place prevents prompt, child, and
+/// signal paths from drifting apart.
+pub(crate) fn enter_raw_mode() -> std::io::Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    let mut out = std::io::stdout();
+    let result = (|| {
+        out.write_all(b"\x1b[=0u")?;
+        crossterm::execute!(
+            out,
+            crossterm::cursor::DisableBlinking,
+            crossterm::event::EnableBracketedPaste,
+            crossterm::event::EnableFocusChange,
+            crossterm::event::EnableMouseCapture,
+        )?;
+        out.flush()
+    })();
+    if result.is_err() {
+        restore_terminal();
+    }
+    result
+}
+
 #[cfg(unix)]
 extern "C" fn sighup_action(_signal: libc::c_int) {
     GOT_SIGHUP.store(true, Ordering::Relaxed);
@@ -234,43 +275,14 @@ impl Session {
         if fshell_engine::is_test_mode() {
             return Err(std::io::Error::other("refusing raw mode in test mode"));
         }
-        crossterm::terminal::enable_raw_mode()?;
-        let mut out = std::io::stdout();
-        // Reset any progressive keyboard enhancement flags (CSI = 0 u) that may
-        // have lingered from a previous program or crash, ensuring standard C0 control codes.
-        let _ = out.write_all(b"\x1b[=0u");
-        crossterm::execute!(
-            out,
-            crossterm::cursor::DisableBlinking,
-            crossterm::event::EnableBracketedPaste,
-            crossterm::event::EnableFocusChange,
-            crossterm::event::EnableMouseCapture,
-        )?;
-        out.flush()?;
+        enter_raw_mode()?;
         Ok(Self { _private: () })
     }
 
     /// Suspend raw for the duration of a command that needs a real PTY
     /// (vim, less, ssh, fzf, …). The returned guard re-enables on drop.
     pub fn suspend(&self) -> std::io::Result<SuspendGuard<'_>> {
-        // Order matters: flush any pending ratatui draws, leave auxiliary
-        // modes before leaving raw, then flush so the child's first
-        // `tcsetattr(TCSAFLUSH)` sees a clean queue.
-        let mut out = std::io::stdout();
-        out.flush()?;
-        let _ = out.write_all(b"\x1b[=0u");
-        // These three are no-ops if the terminal doesn't support them, but
-        // leaving them on leaks mouse escapes into the child's stdin.
-        let _ = crossterm::execute!(
-            out,
-            crossterm::event::DisableBracketedPaste,
-            crossterm::event::DisableFocusChange,
-            crossterm::event::DisableMouseCapture,
-            crossterm::cursor::Show,
-            crossterm::cursor::EnableBlinking,
-        );
-        out.flush()?;
-        crossterm::terminal::disable_raw_mode()?;
+        enter_cooked_mode()?;
         Ok(SuspendGuard {
             session: self,
             armed: true,
@@ -280,17 +292,7 @@ impl Session {
     /// Explicit re-arm without a suspend — used after SIGTSTP resume where
     /// the kernel may have reset termios behind us. Idempotent.
     pub(crate) fn reenter_raw(&self) {
-        let _ = crossterm::terminal::enable_raw_mode();
-        let mut out = std::io::stdout();
-        let _ = out.write_all(b"\x1b[=0u");
-        let _ = crossterm::execute!(
-            out,
-            crossterm::cursor::DisableBlinking,
-            crossterm::event::EnableBracketedPaste,
-            crossterm::event::EnableFocusChange,
-            crossterm::event::EnableMouseCapture,
-        );
-        let _ = out.flush();
+        let _ = enter_raw_mode();
     }
 }
 

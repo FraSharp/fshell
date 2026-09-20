@@ -5,6 +5,7 @@ pub mod agent;
 pub mod ansi;
 pub mod buffer;
 pub mod capture;
+pub mod capability_prompt;
 pub mod clipboard;
 pub mod completions;
 pub mod cursor;
@@ -198,6 +199,8 @@ pub async fn run_ftui_repl(
     let mut drag_anchor: Option<usize> = None;
     let anchor_output = std::env::var("FSH_REPL_ANCHOR_OUTPUT").as_deref() == Ok("1");
 
+    let capability_prompt = capability_prompt::CapabilityPromptTask::spawn(&env);
+
     'repl_loop: loop {
         status_bar.visible = StatusBar::is_enabled(&env);
 
@@ -277,76 +280,6 @@ pub async fn run_ftui_repl(
 
         // ignoreeof handling: first Ctrl-D with empty buffer warns, second exits
         let mut eof_pending = false;
-
-        // Capability prompt handler: drain the engine's cap_prompt channel and
-        // interactively ask the user (suspending raw mode). Without this, TUI
-        // strict-mode denials block 30s then deny.
-        {
-            let env_cap = env.clone();
-            tokio::spawn(async move {
-                let rx = env_cap.caps.cap_prompt_rx.lock().take();
-                if let Some(mut rx) = rx {
-                    while let Some(req) = rx.recv().await {
-                        let _ = crossterm::terminal::disable_raw_mode();
-                        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
-                        eprint!(
-                            "\r\n[fshell] Allow '{}' to {:?}? [y/N/a] ",
-                            req.cmd_name, req.action
-                        );
-                        let _ = std::io::Write::flush(&mut std::io::stderr());
-                        let line = tokio::task::spawn_blocking(|| {
-                            let mut s = String::new();
-                            let _ = std::io::stdin().read_line(&mut s);
-                            s
-                        })
-                        .await
-                        .unwrap_or_default();
-                        let resp = match line.trim().to_lowercase().as_str() {
-                            "y" | "yes" => fshell_engine::CapPromptResponse::GrantOnce,
-                            "a" | "always" => {
-                                let handle_opt = match &req.action {
-                                    fshell_engine::CapAction::ReadDir(p) => {
-                                        Some(fshell_core::ResourceHandle::ReadDir(p.clone()))
-                                    }
-                                    fshell_engine::CapAction::WriteDir(p) => {
-                                        Some(fshell_core::ResourceHandle::WriteDir(p.clone()))
-                                    }
-                                    fshell_engine::CapAction::ReadFile(p) => {
-                                        Some(fshell_core::ResourceHandle::ReadFile(p.clone()))
-                                    }
-                                    fshell_engine::CapAction::WriteFile(p) => {
-                                        Some(fshell_core::ResourceHandle::WriteFile(p.clone()))
-                                    }
-                                    fshell_engine::CapAction::Network(h) if h == "any" => {
-                                        Some(fshell_core::ResourceHandle::NetworkAll)
-                                    }
-                                    fshell_engine::CapAction::Network(h) => {
-                                        Some(fshell_core::ResourceHandle::NetworkSocket(h.clone()))
-                                    }
-                                    fshell_engine::CapAction::ReadEnv(v) => {
-                                        Some(fshell_core::ResourceHandle::ReadEnv(v.clone()))
-                                    }
-                                    fshell_engine::CapAction::WriteEnv(v) => {
-                                        Some(fshell_core::ResourceHandle::WriteEnv(v.clone()))
-                                    }
-                                    fshell_engine::CapAction::ProcessSpawn => {
-                                        Some(fshell_core::ResourceHandle::ProcessSpawn)
-                                    }
-                                };
-                                if let Some(h) = handle_opt {
-                                    env_cap.caps.caps.write().grant(h);
-                                }
-                                fshell_engine::CapPromptResponse::GrantAlways
-                            }
-                            _ => fshell_engine::CapPromptResponse::Deny,
-                        };
-                        let _ = req.response_tx.send(resp);
-                        let _ = crossterm::terminal::enable_raw_mode();
-                        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
-                    }
-                }
-            });
-        }
 
         cpu_dbg!("--- entering input_loop ---");
         // 2. Interactive input entry loop
@@ -3474,6 +3407,7 @@ pub async fn run_ftui_repl(
             text_scroll_offset = 0;
         }
     }
+    capability_prompt.shutdown().await;
 }
 
 fn safe_cursor_position() -> Option<(u16, u16)> {
