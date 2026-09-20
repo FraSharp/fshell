@@ -12,17 +12,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 struct GitStatusCacheEntry {
-    pwd: String,
+    git_dir: Option<std::path::PathBuf>,
     status: Option<RichGitStatus>,
     head_mtime: Option<std::time::SystemTime>,
     index_mtime: Option<std::time::SystemTime>,
+    status_checked_at: Instant,
 }
 
-static GIT_STATUS_CACHE: Mutex<Option<GitStatusCacheEntry>> = Mutex::new(None);
+static GIT_STATUS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, GitStatusCacheEntry>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+const GIT_STATUS_TTL: Duration = Duration::from_secs(1);
 
 pub fn clear_git_status_cache() {
     let mut cache = GIT_STATUS_CACHE.lock();
-    *cache = None;
+    cache.clear();
 }
 
 struct CachedSegment {
@@ -80,38 +83,53 @@ static GIT_UPDATING: AtomicBool = AtomicBool::new(false);
 
 pub fn get_rich_git_status(pwd: &str) -> Option<RichGitStatus> {
     let _timer = std::time::Instant::now();
-    let mut git_dir = None;
-    let mut path = std::path::Path::new(pwd);
-    loop {
-        let candidate = path.join(".git");
-        if candidate.is_dir() {
-            git_dir = Some(candidate);
-            break;
-        }
-        match path.parent() {
-            Some(parent) => path = parent,
-            None => break,
+
+    // 1. Fast cache check
+    {
+        let cache = GIT_STATUS_CACHE.lock();
+        if let Some(entry) = cache.get(pwd) {
+            if let Some(ref git_dir) = entry.git_dir {
+                let head_mtime = std::fs::metadata(git_dir.join("HEAD"))
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                let index_mtime = std::fs::metadata(git_dir.join("index"))
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                if entry.head_mtime == head_mtime
+                    && entry.index_mtime == index_mtime
+                    && entry.status_checked_at.elapsed() < GIT_STATUS_TTL
+                {
+                    return entry.status.clone();
+                }
+            } else if entry.status_checked_at.elapsed() < GIT_STATUS_TTL {
+                return None;
+            }
         }
     }
 
-    let git_dir = match git_dir {
-        Some(d) => d,
-        None => {
+    // 2. Discover git repository
+    let repo = match Repository::discover(std::path::Path::new(pwd)) {
+        Ok(r) => r,
+        Err(_) => {
             let mut cache = GIT_STATUS_CACHE.lock();
-            *cache = None;
-            let elapsed = _timer.elapsed();
-            if elapsed > std::time::Duration::from_millis(1)
-                && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
-            {
-                eprintln!(
-                    "[cpu_dbg] [prompt] get_rich_git_status: no git dir, took {:?} for pwd={:?}",
-                    elapsed, pwd
-                );
+            if cache.len() >= 64 {
+                cache.clear();
             }
+            cache.insert(
+                pwd.to_string(),
+                GitStatusCacheEntry {
+                    git_dir: None,
+                    status: None,
+                    head_mtime: None,
+                    index_mtime: None,
+                    status_checked_at: Instant::now(),
+                },
+            );
             return None;
         }
     };
 
+    let git_dir = repo.git_dir().to_path_buf();
     let head_mtime = std::fs::metadata(git_dir.join("HEAD"))
         .ok()
         .and_then(|m| m.modified().ok());
@@ -119,65 +137,72 @@ pub fn get_rich_git_status(pwd: &str) -> Option<RichGitStatus> {
         .ok()
         .and_then(|m| m.modified().ok());
 
-    // Fast path: cache hit with matching mtimes
-    {
+    // 3. Return stale status or fast branch-only status immediately
+    let stale_status = {
         let cache = GIT_STATUS_CACHE.lock();
-        if let Some(ref entry) = *cache
-            && entry.pwd == pwd
-            && entry.head_mtime == head_mtime
-            && entry.index_mtime == index_mtime
-        {
-            let elapsed = _timer.elapsed();
-            if elapsed > std::time::Duration::from_millis(1)
-                && std::env::var("FSH_DBG_CPU_USG").as_deref() == Ok("1")
-            {
-                eprintln!(
-                    "[cpu_dbg] [prompt] get_rich_git_status: cache HIT, took {:?}",
-                    elapsed
-                );
-            }
-            return entry.status.clone();
+        cache.get(pwd).and_then(|e| e.status.clone())
+    };
+
+    let fast_status = stale_status.unwrap_or_else(|| {
+        let head = repo.head().ok();
+        let branch = head
+            .as_ref()
+            .and_then(|h| h.branch.clone())
+            .unwrap_or_else(|| {
+                head.as_ref()
+                    .map(|h| format!("{}...", &hex::encode(h.oid)[..7]))
+                    .unwrap_or_else(|| "HEAD".to_string())
+            });
+        RichGitStatus {
+            branch,
+            ahead: 0,
+            behind: 0,
+            modified: 0,
+            untracked: 0,
+            clean: true,
+        }
+    });
+
+    {
+        let mut cache = GIT_STATUS_CACHE.lock();
+        if !cache.contains_key(pwd) {
+            cache.insert(
+                pwd.to_string(),
+                GitStatusCacheEntry {
+                    git_dir: Some(git_dir.clone()),
+                    status: Some(fast_status.clone()),
+                    head_mtime,
+                    index_mtime,
+                    status_checked_at: Instant::now(),
+                },
+            );
         }
     }
 
-    // Cache miss: read stale status if available
-    let stale_status = {
-        let cache = GIT_STATUS_CACHE.lock();
-        cache.as_ref().and_then(|e| e.status.clone())
-    };
-
-    // Trigger non-blocking async update if not currently fetching
+    // 4. Trigger non-blocking background async update
     if !GIT_UPDATING.swap(true, Ordering::SeqCst) {
         let pwd_owned = pwd.to_string();
         std::thread::spawn(move || {
             let result = get_rich_git_status_uncached(&pwd_owned);
             let mut cache = GIT_STATUS_CACHE.lock();
-            *cache = Some(GitStatusCacheEntry {
-                pwd: pwd_owned,
-                status: result,
-                head_mtime,
-                index_mtime,
-            });
+            if cache.len() >= 64 {
+                cache.clear();
+            }
+            cache.insert(
+                pwd_owned,
+                GitStatusCacheEntry {
+                    git_dir: Some(git_dir),
+                    status: result,
+                    head_mtime,
+                    index_mtime,
+                    status_checked_at: Instant::now(),
+                },
+            );
             GIT_UPDATING.store(false, Ordering::SeqCst);
         });
     }
 
-    if let Some(status) = stale_status {
-        return Some(status);
-    }
-
-    // First load in session: compute synchronously once
-    let result = get_rich_git_status_uncached(pwd);
-    {
-        let mut cache = GIT_STATUS_CACHE.lock();
-        *cache = Some(GitStatusCacheEntry {
-            pwd: pwd.to_string(),
-            status: result.clone(),
-            head_mtime,
-            index_mtime,
-        });
-    }
-    result
+    Some(fast_status)
 }
 
 fn get_rich_git_status_uncached(pwd: &str) -> Option<RichGitStatus> {
