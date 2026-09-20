@@ -79,6 +79,15 @@ pub fn expand_env_vars(s: &str) -> String {
 }
 
 pub fn complete_files(last_word: &str, pos: usize) -> Vec<CompletionCandidate> {
+    complete_files_at(last_word, pos, std::path::Path::new("."))
+}
+
+/// Complete filesystem paths relative to the shell's logical working directory.
+pub fn complete_files_at(
+    last_word: &str,
+    pos: usize,
+    cwd: &std::path::Path,
+) -> Vec<CompletionCandidate> {
     let word_len = last_word.len();
     let has_opening_double_quote = last_word.starts_with('"');
     let has_opening_single_quote = last_word.starts_with('\'');
@@ -110,7 +119,12 @@ pub fn complete_files(last_word: &str, pos: usize) -> Vec<CompletionCandidate> {
     };
     let expanded = expand_env_vars(&expanded);
 
-    let path = std::path::PathBuf::from(&expanded);
+    let raw_path = std::path::PathBuf::from(&expanded);
+    let path = if raw_path.is_absolute() {
+        raw_path
+    } else {
+        cwd.join(raw_path)
+    };
     let (search_dir, file_prefix) = if expanded.ends_with('/') {
         (path, String::new())
     } else if let Some(parent) = path.parent() {

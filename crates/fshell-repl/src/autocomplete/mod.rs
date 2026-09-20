@@ -282,7 +282,11 @@ impl Completer for FshellCompleter {
                     return results;
                 }
             }
-            let mut results = complete_files(if starting_new_arg { "" } else { last_word }, pos);
+            let mut results = complete_files_at(
+                if starting_new_arg { "" } else { last_word },
+                pos,
+                &self.env.cwd(),
+            );
             results.retain(|s| s.value.ends_with('/'));
             return results;
         }
@@ -290,14 +294,14 @@ impl Completer for FshellCompleter {
         // cd: directory-only completion
         if is_cd {
             let file_word = if starting_new_arg { "" } else { last_word };
-            let mut results = complete_files(file_word, pos);
+            let mut results = complete_files_at(file_word, pos, &self.env.cwd());
             results.retain(|s| s.value.ends_with('/'));
             return results;
         }
 
         // General path completion
         if is_path {
-            return complete_files(last_word, pos);
+            return complete_files_at(last_word, pos, &self.env.cwd());
         }
 
         // Job ID completion for fg/bg
@@ -413,7 +417,11 @@ impl Completer for FshellCompleter {
         }
 
         if is_external && !last_word.starts_with('-') && (starting_new_arg || is_path) {
-            return complete_files(if starting_new_arg { "" } else { last_word }, pos);
+            return complete_files_at(
+                if starting_new_arg { "" } else { last_word },
+                pos,
+                &self.env.cwd(),
+            );
         }
 
         let mut suggestions = Vec::new();
@@ -561,7 +569,7 @@ impl Completer for FshellCompleter {
                 || fshell_engine::is_external_command_cached(cmd, env_path.as_deref());
             if is_cmd {
                 let file_word = if starting_new_arg { "" } else { last_word };
-                return complete_files(file_word, pos);
+                return complete_files_at(file_word, pos, &self.env.cwd());
             }
         }
 
@@ -750,10 +758,10 @@ impl Completer for FshellCompleter {
 
         if suggestions.is_empty() {
             if starting_new_arg {
-                return complete_files("", pos);
+                return complete_files_at("", pos, &self.env.cwd());
             }
             if !last_word.is_empty() {
-                return complete_files(last_word, pos);
+                return complete_files_at(last_word, pos, &self.env.cwd());
             }
         }
 
