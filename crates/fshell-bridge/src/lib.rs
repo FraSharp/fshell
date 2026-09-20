@@ -14,13 +14,24 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::AsyncWriteExt;
 #[cfg(test)]
 use ustr::ustr;
 
 mod cmdnotfound;
 mod structured;
+
+fn terminate_process_group(pid: i32) {
+    if pid > 0 {
+        // The child is placed in a process group whose id is its pid. Sending
+        // SIGTERM to the group prevents a producer that is no longer being
+        // drained from blocking forever on a full stdout pipe.
+        unsafe {
+            let _ = libc::kill(-pid, libc::SIGTERM);
+        }
+    }
+}
 
 /// Coerces a stream of Val into raw byte stream for legacy standard input.
 pub fn coerce_val_to_bytes(val: &Val) -> Vec<u8> {
@@ -731,6 +742,7 @@ pub fn run_external(
     };
 
     let pid = child.id() as i32;
+    let output_cancelled = Arc::new(AtomicBool::new(false));
     if debug_fg {
         eprintln!("[FSH_DEBUG_FG] parent: child spawned pid={}", pid);
     }
@@ -827,13 +839,23 @@ pub fn run_external(
         let json_auto_parse = env.options.read().json_auto_parse;
         let env_clone = env.clone();
         let is_structured = structured::is_known_structured_command(&name_owned, &args_strs);
+        let output_cancelled_clone = output_cancelled.clone();
         tokio::spawn(async move {
             use structured::{ParseResult, ParseState};
             use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
             if !is_structured && !json_auto_parse {
                 let mut buf = vec![0u8; 64 * 1024];
-                while let Ok(n) = async_stdout.read(&mut buf).await {
+                loop {
+                    let n = match async_stdout.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => {
+                            if !output_cancelled_clone.swap(true, Ordering::AcqRel) {
+                                terminate_process_group(pid);
+                            }
+                            break;
+                        }
+                    };
                     if n == 0 {
                         break;
                     }
@@ -846,6 +868,9 @@ pub fn run_external(
                     .await
                     .is_err()
                     {
+                        if !output_cancelled_clone.swap(true, Ordering::AcqRel) {
+                            terminate_process_group(pid);
+                        }
                         break;
                     }
                 }
@@ -853,7 +878,16 @@ pub fn run_external(
                 let mut reader = tokio::io::BufReader::new(&mut async_stdout);
                 let mut buf = Vec::new();
                 let mut parse_state = ParseState::default();
-                while let Ok(n) = reader.read_until(b'\n', &mut buf).await {
+                loop {
+                    let n = match reader.read_until(b'\n', &mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => {
+                            if !output_cancelled_clone.swap(true, Ordering::AcqRel) {
+                                terminate_process_group(pid);
+                            }
+                            break;
+                        }
+                    };
                     if n == 0 {
                         break;
                     }
@@ -910,6 +944,9 @@ pub fn run_external(
                     .is_err()
                     {
                         // Channel closed (downstream consumer exited, e.g. `head` finished).
+                        if !output_cancelled_clone.swap(true, Ordering::AcqRel) {
+                            terminate_process_group(pid);
+                        }
                         break;
                     }
                 }
@@ -929,11 +966,17 @@ pub fn run_external(
         let async_stderr = tokio::fs::File::from_std(std_stderr);
         let tx_diag = tx.clone();
         let stderr_limit = env.options.read().stderr_max_bytes;
+        let output_cancelled_clone = output_cancelled.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let mut err_str = String::with_capacity(4096);
             let mut limited = async_stderr.take(stderr_limit as u64);
-            let _ = limited.read_to_string(&mut err_str).await;
+            if limited.read_to_string(&mut err_str).await.is_err() {
+                if !output_cancelled_clone.swap(true, Ordering::AcqRel) {
+                    terminate_process_group(pid);
+                }
+                return;
+            }
             if limited.limit() == 0 && !err_str.is_empty() {
                 let total = err_str.len();
                 if !err_str.ends_with('\n') {
@@ -946,9 +989,14 @@ pub fn run_external(
                 ));
             }
             if !err_str.is_empty() {
-                let _ = tx_diag
+                if tx_diag
                     .send(PipelinePayload::Structured(err_str.into()))
-                    .await;
+                    .await
+                    .is_err()
+                    && !output_cancelled_clone.swap(true, Ordering::AcqRel)
+                {
+                    terminate_process_group(pid);
+                }
             }
         });
     }
