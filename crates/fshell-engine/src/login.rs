@@ -30,9 +30,8 @@ pub fn is_interactive() -> bool {
 /// or `Terminal.app` is interactive, so the increment is unconditional
 /// for interactive sessions and skipped for `fsh -c` / script mode.
 ///
-/// The host `SHLVL` env var and the fshell `SHLVL` variable are kept
-/// in sync so that both `echo $SHLVL` (fshell var) and child processes
-/// (`env | grep SHLVL`) observe the same value.
+/// The fshell `SHLVL` variable and child environment are kept in sync so that
+/// both `echo $SHLVL` and child processes observe the same value.
 pub fn bump_shlvl(env: &Env) {
     let host_current = std::env::var("SHLVL")
         .ok()
@@ -40,13 +39,7 @@ pub fn bump_shlvl(env: &Env) {
         .unwrap_or(0);
     let next = host_current + 1;
     let next_str = next.to_string();
-    unsafe {
-        std::env::set_var("SHLVL", &next_str);
-    }
-    {
-        let mut vars = env.vars.write();
-        vars.insert("SHLVL".to_string(), Val::String(next_str));
-    }
+    env.set_exported_var("SHLVL", Val::String(next_str));
 }
 
 /// Ensure `$SHLVL` exists as a fshell variable so `echo $SHLVL` does not
@@ -342,18 +335,9 @@ fn try_load_from_cache(env: &Env, is_login: bool, is_interactive: bool) -> bool 
         return false;
     }
 
-    {
-        let mut vars = env.vars.write();
-        for (key, val) in &cache.env_vars {
-            if is_ignored_login_env_var(key) {
-                continue;
-            }
-            if key == "PATH" {
-                unsafe {
-                    std::env::set_var("PATH", val);
-                }
-            }
-            vars.insert(key.clone(), Val::String(val.clone()));
+    for (key, val) in &cache.env_vars {
+        if !is_ignored_login_env_var(key) {
+            env.set_exported_var(key, Val::String(val.clone()));
         }
     }
 

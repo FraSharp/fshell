@@ -1164,7 +1164,7 @@ impl Env {
                 vars.insert("env".to_string(), Val::Map(new_map));
             }
         }
-        fshell_core::set_var("PWD", &pwd_str);
+        self.is_env_modified.store(true, Ordering::Release);
     }
 
     /// Check if strict capability enforcement mode is active.
@@ -3032,17 +3032,6 @@ pub(crate) use eval::{
 };
 
 impl Env {
-    fn val_to_host_string(val: &Val) -> String {
-        match val {
-            Val::String(s) => s.clone(),
-            Val::Int(i) => i.to_string(),
-            Val::Float(f) => f.to_string(),
-            Val::Bool(b) => b.to_string(),
-            Val::Null => String::new(),
-            other => other.to_text(),
-        }
-    }
-
     /// Set a shell variable without exporting to the environment.
     pub fn set_shell_var(&self, key: &str, val: Val) {
         if let Some(ref locals) = self.local_vars {
@@ -3051,9 +3040,8 @@ impl Env {
         self.vars.write().insert(key.to_string(), val);
     }
 
-    /// Set a variable and export it to the environment (vars + env map + host).
+    /// Set a variable and export it to this shell's child environment.
     pub fn set_exported_var(&self, key: &str, val: Val) {
-        let host_str = Self::val_to_host_string(&val);
         if let Some(ref locals) = self.local_vars {
             locals.write().insert(key.to_string(), val.clone());
         }
@@ -3061,9 +3049,6 @@ impl Env {
             let mut vars = self.vars.write();
             vars.insert(key.to_string(), val.clone());
             self.ensure_env_map_insert(&mut vars, key, val);
-        }
-        unsafe {
-            std::env::set_var(key, host_str);
         }
         self.is_env_modified.store(true, Ordering::Release);
         if key == "PATH" {
@@ -3076,13 +3061,9 @@ impl Env {
     pub fn export_existing_var(&self, key: &str) -> bool {
         let val_opt = self.vars.read().get(key).cloned();
         if let Some(val) = val_opt {
-            let host_str = Self::val_to_host_string(&val);
             {
                 let mut vars = self.vars.write();
                 self.ensure_env_map_insert(&mut vars, key, val);
-            }
-            unsafe {
-                std::env::set_var(key, host_str);
             }
             self.is_env_modified.store(true, Ordering::Release);
             if key == "PATH" {
@@ -3105,9 +3086,6 @@ impl Env {
             if let Some(Val::Map(map)) = vars.get_mut("env") {
                 map.swap_remove(&ustr::ustr(key));
             }
-        }
-        unsafe {
-            std::env::remove_var(key);
         }
         self.is_env_modified.store(true, Ordering::Release);
         if key == "PATH" {

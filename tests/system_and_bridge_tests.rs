@@ -15,6 +15,7 @@ use std::path::PathBuf;
 async fn test_integration_cd_and_paths() {
     let cwd_guard = CwdGuard::new_temp();
     let env = setup_test_env();
+    let process_cwd = std::env::current_dir().unwrap();
 
     // Create a sub-directory and move into it
     let parent_dir = cwd_guard.path().canonicalize().unwrap();
@@ -43,10 +44,7 @@ async fn test_integration_cd_and_paths() {
 
     // It should have successfully moved to the parent directory
     assert_eq!(new_dir.canonicalize().unwrap(), parent_dir);
-    assert_eq!(
-        std::env::current_dir().unwrap().canonicalize().unwrap(),
-        parent_dir
-    );
+    assert_eq!(std::env::current_dir().unwrap(), process_cwd);
     assert_eq!(
         env.vars.read().get("PWD").unwrap(),
         &Val::String(parent_dir.to_string_lossy().to_string())
@@ -54,9 +52,11 @@ async fn test_integration_cd_and_paths() {
 }
 
 #[tokio::test]
-async fn test_integration_cd_syncs_process_and_env_vars() {
+async fn test_integration_cd_isolated_from_process_environment() {
     let cwd_guard = CwdGuard::new_temp();
     let env = setup_test_env();
+    let process_cwd = std::env::current_dir().unwrap();
+    let process_pwd = fshell_core::get_var("PWD");
     let parent_dir = cwd_guard.path().canonicalize().unwrap();
     let sub_dir = parent_dir.join("test_cd_target");
     std::fs::create_dir(&sub_dir).unwrap();
@@ -73,18 +73,12 @@ async fn test_integration_cd_syncs_process_and_env_vars() {
     eval_stmt(&stmts[0], &env, false).await.unwrap();
 
     assert_eq!(env.cwd().canonicalize().unwrap(), target_canon);
-    assert_eq!(
-        std::env::current_dir().unwrap().canonicalize().unwrap(),
-        target_canon
-    );
+    assert_eq!(std::env::current_dir().unwrap(), process_cwd);
     assert_eq!(
         env.vars.read().get("PWD").unwrap(),
         &Val::String(target_canon.to_string_lossy().to_string())
     );
-    assert_eq!(
-        fshell_core::get_var("PWD").unwrap().to_string_lossy(),
-        target_canon.to_string_lossy()
-    );
+    assert_eq!(fshell_core::get_var("PWD"), process_pwd);
 }
 
 #[tokio::test]

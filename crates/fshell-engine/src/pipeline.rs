@@ -2523,10 +2523,14 @@ pub fn populate_env_from_host(env: &Env) {
 
     let host_path = std::env::var("PATH").unwrap_or_default();
     let enriched_path = enrich_path(&host_path);
-    unsafe {
-        std::env::set_var("PATH", &enriched_path);
+    if let Some(Val::Map(map)) = vars.get_mut("env") {
+        map.insert(
+            ustr::ustr("PATH"),
+            fshell_core::Val::String(enriched_path.clone()),
+        );
     }
     vars.insert("PATH".to_string(), fshell_core::Val::String(enriched_path));
+    env.is_env_modified.store(true, Ordering::Release);
 }
 
 /// Parse and evaluate fshell source text (a script or inline command).

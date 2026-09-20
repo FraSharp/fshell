@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use fshell_core::ShellError;
-use fshell_core::{ResourceHandle, Val, set_var};
+use fshell_core::{ResourceHandle, Val};
 use fshell_engine::{CapAction, Env};
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -94,9 +94,6 @@ pub fn change_dir_and_update_caps(
             vars.insert("env".to_string(), Val::Map(new_map));
         }
     }
-
-    set_var("PWD", &pwd_str);
-    set_var("OLDPWD", &old_pwd_str);
 
     Ok(())
 }
