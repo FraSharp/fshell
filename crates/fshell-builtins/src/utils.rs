@@ -284,3 +284,23 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     }
     PathBuf::from(path)
 }
+
+/// Expand the shell-owned `~` form using an explicit environment.
+///
+/// The legacy [`expand_tilde`] helper is retained for host-level configuration
+/// paths. Command builtins must use this variant so cloned shell environments
+/// do not accidentally read another shell's `HOME`.
+pub fn expand_tilde_for_env(path: &str, env: &Env) -> PathBuf {
+    if path == "~" || path == "~/" {
+        return env.home_dir();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return env.home_dir().join(rest);
+    }
+    expand_tilde(path)
+}
+
+/// Expand a user path and resolve relative paths against the shell cwd.
+pub fn resolve_user_path(path: &str, env: &Env) -> PathBuf {
+    env.resolve_path(expand_tilde_for_env(path, env))
+}

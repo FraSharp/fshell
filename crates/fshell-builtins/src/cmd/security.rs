@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub fn fs_readwrite_builtin(
     _in_rx: Option<PipeStream>,
     args: Vec<Val>,
-    _env: &Env,
+    env: &Env,
     tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
@@ -33,7 +33,7 @@ pub fn fs_readwrite_builtin(
         )
         .maybe_with_span(span));
     };
-    let path = crate::utils::expand_tilde(&path_str);
+    let path = crate::utils::resolve_user_path(&path_str, env);
     let path2 = path.clone();
     tokio::spawn(async move {
         let _ = tx
@@ -295,7 +295,7 @@ pub fn make_path_cap_builtin(
 + Send
 + Sync
 + 'static {
-    move |_in_rx, args, _env, tx, _span| {
+    move |_in_rx, args, env, tx, _span| {
         let val = if !args.is_empty() {
             match &args[0] {
                 Val::String(s) => s.clone(),
@@ -316,7 +316,7 @@ pub fn make_path_cap_builtin(
             }
             .into());
         };
-        let path = crate::utils::expand_tilde(&val);
+        let path = crate::utils::resolve_user_path(&val, env);
         tokio::spawn(async move {
             let _ = tx
                 .send(PipelinePayload::Data(Arc::new(Val::Capability(variant(

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::error::BuiltinError;
-use crate::utils::expand_tilde;
+use crate::utils::resolve_user_path;
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
@@ -293,7 +293,7 @@ pub fn z_builtin(
     if args.len() == 1
         && let Val::String(ref s) = args[0]
     {
-        let expanded = env.resolve_path(expand_tilde(s));
+        let expanded = resolve_user_path(s, env);
         if expanded.is_dir()
             && let Ok(target_path) = std::fs::canonicalize(&expanded)
         {

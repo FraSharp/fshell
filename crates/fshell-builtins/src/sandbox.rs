@@ -56,7 +56,7 @@ Options:
                     let path_str = path_val.to_text();
                     profile
                         .allow_write_paths
-                        .push(crate::utils::expand_tilde(&path_str));
+                        .push(crate::utils::resolve_user_path(&path_str, env));
                     arg_idx += 2;
                 } else {
                     return Err("sandbox: --allow-path requires a path argument".into());
@@ -68,7 +68,7 @@ Options:
                     let path_str = path_val.to_text();
                     profile
                         .deny_write_paths
-                        .push(crate::utils::expand_tilde(&path_str));
+                        .push(crate::utils::resolve_user_path(&path_str, env));
                     arg_idx += 2;
                 } else {
                     return Err("sandbox: --deny-path requires a path argument".into());

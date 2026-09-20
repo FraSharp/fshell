@@ -4,8 +4,8 @@
 #![allow(clippy::unnecessary_cast)]
 use crate::error::BuiltinError;
 use crate::utils::{
-    change_dir_and_update_caps, check_read_file, expand_tilde, interpret_ansi_escapes,
-    val_to_display_string,
+    change_dir_and_update_caps, check_read_file, expand_tilde_for_env, interpret_ansi_escapes,
+    resolve_user_path, val_to_display_string,
 };
 use fshell_core::ShellError;
 use fshell_core::Val;
@@ -37,7 +37,7 @@ fn format_permissions_from_mode(mode: u32) -> String {
 
 fn parse_ls_args_to_rrls_config(
     args: &[Val],
-    cwd: &std::path::Path,
+    env: &Env,
 ) -> Result<(fshell_ls::Config, Vec<String>, bool), String> {
     let is_tty = fshell_engine::is_stdout_a_tty();
 
@@ -238,9 +238,9 @@ fn parse_ls_args_to_rrls_config(
     }
 
     let raw_path = if !path_args.is_empty() {
-        expand_tilde(&path_args[0])
+        resolve_user_path(&path_args[0], env)
     } else {
-        cwd.to_path_buf()
+        env.cwd()
     };
 
     let config = fshell_ls::Config {
@@ -456,7 +456,7 @@ pub fn ls_builtin(
         env.is_last_stage
     );
     // 1. Parse flags into rrls Config and collect path arguments
-    let (mut config, path_args, verbose) = parse_ls_args_to_rrls_config(&args, &env.cwd())?;
+    let (mut config, path_args, verbose) = parse_ls_args_to_rrls_config(&args, env)?;
 
     // Set theme colors for fshell-ls
     let theme = env.active_theme();
@@ -485,14 +485,7 @@ pub fn ls_builtin(
     let targets: Vec<std::path::PathBuf> = if !path_args.is_empty() {
         path_args
             .iter()
-            .map(|p| {
-                let expanded = expand_tilde(p);
-                if expanded.is_relative() {
-                    env.cwd().join(expanded)
-                } else {
-                    expanded
-                }
-            })
+            .map(|p| resolve_user_path(p, env))
             .collect()
     } else {
         vec![env.cwd()]
@@ -704,13 +697,13 @@ pub fn cd_builtin(
     let raw_path = if !args.is_empty() {
         match &args[0] {
             Val::String(s) => {
-                let expanded = expand_tilde(s);
+                let expanded = expand_tilde_for_env(s, env);
                 if !expanded.exists() {
                     let cdable_vars = env.options.read().cdable_vars;
                     if cdable_vars {
                         let vars = env.vars.read();
                         if let Some(Val::String(var_val)) = vars.get(s) {
-                            expand_tilde(var_val)
+                            expand_tilde_for_env(var_val, env)
                         } else {
                             expanded
                         }
@@ -730,10 +723,7 @@ pub fn cd_builtin(
             }
         }
     } else {
-        match crate::utils::get_home_dir() {
-            Some(home) => home,
-            None => return Err("HOME not set".to_string().into()),
-        }
+        env.home_dir()
     };
 
     if raw_path.to_str() == Some("-") {
@@ -817,7 +807,7 @@ pub fn pushd_builtin(
                 .maybe_with_span(span));
             }
         };
-        let target = std::fs::canonicalize(env.resolve_path(expand_tilde(&target_arg)))
+        let target = std::fs::canonicalize(resolve_user_path(&target_arg, env))
             .map_err(|e| format!("pushd: {}: {}", target_arg, e))?;
 
         stack.insert(0, Val::String(current_dir.to_string_lossy().to_string()));
@@ -971,7 +961,7 @@ pub fn extract_builtin(
         }
     };
 
-    let raw_path = env.resolve_path(expand_tilde(archive_path_str));
+    let raw_path = resolve_user_path(archive_path_str, env);
     let archive_path = std::fs::canonicalize(&raw_path)
         .map_err(|e| format!("Invalid archive path {:?}: {}", raw_path, e))?;
     env.enforce_capability("extract", CapAction::ReadFile(archive_path.clone()))?;
@@ -1174,7 +1164,7 @@ fn resolve_canonical_paths(
 ) -> Result<Vec<PathBuf>, ShellError> {
     let mut canonical = Vec::new();
     for p in paths {
-        let raw = env.resolve_path(expand_tilde(p));
+        let raw = resolve_user_path(p, env);
         let path = std::fs::canonicalize(&raw).map_err(|e| format!("Invalid path {raw:?}: {e}"))?;
         check_read_file(env, cmd, path.clone())?;
         canonical.push(path);
@@ -1662,7 +1652,7 @@ pub fn watch_builtin(
     }
 
     let raw_path = if !path_args.is_empty() {
-        env.resolve_path(expand_tilde(&path_args[0]))
+        resolve_user_path(&path_args[0], env)
     } else {
         env.cwd()
     };
@@ -1776,7 +1766,7 @@ pub fn mkdir_builtin(
     }
 
     for path_str in paths {
-        let path = expand_tilde(&path_str);
+        let path = resolve_user_path(&path_str, env);
         env.enforce_capability("mkdir", CapAction::WriteDir(path.clone()))?;
 
         if make_parents {
@@ -1834,7 +1824,7 @@ pub fn touch_builtin(
             )
             .maybe_with_span(span));
         };
-        let path = expand_tilde(&s);
+        let path = resolve_user_path(&s, env);
         env.enforce_capability("touch", CapAction::WriteFile(path.clone()))?;
 
         if path.exists() {
@@ -1900,7 +1890,7 @@ pub fn cat_builtin(
                 continue;
             }
 
-            let path = expand_tilde(&path_str);
+            let path = resolve_user_path(&path_str, &env_clone);
             if let Err(e) = check_read_file(&env_clone, "cat", path.clone()) {
                 let _ = tx_clone
                     .send(PipelinePayload::Data(Arc::new(Val::String(format!(
