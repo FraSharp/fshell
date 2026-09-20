@@ -76,7 +76,7 @@ pub fn ff_builtin(
         .into());
     }
     env.enforce_capability("ff", fshell_engine::CapAction::ReadDir(search_root.clone()))?;
-    env.track_read(search_root);
+    env.track_read(search_root.clone());
 
     // 4. Run the search
     config.path = search_root.to_string_lossy().into_owned();

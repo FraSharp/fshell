@@ -155,7 +155,7 @@ async fn process_glob(
 
     // Check read capability on the search directory
     env.enforce_capability("replace", CapAction::ReadDir(base_path.clone()))?;
-    env.track_read(base_path);
+    env.track_read(base_path.clone());
 
     // Walk the directory tree and match the glob
     for entry in walkdir::WalkDir::new(&base_path)
