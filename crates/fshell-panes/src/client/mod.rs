@@ -110,6 +110,7 @@ pub async fn connect_or_spawn_daemon(
 /// This is the main entry point for the client process.
 pub async fn run_client(
     session_name: Option<String>,
+    shell: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let socket_path = get_socket_path();
 
@@ -153,6 +154,7 @@ pub async fn run_client(
         session_name: name.clone(),
         cols,
         rows,
+        shell,
     };
     sink.send(Frame::from_client(&attach_msg)).await?;
 

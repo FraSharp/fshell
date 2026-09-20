@@ -22,6 +22,7 @@ pub enum ClientMessage {
         session_name: String,
         cols: u16,
         rows: u16,
+        shell: Option<String>,
     },
     /// Gracefully detach the client without killing the session.
     Detach,
@@ -281,6 +282,7 @@ mod tests {
                 session_name: "test-session".to_string(),
                 cols: 80,
                 rows: 24,
+                shell: None,
             },
             ClientMessage::Detach,
             ClientMessage::PrefixCommand(PrefixCommand::SplitVertical),

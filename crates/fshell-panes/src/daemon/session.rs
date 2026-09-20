@@ -50,6 +50,7 @@ pub struct Session {
     daemon_event_tx: Option<mpsc::Sender<DaemonEvent>>,
     /// Session-wide lock-free dirty flag for rendering.
     pub dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shell: String,
 }
 
 impl Session {
@@ -66,7 +67,12 @@ impl Session {
             terminal_size: (80, 24),
             daemon_event_tx: None,
             dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            shell: get_default_shell(),
         }
+    }
+
+    pub fn set_shell(&mut self, shell: String) {
+        self.shell = shell;
     }
 
     /// Set the daemon event sender for this session.
@@ -137,7 +143,7 @@ impl Session {
         let mut window = Window::new(window_id, pane_id);
 
         // Spawn the initial PTY pipeline for this window.
-        let shell = get_default_shell();
+        let shell = self.shell.clone();
         let (cols, rows) = self.terminal_size;
         let pane_rows = rows.saturating_sub(1);
         let init_cols = cols.saturating_sub(2).max(1);
@@ -268,7 +274,7 @@ impl Session {
         let event_tx = self.daemon_event_tx.clone();
         let dirty = self.dirty.clone();
         let window = &mut self.windows[self.active_window];
-        window.spawn_pane(direction, session_name, event_tx, dirty);
+        window.spawn_pane(direction, session_name, event_tx, dirty, self.shell.clone());
 
         // Resize all panes in the window to correct dimensions.
         let (cols, rows) = self.terminal_size;

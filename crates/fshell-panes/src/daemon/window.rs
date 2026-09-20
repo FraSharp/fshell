@@ -17,7 +17,6 @@ use crate::grid::Grid;
 use crate::layout::bsp::{BspLayout, Split};
 use crate::proto::SCROLLBACK_LIMIT;
 use crate::pty::async_pty::AsyncPty;
-use crate::pty::get_default_shell;
 use crate::pty::grid_manager::{GridManager, PtyCommand};
 use crate::pty::pty_actor::PtyActor;
 
@@ -150,6 +149,7 @@ impl Window {
         session_name: String,
         daemon_event_tx: Option<mpsc::Sender<DaemonEvent>>,
         dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        shell: String,
     ) {
         let focused = self.focus.focused_pane;
         let new_id = self.bsp.split(focused, direction, 0.5);
@@ -182,7 +182,6 @@ impl Window {
         tokio::spawn(async move { manager.run().await });
 
         // Spawn AsyncPty + PtyActor.
-        let shell = get_default_shell();
         if let Ok(pty) = AsyncPty::spawn(&shell, init_cols, init_rows) {
             let actor = PtyActor::new(pty, grid_tx, pty_rx, new_id, None);
             let pane_session_name = session_name;

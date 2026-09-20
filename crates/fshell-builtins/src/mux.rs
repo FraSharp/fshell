@@ -19,19 +19,16 @@ use fshell_panes::proto::{Frame, get_socket_path};
 /// named session via the panes client. Shared by `attach`, `new`, and the
 /// bare-session fallback.
 fn run_client_attached(session_name: Option<String>) -> Result<(), ShellError> {
-    if let Ok(exe) = std::env::current_exe() {
-        // SAFETY: single-threaded builtin dispatch before any threads read the env.
-        unsafe {
-            std::env::set_var("FSHELL_BIN", exe);
-        }
-    }
+    let shell = std::env::current_exe()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| ShellError::from(format!("Failed to create runtime: {e}")))?;
 
     rt.block_on(async {
-        fshell_panes::client::run_client(session_name)
+        fshell_panes::client::run_client(session_name, shell)
             .await
             .map_err(|e| ShellError::from(format!("mux error: {e}")))
     })

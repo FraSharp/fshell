@@ -62,6 +62,7 @@ impl SessionManager {
         name: String,
         cols: u16,
         rows: u16,
+        shell: Option<String>,
         daemon_event_tx: mpsc::Sender<super::DaemonEvent>,
     ) -> Result<Arc<RwLock<Session>>, Box<dyn std::error::Error + Send + Sync>> {
         if self.sessions.contains_key(&name) {
@@ -69,6 +70,9 @@ impl SessionManager {
         }
 
         let mut session = Session::new(name.clone(), 0);
+        if let Some(shell) = shell {
+            session.set_shell(shell);
+        }
         session.terminal_size = (cols, rows);
         session.set_daemon_event_tx(daemon_event_tx.clone());
 
@@ -229,9 +233,11 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
 
         let _ = mgr
-            .create_session("test-1".to_string(), 80, 24, tx.clone())
+            .create_session("test-1".to_string(), 80, 24, None, tx.clone())
             .await;
-        let _ = mgr.create_session("test-2".to_string(), 120, 40, tx).await;
+        let _ = mgr
+            .create_session("test-2".to_string(), 120, 40, None, tx)
+            .await;
 
         let list = mgr.list_sessions().await;
         assert_eq!(list.len(), 2);
@@ -244,7 +250,9 @@ mod tests {
         let mut mgr = SessionManager::new();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
 
-        let _ = mgr.create_session("to-kill".to_string(), 80, 24, tx).await;
+        let _ = mgr
+            .create_session("to-kill".to_string(), 80, 24, None, tx)
+            .await;
         assert!(mgr.kill_session("to-kill").await.is_ok());
 
         let list = mgr.list_sessions().await;

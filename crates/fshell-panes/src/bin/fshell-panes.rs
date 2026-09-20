@@ -112,11 +112,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     match args.command {
         // Default: attach to a session (create if needed).
-        None => fshell_panes::client::run_client(None).await,
+        None => fshell_panes::client::run_client(None, None).await,
 
-        Some(Command::New { name }) => fshell_panes::client::run_client(name).await,
+        Some(Command::New { name }) => fshell_panes::client::run_client(name, None).await,
 
-        Some(Command::Attach { name }) => fshell_panes::client::run_client(name).await,
+        Some(Command::Attach { name }) => fshell_panes::client::run_client(name, None).await,
 
         Some(Command::Ls { json }) => {
             let socket_path = fshell_panes::proto::get_socket_path();

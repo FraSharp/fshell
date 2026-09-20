@@ -66,7 +66,7 @@ pub async fn handle_client(
                         };
 
                         match msg {
-                            ClientMessage::Attach { session_name: name, cols: c, rows: r } => {
+                            ClientMessage::Attach { session_name: name, cols: c, rows: r, shell } => {
                                 cols = c;
                                 rows = r;
 
@@ -90,7 +90,7 @@ pub async fn handle_client(
                                 if needs_create {
                                     eprintln!("fshell-panesd: creating session '{}'", name);
                                     let mut mgr = session_manager.write().await;
-                                    if let Err(e) = mgr.create_session(name.clone(), cols, rows, daemon_event_tx.clone()).await {
+                                    if let Err(e) = mgr.create_session(name.clone(), cols, rows, shell, daemon_event_tx.clone()).await {
                                         eprintln!("fshell-panesd: failed to create session: {}", e);
                                         continue;
                                     }
