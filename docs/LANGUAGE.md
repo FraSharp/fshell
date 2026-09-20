@@ -233,13 +233,19 @@ heredocs feed multi-line text into a command or pipeline:
 ```fsh
 cat <<EOF
 server: 127.0.0.1
-port: {port}
+port: $port
 EOF
 ```
 
-- `<<EOF`: multi-line string with variable interpolation.
+- `<<EOF`: multi-line string with `$` interpolation.
 - `<<'EOF'`: raw multi-line string (no interpolation).
 - `<<-EOF`: strips leading tab characters from each line.
+
+> [!NOTE]
+> triple-quoted strings and heredocs are raw *text* bodies: they expand
+> `$var`, `${var:modifier}`, `$@`/`$#`/`$?`, `$(...)` and `$((...))`, but a bare
+> `{...}` stays literal so JSON, nginx and SQL content is not mangled. Use a
+> double-quoted string when you want `{expr}` interpolation.
 
 here-strings (`<<<`) feed a single expanded string into standard input:
 

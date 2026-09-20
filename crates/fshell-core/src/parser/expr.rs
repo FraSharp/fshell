@@ -1341,9 +1341,9 @@ impl Parser {
                 self.cmd_arg_mode = saved_arg;
                 Ok(Some(e))
             }
-            Some('?') => {
+            Some(sp @ ('?' | '#' | '@' | '*' | '$')) => {
                 self.next_char();
-                Ok(Some(Expr::Variable("?".to_string())))
+                Ok(Some(Expr::Variable(sp.to_string())))
             }
             Some(c) if c.is_alphanumeric() || c == '_' => {
                 let mut name = String::new();

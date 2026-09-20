@@ -243,108 +243,122 @@ fn dedent(s: &str, mode: DedentMode) -> String {
     }
 }
 
-fn parse_braced_interpolation(
-    chars: &mut std::iter::Peekable<std::str::Chars>,
-    base_span: SourceSpan,
-) -> Result<Expr, ParseError> {
-    let mut expr_str = String::new();
-    let mut depth = 1u32;
-    while let Some(&ec) = chars.peek() {
-        if ec == '{' {
-            depth += 1;
-        }
-        if ec == '}' {
-            depth -= 1;
-            if depth == 0 {
-                chars.next(); // consume '}'
-                break;
-            }
-        }
-        expr_str.push(
-            chars
-                .next()
-                .ok_or(ParseError::UnexpectedEof { span: base_span })?,
-        );
-    }
-
-    if depth > 0 {
-        return Err(ParseError::SyntaxError {
-            message: "Unclosed braced interpolation".to_string(),
-            span: base_span,
-        });
-    }
-
-    let mut expr_parser = Parser::new(&expr_str);
-    expr_parser
-        .parse_expr()
-        .map_err(|e| ParseError::SyntaxError {
-            message: format!("Interpolation syntax error: {}", e),
-            span: base_span,
-        })
+/// Parse the interpolation markers of a raw string body into `StringPart`s.
+///
+/// This is the single interpolation grammar shared by triple-quoted strings and
+/// heredocs. It understands exactly the same constructs as a double-quoted
+/// string body:
+///
+/// - `${name}` / `${name:modifier}` — parameter expansion (the same grammar as
+///   double-quoted strings),
+/// - `$name`, `$1`, `$?`, `$#`, `$@`, `$*`, `$$` — variable / special parameters,
+/// - `$(pipeline)` — command substitution,
+/// - `$((expr))` — arithmetic expansion.
+///
+/// Bare `{...}` is intentionally *not* interpolation here: triple-quoted strings
+/// and heredocs carry raw text (JSON, nginx configs, SQL) where braces are
+/// literal. Use double-quoted strings for `{expr}` interpolation, or `<<'EOF'` /
+/// `'''...'''` for a fully raw body.
+fn parse_string_parts(s: &str, base_span: SourceSpan) -> Result<Vec<StringPart>, ParseError> {
+    parse_string_parts_inner(s).map_err(|e| ParseError::SyntaxError {
+        message: format!("Invalid interpolation: {e}"),
+        span: base_span,
+    })
 }
 
-/// Parse interpolation markers in a raw string into StringPart parts.
-/// Handles {expr} and $var patterns.
-fn parse_string_parts(s: &str, base_span: SourceSpan) -> Result<Vec<StringPart>, ParseError> {
-    use std::iter::Peekable;
-    use std::str::Chars;
-
-    let mut parts: Vec<StringPart> = Vec::new();
-    let mut chars: Peekable<Chars> = s.chars().peekable();
-    let mut current_lit = String::new();
-
-    while let Some(c) = chars.next() {
-        if c == '$' {
-            match chars.peek() {
-                Some('{') => {
-                    if !current_lit.is_empty() {
-                        parts.push(StringPart::Lit(std::mem::take(&mut current_lit)));
-                    }
-                    chars.next(); // consume {
-                    let expr = parse_braced_interpolation(&mut chars, base_span)?;
-                    parts.push(StringPart::Expr(Box::new(expr)));
-                }
-                Some('?') | Some('#') | Some('@') | Some('*') | Some('$') => {
-                    if !current_lit.is_empty() {
-                        parts.push(StringPart::Lit(std::mem::take(&mut current_lit)));
-                    }
-                    if let Some(var_char) = chars.next() {
-                        parts.push(StringPart::Expr(Box::new(Expr::Variable(
-                            var_char.to_string(),
-                        ))));
-                    }
-                }
-                Some(nc) if nc.is_alphanumeric() || *nc == '_' => {
-                    if !current_lit.is_empty() {
-                        parts.push(StringPart::Lit(std::mem::take(&mut current_lit)));
-                    }
-                    let mut name = String::new();
-                    while let Some(&nc) = chars.peek() {
-                        if nc.is_alphanumeric() || nc == '_' {
-                            name.push(
-                                chars
-                                    .next()
-                                    .ok_or(ParseError::UnexpectedEof { span: base_span })?,
-                            );
-                        } else {
-                            break;
-                        }
-                    }
-                    parts.push(StringPart::Expr(Box::new(Expr::Variable(name))));
-                }
-                _ => {
-                    current_lit.push('$');
-                }
-            }
-        } else {
-            current_lit.push(c);
+fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
+    fn flush(parts: &mut Vec<StringPart>, lit: &mut String) {
+        if !lit.is_empty() {
+            parts.push(StringPart::Lit(std::mem::take(lit)));
         }
     }
 
-    if !current_lit.is_empty() {
-        parts.push(StringPart::Lit(current_lit));
+    let mut p = Parser::new(s);
+    let mut parts: Vec<StringPart> = Vec::new();
+    let mut lit = String::new();
+
+    while let Some(c) = p.peek() {
+        match c {
+            '$' => {
+                let next = p.input.get(p.pos + 1).copied();
+                match next {
+                    Some('{') => {
+                        p.next_char(); // '$'
+                        flush(&mut parts, &mut lit);
+                        let saved = p.cmd_arg_mode;
+                        p.cmd_arg_mode = false;
+                        let e = p.parse_braced_variable()?;
+                        p.cmd_arg_mode = saved;
+                        parts.push(StringPart::Expr(Box::new(e)));
+                    }
+                    Some('(') => {
+                        p.next_char(); // '$'
+                        flush(&mut parts, &mut lit);
+                        let saved = p.cmd_arg_mode;
+                        p.cmd_arg_mode = false;
+                        // Arithmetic expansion `$(( ... ))` — try it first and fall
+                        // back to command substitution if it does not close.
+                        let mut handled = false;
+                        if p.peek() == Some('(') && p.input.get(p.pos + 1).copied() == Some('(') {
+                            let saved_pos = p.pos;
+                            p.next_char(); // first '('
+                            p.next_char(); // second '('
+                            if let Ok(inner) = p.parse_expr() {
+                                p.skip_whitespace();
+                                if p.peek() == Some(')') {
+                                    p.next_char();
+                                    p.skip_whitespace();
+                                    if p.peek() == Some(')') {
+                                        p.next_char();
+                                        parts.push(StringPart::Expr(Box::new(
+                                            Expr::ArithmeticExpansion(Box::new(inner)),
+                                        )));
+                                        handled = true;
+                                    }
+                                }
+                            }
+                            if !handled {
+                                p.pos = saved_pos;
+                            }
+                        }
+                        if !handled {
+                            let e = p.parse_cmd_substitution()?;
+                            parts.push(StringPart::Expr(Box::new(e)));
+                        }
+                        p.cmd_arg_mode = saved;
+                    }
+                    Some(sp) if matches!(sp, '?' | '#' | '@' | '*' | '$') => {
+                        p.next_char(); // '$'
+                        p.next_char(); // special parameter char
+                        flush(&mut parts, &mut lit);
+                        parts.push(StringPart::Expr(Box::new(Expr::Variable(sp.to_string()))));
+                    }
+                    Some(nc) if nc.is_ascii_alphanumeric() || nc == '_' => {
+                        p.next_char(); // '$'
+                        let mut name = String::new();
+                        while let Some(nc) = p.peek() {
+                            if nc.is_ascii_alphanumeric() || nc == '_' {
+                                name.push(p.next_char().expect("peeked a character"));
+                            } else {
+                                break;
+                            }
+                        }
+                        flush(&mut parts, &mut lit);
+                        parts.push(StringPart::Expr(Box::new(Expr::Variable(name))));
+                    }
+                    _ => {
+                        p.next_char();
+                        lit.push('$');
+                    }
+                }
+            }
+            _ => {
+                lit.push(p.next_char().expect("peeked a character"));
+            }
+        }
     }
 
+    flush(&mut parts, &mut lit);
     Ok(parts)
 }
 
@@ -1406,12 +1420,39 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_string_parts_brace_interp() {
-        let parts = parse_string_parts("count: ${1 + 2}", SourceSpan::new(0.into(), 0)).unwrap();
+    fn test_parse_string_parts_dollar_interp() {
+        // `${...}` uses the parameter-expansion grammar, exactly like a
+        // double-quoted string.
+        let parts = parse_string_parts("count: ${name}", SourceSpan::new(0.into(), 0)).unwrap();
         assert_eq!(parts.len(), 2);
         assert!(matches!(&parts[0], StringPart::Lit(s) if s == "count: "));
         assert!(matches!(&parts[1], StringPart::Expr(_)));
 
+        // Modifiers like `${path:t}` must expand, not be parsed as a generic
+        // expression (which used to fail on the `:t`).
+        let modifier = parse_string_parts("${path:t}", SourceSpan::new(0.into(), 0)).unwrap();
+        assert_eq!(modifier.len(), 1);
+        assert!(matches!(
+            &modifier[0],
+            StringPart::Expr(e)
+                if matches!(
+                    e.unpack(),
+                    Expr::VarWithModifier {
+                        modifier: ParamModifier::Tail,
+                        ..
+                    }
+                )
+        ));
+
+        // Special parameters and command substitution also work in text bodies.
+        let special = parse_string_parts("argv: $@", SourceSpan::new(0.into(), 0)).unwrap();
+        assert_eq!(special.len(), 2);
+        assert!(matches!(
+            &special[1],
+            StringPart::Expr(e) if matches!(e.unpack(), Expr::Variable(name) if name == "@")
+        ));
+
+        // Bare braces stay literal text (nginx/JSON bodies).
         let literal_brace =
             parse_string_parts("server { listen 80; }", SourceSpan::new(0.into(), 0)).unwrap();
         assert_eq!(literal_brace.len(), 1);
