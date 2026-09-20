@@ -3,11 +3,8 @@
 
 use crate::prompt::{get_rich_git_status, render_segment_list_to_ratatui_lines};
 use crate::prompt_config;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crate::terminal_mode::FullscreenTerminalGuard;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use fshell_core::prompt_config::{
     ColorSpec, PromptConfig, SegmentConfig, SegmentType, SeparatorStyle,
 };
@@ -412,23 +409,6 @@ impl App {
     }
 }
 
-struct TerminalGuard;
-
-impl TerminalGuard {
-    fn new() -> io::Result<Self> {
-        enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
-        Ok(TerminalGuard)
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
-    }
-}
-
 fn spec_display(spec: &Option<ColorSpec>) -> String {
     match spec {
         Some(ColorSpec::Named(n)) => n.clone(),
@@ -498,7 +478,8 @@ pub fn run_prompt_customizer(env: &Env) -> Result<(), String> {
         return Err("not a terminal".to_string());
     }
 
-    let _guard = TerminalGuard::new().map_err(|e| format!("terminal setup: {}", e))?;
+    let _guard =
+        FullscreenTerminalGuard::enter(false).map_err(|e| format!("terminal setup: {}", e))?;
     let mut stdout = io::stdout();
     let backend = CrosstermBackend::new(&mut stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| format!("terminal: {}", e))?;

@@ -1,35 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use crate::terminal_mode::FullscreenTerminalGuard;
 use chrono::{Local, Utc};
 use fshell_core::Val;
 use std::fmt::Write;
 use std::io::IsTerminal;
 use unicode_width::UnicodeWidthStr;
 use ustr::ustr;
-
-struct PagerGuard;
-
-impl PagerGuard {
-    fn new() -> Result<Self, String> {
-        use crossterm::terminal::enable_raw_mode;
-        enable_raw_mode().map_err(|e| e.to_string())?;
-        let mut stdout = std::io::stdout();
-        use crossterm::execute;
-        use crossterm::terminal::EnterAlternateScreen;
-        execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;
-        Ok(PagerGuard)
-    }
-}
-
-impl Drop for PagerGuard {
-    fn drop(&mut self) {
-        use crossterm::execute;
-        use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
-    }
-}
 
 fn show_text_pager(text: &str) {
     use crossterm::event::{self, Event, KeyCode};
@@ -48,7 +26,7 @@ fn show_text_pager(text: &str) {
         return;
     }
 
-    let _guard = match PagerGuard::new() {
+    let _guard = match FullscreenTerminalGuard::enter(false) {
         Ok(g) => g,
         Err(_) => {
             print!("{}", text);

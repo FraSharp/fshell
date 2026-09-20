@@ -5,12 +5,9 @@
 
 use super::schema::{OptionItem, OptionKind};
 use super::widgets;
+use crate::terminal_mode::FullscreenTerminalGuard;
 use crate::theme_ext::ThemeColorRatatui;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
 use fshell_core::Val;
 use fshell_core::theme::Theme;
 use fshell_engine::Env;
@@ -941,10 +938,9 @@ impl<'a> App<'a> {
 }
 
 pub fn run(env: &Env) -> Result<(), String> {
-    enable_raw_mode().map_err(|e| format!("Failed to enable raw mode: {e}"))?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)
-        .map_err(|e| format!("Failed to enter alternate screen: {e}"))?;
+    let _guard = FullscreenTerminalGuard::enter(false)
+        .map_err(|e| format!("Failed to initialize terminal: {e}"))?;
+    let stdout = io::stdout();
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal =
@@ -953,9 +949,6 @@ pub fn run(env: &Env) -> Result<(), String> {
     let mut app = App::new(env);
     let res = run_loop(&mut terminal, &mut app);
 
-    // Teardown
-    disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
     terminal.show_cursor().ok();
 
     res?;

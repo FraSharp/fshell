@@ -2,12 +2,13 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::fuzzy::{FuzzyKind, PreparedQuery, fuzzy_score_prepared};
+use crate::terminal_mode::FullscreenTerminalGuard;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, Clear, ClearType},
 };
 use fshell_core::lock::Mutex;
 use std::io::{Write, stdout};
@@ -34,23 +35,6 @@ pub struct Picker {
     items: Vec<PickerItem>,
 }
 
-struct PickerGuard;
-
-impl PickerGuard {
-    fn new() -> Result<Self, String> {
-        terminal::enable_raw_mode().map_err(|e| e.to_string())?;
-        execute!(stdout(), EnterAlternateScreen, Hide).map_err(|e| e.to_string())?;
-        Ok(PickerGuard)
-    }
-}
-
-impl Drop for PickerGuard {
-    fn drop(&mut self) {
-        let _ = execute!(stdout(), Show, LeaveAlternateScreen);
-        let _ = terminal::disable_raw_mode();
-    }
-}
-
 fn truncate_str_to_width(s: &str, max_width: usize) -> String {
     let mut width = 0;
     let mut res = String::new();
@@ -74,7 +58,7 @@ impl Picker {
     }
 
     pub fn run(&mut self) -> Result<Option<String>, String> {
-        let _guard = PickerGuard::new()?;
+        let _guard = FullscreenTerminalGuard::enter(true).map_err(|e| e.to_string())?;
         let mut stdout = stdout();
 
         let mut query = String::new();

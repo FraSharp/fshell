@@ -3,11 +3,8 @@
 
 //! Interactive first-run startup splash screen and environment status overview.
 
-use crossterm::{
-    event::{self, Event, KeyCode},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crate::terminal_mode::FullscreenTerminalGuard;
+use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -16,24 +13,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
 };
-use std::io::{self, IsTerminal};
-
-struct TerminalGuard;
-
-impl TerminalGuard {
-    fn new() -> io::Result<Self> {
-        enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
-        Ok(TerminalGuard)
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
-    }
-}
+use std::io::IsTerminal;
 
 /// Renders the first-run splash banner with environment checks and capability mode status.
 pub fn show_splash(
@@ -50,7 +30,7 @@ pub fn show_splash(
         return;
     }
 
-    let _guard = match TerminalGuard::new() {
+    let _guard = match FullscreenTerminalGuard::enter(false) {
         Ok(g) => g,
         Err(_) => return,
     };

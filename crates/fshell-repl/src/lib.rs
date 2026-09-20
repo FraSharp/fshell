@@ -75,6 +75,7 @@ pub mod picker;
 pub mod prompt;
 pub mod prompt_config;
 pub mod prompt_customizer;
+pub(crate) mod terminal_mode;
 pub mod theme_ext;
 
 pub use autocomplete::*;

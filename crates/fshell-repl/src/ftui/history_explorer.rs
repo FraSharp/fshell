@@ -4,12 +4,9 @@
 //! Fullscreen interactive SQLite history explorer and execution log viewer.
 
 use crate::history::query_history;
+use crate::terminal_mode::FullscreenTerminalGuard;
 use chrono::TimeZone;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -64,23 +61,6 @@ impl FilterMode {
     }
 }
 
-struct TerminalGuard;
-
-impl TerminalGuard {
-    fn new() -> io::Result<Self> {
-        enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
-        Ok(TerminalGuard)
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
-    }
-}
-
 /// Runs the fullscreen interactive history explorer TUI.
 pub fn run_history_tui(
     current_cwd: &str,
@@ -88,8 +68,8 @@ pub fn run_history_tui(
     current_session: &str,
 ) -> Result<TuiResult, String> {
     // Setup terminal
-    let _guard =
-        TerminalGuard::new().map_err(|e| format!("Failed to initialize terminal TUI: {}", e))?;
+    let _guard = FullscreenTerminalGuard::enter(false)
+        .map_err(|e| format!("Failed to initialize terminal TUI: {}", e))?;
     let mut stdout = io::stdout();
     let backend = CrosstermBackend::new(&mut stdout);
     let mut terminal =
