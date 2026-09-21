@@ -590,6 +590,8 @@ match response {
 
 supported pattern types:
 - wildcard: `_`
+- binding: `d` (any bare identifier captures the matched value; string
+  literals must be quoted)
 - literal: `null`, `true`, `false`, `42`, `"ready"`
 - structural map: `{ field: pattern, .. }`
 

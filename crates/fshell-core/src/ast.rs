@@ -320,6 +320,8 @@ pub enum TypeConstraint {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MatchPattern {
     Wildcard,
+    /// A bare identifier binds the matched value to a name (irrefutable).
+    Bind(String),
     Literal(LiteralPattern),
     Map {
         fields: Vec<(String, MatchPattern)>,

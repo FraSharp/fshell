@@ -614,6 +614,24 @@ mod tests {
     }
 
     #[test]
+    fn test_match_pattern_bare_identifier_is_binding() {
+        let mut p = Parser::new("match item { {name: n, ..} => n, _ => \"other\" }");
+        let stmts = p.parse_statements().unwrap();
+        let Stmt::Match { arms, .. } = stmts[0].unpack() else {
+            panic!("Expected Stmt::Match");
+        };
+        let MatchPattern::Map { fields, .. } = &arms[0].pattern else {
+            panic!("Expected map pattern, got {:?}", arms[0].pattern);
+        };
+        assert_eq!(fields.len(), 1);
+        assert!(
+            matches!(&fields[0].1, MatchPattern::Bind(n) if n == "n"),
+            "bare identifier must bind, got {:?}",
+            fields[0].1
+        );
+    }
+
+    #[test]
     fn test_parse_match_map_pattern() {
         let mut p = Parser::new("match item { {type: \"file\", name: n} => n, _ => \"other\" }");
         let stmts = p.parse_statements().unwrap();

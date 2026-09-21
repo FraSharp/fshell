@@ -1350,6 +1350,7 @@ pub fn format_stmt(stmt: &fshell_core::Stmt, indent: usize) -> String {
 fn format_match_pattern(p: &fshell_core::MatchPattern) -> String {
     match p {
         fshell_core::MatchPattern::Wildcard => "_".to_string(),
+        fshell_core::MatchPattern::Bind(name) => name.clone(),
         fshell_core::MatchPattern::Literal(lit) => match lit {
             fshell_core::LiteralPattern::Null => "null".to_string(),
             fshell_core::LiteralPattern::Bool(b) => b.to_string(),

@@ -80,13 +80,15 @@ impl Parser {
                 }
             }
             _ => {
-                // Could be null, true, false, or a variable name (treated as string)
+                // `null`/`true`/`false` are literals; any other bare identifier is
+                // a binding that captures the matched value (`data: d` binds `d`).
+                // String literals must be quoted.
                 let ident = self.parse_identifier()?;
                 match ident.as_str() {
                     "null" => Ok(MatchPattern::Literal(LiteralPattern::Null)),
                     "true" => Ok(MatchPattern::Literal(LiteralPattern::Bool(true))),
                     "false" => Ok(MatchPattern::Literal(LiteralPattern::Bool(false))),
-                    _ => Ok(MatchPattern::Literal(LiteralPattern::String(ident))),
+                    _ => Ok(MatchPattern::Bind(ident)),
                 }
             }
         }

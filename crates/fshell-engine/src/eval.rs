@@ -1126,9 +1126,20 @@ pub(crate) fn parse_ansi_c_quote(s: &str) -> String {
     out
 }
 
-pub(crate) fn matches_pattern(val: &Val, pattern: &fshell_core::MatchPattern) -> bool {
+/// Match `val` against `pattern`, recording any `Bind` captures in `bindings`.
+/// Returns false on mismatch; `bindings` may then hold partial captures and must
+/// be discarded by the caller.
+pub(crate) fn match_pattern_into(
+    val: &Val,
+    pattern: &fshell_core::MatchPattern,
+    bindings: &mut FxHashMap<String, Val>,
+) -> bool {
     match pattern {
         fshell_core::MatchPattern::Wildcard => true,
+        fshell_core::MatchPattern::Bind(name) => {
+            bindings.insert(name.clone(), val.clone());
+            true
+        }
         fshell_core::MatchPattern::Literal(lit) => match lit {
             fshell_core::LiteralPattern::Null => matches!(val, Val::Null),
             fshell_core::LiteralPattern::Bool(b) => matches!(val, Val::Bool(v) if v == b),
@@ -1141,7 +1152,7 @@ pub(crate) fn matches_pattern(val: &Val, pattern: &fshell_core::MatchPattern) ->
                 for (field_name, field_pat) in fields {
                     match map.get(&ustr::ustr(field_name)) {
                         Some(field_val) => {
-                            if !matches_pattern(field_val, field_pat) {
+                            if !match_pattern_into(field_val, field_pat, bindings) {
                                 return false;
                             }
                         }
@@ -1156,6 +1167,14 @@ pub(crate) fn matches_pattern(val: &Val, pattern: &fshell_core::MatchPattern) ->
             _ => false,
         },
     }
+}
+
+/// Whether `val` matches `pattern`, ignoring any captures. Kept for tests that
+/// only need a boolean; production matching goes through `match_pattern_into`.
+#[cfg(test)]
+pub(crate) fn matches_pattern(val: &Val, pattern: &fshell_core::MatchPattern) -> bool {
+    let mut bindings = FxHashMap::default();
+    match_pattern_into(val, pattern, &mut bindings)
 }
 
 pub(crate) fn eval_binop(op: BinOp, l: Val, r: Val) -> Result<Val, EngineError> {
@@ -2011,8 +2030,16 @@ async fn eval_stmt_inner(
             let val = eval_expr(expr, env).await?;
             let mut matched = false;
             for arm in arms {
-                if matches_pattern(&val, &arm.pattern) {
-                    match eval_block_flow(&arm.body, env, false).await? {
+                let mut bindings: FxHashMap<String, Val> = FxHashMap::default();
+                if match_pattern_into(&val, &arm.pattern, &mut bindings) {
+                    // Bindings captured by the pattern are visible only to this
+                    // arm's body.
+                    let arm_env = if bindings.is_empty() {
+                        env.clone()
+                    } else {
+                        env.push_scope(Arc::new(fshell_core::RwLock::new(bindings)))
+                    };
+                    match eval_block_flow(&arm.body, &arm_env, false).await? {
                         Flow::Normal => {}
                         flow => return Ok(flow),
                     }

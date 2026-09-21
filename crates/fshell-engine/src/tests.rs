@@ -1491,6 +1491,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_eval_stmt_match_binds_identifier() {
+        let env = Env::new();
+        let mut m = indexmap::IndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
+        m.insert(ustr::ustr("status"), Val::Int(200));
+        m.insert(ustr::ustr("data"), Val::String("payload".into()));
+        env.vars.write().insert("resp".into(), Val::Map(m));
+
+        // match resp { { status: 200, data: d, .. } => { let got = d } }
+        let stmt = Stmt::Match {
+            expr: Expr::Variable("resp".into()),
+            arms: vec![MatchArm {
+                pattern: MatchPattern::Map {
+                    fields: vec![
+                        (
+                            "status".into(),
+                            MatchPattern::Literal(LiteralPattern::Int(200)),
+                        ),
+                        ("data".into(), MatchPattern::Bind("d".into())),
+                    ],
+                    rest: true,
+                },
+                body: vec![Stmt::Let {
+                    name: "got".into(),
+                    expr: Expr::Ident("d".into()),
+                }],
+            }],
+        };
+        eval_stmt(&stmt, &env, false).await.unwrap();
+        assert_eq!(
+            env.vars.read().get("got"),
+            Some(&Val::String("payload".into()))
+        );
+    }
+
+    #[tokio::test]
     async fn test_eval_stmt_match_no_match() {
         let env = Env::new();
         env.vars.write().insert("val".into(), Val::Int(99));
