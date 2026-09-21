@@ -128,7 +128,13 @@ fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<String> {
 }
 
 /// Spawn a background thread to search for the command and cache results.
+///
+/// This runs the system package manager (`brew`/`apt-cache`/`dnf`), which may
+/// touch the network, so it is opt-in: nothing runs unless `FSH_CNF_SEARCH=1`.
 pub fn spawn_background_search(name: &str) {
+    if std::env::var("FSH_CNF_SEARCH").as_deref() != Ok("1") {
+        return;
+    }
     if std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1") {
         eprintln!(
             "[cnf_debug] {}:{}: spawn_background_search name={:?}",
