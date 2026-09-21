@@ -1026,13 +1026,13 @@ pub fn run_external(
     // and continue to drain pipes concurrently.
     let _exit_code = fshell_engine::wait_for_job_sync(env, pid, job_id, &cmd_str, is_interactive);
 
-    // Wait for the stdout/stderr forwarding tasks to finish before returning,
-    // so a later stage cannot observe truncated output. They cannot be awaited
-    // directly: this runs on a `spawn_blocking` thread where `Handle::block_on`
-    // panics ("cannot start a runtime from within a runtime"). Instead park on a
-    // std channel while the runtime keeps driving the tasks.
+    // Observe the stdout/stderr forwarding tasks so a panic is not silently
+    // detached. They cannot be awaited here: this function is called both from
+    // the pipeline's `spawn_blocking` (where `Handle::block_on` panics) and
+    // directly from async callers (where any blocking wait would deadlock a
+    // current-thread runtime). Consumers still observe a fully-drained stream
+    // because these tasks hold sender clones until they finish.
     if !io_tasks.is_empty() {
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let task_env = env.clone();
         tokio::spawn(async move {
             for task in io_tasks {
@@ -1041,9 +1041,7 @@ pub fn run_external(
                     eprintln!("external command I/O task failed: {error}");
                 }
             }
-            let _ = done_tx.send(());
         });
-        let _ = done_rx.recv();
     }
 
     if cnf_debug {
