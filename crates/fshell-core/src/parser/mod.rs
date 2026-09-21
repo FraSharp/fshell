@@ -154,7 +154,34 @@ fn parse_ansi_escapes(s: &str, base_span: SourceSpan) -> Result<String, ParseErr
                 Some('\\') => out.push('\\'),
                 Some('\'') => out.push('\''),
                 Some('\"') => out.push('\"'),
-                Some('0') => out.push('\0'),
+                Some(c @ ('u' | 'U')) => {
+                    let width = if c == 'u' { 4 } else { 8 };
+                    let mut hex = String::with_capacity(width);
+                    for _ in 0..width {
+                        match chars.next() {
+                            Some(h) if h.is_ascii_hexdigit() => hex.push(h),
+                            _ => {
+                                return Err(ParseError::SyntaxError {
+                                    message: format!(
+                                        "invalid \\{c} escape: expected {width} hexadecimal digits"
+                                    ),
+                                    span: base_span,
+                                });
+                            }
+                        }
+                    }
+                    let code_point =
+                        u32::from_str_radix(&hex, 16).map_err(|_| ParseError::SyntaxError {
+                            message: "invalid hexadecimal digits".to_string(),
+                            span: base_span,
+                        })?;
+                    let ch =
+                        char::from_u32(code_point).ok_or_else(|| ParseError::SyntaxError {
+                            message: format!("invalid unicode code point U+{code_point:04X}"),
+                            span: base_span,
+                        })?;
+                    out.push(ch);
+                }
                 Some('x') => {
                     let mut hex = String::with_capacity(2);
                     for _ in 0..2 {
@@ -751,6 +778,30 @@ mod tests {
         let mut parser = Parser::new(r#""\xGH""#);
         let result = parser.parse_expr();
         assert!(result.is_err(), "Invalid hex escape should produce error");
+    }
+
+    #[test]
+    fn test_ansi_c_quote_unicode_and_octal() {
+        // \uXXXX
+        let expr = Parser::new(r"$'\u00E9'").parse_expr().unwrap();
+        assert_eq!(expr.unpack(), &Expr::AnsiCQuote("\u{00E9}".to_string()));
+
+        // \UXXXXXXXX
+        let expr = Parser::new(r"$'\U0001F600'").parse_expr().unwrap();
+        assert_eq!(expr.unpack(), &Expr::AnsiCQuote("\u{1F600}".to_string()));
+
+        // \0 is NUL, and octal escapes consume up to three digits (bash parity):
+        // \101 == 'A', \102 == 'B'.
+        let expr = Parser::new(r"$'\0'").parse_expr().unwrap();
+        assert_eq!(expr.unpack(), &Expr::AnsiCQuote("\0".to_string()));
+        let expr = Parser::new(r"$'\101\102'").parse_expr().unwrap();
+        assert_eq!(expr.unpack(), &Expr::AnsiCQuote("AB".to_string()));
+
+        // A surrogate code point is not a valid char.
+        assert!(
+            Parser::new(r"$'\uD800'").parse_expr().is_err(),
+            "surrogate escape must be rejected"
+        );
     }
 
     #[test]
