@@ -584,6 +584,27 @@ async fn test_stderr_merges_into_stdout_with_2_to_1() {
 }
 
 #[tokio::test]
+async fn test_write_then_2_to_1_merges_stderr_into_file() {
+    // `cmd > file 2>&1` must put both stdout and stderr in the file.
+    let ctx = TestContext::new();
+    let out = ctx.temp_path().join("combined.txt");
+    let script = format!(
+        "sh -c 'echo out; echo err 1>&2' > \"{}\" 2>&1",
+        out.display()
+    );
+    ctx.eval_script(&script).await.unwrap();
+    let content = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        content.contains("out"),
+        "stdout missing from file: {content}"
+    );
+    assert!(
+        content.contains("err"),
+        "stderr not merged into file: {content}"
+    );
+}
+
+#[tokio::test]
 async fn test_yaml_boundary_is_plain_data() {
     let env = setup_test_env();
     let data = Val::Map({

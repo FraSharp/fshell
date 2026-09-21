@@ -381,6 +381,37 @@ pub async fn execute_pipeline(
         }
     }
 
+    // POSIX redirection ordering: `cmd > file 2>&1` duplicates stderr onto the
+    // already-redirected stdout, i.e. both go to the file. In the stage model
+    // that is a `Write` immediately followed by `FdRedirect { 2, 1 }`; merge the
+    // duplicate into the write.
+    let mut j = 0;
+    while j + 1 < stages.len() {
+        if matches!(
+            (&stages[j], &stages[j + 1]),
+            (
+                PipelineStage::Write {
+                    redirect_stdout: true,
+                    ..
+                },
+                PipelineStage::FdRedirect {
+                    src_fd: 2,
+                    dst_fd: 1
+                }
+            )
+        ) {
+            if let PipelineStage::Write {
+                redirect_stderr, ..
+            } = &mut stages[j]
+            {
+                *redirect_stderr = true;
+            }
+            stages.remove(j + 1);
+        } else {
+            j += 1;
+        }
+    }
+
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let mut current_rx: Option<PipeStream> = None;
 
