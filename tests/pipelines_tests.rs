@@ -560,6 +560,27 @@ async fn test_pipeline_empty_input() {
 }
 
 #[tokio::test]
+async fn test_pipeline_grep_regex() {
+    let env = setup_test_env();
+    env.vars.write().insert(
+        "files".to_string(),
+        Val::List(vec![
+            Val::String("a.tmp".into()),
+            Val::String("b.log".into()),
+            Val::String("ctmp".into()),
+        ]),
+    );
+    let mut parser = Parser::new(r#"$files | grep r"\.tmp$""#);
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        assert_eq!(res, Val::List(vec![Val::String("a.tmp".into())]));
+    } else {
+        panic!("expected expression statement, got {stmts:?}");
+    }
+}
+
+#[tokio::test]
 async fn test_count_without_upstream_emits_zero() {
     // `count` with nothing piped in must still emit a single 0, not nothing.
     let ctx = TestContext::new();

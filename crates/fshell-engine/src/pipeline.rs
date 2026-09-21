@@ -1433,6 +1433,14 @@ pub async fn execute_pipeline(
                             return;
                         }
                     };
+                    // The pattern is a regular expression (documented, e.g.
+                    // `grep r"\.tmp$"`); fall back to a plain substring when it
+                    // does not compile so literal patterns keep working.
+                    let pattern_re = regex::Regex::new(&pat_val).ok();
+                    let matches = |text: &str| match &pattern_re {
+                        Some(re) => re.is_match(text),
+                        None => text.contains(&pat_val),
+                    };
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
                             if env_clone.job_control.cancellation.load(Ordering::Acquire) {
@@ -1454,14 +1462,14 @@ pub async fn execute_pipeline(
                                         }
                                         other => other.to_text(),
                                     };
-                                    if val_str.contains(&pat_val) {
+                                    if matches(&val_str) {
                                         let _ = out_tx.send(PipelinePayload::Data(val_arc)).await;
                                     }
                                 }
                                 PipelinePayload::Bytes(b) => {
                                     let text = String::from_utf8_lossy(&b);
                                     for line in text.lines() {
-                                        if line.contains(&pat_val) {
+                                        if matches(line) {
                                             let _ = out_tx
                                                 .send(PipelinePayload::Data(Arc::new(Val::String(
                                                     line.to_string(),

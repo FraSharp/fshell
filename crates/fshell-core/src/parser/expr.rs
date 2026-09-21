@@ -848,6 +848,17 @@ impl Parser {
                     self.cmd_arg_mode = saved_arg;
                     parts.push(StringPart::Expr(Box::new(expression)));
                 }
+                // Raw string argument: `grep r"\.tmp$"`. Adjacent `r"` would
+                // otherwise be ordinary shell adjacency (`r` + a quoted word).
+                'r' if self.pos + 1 < self.input.len()
+                    && self.input[self.pos + 1] == '"'
+                    && !(self.pos + 2 < self.input.len() && self.input[self.pos + 2] == '"') =>
+                {
+                    had_quoted_segment = true;
+                    self.next_char(); // consume 'r'
+                    let raw = self.parse_raw_string_content()?;
+                    literal.push_str(&raw);
+                }
                 '{' if parts.is_empty() && literal.is_empty() && !self.is_brace_expansion() => {
                     // Preserve fshell map literals as structured command arguments.
                     let saved_arg = self.cmd_arg_mode;

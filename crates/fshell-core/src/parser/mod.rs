@@ -2675,6 +2675,19 @@ mod tests {
     }
 
     #[test]
+    fn test_raw_string_argument() {
+        // `grep r"\.tmp$"` — a raw string in command-argument position.
+        let stage = last_stage_of(r#"ls | grep r"\.tmp$""#);
+        let PipelineStage::Grep { pattern } = &stage else {
+            panic!("Expected Grep stage, got {stage:?}");
+        };
+        assert_eq!(
+            pattern.unpack(),
+            &Expr::String(vec![StringPart::Lit(r"\.tmp$".to_string())])
+        );
+    }
+
+    #[test]
     fn test_command_arg_dotted_path_stays_string() {
         // A dotted token in command-argument position is still a path string.
         let stage = last_stage_of("cat app.toml");
