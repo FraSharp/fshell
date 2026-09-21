@@ -800,17 +800,14 @@ fn lookup_variable_fallback(name: &str, env: &Env) -> Result<Val, EngineError> {
 
 fn member_access_dispatch(val: Val, member: &str) -> Result<Val, EngineError> {
     let mut base = val;
+    // A captured single-record pipeline yields a one-element list holding a map;
+    // unwrap only that case (not e.g. `[42].x`).
     if let Val::List(ref mut list) = base
         && list.len() == 1
+        && matches!(list.first(), Some(Val::Map(_)))
+        && let Some(v) = list.pop()
     {
-        base = match list.pop() {
-            Some(v) => v,
-            None => {
-                return Err(EngineError::from(
-                    "internal error: expected list with 1 element",
-                ));
-            }
-        };
+        base = v;
     }
     match base {
         Val::Map(map) => map
