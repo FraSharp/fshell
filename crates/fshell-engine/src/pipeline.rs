@@ -984,18 +984,76 @@ pub async fn execute_pipeline(
                                 let mut last_val: Option<Val> = None;
                                 'fn_body: for s in &body {
                                     match s.unpack() {
-                                        Stmt::Expr(expr) => match eval_expr(expr, &fn_env).await {
-                                            Ok(v) => last_val = Some(v),
-                                            Err(e) => {
-                                                env_clone.report_stage_error();
-                                                let diag =
-                                                    fshell_core::diagnostic::FshDiag::from(e);
-                                                let _ = out_tx
-                                                    .send(PipelinePayload::Structured(diag))
-                                                    .await;
-                                                return;
+                                        Stmt::Expr(expr) => {
+                                            // An `if` in statement position must let
+                                            // `return`/`exit`/`break` out of its body;
+                                            // `eval_expr` (the value path) would drop
+                                            // them.
+                                            if matches!(expr.unpack(), Expr::If { .. }) {
+                                                match crate::eval::eval_if_stmt(expr, &fn_env).await
+                                                {
+                                                    Ok((Flow::Normal, v)) => last_val = Some(v),
+                                                    Ok((Flow::Return(ret), _)) => {
+                                                        last_val = Some(ret);
+                                                        break 'fn_body;
+                                                    }
+                                                    Ok((Flow::ConditionFalse, _)) => {
+                                                        env_clone.report_stage_error_code(1);
+                                                        let diag =
+                                                            fshell_core::diagnostic::FshDiag::from(
+                                                                fshell_core::ShellError::condition_false(),
+                                                            );
+                                                        let _ = out_tx
+                                                            .send(PipelinePayload::Structured(diag))
+                                                            .await;
+                                                        return;
+                                                    }
+                                                    Ok((flow, _)) => {
+                                                        env_clone.report_stage_error();
+                                                        let msg =
+                                                            flow.stray_message().unwrap_or_else(
+                                                                || "control flow".to_string(),
+                                                            );
+                                                        let diag = fshell_core::diagnostic::FshDiag::from(
+                                                            fshell_core::ShellError::new(
+                                                                fshell_core::diagnostic::ErrorCode::InternalError,
+                                                                format!("stray `{msg}` in pipeline function"),
+                                                            ),
+                                                        );
+                                                        let _ = out_tx
+                                                            .send(PipelinePayload::Structured(diag))
+                                                            .await;
+                                                        return;
+                                                    }
+                                                    Err(e) => {
+                                                        env_clone.report_stage_error();
+                                                        let diag =
+                                                            fshell_core::diagnostic::FshDiag::from(
+                                                                e,
+                                                            );
+                                                        let _ = out_tx
+                                                            .send(PipelinePayload::Structured(diag))
+                                                            .await;
+                                                        return;
+                                                    }
+                                                }
+                                            } else {
+                                                match eval_expr(expr, &fn_env).await {
+                                                    Ok(v) => last_val = Some(v),
+                                                    Err(e) => {
+                                                        env_clone.report_stage_error();
+                                                        let diag =
+                                                            fshell_core::diagnostic::FshDiag::from(
+                                                                e,
+                                                            );
+                                                        let _ = out_tx
+                                                            .send(PipelinePayload::Structured(diag))
+                                                            .await;
+                                                        return;
+                                                    }
+                                                }
                                             }
-                                        },
+                                        }
                                         _ => match eval_stmt(s, &fn_env, false).await {
                                             Ok(Flow::Normal) => {}
                                             Ok(Flow::Return(ret)) => {

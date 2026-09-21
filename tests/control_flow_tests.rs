@@ -121,6 +121,40 @@ async fn test_function_return_type_is_enforced() {
     assert!(err.is_err(), "mismatched return type must error");
 }
 
+#[tokio::test]
+async fn test_function_return_inside_if_propagates() {
+    let ctx = TestContext::new();
+    let script = r#"
+        fn classify(x) { if x > 0 { return "pos" } else { return "nonpos" } }
+        fn nested(x) { if x > 0 { if x > 10 { return "big" } return "small" } return "neg" }
+        let a = $| classify 5 |
+        let b = $| classify -5 |
+        let c = $| nested 20 |
+        let d = $| nested 3 |
+    "#;
+    ctx.eval_script(script).await.unwrap();
+    assert_eq!(
+        ctx.get_var("a"),
+        Some(Val::List(vec![Val::String("pos".into())])),
+        "return inside the then-branch must propagate"
+    );
+    assert_eq!(
+        ctx.get_var("b"),
+        Some(Val::List(vec![Val::String("nonpos".into())])),
+        "return inside the else-branch must propagate"
+    );
+    assert_eq!(
+        ctx.get_var("c"),
+        Some(Val::List(vec![Val::String("big".into())])),
+        "return inside a nested if must propagate"
+    );
+    assert_eq!(
+        ctx.get_var("d"),
+        Some(Val::List(vec![Val::String("small".into())])),
+        "return after a nested if must propagate"
+    );
+}
+
 // Match execution
 
 #[tokio::test]

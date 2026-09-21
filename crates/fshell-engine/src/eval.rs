@@ -846,6 +846,66 @@ fn member_access_dispatch(val: Val, member: &str) -> Result<Val, EngineError> {
     }
 }
 
+/// Evaluate an `if` that appears in statement position, returning both the
+/// control flow produced by its body and the value of the taken branch.
+///
+/// `eval_expr` evaluates `if` as a value and therefore discards control flow,
+/// which is why `return` inside an `if` at the top level of a function body used
+/// to be silently swallowed. Function bodies (and other statement contexts) use
+/// this instead; the value is still captured so `if` can be a function's last
+/// expression.
+#[async_recursion::async_recursion]
+pub(crate) async fn eval_if_stmt(expr: &Expr, env: &Env) -> Result<(Flow, Val), EngineError> {
+    let Expr::If {
+        condition,
+        then_body,
+        else_body,
+    } = expr.unpack()
+    else {
+        return Ok((Flow::Normal, eval_expr(expr, env).await?));
+    };
+
+    let old_errexit = env.options.read().errexit;
+    if old_errexit {
+        env.options.write().errexit = false;
+    }
+    let cond_res = eval_expr(condition, env).await;
+    if old_errexit {
+        env.options.write().errexit = true;
+    }
+    let is_truthy = val_to_bool(&cond_res?)?;
+
+    let body = if is_truthy {
+        then_body
+    } else if let Some(else_body) = else_body {
+        else_body
+    } else {
+        return Ok((Flow::Normal, Val::Null));
+    };
+
+    let mut result = Val::Null;
+    for stmt in body {
+        match stmt.unpack() {
+            // Nested `if` in statement position: recurse so its flow propagates.
+            Stmt::Expr(e) if matches!(e.unpack(), Expr::If { .. }) => {
+                let (flow, val) = eval_if_stmt(e, env).await?;
+                result = val;
+                if !flow.is_normal() {
+                    return Ok((flow, result));
+                }
+            }
+            Stmt::Expr(e) => {
+                result = eval_expr(e, env).await?;
+            }
+            other => match eval_stmt(other, env, false).await? {
+                Flow::Normal => {}
+                flow => return Ok((flow, result)),
+            },
+        }
+    }
+    Ok((Flow::Normal, result))
+}
+
 /// Core expression evaluator.
 pub fn eval_expr<'a>(
     expr: &'a Expr,
@@ -1045,6 +1105,10 @@ pub fn eval_expr<'a>(
                 Ok(result)
             }
 
+            // NOTE: this arm is the *value* path for `if` (e.g. `let x = if c
+            // { 1 } else { 2 }`). Where an `if` appears as a statement —
+            // including the top level of a function body — `eval_if_stmt` is
+            // used instead so `return`/`exit`/`break` inside it propagate.
             Expr::AnsiCQuote(s) => Ok(Val::String(parse_ansi_c_quote(s))),
             Expr::RawMultiLineString(s) => Ok(Val::String(s.clone())),
             Expr::MultiLineString { parts, .. } => {
