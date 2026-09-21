@@ -559,6 +559,14 @@ async fn test_pipeline_empty_input() {
     }
 }
 
+#[tokio::test]
+async fn test_count_without_upstream_emits_zero() {
+    // `count` with nothing piped in must still emit a single 0, not nothing.
+    let ctx = TestContext::new();
+    let res = ctx.eval_ok("count").await;
+    assert_val_eq!(res, Val::List(vec![Val::Int(0)]));
+}
+
 // Map member access
 
 #[tokio::test]

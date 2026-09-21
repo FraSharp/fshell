@@ -1544,8 +1544,13 @@ pub async fn execute_pipeline(
             }
             PipelineStage::Count => {
                 tokio::spawn(async move {
+                    let mut count = 0i64;
+                    // Byte streams are line-oriented; a chunk that does not end in a
+                    // newline still contributes a final (possibly partial) line.
+                    let mut byte_newlines = 0i64;
+                    let mut byte_any = false;
+                    let mut bytes_end_in_newline = true;
                     if let Some(mut rx) = current_rx {
-                        let mut count = 0;
                         while let Some(payload) = rx.recv().await {
                             if env_clone.job_control.cancellation.load(Ordering::Acquire) {
                                 break;
@@ -1555,22 +1560,26 @@ pub async fn execute_pipeline(
                                     count += 1;
                                 }
                                 PipelinePayload::Bytes(b) => {
-                                    let newlines = b.iter().filter(|&&byte| byte == b'\n').count();
-                                    count += if newlines == 0 && !b.is_empty() {
-                                        1
-                                    } else {
-                                        newlines as i64
-                                    };
+                                    if let Some(&last) = b.last() {
+                                        byte_any = true;
+                                        byte_newlines +=
+                                            b.iter().filter(|&&byte| byte == b'\n').count() as i64;
+                                        bytes_end_in_newline = last == b'\n';
+                                    }
                                 }
                                 PipelinePayload::Structured(d) => {
                                     let _ = out_tx.send(PipelinePayload::Structured(d)).await;
                                 }
                             }
                         }
-                        let _ = out_tx
-                            .send(PipelinePayload::Data(Arc::new(Val::Int(count))))
-                            .await;
                     }
+                    if byte_any {
+                        count += byte_newlines + i64::from(!bytes_end_in_newline);
+                    }
+                    // `count` always emits a single integer, even with no upstream.
+                    let _ = out_tx
+                        .send(PipelinePayload::Data(Arc::new(Val::Int(count))))
+                        .await;
                 });
             }
             PipelineStage::Hash { mode, per_record } => {
