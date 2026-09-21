@@ -644,6 +644,14 @@ async fn test_pipeline_grep_regex() {
 }
 
 #[tokio::test]
+async fn test_filter_non_bool_predicate_errors() {
+    // A predicate that is not a Bool must be reported, not silently drop items.
+    let ctx = TestContext::new();
+    let err = ctx.eval_script("let d = [1, 2]; $d | filter 5").await;
+    assert!(err.is_err(), "non-bool filter predicate must error");
+}
+
+#[tokio::test]
 async fn test_count_without_upstream_emits_zero() {
     // `count` with nothing piped in must still emit a single 0, not nothing.
     let ctx = TestContext::new();

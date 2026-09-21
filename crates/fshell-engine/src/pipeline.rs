@@ -1306,7 +1306,26 @@ pub async fn execute_pipeline(
                                             let _ =
                                                 out_tx.send(PipelinePayload::Data(val_arc)).await;
                                         }
-                                        Ok(_) => {}
+                                        Ok(Val::Bool(false)) => {}
+                                        Ok(other) => {
+                                            // A predicate must be Bool. Silently
+                                            // dropping the item (as before) hid
+                                            // genuine mistakes; `if` already errors.
+                                            env_clone.report_stage_error();
+                                            let diag = fshell_core::diagnostic::FshDiag::from(
+                                                fshell_core::ShellError::new(
+                                                    fshell_core::diagnostic::ErrorCode::TypeError,
+                                                    format!(
+                                                        "filter predicate must evaluate to Bool, got {}",
+                                                        other.type_name()
+                                                    ),
+                                                ),
+                                            );
+                                            let _ = out_tx
+                                                .send(PipelinePayload::Structured(diag))
+                                                .await;
+                                            break;
+                                        }
                                         Err(e) => {
                                             env_clone.report_stage_error();
                                             let _ = out_tx
@@ -1332,7 +1351,23 @@ pub async fn execute_pipeline(
                                                     .send(PipelinePayload::Data(val_arc))
                                                     .await;
                                             }
-                                            Ok(_) => {}
+                                            Ok(Val::Bool(false)) => {}
+                                            Ok(other) => {
+                                                env_clone.report_stage_error();
+                                                let diag = fshell_core::diagnostic::FshDiag::from(
+                                                    fshell_core::ShellError::new(
+                                                        fshell_core::diagnostic::ErrorCode::TypeError,
+                                                        format!(
+                                                            "filter predicate must evaluate to Bool, got {}",
+                                                            other.type_name()
+                                                        ),
+                                                    ),
+                                                );
+                                                let _ = out_tx
+                                                    .send(PipelinePayload::Structured(diag))
+                                                    .await;
+                                                break;
+                                            }
                                             Err(e) => {
                                                 env_clone.report_stage_error();
                                                 let _ = out_tx

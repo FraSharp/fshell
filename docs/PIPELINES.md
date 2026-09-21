@@ -129,8 +129,9 @@ ps | filter cpu > 20.0 or mem > 1024
 **execution:**
 1. receives `Val::Map` records from the upstream channel.
 2. binds map fields as local variables in a scoped sub-environment.
-3. evaluates the condition expression.
+3. evaluates the condition expression (it must be a `Bool`; anything else is a type error).
 4. if `true`, forwards `Arc<Val>` downstream; if `false`, drops the item.
+5. a record that lacks a field the predicate references as a column is dropped (an identifier that also resolves from the enclosing scope — a function parameter — is not treated as a required column).
 
 ### `map`
 
