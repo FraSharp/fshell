@@ -1722,39 +1722,50 @@ mod tests {
         assert_eq!(val.as_ref(), &vec![Val::Int(100)]);
     }
 
+    /// Register the process-global POSIX handler exactly once.
+    ///
+    /// `register_posix_handler` writes a process-wide static, so a test that
+    /// needs it must not depend on another test having run first.
+    fn ensure_posix_test_handler() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            crate::register_posix_handler(
+                |content: String, _args: Vec<String>, env: crate::Env, _capture: bool| async move {
+                    for line in content.lines() {
+                        let line = line.trim();
+                        if line.starts_with("FOO=") {
+                            env.vars
+                                .write()
+                                .insert("FOO".to_string(), Val::String("bar".into()));
+                        } else if line.starts_with("export BAZ=") {
+                            env.vars
+                                .write()
+                                .insert("BAZ".to_string(), Val::String("qux".into()));
+                        } else if line.starts_with("alias ll=") {
+                            env.register_alias("ll", "ls -la");
+                        } else if line.starts_with("VIRTUAL_ENV=") {
+                            env.vars
+                                .write()
+                                .insert("VIRTUAL_ENV".to_string(), Val::String("/opt/venv".into()));
+                        } else if line.starts_with("export PATH=") {
+                            env.vars.write().insert(
+                                "PATH".to_string(),
+                                Val::String("/opt/venv/bin:/usr/bin".into()),
+                            );
+                        }
+                    }
+                    Ok((0, None))
+                },
+            );
+        });
+    }
+
     #[tokio::test]
     async fn test_eval_stmt_source_bash() {
+        ensure_posix_test_handler();
         let env = Env::new();
         let tmp = tempfile::tempdir().unwrap();
         let file_path = tmp.path().join("test_script.sh");
-        crate::register_posix_handler(
-            |content: String, _args: Vec<String>, env: crate::Env, _capture: bool| async move {
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.starts_with("FOO=") {
-                        env.vars
-                            .write()
-                            .insert("FOO".to_string(), Val::String("bar".into()));
-                    } else if line.starts_with("export BAZ=") {
-                        env.vars
-                            .write()
-                            .insert("BAZ".to_string(), Val::String("qux".into()));
-                    } else if line.starts_with("alias ll=") {
-                        env.register_alias("ll", "ls -la");
-                    } else if line.starts_with("VIRTUAL_ENV=") {
-                        env.vars
-                            .write()
-                            .insert("VIRTUAL_ENV".to_string(), Val::String("/opt/venv".into()));
-                    } else if line.starts_with("export PATH=") {
-                        env.vars.write().insert(
-                            "PATH".to_string(),
-                            Val::String("/opt/venv/bin:/usr/bin".into()),
-                        );
-                    }
-                }
-                Ok((0, None))
-            },
-        );
 
         std::fs::write(
             &file_path,
@@ -1783,6 +1794,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_eval_stmt_source_autodetects_bash() {
+        ensure_posix_test_handler();
         // Plain `source` of a bash script (like a venv `activate`) must
         // delegate to the bash shim instead of surfacing a parse error.
         let env = Env::new();
