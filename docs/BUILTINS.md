@@ -306,6 +306,49 @@ helper builtins that emit initialization scripts for third-party shell tools.
 
 ---
 
+## additional builtins
+
+### `sort`
+
+sorts the incoming stream by a column (or by value for scalars):
+
+```fsh
+ls | sort size desc
+```
+
+a leading flag (`sort -n`) makes the stage an external command instead (see
+`PIPELINES.md`). the standalone `sort` builtin sorts its arguments.
+
+### `hash` / `cksum`
+
+computes sponge hashes over files or stream records (`-a 256|512`, `-o <len>`,
+`--per-record`); `cksum` is an alias.
+
+### `read [<variable>]`
+
+reads a line from stdin into a variable (defaults to `$REPLY`).
+
+### `clear` / `wrap`
+
+`clear` wipes the screen and scrollback; `wrap` clears only the visible screen,
+preserving scrollback.
+
+### `self`
+
+the path of the running `fsh` binary (`self [--exe|--pid|--version|--info]`,
+`self exec ...`).
+
+### completion & keybindings
+
+- `complete`: declares completion rules.
+- `compgen`: generates completions.
+- `bind` / `bindkey`: inspect or set key bindings.
+
+### not implemented
+
+`http`, `sql` and `chart` are registered but not implemented in this build; they
+report an error rather than doing nothing.
+
 ## feature-gated builtins
 
 ### sandbox & capabilities (`feature = "sandbox"`)

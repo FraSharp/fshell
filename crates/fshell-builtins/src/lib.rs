@@ -64,9 +64,7 @@ fn http_stub(
     _tx: fshell_engine::PipeSender,
     _span: Option<miette::SourceSpan>,
 ) -> Result<(), ShellError> {
-    Err("http: not yet implemented (enable with --features http)"
-        .to_string()
-        .into())
+    Err("http: not implemented in this build".to_string().into())
 }
 
 fn sql_stub(
@@ -76,9 +74,7 @@ fn sql_stub(
     _tx: fshell_engine::PipeSender,
     _span: Option<miette::SourceSpan>,
 ) -> Result<(), ShellError> {
-    Err("sql: not yet implemented (enable with --features sql)"
-        .to_string()
-        .into())
+    Err("sql: not implemented in this build".to_string().into())
 }
 
 fn chart_stub(
@@ -90,7 +86,7 @@ fn chart_stub(
 ) -> Result<(), ShellError> {
     Err(ShellError::new(
         ErrorCode::Unsupported,
-        "chart: not yet implemented",
+        "chart: not implemented in this build",
     ))
 }
 

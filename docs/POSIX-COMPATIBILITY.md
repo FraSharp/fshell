@@ -369,10 +369,12 @@ all standard POSIX control structures execute natively:
 | pathname expansion (globbing) | yes | yes | full in-process |
 | C-style arithmetic (`$((...))`) | yes | yes | full in-process |
 | `test` / `[` conditional syntax | yes | yes | full in-process |
-| extended test `[[ ... ]]` | no | yes | full in-process |
+| extended test `[[ ... ]]` | no | yes | not supported |
 | subshell scoping `( ... )` | yes | yes | transactional scope clone |
 | dynamic `eval` | yes | yes | full in-process |
-| signal traps (`trap`) | yes | yes | mapped to fshell hook system |
+| signal traps (`trap`) | yes | yes | handled inside the POSIX engine |
 | virtualenv activation (`source activate`) | n/a | yes | verified full compatibility |
-| process substitution `<(cmd)` | no | yes | supported via named pipes/tempfiles |
-| arrays (`arr=(a b c)`) | no | yes | supported |
+| process substitution `<(cmd)` | no | yes | not supported |
+| arrays (`arr=(a b c)`) | no | yes | not supported |
+| `umask` | yes | yes | query and set |
+| `alias` / `unalias` / `ulimit` | yes | yes | accepted but no-op |
