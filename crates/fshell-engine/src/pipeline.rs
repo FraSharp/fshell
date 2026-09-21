@@ -1188,20 +1188,40 @@ pub async fn execute_pipeline(
                             match payload {
                                 PipelinePayload::Data(val_arc) => {
                                     if let Val::Map(map) = &*val_arc {
-                                        if needed.is_empty() {
-                                            sub_env.scope.local_vars = base_locals.clone();
-                                        } else {
-                                            let mut locals = FxHashMap::default();
-                                            for (k, v) in map {
-                                                if needed.contains(k.as_str()) {
-                                                    locals.insert(k.to_string(), v.clone());
+                                        // A referenced identifier is a "column" when it is
+                                        // neither a map field nor resolvable from the
+                                        // enclosing scope. A record missing such a column
+                                        // cannot satisfy the predicate, so drop it instead
+                                        // of failing the whole stage.
+                                        let mut locals = FxHashMap::default();
+                                        let mut missing_column = false;
+                                        for k in &needed {
+                                            match map.get(&ustr::ustr(k)) {
+                                                Some(v) => {
+                                                    locals.insert(k.clone(), v.clone());
+                                                }
+                                                None => {
+                                                    let resolvable_outside = base_locals
+                                                        .as_ref()
+                                                        .is_some_and(|l| l.contains(k))
+                                                        || env_clone
+                                                            .vars
+                                                            .read()
+                                                            .contains_key(k.as_str());
+                                                    if !resolvable_outside {
+                                                        missing_column = true;
+                                                        break;
+                                                    }
                                                 }
                                             }
-                                            sub_env.scope.local_vars = Some(record_scope(
-                                                locals,
-                                                base_locals.as_ref(),
-                                            ));
                                         }
+                                        if missing_column {
+                                            continue;
+                                        }
+                                        sub_env.scope.local_vars = Some(record_scope(
+                                            locals,
+                                            base_locals.as_ref(),
+                                        ));
                                     } else {
                                         sub_env.scope.local_vars = base_locals.clone();
                                     }
