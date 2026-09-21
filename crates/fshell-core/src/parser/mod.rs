@@ -2228,7 +2228,8 @@ mod tests {
 
     #[test]
     fn parse_negative_substring() {
-        let expr = Parser::new("${var:-3:5}").parse_expr().unwrap();
+        // A space after `:` marks a signed substring offset (`${var: -3:5}`).
+        let expr = Parser::new("${var: -3:5}").parse_expr().unwrap();
         match expr.unpack() {
             Expr::VarWithModifier {
                 name,
@@ -2239,6 +2240,19 @@ mod tests {
                 assert_eq!(*length, Some(5u64));
             }
             _ => panic!("Expected VarWithModifier with Substring, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn parse_double_colon_dash_is_default() {
+        // `${var:-N}` is the POSIX default form, even for a numeric word.
+        let expr = Parser::new("${var:-3}").parse_expr().unwrap();
+        match expr.unpack() {
+            Expr::VarWithModifier {
+                name,
+                modifier: ParamModifier::Default(_),
+            } => assert_eq!(name, "var"),
+            _ => panic!("Expected Default modifier, got {:?}", expr),
         }
     }
 

@@ -1618,6 +1618,19 @@ impl Parser {
         if self.peek() == Some(':') {
             self.next_char(); // consume :
             match self.peek() {
+                // `${var: -N}` — substring with a signed offset. The space
+                // disambiguates it from the POSIX `${var:-word}` default form.
+                Some(c) if c.is_whitespace() => {
+                    self.skip_whitespace();
+                    let offset = self.parse_signed_int()?;
+                    let length = if self.peek() == Some(':') {
+                        self.next_char();
+                        Some(self.parse_unsigned_int()?)
+                    } else {
+                        None
+                    };
+                    modifier = Some(ParamModifier::Substring { offset, length });
+                }
                 // :t, :h, :r, :e — legacy path modifiers (single char)
                 Some('t') => {
                     self.next_char();
@@ -1643,34 +1656,13 @@ impl Parser {
                     self.next_char();
                     modifier = Some(ParamModifier::Lower);
                 }
-                // -, =, ?, + — default/assign/error/alternate (check BEFORE digit case)
+                // `:-` is the POSIX default-value form (`${var:-word}`, so
+                // `${var:-1}` defaults to "1"). Use `${var: -1}` for a negative
+                // substring offset.
                 Some('-') => {
                     self.next_char(); // consume -
-                    // Check if this is a negative offset substring: ${var:-N:M}
-                    if self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                        let offset = -(self.parse_unsigned_int()? as i64);
-                        if self.peek() == Some(':') {
-                            // ${var:-N:M} — negative offset substring
-                            self.next_char(); // consume :
-                            let length = Some(self.parse_unsigned_int()?);
-                            modifier = Some(ParamModifier::Substring { offset, length });
-                        } else if self.peek() == Some('}') {
-                            // ${var:-N} — negative offset substring, no length
-                            modifier = Some(ParamModifier::Substring {
-                                offset,
-                                length: None,
-                            });
-                        } else {
-                            // Not a valid substring — treat as default with the number as text
-                            let rest = format!("-{}", offset.abs());
-                            modifier = Some(ParamModifier::Default(Box::new(Expr::String(vec![
-                                StringPart::Lit(rest),
-                            ]))));
-                        }
-                    } else {
-                        let default_expr = self.parse_modifier_value()?;
-                        modifier = Some(ParamModifier::Default(Box::new(default_expr)));
-                    }
+                    let default_expr = self.parse_modifier_value()?;
+                    modifier = Some(ParamModifier::Default(Box::new(default_expr)));
                 }
                 Some('=') => {
                     self.next_char(); // consume =

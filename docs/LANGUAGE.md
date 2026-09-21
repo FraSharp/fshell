@@ -406,8 +406,11 @@ fshell supports comprehensive parameter modifiers on `${var:...}` and `${var#...
 ```fsh
 # substring: offset or offset:length
 let sub = ${text:0:5}
+let tail = ${text: -3}              # space after `:` = signed offset
+let mid  = ${text: -3:2}
 
-# default values
+# `:-` is the POSIX default form (`${var:-N}` defaults to N, it is not a
+# negative offset — write `${var: -N}` for that)
 let host = ${HOST:-"127.0.0.1"}     # use default if unset or empty
 let port = ${PORT:="8080"}          # assign default if unset or empty
 let val  = ${CRITICAL:?"missing"}   # error if unset or empty
