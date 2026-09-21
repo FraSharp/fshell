@@ -1132,6 +1132,7 @@ dependencies = [
 name = "fshell-engine"
 version = "0.1.0"
 dependencies = [
+ "async-recursion",
  "bytes",
  "chrono",
  "criterion",

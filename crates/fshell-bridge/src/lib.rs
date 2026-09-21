@@ -1010,21 +1010,21 @@ pub fn run_external(
     // and continue to drain pipes concurrently.
     let _exit_code = fshell_engine::wait_for_job_sync(env, pid, job_id, &cmd_str, is_interactive);
 
-    // Drain the stdout/stderr forwarding tasks before returning. Detaching them
-    // let a later stage observe truncated output; since this function already
-    // blocks on `waitpid` it is necessarily running on a blocking thread, so
-    // blocking on the runtime handle is safe and does not stall the executor.
+    // Observe every I/O task so a panic in a producer/consumer is not silently
+    // detached. They cannot be awaited here: this function may run on a runtime
+    // worker thread (the bridge is also called outside `spawn_blocking`), where
+    // `Handle::block_on` panics ("cannot start a runtime from within a runtime").
+    // Callers that need fully-drained output must let the runtime drive them.
     if !io_tasks.is_empty() {
-        let drain = async move {
+        let task_env = env.clone();
+        tokio::spawn(async move {
             for task in io_tasks {
                 if let Err(error) = task.await {
+                    task_env.report_stage_error();
                     eprintln!("external command I/O task failed: {error}");
                 }
             }
-        };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.block_on(drain);
-        }
+        });
     }
 
     if cnf_debug {
