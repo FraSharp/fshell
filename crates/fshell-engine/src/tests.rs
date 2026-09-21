@@ -22,6 +22,29 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn test_push_scope_chains_to_enclosing_frames() {
+        let env = Env::new();
+        let mut params = fshell_hash::FxHashMap::default();
+        params.insert("p".to_string(), Val::Int(10));
+        let fn_env = env.push_scope(std::sync::Arc::new(fshell_core::RwLock::new(params)));
+
+        let mut loop_frame = fshell_hash::FxHashMap::default();
+        loop_frame.insert("i".to_string(), Val::Int(0));
+        let loop_env = fn_env.push_scope(std::sync::Arc::new(fshell_core::RwLock::new(loop_frame)));
+
+        let locals = loop_env.local_vars.as_ref().expect("scoped");
+        // The loop frame sees the enclosing parameter...
+        assert_eq!(locals.get("i"), Some(Val::Int(0)));
+        assert_eq!(locals.get("p"), Some(Val::Int(10)));
+        // ...and updating it writes through to the parameter frame.
+        assert!(locals.update("p", Val::Int(99)));
+        assert_eq!(
+            fn_env.local_vars.as_ref().unwrap().get("p"),
+            Some(Val::Int(99))
+        );
+    }
+
+    #[tokio::test]
     async fn test_exit_stmt() {
         let env = Env::new();
         let mut p = Parser::new("exit 42");

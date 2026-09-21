@@ -2,10 +2,10 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::{
-    CapAction, EngineError, Env, PendingSuggestion, PipeSender, PipeStream, PipelinePayload,
-    SuggestionMode, cmp_vals, decode_csv_input, eval_expr, eval_stmt, expand_alias_with_args,
-    expand_globs, get_suggested_command, is_external_command_at, pipeline_channel_size,
-    render_bar_chart, render_table, run_boundary_operator,
+    CapAction, EngineError, Env, LocalScope, PendingSuggestion, PipeSender, PipeStream,
+    PipelinePayload, SuggestionMode, cmp_vals, decode_csv_input, eval_expr, eval_stmt,
+    expand_alias_with_args, expand_globs, get_suggested_command, is_external_command_at,
+    pipeline_channel_size, render_bar_chart, render_table, run_boundary_operator,
 };
 use crate::{Flow, PipelineFailure};
 use fshell_core::ShellError;
@@ -25,6 +25,17 @@ use ustr::ustr;
 
 fn function_exists(env: &Env, name: &str) -> bool {
     env.fns.read().contains_key(name) || env.posix_fns.read().contains_key(name)
+}
+
+/// Build the per-record local scope for `filter`/`map`, chained onto the
+/// enclosing local scope so function parameters and outer bindings stay visible
+/// while the record fields shadow them.
+fn record_scope(fields: FxHashMap<String, Val>, parent: Option<&Arc<LocalScope>>) -> Arc<LocalScope> {
+    let frame = Arc::new(RwLock::new(fields));
+    match parent {
+        Some(parent) => Arc::new(LocalScope::child(frame, parent.clone())),
+        None => Arc::new(LocalScope::new(frame)),
+    }
 }
 
 /// Boundary conversion used by stage handlers: raw bytes become one String Val
@@ -440,9 +451,9 @@ pub async fn execute_pipeline(
                     let val = {
                         let mut found = {
                             if let Some(ref locals) = env_clone.local_vars
-                                && let Some(val) = locals.read().get(&var_name)
+                                && let Some(val) = locals.get(&var_name)
                             {
-                                Some(val.clone())
+                                Some(val)
                             } else {
                                 let vars = lock_vars!(env_clone.vars.read());
                                 vars.get(&var_name).cloned()
@@ -1131,6 +1142,9 @@ pub async fn execute_pipeline(
                     if let Some(mut rx) = current_rx {
                         // Clone env once and reuse across items to avoid per-item Arc batching
                         let mut sub_env = env_clone.clone();
+                        // Enclosing locals (function parameters, outer loop vars) must
+                        // stay visible inside the stage.
+                        let base_locals = env_clone.local_vars.clone();
                         while let Some(payload) = rx.recv().await {
                             if env_clone.job_control.cancellation.load(Ordering::Acquire)
                                 || *_stage_cancel.borrow()
@@ -1141,7 +1155,7 @@ pub async fn execute_pipeline(
                                 PipelinePayload::Data(val_arc) => {
                                     if let Val::Map(map) = &*val_arc {
                                         if needed.is_empty() {
-                                            sub_env.scope.local_vars = None;
+                                            sub_env.scope.local_vars = base_locals.clone();
                                         } else {
                                             let mut locals = FxHashMap::default();
                                             for (k, v) in map {
@@ -1149,11 +1163,13 @@ pub async fn execute_pipeline(
                                                     locals.insert(k.to_string(), v.clone());
                                                 }
                                             }
-                                            sub_env.scope.local_vars =
-                                                Some(Arc::new(fshell_core::RwLock::new(locals)));
+                                            sub_env.scope.local_vars = Some(record_scope(
+                                                locals,
+                                                base_locals.as_ref(),
+                                            ));
                                         }
                                     } else {
-                                        sub_env.scope.local_vars = None;
+                                        sub_env.scope.local_vars = base_locals.clone();
                                     }
                                     match eval_expr(&condition, &sub_env).await {
                                         Ok(Val::Bool(true)) => {
@@ -1179,7 +1195,7 @@ pub async fn execute_pipeline(
                                             continue;
                                         }
                                         let val_arc = Arc::new(Val::String(line.to_string()));
-                                        sub_env.scope.local_vars = None;
+                                        sub_env.scope.local_vars = base_locals.clone();
                                         match eval_expr(&condition, &sub_env).await {
                                             Ok(Val::Bool(true)) => {
                                                 let _ = out_tx
@@ -1214,6 +1230,7 @@ pub async fn execute_pipeline(
                     if let Some(mut rx) = current_rx {
                         // Clone env once and reuse across items to avoid per-item Arc batching
                         let mut sub_env = env_clone.clone();
+                        let base_locals = env_clone.local_vars.clone();
                         while let Some(payload) = rx.recv().await {
                             if env_clone.job_control.cancellation.load(Ordering::Acquire) {
                                 break;
@@ -1222,7 +1239,7 @@ pub async fn execute_pipeline(
                                 PipelinePayload::Data(val_arc) => {
                                     if let Val::Map(map) = &*val_arc {
                                         if needed.is_empty() {
-                                            sub_env.scope.local_vars = None;
+                                            sub_env.scope.local_vars = base_locals.clone();
                                         } else {
                                             let mut locals = FxHashMap::default();
                                             for (k, v) in map {
@@ -1230,11 +1247,13 @@ pub async fn execute_pipeline(
                                                     locals.insert(k.to_string(), v.clone());
                                                 }
                                             }
-                                            sub_env.scope.local_vars =
-                                                Some(Arc::new(fshell_core::RwLock::new(locals)));
+                                            sub_env.scope.local_vars = Some(record_scope(
+                                                locals,
+                                                base_locals.as_ref(),
+                                            ));
                                         }
                                     } else {
-                                        sub_env.scope.local_vars = None;
+                                        sub_env.scope.local_vars = base_locals.clone();
                                     }
                                     let mut new_map = indexmap::IndexMap::with_hasher(
                                         fshell_hash::FxBuildHasher::default(),

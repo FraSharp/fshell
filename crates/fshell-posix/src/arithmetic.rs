@@ -278,9 +278,9 @@ impl<'a> ArithParser<'a> {
 
     fn resolve_var(&self, name: &str) -> i64 {
         let v_opt = if let Some(ref locals) = self.env.local_vars
-            && let Some(v) = locals.read().get(name)
+            && let Some(v) = locals.get(name)
         {
-            Some(v.clone())
+            Some(v)
         } else {
             self.env.vars.read().get(name).cloned()
         };

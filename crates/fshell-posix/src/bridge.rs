@@ -24,8 +24,8 @@ pub fn fork_env_for_subshell(parent: &Env) -> Env {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     if let Some(ref locals) = parent.local_vars {
-        for (k, v) in locals.read().iter() {
-            snap_vars.insert(k.clone(), v.clone());
+        for (k, v) in locals.flatten() {
+            snap_vars.insert(k, v);
         }
     }
     let snap_fns: HashMap<String, FnDefTuple> = parent

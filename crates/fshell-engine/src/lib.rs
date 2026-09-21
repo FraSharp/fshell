@@ -63,7 +63,7 @@ pub mod profiler;
 pub mod prompt;
 pub mod reactive;
 pub mod scope;
-pub use scope::ConfigTuiHandler;
+pub use scope::{ConfigTuiHandler, LocalScope};
 pub mod special_vars;
 
 impl From<EngineError> for ShellError {
@@ -2017,9 +2017,16 @@ impl Env {
         env
     }
 
-    /// Create a lightweight scope with local vars without cloning the full Env.
-    /// Shares all Arcs with the parent; only local_vars is replaced.
+    /// Create a lightweight child scope without cloning the full `Env`.
+    ///
+    /// `local_vars` becomes the innermost frame, linked to this environment's
+    /// existing local scope (if any), so lookups still see enclosing bindings
+    /// (function parameters, outer loop variables) instead of losing them.
     pub fn push_scope(&self, local_vars: Arc<RwLock<FxHashMap<String, Val>>>) -> Self {
+        let local_vars = match &self.local_vars {
+            Some(parent) => Arc::new(scope::LocalScope::child(local_vars, parent.clone())),
+            None => Arc::new(scope::LocalScope::new(local_vars)),
+        };
         Env {
             scope: scope::Scope {
                 local_vars: Some(local_vars),
@@ -3118,7 +3125,7 @@ impl Env {
     /// Set a shell variable without exporting to the environment.
     pub fn set_shell_var(&self, key: &str, val: Val) {
         if let Some(ref locals) = self.local_vars {
-            locals.write().insert(key.to_string(), val.clone());
+            locals.declare(key, val.clone());
         }
         self.vars.write().insert(key.to_string(), val);
     }
@@ -3126,7 +3133,7 @@ impl Env {
     /// Set a variable and export it to this shell's child environment.
     pub fn set_exported_var(&self, key: &str, val: Val) {
         if let Some(ref locals) = self.local_vars {
-            locals.write().insert(key.to_string(), val.clone());
+            locals.declare(key, val.clone());
         }
         {
             let mut vars = self.vars.write();
@@ -3161,7 +3168,7 @@ impl Env {
     /// Remove a variable from shell vars and environment.
     pub fn unset_var(&self, key: &str) {
         if let Some(ref locals) = self.local_vars {
-            locals.write().remove(key);
+            locals.remove(key);
         }
         {
             let mut vars = self.vars.write();

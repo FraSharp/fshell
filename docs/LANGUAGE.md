@@ -515,7 +515,7 @@ fn start_service(cfg: { host: String, port: Int, .. }) {
 
 - `return <expr>` stops function execution and returns the given `Val`.
 - a function without an explicit `return` returns `Val::Null`.
-- functions execute in their own local scope (`local_vars`), inheriting reads from the outer `Env`.
+- functions execute in their own local scope (`local_vars`), which is linked to the enclosing scope: parameters stay visible inside loop bodies and pipeline stages, and updating a parameter inside a block remains visible after it.
 
 ---
 

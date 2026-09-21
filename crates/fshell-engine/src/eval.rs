@@ -446,9 +446,9 @@ fn try_eval_sync_inner(expr: &Expr, env: &Env) -> Option<Result<Val, EngineError
                 return None;
             }
             if let Some(ref locals) = env.local_vars
-                && let Some(val) = locals.read().get(name)
+                && let Some(val) = locals.get(name)
             {
-                return Some(Ok(val.clone()));
+                return Some(Ok(val));
             }
             Some(lookup_variable_fallback(name, env))
         }
@@ -742,9 +742,9 @@ fn trim_longest_suffix(s: &str, pattern: &str) -> String {
 
 fn resolve_ident_value(name: &str, env: &Env) -> Val {
     if let Some(ref locals) = env.local_vars
-        && let Some(val) = locals.read().get(name)
+        && let Some(val) = locals.get(name)
     {
-        return val.clone();
+        return val;
     }
     let vars = env.vars.read();
     if let Some(val) = vars.get(name) {
@@ -899,9 +899,9 @@ pub fn eval_expr<'a>(
             }
             Expr::Variable(name) => {
                 if let Some(ref locals) = env.local_vars
-                    && let Some(val) = locals.read().get(name)
+                    && let Some(val) = locals.get(name)
                 {
-                    return Ok(val.clone());
+                    return Ok(val);
                 }
                 let mut found_cell = None;
                 if env
@@ -1422,7 +1422,7 @@ fn try_eval_stmt_sync_inner(
                 Val::Null
             };
             if let Some(ref locals) = env.local_vars {
-                locals.write().insert(name.clone(), val);
+                locals.declare(name, val);
             } else {
                 env.vars.write().insert(name.clone(), val);
             }
@@ -1434,12 +1434,10 @@ fn try_eval_stmt_sync_inner(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if let Some(ref locals) = env.local_vars {
-                let mut map = locals.write();
-                if map.contains_key(name) {
-                    map.insert(name.clone(), val);
-                    return Some(Ok(Flow::Normal));
-                }
+            if let Some(ref locals) = env.local_vars
+                && locals.update(name, val.clone())
+            {
+                return Some(Ok(Flow::Normal));
             }
             env.vars.write().insert(name.clone(), val);
             Some(Ok(Flow::Normal))
@@ -1450,12 +1448,10 @@ fn try_eval_stmt_sync_inner(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if let Some(ref locals) = env.local_vars {
-                let mut map = locals.write();
-                if let Some(entry) = map.get_mut(name) {
-                    *entry = val;
-                    return Some(Ok(Flow::Normal));
-                }
+            if let Some(ref locals) = env.local_vars
+                && locals.update(name, val.clone())
+            {
+                return Some(Ok(Flow::Normal));
             }
             let mut vars = env.vars.write();
             if let Some(entry) = vars.get_mut(name) {
@@ -1474,16 +1470,15 @@ fn try_eval_stmt_sync_inner(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if let Some(ref locals) = env.local_vars {
-                let mut map = locals.write();
-                if let Some(entry) = map.get_mut(name) {
-                    let new_val = match eval_binop(*op, entry.clone(), val) {
-                        Ok(nv) => nv,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    *entry = new_val;
-                    return Some(Ok(Flow::Normal));
-                }
+            if let Some(ref locals) = env.local_vars
+                && let Some(current) = locals.get(name)
+            {
+                let new_val = match eval_binop(*op, current, val) {
+                    Ok(nv) => nv,
+                    Err(e) => return Some(Err(e)),
+                };
+                locals.update(name, new_val);
+                return Some(Ok(Flow::Normal));
             }
             let mut vars = env.vars.write();
             if let Some(entry) = vars.get_mut(name) {
@@ -1690,8 +1685,7 @@ async fn eval_stmt_inner(
                 Val::Null
             };
             if let Some(ref locals) = env.local_vars {
-                let mut map = locals.write();
-                map.insert(name.clone(), val);
+                locals.declare(name, val);
             } else {
                 let mut vars = env.vars.write();
                 vars.insert(name.clone(), val);
@@ -1700,24 +1694,20 @@ async fn eval_stmt_inner(
         }
         Stmt::Let { name, expr } => {
             let val = eval_expr(expr, env).await?;
-            if let Some(ref locals) = env.local_vars {
-                let mut map = locals.write();
-                if map.contains_key(name) {
-                    map.insert(name.clone(), val);
-                    return Ok(Flow::Normal);
-                }
+            if let Some(ref locals) = env.local_vars
+                && locals.update(name, val.clone())
+            {
+                return Ok(Flow::Normal);
             }
             env.vars.write().insert(name.clone(), val);
             Ok(Flow::Normal)
         }
         Stmt::Assign { name, expr } => {
             let val = eval_expr(expr, env).await?;
-            if let Some(ref locals) = env.local_vars {
-                let mut map = locals.write();
-                if let Some(entry) = map.get_mut(name) {
-                    *entry = val;
-                    return Ok(Flow::Normal);
-                }
+            if let Some(ref locals) = env.local_vars
+                && locals.update(name, val.clone())
+            {
+                return Ok(Flow::Normal);
             }
             let mut vars = env.vars.write();
             if let Some(entry) = vars.get_mut(name) {
@@ -1732,13 +1722,12 @@ async fn eval_stmt_inner(
         }
         Stmt::Update { name, op, expr } => {
             let val = eval_expr(expr, env).await?;
-            if let Some(ref locals) = env.local_vars {
-                let mut map = locals.write();
-                if let Some(entry) = map.get_mut(name) {
-                    let new_val = eval_binop(*op, entry.clone(), val)?;
-                    *entry = new_val;
-                    return Ok(Flow::Normal);
-                }
+            if let Some(ref locals) = env.local_vars
+                && let Some(current) = locals.get(name)
+            {
+                let new_val = eval_binop(*op, current, val)?;
+                locals.update(name, new_val);
+                return Ok(Flow::Normal);
             }
             let mut vars = env.vars.write();
             if let Some(entry) = vars.get_mut(name) {

@@ -156,7 +156,7 @@ fn resolve_parameter(param: &Parameter, env: &fshell_engine::Env, positional: &[
                 return v.to_text();
             }
             if let Some(ref locals) = env.local_vars
-                && let Some(val) = locals.read().get(name.as_str())
+                && let Some(val) = locals.get(name.as_str())
             {
                 return val.to_text();
             }

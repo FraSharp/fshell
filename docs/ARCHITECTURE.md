@@ -244,7 +244,7 @@ the central `Env` struct in `crates/fshell-engine/src/lib.rs` delegates state ac
 ```rust
 pub struct Env {
     pub vars: Arc<RwLock<FxHashMap<String, Val>>>,
-    pub local_vars: Option<Arc<RwLock<FxHashMap<String, Val>>>>,
+    pub local_vars: Option<Arc<LocalScope>>,
     pub fns: Arc<RwLock<FxHashMap<String, (Vec<Param>, Option<String>, Vec<Stmt>)>>>,
     pub aliases: Arc<RwLock<FxHashMap<String, String>>>,
     pub builtins: Arc<RwLock<FxHashMap<String, BuiltinHandler>>>,
@@ -263,7 +263,7 @@ all internal synchronization uses `parking_lot::RwLock` (re-exported via `fshell
 
 ### variable scoping
 
-- **`env.push_scope(locals)`**: creates a cloned child `Env` pointing to a local variable map (`local_vars`). reads fall through to outer environment variables; writes via `local` update only the active frame.
+- **`env.push_scope(locals)`**: creates a cloned child `Env` whose `local_vars` is a new `LocalScope` frame linked to the current one. lookups walk outward through the chain (so loop bodies and `filter`/`map` stages still see function parameters) and then fall through to the environment; writes update the innermost frame that already holds the name, so mutating a parameter inside a block stays visible after it.
 - **built-in variables**: special shell variables (`$?`, `$#`, `$@`, `$*`, `$0`..`$9`) are resolved dynamically during variable lookup.
 
 ### runtime lock ordering

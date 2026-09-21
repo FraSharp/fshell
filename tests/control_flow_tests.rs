@@ -43,6 +43,51 @@ async fn test_fn_definition_and_call() {
     assert_eq!(val, Some(Val::String("Hello, World".to_string())));
 }
 
+#[tokio::test]
+async fn test_function_param_visible_inside_for_loop() {
+    let ctx = TestContext::new();
+    let script = r#"
+        fn f(x) { for i in [1, 2] { let seen = $x } }
+        f 7
+    "#;
+    let val = ctx.get_var_after_script(script, "seen").await;
+    assert_eq!(
+        val,
+        Some(Val::Int(7)),
+        "function parameter must be visible inside the loop body"
+    );
+}
+
+#[tokio::test]
+async fn test_function_param_mutation_inside_loop_persists() {
+    let ctx = TestContext::new();
+    let script = r#"
+        fn f(n) { for i in [1, 2] { n = n + 1 }; let out = $n }
+        f 10
+    "#;
+    let val = ctx.get_var_after_script(script, "out").await;
+    assert_eq!(
+        val,
+        Some(Val::Int(12)),
+        "updating a parameter inside a loop must write back to the function frame"
+    );
+}
+
+#[tokio::test]
+async fn test_function_param_visible_inside_pipeline_filter() {
+    let ctx = TestContext::new();
+    let script = r#"
+        fn f(th) { let c = $| echo "x" | filter th == 5 | count | }
+        f 5
+    "#;
+    let val = ctx.get_var_after_script(script, "c").await;
+    assert_eq!(
+        val,
+        Some(Val::List(vec![Val::Int(1)])),
+        "function parameter must be visible inside a pipeline stage"
+    );
+}
+
 // Match execution
 
 #[tokio::test]
