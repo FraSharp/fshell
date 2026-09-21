@@ -702,7 +702,7 @@ ps | map pid command cpu
 sorts records by column name in ascending or descending order:
 ```fsh
 ls | sort size desc
-ls | sort -name asc
+ls | sort name asc
 ```
 
 #### `grep`
@@ -828,7 +828,7 @@ with caps(net.all, process.spawn) {
 
 ### `unsafe` blocks
 
-bypasses read-only query protections in reactive cells or sandbox checks:
+bypasses the read-only query guard on reactive cells (it does not bypass capability or sandbox checks):
 
 ```fsh
 unsafe {

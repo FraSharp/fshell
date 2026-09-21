@@ -159,15 +159,15 @@ ls | sort size desc
 
 # ascending sort (default)
 ls | sort name asc
-
-# shorthand negative prefix for descending
-ls | sort -size
 ```
+
+a leading flag (`sort -n`, `sort -k 2`) makes the stage an external command
+call instead, per the pipeline-keyword rule.
 
 **execution:**
 1. buffers incoming stream items into memory.
 2. applies `cmp_vals` on the target field using `Ustr` key lookup.
-3. bounded by `sort_max_items` (default 50,000) to protect against memory exhaustion on infinite streams.
+3. bounded by `sort_max_items` (default 100,000) to protect against memory exhaustion on infinite streams.
 4. emits sorted records downstream.
 
 ### `grep`
@@ -180,7 +180,7 @@ ls | grep r"\.tmp$"
 ```
 
 **execution:**
-- for strings: checks substring containment or regex match.
+- the pattern is a regular expression; if it does not compile, a plain substring match is used.
 - for maps: serializes fields to text representation before matching.
 
 ### `mark`
@@ -192,9 +192,9 @@ cat build.log | mark "WARNING"
 ```
 
 **execution:**
-- matches incoming records against the pattern.
-- matched items are formatted with visual markers (`> <text>`) and terminal color highlights when stdout is a TTY.
-- all items (matched and unmatched) are forwarded downstream.
+- matches incoming records against the pattern (regex, else substring).
+- matching *textual* values are annotated with a visual marker (`> <text>`) and terminal color when stdout is a TTY.
+- structured records are forwarded unchanged, so their shape is preserved for downstream stages.
 
 ### `count`
 
@@ -203,6 +203,9 @@ aggregates the incoming stream and emits a single integer `Val::Int`.
 ```fsh
 ls | filter size == 0 | count
 ```
+
+always emits exactly one value, including `0` when there is no upstream
+(`count` on its own). a trailing byte stream line without a newline still counts.
 
 ### `limit`
 
