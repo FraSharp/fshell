@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use super::{dedent, parse_ansi_escapes, parse_string_parts};
+use super::{dedent, parse_ansi_escapes, parse_string_parts, trim_block_tail};
 use crate::ast::*;
 use crate::{ParseError, Parser};
 
@@ -401,6 +401,12 @@ impl Parser {
                     false
                 };
 
+                // `r"..."` is a raw string literal, not a command named `r`
+                // followed by an argument. Requires adjacency (`r "x"` is still a
+                // command with an argument).
+                let is_raw_string =
+                    ident == "r" && next_char == Some('"') && next_pos == ident_end;
+
                 let is_operator = match next_char {
                     Some('+') => {
                         // `chmod +x file`: `+x` is a flag-style argument, not addition.
@@ -457,7 +463,7 @@ impl Parser {
                     }
                 };
 
-                if !is_member_access && !is_operator {
+                if !is_member_access && !is_operator && !is_raw_string {
                     let pipeline = self.parse_pipeline()?;
                     return Ok(Expr::Pipeline(pipeline));
                 }
@@ -1096,6 +1102,19 @@ impl Parser {
                 }
                 Ok(Expr::Variable(name))
             }
+            // Raw string literal `r"..."`: no escapes, no interpolation. This is
+            // an expression-position literal only; in command-argument position
+            // `r"..."` keeps ordinary shell adjacency semantics (`r` concatenated
+            // with a quoted word).
+            Some('r')
+                if self.pos + 1 < self.input.len()
+                    && self.input[self.pos + 1] == '"'
+                    && !(self.pos + 2 < self.input.len() && self.input[self.pos + 2] == '"') =>
+            {
+                self.next_char(); // consume 'r'
+                let s = self.parse_raw_string_content()?;
+                Ok(Expr::String(vec![StringPart::Lit(s)]))
+            }
             Some('"') => {
                 // Check for triple-quote """
                 if self.pos + 2 < self.input.len()
@@ -1107,6 +1126,13 @@ impl Parser {
                 self.parse_string_literal()
             }
             Some('\'') => {
+                // Triple-single-quoted raw text block: '''...'''
+                if self.pos + 2 < self.input.len()
+                    && self.input[self.pos + 1] == '\''
+                    && self.input[self.pos + 2] == '\''
+                {
+                    return self.parse_triple_single_quoted_string();
+                }
                 self.next_char();
                 let mut s = String::new();
                 let mut closed = false;
@@ -2004,10 +2030,7 @@ impl Parser {
                     self.next_char(); // "
                     self.next_char(); // "
                     self.next_char(); // "
-                    // If the closing """ is followed by a newline, strip trailing newline from content
-                    if content.ends_with('\n') {
-                        content.pop();
-                    }
+                    trim_block_tail(&mut content);
                     break;
                 }
                 Some(c) => {
@@ -2021,6 +2044,83 @@ impl Parser {
         let parts = parse_string_parts(&dedented, self.current_span())?;
         Ok(Expr::MultiLineString {
             parts,
+            dedent: DedentMode::All,
+        })
+    }
+
+    /// Parse a raw string literal body. The current character is the opening
+    /// `"`; content runs verbatim to the next `"` with no escapes or
+    /// interpolation.
+    fn parse_raw_string_content(&mut self) -> Result<String, ParseError> {
+        if self.peek() != Some('"') {
+            return Err(ParseError::ExpectedChar {
+                expected: '"',
+                found: self.peek().unwrap_or('\0'),
+                span: self.current_span(),
+            });
+        }
+        self.next_char(); // opening "
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(ParseError::SyntaxError {
+                        message: "Unterminated raw string literal".to_string(),
+                        span: self.current_span(),
+                    });
+                }
+                Some('"') => {
+                    self.next_char();
+                    break;
+                }
+                Some(c) => {
+                    s.push(c);
+                    self.next_char();
+                }
+            }
+        }
+        Ok(s)
+    }
+
+    /// Parse a triple-single-quoted raw text block: `'''...'''`. Content is
+    /// taken verbatim (no interpolation, no escapes) and commonly indented lines
+    /// are dedented, mirroring `"""..."""`.
+    pub(crate) fn parse_triple_single_quoted_string(&mut self) -> Result<Expr, ParseError> {
+        self.next_char(); // '
+        self.next_char(); // '
+        self.next_char(); // '
+        if self.peek() == Some('\n') {
+            self.next_char();
+        }
+        let mut content = String::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(ParseError::SyntaxError {
+                        message: "Unterminated triple-single-quoted string".to_string(),
+                        span: self.current_span(),
+                    });
+                }
+                Some('\'')
+                    if self.pos + 2 < self.input.len()
+                        && self.input[self.pos + 1] == '\''
+                        && self.input[self.pos + 2] == '\'' =>
+                {
+                    self.next_char();
+                    self.next_char();
+                    self.next_char();
+                    trim_block_tail(&mut content);
+                    break;
+                }
+                Some(c) => {
+                    content.push(c);
+                    self.next_char();
+                }
+            }
+        }
+        let dedented = dedent(&content, DedentMode::All);
+        Ok(Expr::MultiLineString {
+            parts: vec![StringPart::Lit(dedented)],
             dedent: DedentMode::All,
         })
     }

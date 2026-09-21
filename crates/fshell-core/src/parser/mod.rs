@@ -211,6 +211,23 @@ fn parse_ansi_escapes(s: &str, base_span: SourceSpan) -> Result<String, ParseErr
     Ok(out)
 }
 
+/// Drop the trailing line of a block string when it is only indentation.
+///
+/// Triple-quoted bodies usually put the closing delimiter on its own (possibly
+/// indented) line. Without this, `dedent` would leave a stray trailing newline
+/// (or an indentation-only final line) in the value.
+fn trim_block_tail(content: &mut String) {
+    if content.ends_with('\n') {
+        content.pop();
+    } else if let Some(last_newline) = content.rfind('\n') {
+        if content[last_newline + 1..].trim().is_empty() {
+            content.truncate(last_newline);
+        }
+    } else if content.trim().is_empty() {
+        content.clear();
+    }
+}
+
 /// Strip common leading whitespace from all non-empty lines.
 fn dedent(s: &str, mode: DedentMode) -> String {
     match mode {
@@ -2528,6 +2545,36 @@ mod tests {
                 ));
             }
             other => panic!("Expected `and` at the root, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_raw_string_literal() {
+        let stmts = Parser::new(r#"let re = r"\.rs$""#)
+            .parse_statements()
+            .unwrap();
+        let Stmt::Let { expr, .. } = stmts[0].unpack() else {
+            panic!("Expected Stmt::Let");
+        };
+        assert_eq!(
+            expr.unpack(),
+            &Expr::String(vec![StringPart::Lit(r"\.rs$".to_string())])
+        );
+    }
+
+    #[test]
+    fn test_triple_single_quoted_string_is_raw_and_dedented() {
+        let stmts = Parser::new("let x = '''\n    hello\n    world\n    '''")
+            .parse_statements()
+            .unwrap();
+        let Stmt::Let { expr, .. } = stmts[0].unpack() else {
+            panic!("Expected Stmt::Let");
+        };
+        match expr.unpack() {
+            Expr::MultiLineString { parts, .. } => {
+                assert_eq!(parts, &vec![StringPart::Lit("hello\nworld".to_string())]);
+            }
+            other => panic!("Expected MultiLineString, got {other:?}"),
         }
     }
 
