@@ -560,6 +560,26 @@ async fn test_pipeline_empty_input() {
 }
 
 #[tokio::test]
+async fn test_stderr_merges_into_stdout_with_2_to_1() {
+    let ctx = TestContext::new();
+    let val = ctx
+        .eval_ok("sh -c 'echo oops 1>&2' 2>&1 | @text")
+        .await;
+    let text = match &val {
+        Val::List(items) => items
+            .iter()
+            .map(|v| v.to_text())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_text(),
+    };
+    assert!(
+        text.contains("oops"),
+        "stderr must reach downstream after 2>&1, got: {text}"
+    );
+}
+
+#[tokio::test]
 async fn test_yaml_boundary_is_plain_data() {
     let env = setup_test_env();
     let data = Val::Map({

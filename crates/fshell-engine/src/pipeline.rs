@@ -2195,8 +2195,14 @@ pub async fn execute_pipeline(
                                 }
                                 PipelinePayload::Structured(d) => {
                                     if src_fd == 2 && dst_fd == 1 {
-                                        // 2>&1: stderr to stdout -> forward as-is (already structured)
-                                        let _ = out_tx.send(PipelinePayload::Structured(d)).await;
+                                        // `2>&1`: merge stderr into stdout as data so
+                                        // downstream stages actually see it. (Leaving
+                                        // it Structured made this a no-op.)
+                                        let _ = out_tx
+                                            .send(PipelinePayload::Data(Arc::new(Val::String(
+                                                d.to_string(),
+                                            ))))
+                                            .await;
                                     } else if src_fd == 1 && dst_fd == 2 {
                                         // 1>&2: stdout to stderr -> forward as Structured
                                         let _ = out_tx.send(PipelinePayload::Structured(d)).await;
