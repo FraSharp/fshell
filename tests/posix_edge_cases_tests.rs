@@ -297,6 +297,18 @@ async fn test_posix_heredoc_quoted_delimiter_literal() {
 }
 
 #[tokio::test]
+async fn test_posix_ulimit_query() {
+    // `ulimit -n` must report the open-file limit, not silently print nothing.
+    let env = setup_posix_env();
+    let (_, out) = run_posix_capture("ulimit -n", &env).await;
+    let n: u64 = out
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("ulimit -n should print a number, got {out:?}"));
+    assert!(n > 0, "open-file limit should be positive, got {n}");
+}
+
+#[tokio::test]
 async fn test_posix_alias_defines_and_lists() {
     let env = setup_posix_env();
     let (_, out) = run_posix_capture("alias greet='echo hi'; alias greet", &env).await;

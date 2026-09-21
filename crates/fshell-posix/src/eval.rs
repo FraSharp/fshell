@@ -1608,7 +1608,69 @@ async fn eval_simple_command_inner(
             }
             return Ok((status, None));
         }
-        "ulimit" | "times" | "jobs" => {
+        "ulimit" => {
+            // Report or set a soft resource limit. -n files, -c core, -s stack,
+            // -v address space, -f file size (default).
+            let mut resource = libc::RLIMIT_FSIZE;
+            let mut idx = 0;
+            if let Some(flag) = args.first().and_then(|a| a.strip_prefix('-')) {
+                idx = 1;
+                match flag.chars().next() {
+                    Some('n') => resource = libc::RLIMIT_NOFILE,
+                    Some('c') => resource = libc::RLIMIT_CORE,
+                    Some('s') => resource = libc::RLIMIT_STACK,
+                    Some('v') => resource = libc::RLIMIT_AS,
+                    Some('f') | None => {}
+                    Some(other) => {
+                        eprintln!("ulimit: unsupported option -{other}");
+                        return Ok((1, None));
+                    }
+                }
+            }
+            let mut rl = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if unsafe { libc::getrlimit(resource, &mut rl) } != 0 {
+                eprintln!("ulimit: getrlimit: {}", std::io::Error::last_os_error());
+                return Ok((1, None));
+            }
+            if let Some(value) = args.get(idx) {
+                rl.rlim_cur = if value == "unlimited" {
+                    libc::RLIM_INFINITY
+                } else {
+                    match value.parse::<u64>() {
+                        Ok(v) => v as libc::rlim_t,
+                        Err(_) => {
+                            eprintln!("ulimit: invalid value: {value}");
+                            return Ok((1, None));
+                        }
+                    }
+                };
+                if unsafe { libc::setrlimit(resource, &rl) } != 0 {
+                    eprintln!("ulimit: setrlimit: {}", std::io::Error::last_os_error());
+                    return Ok((1, None));
+                }
+                return Ok((0, None));
+            }
+            let text = if rl.rlim_cur == libc::RLIM_INFINITY {
+                "unlimited\n".to_string()
+            } else if resource == libc::RLIMIT_FSIZE {
+                // POSIX reports the file-size limit in 512-byte blocks.
+                format!("{}\n", rl.rlim_cur / 512)
+            } else {
+                format!("{}\n", rl.rlim_cur)
+            };
+            let out = write_builtin_output(
+                &text,
+                redir,
+                io_cfg.stdout_stream.as_ref(),
+                io_cfg.capture_stdout,
+            )
+            .await?;
+            return Ok((0, out));
+        }
+        "times" | "jobs" => {
             return Ok((0, None));
         }
         "hash" => {

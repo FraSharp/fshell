@@ -378,4 +378,4 @@ all standard POSIX control structures execute natively:
 | arrays (`arr=(a b c)`) | no | yes | not supported |
 | `umask` | yes | yes | query and set |
 | `alias` / `unalias` | yes | yes | in-process (registered on the fsh alias table) |
-| `ulimit` | yes | yes | accepted but no-op |
+| `ulimit` | yes | yes | query/set (`-f`, `-n`, `-c`, `-s`, `-v`) |
