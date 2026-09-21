@@ -2757,12 +2757,15 @@ pub fn setup_signal_handlers(env: Env) {
                     } else {
                         println!();
                         let _ = std::io::Write::flush(&mut std::io::stdout());
-                        env.job_control.sigint_pending.store(true, Ordering::SeqCst);
-                        let env_clone = env.clone();
-                        tokio::spawn(async move {
-                            run_hooks("sigint", &env_clone).await;
-                        });
                     }
+                    // Set unconditionally: in-process stages poll `sigint_pending`
+                    // (see `Env::pipeline_cancelled`), so a mixed pipeline such as
+                    // `ls --tree | wc -l` stops instead of running to completion.
+                    env.job_control.sigint_pending.store(true, Ordering::SeqCst);
+                    let env_clone = env.clone();
+                    tokio::spawn(async move {
+                        run_hooks("sigint", &env_clone).await;
+                    });
                 }
                 _ = sigwinch.recv() => {
                     forward_signal(&env, libc::SIGWINCH);
@@ -3170,6 +3173,15 @@ impl Env {
         std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/"))
+    }
+
+    /// True when a running pipeline should stop: the shell is being cancelled
+    /// (SIGTERM/SIGQUIT/SIGHUP) or the user pressed Ctrl+C and no foreground
+    /// child process consumed it. Stage loops poll this so an in-process
+    /// pipeline is interruptible.
+    pub fn pipeline_cancelled(&self) -> bool {
+        self.job_control.cancellation.load(Ordering::Acquire)
+            || self.job_control.sigint_pending.load(Ordering::Acquire)
     }
 
     /// Set a shell variable without exporting to the environment.

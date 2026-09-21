@@ -22,6 +22,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_pipeline_cancelled_reacts_to_sigint_pending() {
+        let env = Env::new();
+        assert!(!env.pipeline_cancelled());
+        // Ctrl+C must stop an in-process pipeline, not just SIGTERM/QUIT/HUP.
+        env.job_control.sigint_pending.store(true, Ordering::SeqCst);
+        assert!(env.pipeline_cancelled());
+    }
+
+    #[test]
     fn test_hook_event_names_are_normalized() {
         let env = Env::new();
         assert!(crate::register_hook("SIGINT", "h1", &env).is_ok());

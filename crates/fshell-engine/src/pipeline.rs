@@ -78,7 +78,7 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
     let mut results = Vec::new();
     let mut has_logical_error = false;
     while let Some(payload) = rx.recv().await {
-        if env.job_control.cancellation.load(Ordering::Acquire) {
+        if env.pipeline_cancelled() {
             break;
         }
         match payload {
@@ -135,7 +135,7 @@ pub(crate) async fn collect_pipeline_silent(pipeline: &Pipeline, env: &Env) -> V
     });
     let mut results = Vec::new();
     while let Some(payload) = rx.recv().await {
-        if env.job_control.cancellation.load(Ordering::Acquire) {
+        if env.pipeline_cancelled() {
             break;
         }
         match payload {
@@ -385,7 +385,7 @@ pub async fn execute_pipeline(
     let mut current_rx: Option<PipeStream> = None;
 
     for (idx, stage) in stages.iter().enumerate() {
-        if env.job_control.cancellation.load(Ordering::Acquire) {
+        if env.pipeline_cancelled() {
             break;
         }
         let (stage_tx, stage_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
@@ -1258,9 +1258,7 @@ pub async fn execute_pipeline(
                         // stay visible inside the stage.
                         let base_locals = env_clone.local_vars.clone();
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire)
-                                || *_stage_cancel.borrow()
-                            {
+                            if env_clone.pipeline_cancelled() || *_stage_cancel.borrow() {
                                 break;
                             }
                             match payload {
@@ -1397,7 +1395,7 @@ pub async fn execute_pipeline(
                         let mut sub_env = env_clone.clone();
                         let base_locals = env_clone.local_vars.clone();
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                            if env_clone.pipeline_cancelled() {
                                 break;
                             }
                             match payload {
@@ -1473,7 +1471,7 @@ pub async fn execute_pipeline(
                     if let Some(mut rx) = current_rx {
                         let mut items = Vec::new();
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                            if env_clone.pipeline_cancelled() {
                                 break;
                             }
                             match payload {
@@ -1573,7 +1571,7 @@ pub async fn execute_pipeline(
                     };
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                            if env_clone.pipeline_cancelled() {
                                 break;
                             }
                             match payload {
@@ -1640,7 +1638,7 @@ pub async fn execute_pipeline(
                     };
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                            if env_clone.pipeline_cancelled() {
                                 break;
                             }
                             match payload {
@@ -1687,7 +1685,7 @@ pub async fn execute_pipeline(
                     let mut bytes_end_in_newline = true;
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                            if env_clone.pipeline_cancelled() {
                                 break;
                             }
                             match payload {
@@ -1722,7 +1720,7 @@ pub async fn execute_pipeline(
                     if let Some(mut rx) = current_rx {
                         if per_record {
                             while let Some(payload) = rx.recv().await {
-                                if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                                if env_clone.pipeline_cancelled() {
                                     break;
                                 }
                                 match payload {
@@ -1840,7 +1838,7 @@ pub async fn execute_pipeline(
                             };
 
                             while let Some(payload) = rx.recv().await {
-                                if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                                if env_clone.pipeline_cancelled() {
                                     break;
                                 }
                                 match payload {
@@ -1896,7 +1894,7 @@ pub async fn execute_pipeline(
                     if let Some(mut rx) = current_rx {
                         let mut yielded = 0;
                         while yielded < limit_count {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                            if env_clone.pipeline_cancelled() {
                                 break;
                             }
                             if let Some(payload) = rx.recv().await {
@@ -1953,9 +1951,7 @@ pub async fn execute_pipeline(
                 tokio::spawn(async move {
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire)
-                                || *_stage_cancel.borrow()
-                            {
+                            if env_clone.pipeline_cancelled() || *_stage_cancel.borrow() {
                                 break;
                             }
                             match payload {
@@ -2293,7 +2289,7 @@ pub async fn execute_pipeline(
                 tokio::spawn(async move {
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                            if env_clone.pipeline_cancelled() {
                                 break;
                             }
                             match payload {
@@ -2415,7 +2411,7 @@ pub async fn execute_pipeline(
                     };
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                            if env_clone.pipeline_cancelled() {
                                 break;
                             }
                             match payload {
@@ -2576,7 +2572,7 @@ pub async fn execute_pipeline(
                                 if n == 0 {
                                     break;
                                 }
-                                if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                                if env_clone.pipeline_cancelled() {
                                     break;
                                 }
                                 let val = match std::str::from_utf8(&buf) {
@@ -2629,7 +2625,7 @@ pub async fn execute_pipeline(
                 };
                 tokio::spawn(async move {
                     for line in text.lines() {
-                        if env_clone.job_control.cancellation.load(Ordering::Acquire) {
+                        if env_clone.pipeline_cancelled() {
                             break;
                         }
                         let val = Val::String(line.to_string());
