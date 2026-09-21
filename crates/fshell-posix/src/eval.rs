@@ -1545,7 +1545,70 @@ async fn eval_simple_command_inner(
                 }
             }
         }
-        "alias" | "unalias" | "ulimit" | "times" | "jobs" => {
+        "alias" => {
+            // `alias` / `alias -p` lists all; `alias name` prints one;
+            // `alias name=value` defines one. A `name=value` argument is parsed
+            // as a prefix assignment, so pull definitions from there too.
+            for (name, value) in prefix_assignments {
+                env.register_alias(name, value);
+            }
+            let defines = !prefix_assignments.is_empty() || args.iter().any(|a| a.contains('='));
+            let list_all = !defines && (args.is_empty() || args.iter().all(|a| a == "-p"));
+            if list_all {
+                let mut out = String::new();
+                for (name, expansion) in env.get_all_aliases() {
+                    out.push_str(&format!("alias {name}='{expansion}'\n"));
+                }
+                let out = write_builtin_output(
+                    &out,
+                    redir,
+                    io_cfg.stdout_stream.as_ref(),
+                    io_cfg.capture_stdout,
+                )
+                .await?;
+                return Ok((0, out));
+            }
+            let mut listed = String::new();
+            let mut status = 0;
+            for arg in args {
+                if let Some((name, value)) = arg.split_once('=') {
+                    env.register_alias(name, value);
+                } else if let Some(expansion) = env.get_alias(arg) {
+                    listed.push_str(&format!("alias {arg}='{expansion}'\n"));
+                } else {
+                    eprintln!("alias: {arg}: not found");
+                    status = 1;
+                }
+            }
+            if listed.is_empty() {
+                return Ok((status, None));
+            }
+            let out = write_builtin_output(
+                &listed,
+                redir,
+                io_cfg.stdout_stream.as_ref(),
+                io_cfg.capture_stdout,
+            )
+            .await?;
+            return Ok((status, out));
+        }
+        "unalias" => {
+            if args.iter().any(|a| a == "-a") {
+                for (name, _) in env.get_all_aliases() {
+                    env.remove_alias(&name);
+                }
+                return Ok((0, None));
+            }
+            let mut status = 0;
+            for arg in args {
+                if env.remove_alias(arg).is_none() {
+                    eprintln!("unalias: {arg}: not found");
+                    status = 1;
+                }
+            }
+            return Ok((status, None));
+        }
+        "ulimit" | "times" | "jobs" => {
             return Ok((0, None));
         }
         "hash" => {

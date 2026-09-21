@@ -297,6 +297,18 @@ async fn test_posix_heredoc_quoted_delimiter_literal() {
 }
 
 #[tokio::test]
+async fn test_posix_alias_defines_and_lists() {
+    let env = setup_posix_env();
+    let (_, out) = run_posix_capture("alias greet='echo hi'; alias greet", &env).await;
+    assert_eq!(out.trim(), "alias greet='echo hi'");
+    assert_eq!(env.get_alias("greet").as_deref(), Some("echo hi"));
+
+    let (_, out) = run_posix_capture("unalias greet; alias greet", &env).await;
+    assert!(out.trim().is_empty());
+    assert_eq!(env.get_alias("greet"), None);
+}
+
+#[tokio::test]
 async fn test_posix_umask_query_and_set() {
     let env = setup_posix_env();
     let (_, out) = run_posix_capture("umask 022; umask", &env).await;

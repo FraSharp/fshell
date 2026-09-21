@@ -377,4 +377,5 @@ all standard POSIX control structures execute natively:
 | process substitution `<(cmd)` | no | yes | not supported |
 | arrays (`arr=(a b c)`) | no | yes | not supported |
 | `umask` | yes | yes | query and set |
-| `alias` / `unalias` / `ulimit` | yes | yes | accepted but no-op |
+| `alias` / `unalias` | yes | yes | in-process (registered on the fsh alias table) |
+| `ulimit` | yes | yes | accepted but no-op |
