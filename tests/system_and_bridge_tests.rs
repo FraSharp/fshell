@@ -87,7 +87,7 @@ async fn test_custom_user_tilde_expansion() {
 
     let mut p = Parser::new("fs-read \"~root\"");
     let stmts = p.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         if let Val::List(items) = res {
             if let Val::Capability(ResourceHandle::ReadDir(path)) = &items[0] {
@@ -148,7 +148,7 @@ async fn test_integration_bridge_fallthrough_echo() {
     let env = setup_test_env();
     let mut parser = Parser::new(r##"echo "hello world""##);
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         match res {
             Val::List(list) => {

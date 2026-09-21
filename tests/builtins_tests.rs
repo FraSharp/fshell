@@ -549,7 +549,7 @@ async fn test_integration_which_builtin() {
     let env = setup_test_env();
     let mut parser = Parser::new("which ls");
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(fshell_core::ast::Expr::Pipeline(pipeline)) = &stmts[0] {
+    if let Stmt::Expr(fshell_core::ast::Expr::Pipeline(pipeline)) = stmts[0].unpack() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
         let env_clone = env.clone();
         let pipeline_clone = pipeline.clone();

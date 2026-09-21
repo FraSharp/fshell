@@ -33,7 +33,7 @@ async fn test_pipeline_filter_on_heterogeneous_maps() {
     let script = "$users | filter score > 50";
     let mut parser = Parser::new(script);
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         if let Val::List(filtered) = res {
             assert_eq!(filtered.len(), 1);
@@ -61,7 +61,7 @@ async fn test_pipeline_sort_mixed_and_empty() {
     let script = "$empty | sort";
     let mut parser = Parser::new(script);
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(res, Val::List(vec![]));
     }
@@ -97,7 +97,7 @@ async fn test_pipeline_limit_and_count() {
     let script = "$nums | limit 2";
     let mut parser = Parser::new(script);
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(res, Val::List(vec![Val::Int(1), Val::Int(2)]));
     }
@@ -126,7 +126,7 @@ async fn test_pipeline_grep_strings() {
     let script = "$fruits | grep \"apple\"";
     let mut parser = Parser::new(script);
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(
             res,
@@ -181,14 +181,18 @@ async fn test_serialization_csv_operator() {
     let script = "$table | @csv";
     let mut parser = Parser::new(script);
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
-        if let Val::String(csv_str) = res {
-            assert!(csv_str.contains("id") && csv_str.contains("name"));
-            assert!(csv_str.contains("Alice") && csv_str.contains("Bob"));
-        } else {
-            panic!("Expected CSV string result");
-        }
+        let csv_str = match res {
+            Val::List(items) => items
+                .iter()
+                .map(|v| v.to_text())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            other => other.to_text(),
+        };
+        assert!(csv_str.contains("id") && csv_str.contains("name"));
+        assert!(csv_str.contains("Alice") && csv_str.contains("Bob"));
     }
 }
 
@@ -201,13 +205,19 @@ async fn test_serialization_text_operator() {
     let script = "$items | @text";
     let mut parser = Parser::new(script);
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
-        if let Val::String(text) = res {
-            assert_eq!(text.trim(), "10\n20\n30");
-        } else {
-            panic!("Expected string output from @text");
-        }
+        // Boundary operators emit one item per input value (a captured pipeline
+        // wraps them in a list).
+        let text = match res {
+            Val::List(items) => items
+                .iter()
+                .map(|v| v.to_text())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            other => other.to_text(),
+        };
+        assert_eq!(text.trim(), "10\n20\n30");
     }
 }
 

@@ -369,7 +369,7 @@ async fn test_capability_constructors_evaluation() {
     // 1. fs-read
     let mut p = Parser::new("fs-read \"/tmp\"");
     let stmts = p.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(
             res,
@@ -382,7 +382,7 @@ async fn test_capability_constructors_evaluation() {
     // 2. fs-write
     let mut p = Parser::new("fs-write \"/tmp\"");
     let stmts = p.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(
             res,
@@ -395,7 +395,7 @@ async fn test_capability_constructors_evaluation() {
     // 3. fs-readwrite
     let mut p = Parser::new("fs-readwrite \"/tmp\"");
     let stmts = p.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(
             res,
@@ -409,7 +409,7 @@ async fn test_capability_constructors_evaluation() {
     // 4. net-connect
     let mut p = Parser::new("net-connect \"example.com\"");
     let stmts = p.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(
             res,
@@ -422,7 +422,7 @@ async fn test_capability_constructors_evaluation() {
     // 5. net-all
     let mut p = Parser::new("net-all");
     let stmts = p.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(
             res,
@@ -433,7 +433,7 @@ async fn test_capability_constructors_evaluation() {
     // 6. env-read
     let mut p = Parser::new("env-read \"TEST\"");
     let stmts = p.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(
             res,
@@ -446,7 +446,7 @@ async fn test_capability_constructors_evaluation() {
     // 7. env-write
     let mut p = Parser::new("env-write \"TEST\"");
     let stmts = p.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(
             res,
@@ -459,7 +459,7 @@ async fn test_capability_constructors_evaluation() {
     // 8. process-spawn
     let mut p = Parser::new("process-spawn");
     let stmts = p.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         assert_eq!(
             res,
