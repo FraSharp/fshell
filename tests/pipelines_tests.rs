@@ -315,18 +315,19 @@ async fn test_pipeline_mark_basic() {
 
     let mut parser = Parser::new("$data | mark \"a\"");
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
-        let res = eval_expr(expr, &env).await.unwrap();
-        match res {
-            Val::List(items) => {
-                assert_eq!(items.len(), 4, "mark should pass all items through");
-                assert_eq!(items[0], Val::String("> apple".to_string()));
-                assert_eq!(items[1], Val::String("> banana".to_string()));
-                assert_eq!(items[2], Val::String("cherry".to_string()));
-                assert_eq!(items[3], Val::String("date".to_string()));
-            }
-            other => panic!("Expected Val::List, got {:?}", other),
+    let Stmt::Expr(expr) = stmts[0].unpack() else {
+        panic!("expected expression statement");
+    };
+    let res = eval_expr(expr, &env).await.unwrap();
+    match res {
+        Val::List(items) => {
+            assert_eq!(items.len(), 4, "mark should pass all items through");
+            assert_eq!(items[0], Val::String("> apple".to_string()));
+            assert_eq!(items[1], Val::String("> banana".to_string()));
+            assert_eq!(items[2], Val::String("cherry".to_string()));
+            assert_eq!(items[3], Val::String("> date".to_string()));
         }
+        other => panic!("Expected Val::List, got {:?}", other),
     }
 }
 
@@ -343,16 +344,17 @@ async fn test_pipeline_mark_no_match() {
 
     let mut parser = Parser::new("$data | mark \"z\"");
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
-        let res = eval_expr(expr, &env).await.unwrap();
-        match res {
-            Val::List(items) => {
-                assert_eq!(items.len(), 2, "mark should pass all items through");
-                assert_eq!(items[0], Val::String("apple".to_string()));
-                assert_eq!(items[1], Val::String("banana".to_string()));
-            }
-            other => panic!("Expected Val::List, got {:?}", other),
+    let Stmt::Expr(expr) = stmts[0].unpack() else {
+        panic!("expected expression statement");
+    };
+    let res = eval_expr(expr, &env).await.unwrap();
+    match res {
+        Val::List(items) => {
+            assert_eq!(items.len(), 2, "mark should pass all items through");
+            assert_eq!(items[0], Val::String("apple".to_string()));
+            assert_eq!(items[1], Val::String("banana".to_string()));
         }
+        other => panic!("Expected Val::List, got {:?}", other),
     }
 }
 
@@ -379,22 +381,26 @@ async fn test_pipeline_mark_structured() {
 
     let mut parser = Parser::new("$data | mark \".py\"");
     let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = &stmts[0] {
-        let res = eval_expr(expr, &env).await.unwrap();
-        match res {
-            Val::List(items) => {
-                assert_eq!(items.len(), 2, "mark should pass all items through");
-                assert_eq!(
-                    items[0],
-                    Val::String("name readme.md size 100 ".to_string())
-                );
-                assert_eq!(
-                    items[1],
-                    Val::String("> name script.py size 200 ".to_string())
-                );
+    let Stmt::Expr(expr) = stmts[0].unpack() else {
+        panic!("expected expression statement");
+    };
+    let res = eval_expr(expr, &env).await.unwrap();
+    match res {
+        Val::List(items) => {
+            assert_eq!(items.len(), 2, "mark should pass all items through");
+            // Structured records keep their shape; `mark` must not flatten and
+            // retype them into strings.
+            for (item, name) in items.iter().zip(["readme.md", "script.py"]) {
+                match item {
+                    Val::Map(m) => assert_eq!(
+                        m.get(&ustr::ustr("name")),
+                        Some(&Val::String(name.to_string()))
+                    ),
+                    other => panic!("expected a Map to pass through, got {other:?}"),
+                }
             }
-            other => panic!("Expected Val::List, got {:?}", other),
         }
+        other => panic!("Expected Val::List, got {:?}", other),
     }
 }
 

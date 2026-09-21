@@ -1503,6 +1503,12 @@ pub async fn execute_pipeline(
                             return;
                         }
                     };
+                    // Same pattern semantics as `grep`: regex, else substring.
+                    let pattern_re = regex::Regex::new(&pat_val).ok();
+                    let matches = |text: &str| match &pattern_re {
+                        Some(re) => re.is_match(text),
+                        None => text.contains(&pat_val),
+                    };
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
                             if env_clone.job_control.cancellation.load(Ordering::Acquire) {
@@ -1510,34 +1516,25 @@ pub async fn execute_pipeline(
                             }
                             match payload {
                                 PipelinePayload::Data(val_arc) => {
-                                    let val_str = match &*val_arc {
-                                        Val::String(s) => s.clone(),
-                                        Val::Map(map) => {
-                                            let mut s = String::new();
-                                            for (k, v) in map {
-                                                s.push_str(k.as_str());
-                                                s.push(' ');
-                                                s.push_str(&v.to_text());
-                                                s.push(' ');
-                                            }
-                                            s
-                                        }
-                                        other => other.to_text(),
-                                    };
-                                    if val_str.contains(&pat_val) {
+                                    // Only textual values are annotated; structured
+                                    // records pass through unchanged so `mark` does
+                                    // not destroy their structure for later stages.
+                                    if let Val::String(s) = &*val_arc
+                                        && matches(s)
+                                    {
                                         let annotated = if use_color {
-                                            format!("\x1b[32m> {}\x1b[0m", val_str)
+                                            format!("\x1b[32m> {}\x1b[0m", s)
                                         } else {
-                                            format!("> {}", val_str)
+                                            format!("> {}", s)
                                         };
                                         let _ = out_tx
                                             .send(PipelinePayload::Data(Arc::new(Val::String(
                                                 annotated,
                                             ))))
                                             .await;
-                                    } else {
-                                        let _ = out_tx.send(PipelinePayload::Data(val_arc)).await;
+                                        continue;
                                     }
+                                    let _ = out_tx.send(PipelinePayload::Data(val_arc)).await;
                                 }
                                 PipelinePayload::Bytes(b) => {
                                     // Boundary conversion: raw bytes -> line-split string Vals.
