@@ -1010,20 +1010,21 @@ pub fn run_external(
     // and continue to drain pipes concurrently.
     let _exit_code = fshell_engine::wait_for_job_sync(env, pid, job_id, &cmd_str, is_interactive);
 
-    // The synchronous bridge API cannot await Tokio tasks directly: it is also
-    // used by callers already running on a Tokio worker thread. Keep the
-    // process wait synchronous, but retain and observe every I/O task so a
-    // panic in a producer/consumer task is not silently detached.
+    // Drain the stdout/stderr forwarding tasks before returning. Detaching them
+    // let a later stage observe truncated output; since this function already
+    // blocks on `waitpid` it is necessarily running on a blocking thread, so
+    // blocking on the runtime handle is safe and does not stall the executor.
     if !io_tasks.is_empty() {
-        let task_env = env.clone();
-        tokio::spawn(async move {
+        let drain = async move {
             for task in io_tasks {
                 if let Err(error) = task.await {
-                    task_env.report_stage_error();
                     eprintln!("external command I/O task failed: {error}");
                 }
             }
-        });
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.block_on(drain);
+        }
     }
 
     if cnf_debug {
