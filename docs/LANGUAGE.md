@@ -615,7 +615,7 @@ try {
 }
 ```
 
-the catch variable contains `code`, `name`, `category`, `message`, `help`, `fix`, `suggestions` and `docs_url`. control flow (`Flow { Break, Continue, Return, Exit, ConditionFalse }`) is not an error and passes through `try` / `catch` transparently; logical false (`ConditionFalse`, exit 1) never renders as an error line and drives `&&`/`||` and `$?`.
+the catch variable contains `code`, `name`, `category`, `message`, `help`, `fix`, `suggestions` and `docs_url`, and is scoped to the catch block (it does not leak into the surrounding scope). control flow (`Flow { Break, Continue, Return, Exit, ConditionFalse }`) is not an error and passes through `try` / `catch` transparently; logical false (`ConditionFalse`, exit 1) never renders as an error line and drives `&&`/`||` and `$?`.
 
 ---
 

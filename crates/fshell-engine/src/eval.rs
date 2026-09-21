@@ -1932,11 +1932,16 @@ async fn eval_stmt_inner(
                 let diag = FshDiag::new(e);
                 env.set_last_error(diag.clone());
                 let err_val = diag.to_val();
-                {
-                    let mut vars = env.vars.write();
-                    vars.insert(catch_var.clone(), err_val);
+                // The catch binding is scoped to the catch body instead of
+                // leaking into the surrounding environment, and control flow
+                // (`return`/`exit`/`break`) inside it propagates.
+                let mut frame = FxHashMap::default();
+                frame.insert(catch_var.clone(), err_val);
+                let catch_env = env.push_scope(Arc::new(fshell_core::RwLock::new(frame)));
+                match eval_block_flow(catch_body, &catch_env, false).await? {
+                    Flow::Normal => {}
+                    flow => return Ok(flow),
                 }
-                eval_block_flow(catch_body, env, false).await?;
             }
             Ok(Flow::Normal)
         }

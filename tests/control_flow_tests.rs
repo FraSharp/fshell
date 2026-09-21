@@ -23,16 +23,21 @@ async fn test_integration_simple_math() {
 #[tokio::test]
 async fn test_integration_try_catch() {
     let ctx = TestContext::new();
+    // `err` is a global alias for the last error, so use a distinct name here.
     let script = "
         try {
             let result = 1 / 0
-        } catch |err| {
-            let caught = true
+        } catch |e| {
+            let caught = $e
         }
     ";
     ctx.eval_script(script).await.unwrap();
-    assert_eq!(ctx.get_var("caught"), Some(Val::Bool(true)));
-    assert!(ctx.get_var("err").is_some());
+    assert!(matches!(ctx.get_var("caught"), Some(Val::Map(_))));
+    assert_eq!(
+        ctx.get_var("e"),
+        None,
+        "the catch binding must be scoped to the catch body"
+    );
 }
 
 #[tokio::test]

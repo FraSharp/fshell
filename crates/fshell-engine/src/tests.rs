@@ -1289,7 +1289,13 @@ mod tests {
         };
         eval_stmt(&stmt, &env, false).await.unwrap();
         let vars = env.vars.read();
-        if let Some(Val::Map(m)) = vars.get("err_msg") {
+        // The binding is scoped to the catch body: the body can read it (via
+        // `logged`) but it does not leak into the environment.
+        assert!(
+            !vars.contains_key("err_msg"),
+            "catch binding must not leak into the environment"
+        );
+        if let Some(Val::Map(m)) = vars.get("logged") {
             assert_eq!(
                 m.get(&ustr("code")),
                 Some(&Val::String("FSH-SCOPE-001".into()))
@@ -1297,11 +1303,10 @@ mod tests {
             assert!(matches!(m.get(&ustr("message")), Some(Val::String(s)) if s.contains("bad")));
         } else {
             panic!(
-                "Expected Val::Map for err_msg, got {:?}",
-                vars.get("err_msg")
+                "Expected Val::Map for logged, got {:?}",
+                vars.get("logged")
             );
         }
-        assert_eq!(vars.get("logged"), vars.get("err_msg"));
     }
 
     #[tokio::test]
@@ -1328,9 +1333,9 @@ mod tests {
         eval_stmt(&stmt, &env, false).await.unwrap();
         let vars = env.vars.read();
         assert_eq!(vars.get("inner_handled"), Some(&Val::Bool(true)));
-        assert!(vars.contains_key("inner_err"));
         assert_eq!(vars.get("outer_handled"), Some(&Val::Bool(true)));
-        assert!(vars.contains_key("outer_err"));
+        assert!(!vars.contains_key("inner_err"));
+        assert!(!vars.contains_key("outer_err"));
     }
 
     #[tokio::test]
