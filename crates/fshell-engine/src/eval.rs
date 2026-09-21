@@ -2384,11 +2384,14 @@ async fn eval_stmt_inner(
             unit,
             body,
         } => {
+            // Clamp to >= 1ms: `tokio::time::interval` panics on a zero period,
+            // and saturate so a huge literal cannot overflow the multiplication.
             let millis = match unit {
-                TimeUnit::Second => duration * 1000,
-                TimeUnit::Minute => duration * 60 * 1000,
-                TimeUnit::Hour => duration * 60 * 60 * 1000,
-            };
+                TimeUnit::Second => duration.saturating_mul(1000),
+                TimeUnit::Minute => duration.saturating_mul(60_000),
+                TimeUnit::Hour => duration.saturating_mul(3_600_000),
+            }
+            .max(1);
 
             let interval_duration = std::time::Duration::from_millis(millis);
             let mut interval = tokio::time::interval(interval_duration);
@@ -2504,11 +2507,13 @@ async fn eval_stmt_inner(
             let unit_val = *unit;
 
             tokio::spawn(async move {
+                // See the `every` statement: clamp to >= 1ms and saturate.
                 let millis = match unit_val {
-                    TimeUnit::Second => duration_val * 1000,
-                    TimeUnit::Minute => duration_val * 60 * 1000,
-                    TimeUnit::Hour => duration_val * 60 * 60 * 1000,
-                };
+                    TimeUnit::Second => duration_val.saturating_mul(1000),
+                    TimeUnit::Minute => duration_val.saturating_mul(60_000),
+                    TimeUnit::Hour => duration_val.saturating_mul(3_600_000),
+                }
+                .max(1);
 
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(millis));
                 loop {
