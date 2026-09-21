@@ -85,6 +85,11 @@ pub struct Parser {
     /// When true, we are parsing a subsequent stage of a pipeline (after the first stage),
     /// which allows keywords like `hash` to be parsed as pipeline stages instead of commands.
     is_subsequent_stage: bool,
+    /// When true, `&&`/`||` are boolean operators inside the expression. They are
+    /// only enabled in value/condition contexts (right-hand sides, `if`/`while`
+    /// conditions, ...); at statement level they keep their shell meaning of
+    /// chaining on the previous command's exit status.
+    bool_ops: bool,
     recursion_depth: std::cell::Cell<usize>,
 }
 
@@ -2615,6 +2620,42 @@ mod tests {
             }
             other => panic!("Expected `and` at the root, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_logical_ops_are_boolean_in_expression_context() {
+        // The documented example must parse as one boolean expression.
+        let stmts = Parser::new("let ok = !false && (a or b)")
+            .parse_statements()
+            .unwrap();
+        assert_eq!(stmts.len(), 1);
+        let Stmt::Let { expr, .. } = stmts[0].unpack() else {
+            panic!("Expected Stmt::Let");
+        };
+        assert!(
+            matches!(expr.unpack(), Expr::BinaryOp { op: BinOp::And, .. }),
+            "expected `&&` to be a boolean operator, got {:?}",
+            expr
+        );
+
+        let stmts = Parser::new("let ok = a || b").parse_statements().unwrap();
+        let Stmt::Let { expr, .. } = stmts[0].unpack() else {
+            panic!("Expected Stmt::Let");
+        };
+        assert!(matches!(expr.unpack(), Expr::BinaryOp { op: BinOp::Or, .. }));
+    }
+
+    #[test]
+    fn test_statement_level_and_chains_on_exit_status() {
+        // At statement level `&&`/`||` keep shell exit-status semantics.
+        let stmts = Parser::new("cargo build && cargo test")
+            .parse_statements()
+            .unwrap();
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0].unpack(), Stmt::And(..)));
+
+        let stmts = Parser::new("a || b").parse_statements().unwrap();
+        assert!(matches!(stmts[0].unpack(), Stmt::Or(..)));
     }
 
     #[test]

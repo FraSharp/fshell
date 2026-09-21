@@ -321,6 +321,12 @@ let ok = !false && (cpu < 80.0 or mem < 90.0)
 - `and` / `&&`: logical and (short-circuiting).
 - `or` / `||`: logical or (short-circuiting).
 
+> [!NOTE]
+> inside an expression (a right-hand side, `if`/`while` condition, `filter`
+> predicate, ...) `&&`/`||` are boolean operators. At statement level they chain
+> commands on the previous command's exit status, as in a normal shell:
+> `cargo test && echo passed`.
+
 ### regex matching
 
 the `~` operator matches a string against a regular expression pattern:

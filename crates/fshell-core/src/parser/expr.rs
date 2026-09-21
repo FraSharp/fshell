@@ -158,9 +158,52 @@ impl Parser {
         })
     }
 
+    /// Parse a value expression (e.g. a right-hand side or condition), where
+    /// `&&`/`||` are boolean operators rather than statement-level exit-status
+    /// chaining.
+    pub(crate) fn parse_expr_bool(&mut self) -> Result<Expr, ParseError> {
+        let saved = self.bool_ops;
+        self.bool_ops = true;
+        let result = self.parse_expr();
+        self.bool_ops = saved;
+        result
+    }
+
+    /// Same as `parse_expr_bool`, but with explicit pipeline control.
+    pub(crate) fn parse_expr_with_pipeline_bool(
+        &mut self,
+        allow_pipeline: bool,
+    ) -> Result<Expr, ParseError> {
+        let saved = self.bool_ops;
+        self.bool_ops = true;
+        let result = self.parse_expr_with_pipeline(allow_pipeline);
+        self.bool_ops = saved;
+        result
+    }
+
     pub(crate) fn binop_precedence(&mut self) -> Option<(BinOp, u8)> {
         let c = self.peek()?;
         match c {
+            '&' => {
+                // `&&` is a boolean operator only in value/condition contexts;
+                // at statement level it chains on exit status instead.
+                if !self.bool_ops
+                    || !(self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '&')
+                {
+                    return None;
+                }
+                self.pos += 2;
+                Some((BinOp::And, 2))
+            }
+            '|' => {
+                if !self.bool_ops
+                    || !(self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '|')
+                {
+                    return None;
+                }
+                self.pos += 2;
+                Some((BinOp::Or, 1))
+            }
             '+' => {
                 self.next_char();
                 Some((BinOp::Add, 4))
@@ -410,6 +453,18 @@ impl Parser {
                     ident == "r" && next_char == Some('"') && next_pos == ident_end;
 
                 let is_operator = match next_char {
+                    // In a value/condition context `&&`/`||` are boolean
+                    // operators, so `a && b` is an expression, not a command.
+                    Some('&') => {
+                        self.bool_ops
+                            && next_pos + 1 < self.input.len()
+                            && self.input[next_pos + 1] == '&'
+                    }
+                    Some('|') => {
+                        self.bool_ops
+                            && next_pos + 1 < self.input.len()
+                            && self.input[next_pos + 1] == '|'
+                    }
                     Some('+') => {
                         // `chmod +x file`: `+x` is a flag-style argument, not addition.
                         // Mirror the `-` handling: `+` is an operator only when not
@@ -1875,7 +1930,7 @@ impl Parser {
         let saved_redirect = self.redirect_mode;
         self.cmd_arg_mode = false;
         self.redirect_mode = false;
-        let condition = self.parse_expr_with_pipeline(false)?;
+        let condition = self.parse_expr_with_pipeline_bool(false)?;
         self.cmd_arg_mode = saved_arg;
         self.redirect_mode = saved_redirect;
         self.skip_whitespace();

@@ -63,7 +63,7 @@ impl Parser {
         self.skip_whitespace();
         self.next_char(); // consume the operator char (+, -, *, /)
         self.expect('=')?;
-        let expr = self.parse_expr()?;
+        let expr = self.parse_expr_bool()?;
         Ok(Stmt::Update { name, op, expr })
     }
 
@@ -368,7 +368,7 @@ impl Parser {
             let expr = if self.peek() == Some('=') {
                 self.next_char();
                 self.skip_horizontal_whitespace();
-                Some(self.parse_expr()?)
+                Some(self.parse_expr_bool()?)
             } else {
                 None
             };
@@ -376,7 +376,7 @@ impl Parser {
         } else if self.match_keyword("let") {
             let name = self.parse_identifier()?;
             self.expect('=')?;
-            let expr = self.parse_expr()?;
+            let expr = self.parse_expr_bool()?;
             Ok(Stmt::Let { name, expr })
         } else if self.match_keyword("fn") {
             let name = self.parse_identifier()?;
@@ -478,7 +478,7 @@ impl Parser {
                 catch_body,
             })
         } else if self.match_keyword("match") {
-            let expr = self.parse_expr_with_pipeline(false)?;
+            let expr = self.parse_expr_with_pipeline_bool(false)?;
             self.skip_whitespace();
             self.expect('{')?;
             let mut arms = Vec::new();
@@ -559,7 +559,7 @@ impl Parser {
             let saved_redirect = self.redirect_mode;
             self.cmd_arg_mode = false;
             self.redirect_mode = false;
-            let condition = self.parse_expr_with_pipeline(false)?;
+            let condition = self.parse_expr_with_pipeline_bool(false)?;
             self.cmd_arg_mode = saved_arg;
             self.redirect_mode = saved_redirect;
             self.skip_whitespace();
@@ -577,7 +577,7 @@ impl Parser {
                     span: self.current_span(),
                 });
             }
-            let iter = self.parse_expr_with_pipeline(false)?;
+            let iter = self.parse_expr_with_pipeline_bool(false)?;
             self.skip_whitespace();
             self.expect('{')?;
             let body = self.parse_block_statements()?;
@@ -647,7 +647,7 @@ impl Parser {
             {
                 Expr::Null
             } else {
-                self.parse_expr()?
+                self.parse_expr_bool()?
             };
             Ok(Stmt::Return(expr))
         } else if self.match_keyword("exit") {
@@ -659,7 +659,7 @@ impl Parser {
             {
                 None
             } else {
-                Some(self.parse_expr()?)
+                Some(self.parse_expr_bool()?)
             };
             Ok(Stmt::Exit(expr))
         } else if self.match_keyword("on") {
@@ -1453,7 +1453,7 @@ impl Parser {
             // `grep -E`, `map -x`). `hash` is exempt: its own flags (`-a`, `-o`,
             // `--per-record`) are part of the stage.
             "filter" if !has_flag => {
-                let condition = self.parse_expr_with_pipeline(false)?;
+                let condition = self.parse_expr_with_pipeline_bool(false)?;
                 Ok(PipelineStage::Filter { condition })
             }
             "map" if !has_flag => {
