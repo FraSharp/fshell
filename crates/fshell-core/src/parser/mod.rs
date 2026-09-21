@@ -76,6 +76,10 @@ impl ParseError {
 
 pub struct Parser {
     input: Vec<char>,
+    /// Byte offset of each `input[i]` (plus a final entry for end-of-input).
+    /// miette `SourceSpan`s are byte offsets, while `pos` counts chars, so spans
+    /// must be translated or diagnostics mis-point on non-ASCII input.
+    byte_offsets: Vec<usize>,
     pos: usize,
     /// When true, `>` is not treated as an infix operator (BinOp::Gt),
     /// allowing it to be used for output redirection at the pipeline level.
@@ -2672,6 +2676,19 @@ mod tests {
             }
             other => panic!("Expected MemberAccess, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_error_spans_use_byte_offsets() {
+        // `ü` is two bytes (char index 4, byte offset 4, and the `)` after it is
+        // char 8 but byte 9). miette spans are byte offsets, so the reported
+        // offset must be 9 or diagnostics would mis-point on non-ASCII input.
+        let err = Parser::new("let ü = )").parse_statements().unwrap_err();
+        assert_eq!(
+            err.span().offset(),
+            9,
+            "spans must be byte offsets, not char indices"
+        );
     }
 
     #[test]

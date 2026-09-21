@@ -1436,7 +1436,8 @@ impl Parser {
         };
         let mut stage = self.parse_stage_inner(name, has_flag, inline_env)?;
         if let PipelineStage::CommandCall { span, .. } = &mut stage {
-            *span = SourceSpan::new(start.into(), self.pos - start);
+            let from = self.byte_offset(start);
+            *span = SourceSpan::new(from.into(), self.byte_offset(self.pos).saturating_sub(from));
         }
         Ok(stage)
     }

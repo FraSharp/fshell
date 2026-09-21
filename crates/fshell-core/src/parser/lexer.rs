@@ -6,8 +6,17 @@ use miette::SourceSpan;
 
 impl Parser {
     pub fn new(input: &str) -> Self {
+        let chars: Vec<char> = input.chars().collect();
+        let mut byte_offsets = Vec::with_capacity(chars.len() + 1);
+        let mut offset = 0usize;
+        for c in &chars {
+            byte_offsets.push(offset);
+            offset += c.len_utf8();
+        }
+        byte_offsets.push(offset);
         Parser {
-            input: input.chars().collect(),
+            input: chars,
+            byte_offsets,
             pos: 0,
             redirect_mode: false,
             cmd_arg_mode: false,
@@ -112,12 +121,24 @@ impl Parser {
 }
 
 impl Parser {
+    /// Byte offset for a char index (clamped to end-of-input).
+    pub(crate) fn byte_offset(&self, char_pos: usize) -> usize {
+        self.byte_offsets
+            .get(char_pos)
+            .copied()
+            .unwrap_or_else(|| self.byte_offsets.last().copied().unwrap_or(0))
+    }
+
     pub(crate) fn current_span(&self) -> SourceSpan {
-        SourceSpan::new(self.pos.into(), 1)
+        let start = self.byte_offset(self.pos);
+        let end = self.byte_offset(self.pos + 1);
+        SourceSpan::new(start.into(), end.saturating_sub(start).max(1))
     }
 
     pub(crate) fn span_from(&self, start: usize) -> SourceSpan {
-        SourceSpan::new(start.into(), self.pos - start)
+        let from = self.byte_offset(start);
+        let to = self.byte_offset(self.pos);
+        SourceSpan::new(from.into(), to.saturating_sub(from))
     }
 
     pub(crate) fn skip_whitespace(&mut self) {
