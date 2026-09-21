@@ -397,6 +397,15 @@ pub fn run_external(
     };
 
     fshell_core::debug_log!("run_external resolved: resolved_name={:?}", resolved_name);
+    if cnf_debug {
+        eprintln!(
+            "[cnf_debug] {}:{}: resolved_name={:?} args={:?}",
+            file!(),
+            line!(),
+            resolved_name,
+            args
+        );
+    }
 
     // 3. Auto-sandbox if sandbox_all is active, or for .sh scripts and bash/zsh shell worker invocations
     let sandbox_all = env.options.read().sandbox_all;
@@ -476,8 +485,15 @@ pub fn run_external(
                 && fshell_engine::is_stdout_a_tty()
         };
 
-    // Set working directory to the environment's logical cwd
-    cmd.current_dir(env.cwd());
+    // Set working directory to the environment's logical cwd. The recorded cwd
+    // may no longer exist (removed since it was captured, or the directory the
+    // shell was started in was deleted); passing a missing directory to
+    // `current_dir` makes spawn fail with ENOENT even though the program exists,
+    // so fall back to inheriting the process cwd in that case.
+    let recorded_cwd = env.cwd();
+    if recorded_cwd.is_dir() {
+        cmd.current_dir(&recorded_cwd);
+    }
 
     // Inherit environment variables from fshell state "env" variable.
     // Skip entirely when no env modifications have been made — the child
@@ -1010,12 +1026,13 @@ pub fn run_external(
     // and continue to drain pipes concurrently.
     let _exit_code = fshell_engine::wait_for_job_sync(env, pid, job_id, &cmd_str, is_interactive);
 
-    // Observe every I/O task so a panic in a producer/consumer is not silently
-    // detached. They cannot be awaited here: this function may run on a runtime
-    // worker thread (the bridge is also called outside `spawn_blocking`), where
-    // `Handle::block_on` panics ("cannot start a runtime from within a runtime").
-    // Callers that need fully-drained output must let the runtime drive them.
+    // Wait for the stdout/stderr forwarding tasks to finish before returning,
+    // so a later stage cannot observe truncated output. They cannot be awaited
+    // directly: this runs on a `spawn_blocking` thread where `Handle::block_on`
+    // panics ("cannot start a runtime from within a runtime"). Instead park on a
+    // std channel while the runtime keeps driving the tasks.
     if !io_tasks.is_empty() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let task_env = env.clone();
         tokio::spawn(async move {
             for task in io_tasks {
@@ -1024,7 +1041,9 @@ pub fn run_external(
                     eprintln!("external command I/O task failed: {error}");
                 }
             }
+            let _ = done_tx.send(());
         });
+        let _ = done_rx.recv();
     }
 
     if cnf_debug {
