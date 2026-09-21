@@ -87,7 +87,7 @@ $$\text{Request} \longrightarrow \text{Denied Check} \xrightarrow{\text{not deni
 │                        Tier 1: Explicit Elevation                      │
 │  - Scoped blocks via `with caps(...) { ... }`                          │
 │  - Grants temporary tokens only for the block's lifespan               │
-│  - Automatically restores previous token state on exit                 │
+│  - Runs against a private token copy; shared state untouched           │
 ├────────────────────────────────────────────────────────────────────────┤
 │                        Tier 2: Strict Mode                             │
 │  - Enabled via `fsh -s` / `--strict` or `strict` builtin               │
@@ -121,7 +121,7 @@ with caps(fs.read("/var/log")) {
 }
 ```
 
-when execution leaves the `with caps` block, all granted tokens are revoked immediately, restoring the previous security state.
+the block runs against a private copy of the token set: the requested tokens are added to that copy and the shared registry is never mutated, so the elevation is visible only to the block (and the tasks it spawns) and leaves the surrounding session — including concurrent background jobs and reactive cells — untouched.
 
 ### tier 2: strict mode (`--strict`)
 

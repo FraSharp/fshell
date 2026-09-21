@@ -1943,49 +1943,42 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::WithCaps { caps, body } => {
-            // Temporarily grant capabilities for this execution scope
-            let old_caps = env.caps.caps.read().clone();
+            // Build a scoped capability registry: the current grants plus the
+            // requested ones. The shared registry is never mutated, so a `with
+            // caps` block cannot leak privileges to concurrent tasks (background
+            // jobs, reactive cells) and a later block cannot revoke another's
+            // grants.
+            let mut scoped = env.caps.caps.read().clone();
             for cap_expr in caps {
                 let val = eval_expr(cap_expr, env).await?;
-                // Map Val to ResourceHandle and grant it
                 match val {
-                    Val::Capability(handle) => {
-                        let mut caps = lock_caps!(env.caps.caps.write());
-                        caps.grant(handle);
-                    }
+                    Val::Capability(handle) => scoped.grant(handle),
                     Val::List(list) => {
                         for item in list {
                             if let Val::Capability(handle) = item {
-                                let mut caps = lock_caps!(env.caps.caps.write());
-                                caps.grant(handle);
+                                scoped.grant(handle);
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            let mut flow_out = Flow::Normal;
-            let mut hard_err: Option<EngineError> = None;
+            let mut scoped_env = env.clone();
+            scoped_env.caps = crate::caps::Caps {
+                caps: Arc::new(fshell_core::RwLock::new(scoped)),
+                strict_mode_temp_count: env.caps.strict_mode_temp_count.clone(),
+                audit_log: env.caps.audit_log.clone(),
+                cap_prompt_tx: env.caps.cap_prompt_tx.clone(),
+                cap_prompt_rx: env.caps.cap_prompt_rx.clone(),
+            };
             for s in body {
-                match eval_stmt(s, env, false).await {
+                match eval_stmt(s, &scoped_env, false).await {
                     Ok(Flow::Normal) => {}
-                    Ok(flow) => {
-                        flow_out = flow;
-                        break;
-                    }
-                    Err(e) => {
-                        hard_err = Some(e);
-                        break;
-                    }
+                    Ok(flow) => return Ok(flow),
+                    Err(e) => return Err(e),
                 }
             }
-            // Restore previous capabilities registry
-            let mut caps_w = env.caps.caps.write();
-            *caps_w = old_caps;
-            if let Some(e) = hard_err {
-                return Err(e);
-            }
-            Ok(flow_out)
+            Ok(Flow::Normal)
         }
         Stmt::ReactiveCell { name, pipeline } => {
             // Reject mutations unless in unsafe context
