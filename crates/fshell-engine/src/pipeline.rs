@@ -1724,8 +1724,9 @@ pub async fn execute_pipeline(
                                         }
                                     }
                                     PipelinePayload::Bytes(b) => {
-                                        // Boundary conversion: raw bytes -> line-split string Vals.
-                                        forward_bytes_as_lines(&out_tx, &b).await;
+                                        // Whole-stream mode hashes the raw bytes; it
+                                        // must not forward them unhashed.
+                                        hasher.update(&b);
                                     }
                                     PipelinePayload::Structured(d) => {
                                         let _ = out_tx.send(PipelinePayload::Structured(d)).await;

@@ -1157,7 +1157,8 @@ mod tests {
         };
         let expr = Expr::Pipeline(pipeline);
         let res = eval_expr(&expr, &env).await.unwrap();
-        assert_eq!(res, Val::List(vec![]));
+        // `count` with no upstream still emits a single 0.
+        assert_eq!(res, Val::List(vec![Val::Int(0)]));
     }
 
     #[tokio::test]
