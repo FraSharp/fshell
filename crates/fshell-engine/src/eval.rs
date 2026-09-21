@@ -1938,6 +1938,12 @@ async fn eval_stmt_inner(
                         }
                     }
                 }
+                // A spawned stage (e.g. a user function) may have called `exit`;
+                // it cannot return `Flow::Exit` itself, so honour its request now.
+                if let Some(code) = env.job_control.exit_request.lock().take() {
+                    env.set_exit_code(code as i64);
+                    return Ok(Flow::Exit(code));
+                }
                 let pipefail = env.options.read().pipefail;
                 let last_ec = *env.prompt.last_exit_code.read();
                 let (exit_code, failure) = crate::pipeline_finalize(errors, last_ec, pipefail);

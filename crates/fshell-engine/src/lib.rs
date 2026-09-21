@@ -1758,6 +1758,7 @@ impl Env {
                 fg_cvar: Arc::new(Condvar::new()),
                 sigint_pending: Arc::new(AtomicBool::new(false)),
                 cancellation: Arc::new(AtomicBool::new(false)),
+                exit_request: Arc::new(Mutex::new(None)),
             },
             reactive: reactive::Reactivity {
                 cells: Arc::new(RwLock::new(FxHashMap::default())),
@@ -1913,6 +1914,7 @@ impl Env {
                 fg_cvar: Arc::new(Condvar::new()),
                 sigint_pending: Arc::new(AtomicBool::new(false)),
                 cancellation: Arc::new(AtomicBool::new(false)),
+                exit_request: Arc::new(Mutex::new(None)),
             },
             reactive: reactive::Reactivity {
                 cells: Arc::new(RwLock::new(FxHashMap::default())),

@@ -14,6 +14,11 @@ pub struct JobControl {
     pub fg_cvar: Arc<Condvar>,
     pub sigint_pending: Arc<AtomicBool>,
     pub cancellation: Arc<AtomicBool>,
+    /// Set by `exit` executed inside a pipeline task (e.g. a user function,
+    /// which runs in a spawned task and cannot return `Flow::Exit` directly).
+    /// The statement driver observes it after the pipeline completes and turns
+    /// it into `Flow::Exit`.
+    pub exit_request: Arc<Mutex<Option<i32>>>,
 }
 
 impl std::fmt::Debug for JobControl {
@@ -34,6 +39,7 @@ impl Clone for JobControl {
             fg_cvar: self.fg_cvar.clone(),
             sigint_pending: self.sigint_pending.clone(),
             cancellation: self.cancellation.clone(),
+            exit_request: self.exit_request.clone(),
         }
     }
 }

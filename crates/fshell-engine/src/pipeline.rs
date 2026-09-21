@@ -1008,6 +1008,16 @@ pub async fn execute_pipeline(
                                                             .await;
                                                         return;
                                                     }
+                                                    Ok((Flow::Exit(code), _)) => {
+                                                        // `exit` inside a function must end
+                                                        // the script, not error: record it
+                                                        // for the statement driver.
+                                                        *env_clone
+                                                            .job_control
+                                                            .exit_request
+                                                            .lock() = Some(code);
+                                                        return;
+                                                    }
                                                     Ok((flow, _)) => {
                                                         env_clone.report_stage_error();
                                                         let msg =
@@ -1068,6 +1078,12 @@ pub async fn execute_pipeline(
                                                 let _ = out_tx
                                                     .send(PipelinePayload::Structured(diag))
                                                     .await;
+                                                return;
+                                            }
+                                            Ok(Flow::Exit(code)) => {
+                                                // `exit` inside a function ends the script.
+                                                *env_clone.job_control.exit_request.lock() =
+                                                    Some(code);
                                                 return;
                                             }
                                             Ok(flow) => {
@@ -2912,6 +2928,12 @@ pub(crate) fn run_script_stmt<'a>(
                                 }
                             }
                         }
+                    }
+                    // Honour an `exit` requested from inside a spawned stage
+                    // (e.g. a user function) before the normal finalize.
+                    if let Some(code) = env.job_control.exit_request.lock().take() {
+                        env.set_exit_code(code as i64);
+                        return Ok(Flow::Exit(code));
                     }
                     let last_ec = *env.prompt.last_exit_code.read();
                     let (exit_code, failure) = crate::pipeline_finalize(errors, last_ec, pipefail);

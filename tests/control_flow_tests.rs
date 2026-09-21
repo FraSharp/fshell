@@ -155,6 +155,30 @@ async fn test_function_return_inside_if_propagates() {
     );
 }
 
+#[tokio::test]
+async fn test_exit_inside_function_propagates() {
+    let env = setup_test_env();
+    let script = "fn die() { exit 7 }\nlet reached = false\ndie\nlet reached = true";
+    let mut p = Parser::new(script);
+    let stmts = p.parse_statements().unwrap();
+    let mut last = fshell_engine::Flow::Normal;
+    for stmt in &stmts {
+        last = eval_stmt(stmt, &env, false).await.unwrap();
+        if !matches!(last, fshell_engine::Flow::Normal) {
+            break;
+        }
+    }
+    assert!(
+        matches!(last, fshell_engine::Flow::Exit(7)),
+        "exit inside a function must propagate, got {last:?}"
+    );
+    assert_eq!(
+        env.vars.read().get("reached"),
+        Some(&Val::Bool(false)),
+        "statements after the exiting call must not run"
+    );
+}
+
 // Match execution
 
 #[tokio::test]
