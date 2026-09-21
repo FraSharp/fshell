@@ -96,11 +96,17 @@ async fn test_function_param_visible_inside_pipeline_filter() {
 #[tokio::test]
 async fn test_function_arity_is_enforced() {
     let ctx = TestContext::new();
-    let ok = ctx.eval_script("fn add(a, b) { let s = $a + $b }; add 1 2").await;
+    let ok = ctx
+        .eval_script("fn add(a, b) { let s = $a + $b }; add 1 2")
+        .await;
     assert!(ok.is_ok(), "correct arity must succeed: {ok:?}");
-    let err = ctx.eval_script("fn add(a, b) { let s = $a + $b }; add 1").await;
+    let err = ctx
+        .eval_script("fn add(a, b) { let s = $a + $b }; add 1")
+        .await;
     assert!(err.is_err(), "calling with too few arguments must error");
-    let err = ctx.eval_script("fn add(a, b) { let s = $a + $b }; add 1 2 3").await;
+    let err = ctx
+        .eval_script("fn add(a, b) { let s = $a + $b }; add 1 2 3")
+        .await;
     assert!(err.is_err(), "calling with too many arguments must error");
 }
 

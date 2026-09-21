@@ -1148,9 +1148,7 @@ async fn eval_simple_command(
             // A declaration builtin declares a shell variable; only a plain
             // command's prefix assignment becomes part of that command's
             // environment.
-            if !is_decl_cmd
-                && let Some(Val::Map(map)) = vars.get_mut("env")
-            {
+            if !is_decl_cmd && let Some(Val::Map(map)) = vars.get_mut("env") {
                 map.insert(ustr::ustr(name), Val::String(value.clone()));
             }
         }

@@ -184,11 +184,10 @@ fn parse_ansi_escapes(s: &str, base_span: SourceSpan) -> Result<String, ParseErr
                             message: "invalid hexadecimal digits".to_string(),
                             span: base_span,
                         })?;
-                    let ch =
-                        char::from_u32(code_point).ok_or_else(|| ParseError::SyntaxError {
-                            message: format!("invalid unicode code point U+{code_point:04X}"),
-                            span: base_span,
-                        })?;
+                    let ch = char::from_u32(code_point).ok_or_else(|| ParseError::SyntaxError {
+                        message: format!("invalid unicode code point U+{code_point:04X}"),
+                        span: base_span,
+                    })?;
                     out.push(ch);
                 }
                 Some('x') => {
@@ -2584,13 +2583,7 @@ mod tests {
             } => {
                 assert_eq!(lhs.unpack(), &Expr::Ident("a".to_string()));
                 assert!(
-                    matches!(
-                        rhs.unpack(),
-                        Expr::BinaryOp {
-                            op: BinOp::And,
-                            ..
-                        }
-                    ),
+                    matches!(rhs.unpack(), Expr::BinaryOp { op: BinOp::And, .. }),
                     "expected `and` to bind tighter than `or`, got {:?}",
                     rhs
                 );
@@ -2613,14 +2606,8 @@ mod tests {
                 lhs,
                 rhs,
             } => {
-                assert!(matches!(
-                    lhs.unpack(),
-                    Expr::BinaryOp { op: BinOp::Eq, .. }
-                ));
-                assert!(matches!(
-                    rhs.unpack(),
-                    Expr::BinaryOp { op: BinOp::Eq, .. }
-                ));
+                assert!(matches!(lhs.unpack(), Expr::BinaryOp { op: BinOp::Eq, .. }));
+                assert!(matches!(rhs.unpack(), Expr::BinaryOp { op: BinOp::Eq, .. }));
             }
             other => panic!("Expected `and` at the root, got {:?}", other),
         }
@@ -2646,7 +2633,10 @@ mod tests {
         let Stmt::Let { expr, .. } = stmts[0].unpack() else {
             panic!("Expected Stmt::Let");
         };
-        assert!(matches!(expr.unpack(), Expr::BinaryOp { op: BinOp::Or, .. }));
+        assert!(matches!(
+            expr.unpack(),
+            Expr::BinaryOp { op: BinOp::Or, .. }
+        ));
     }
 
     #[test]

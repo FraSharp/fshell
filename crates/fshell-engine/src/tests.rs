@@ -1318,10 +1318,7 @@ mod tests {
             );
             assert!(matches!(m.get(&ustr("message")), Some(Val::String(s)) if s.contains("bad")));
         } else {
-            panic!(
-                "Expected Val::Map for logged, got {:?}",
-                vars.get("logged")
-            );
+            panic!("Expected Val::Map for logged, got {:?}", vars.get("logged"));
         }
     }
 

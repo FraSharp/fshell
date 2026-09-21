@@ -153,8 +153,8 @@ impl PromptAnimation {
             return String::new();
         }
         let frame_rate_ms = self.frame_rate_ms.max(1);
-        let index = ((elapsed.as_millis() as u64 / frame_rate_ms) % self.frames.len() as u64)
-            as usize;
+        let index =
+            ((elapsed.as_millis() as u64 / frame_rate_ms) % self.frames.len() as u64) as usize;
         self.frames[index].clone()
     }
 }

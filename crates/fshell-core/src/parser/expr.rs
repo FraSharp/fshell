@@ -449,8 +449,7 @@ impl Parser {
                 // `r"..."` is a raw string literal, not a command named `r`
                 // followed by an argument. Requires adjacency (`r "x"` is still a
                 // command with an argument).
-                let is_raw_string =
-                    ident == "r" && next_char == Some('"') && next_pos == ident_end;
+                let is_raw_string = ident == "r" && next_char == Some('"') && next_pos == ident_end;
 
                 let is_operator = match next_char {
                     // In a value/condition context `&&`/`||` are boolean
@@ -1368,8 +1367,7 @@ impl Parser {
                     let end = self.pos + name.len();
                     if end + 1 < self.input.len()
                         && self.input[end] == '.'
-                        && (self.input[end + 1].is_ascii_alphabetic()
-                            || self.input[end + 1] == '_')
+                        && (self.input[end + 1].is_ascii_alphabetic() || self.input[end + 1] == '_')
                     {
                         let name = self.parse_identifier()?;
                         return Ok(Expr::Ident(name));

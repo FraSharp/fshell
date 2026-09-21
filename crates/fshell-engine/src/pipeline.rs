@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use crate::eval::{json_value_to_val, val_to_json_value};
 use crate::{
     CapAction, EngineError, Env, LocalScope, PendingSuggestion, PipeSender, PipeStream,
     PipelinePayload, SuggestionMode, cmp_vals, decode_csv_input, eval_expr, eval_stmt,
     expand_alias_with_args, expand_globs, get_suggested_command, is_external_command_at,
     pipeline_channel_size, render_bar_chart, render_table, run_boundary_operator,
 };
-use crate::eval::{json_value_to_val, val_to_json_value};
 use crate::{Flow, PipelineFailure};
 use fshell_core::ShellError;
 use fshell_core::lock::{Mutex, RwLock};
@@ -31,7 +31,10 @@ fn function_exists(env: &Env, name: &str) -> bool {
 /// Build the per-record local scope for `filter`/`map`, chained onto the
 /// enclosing local scope so function parameters and outer bindings stay visible
 /// while the record fields shadow them.
-fn record_scope(fields: FxHashMap<String, Val>, parent: Option<&Arc<LocalScope>>) -> Arc<LocalScope> {
+fn record_scope(
+    fields: FxHashMap<String, Val>,
+    parent: Option<&Arc<LocalScope>>,
+) -> Arc<LocalScope> {
     let frame = Arc::new(RwLock::new(fields));
     match parent {
         Some(parent) => Arc::new(LocalScope::child(frame, parent.clone())),
@@ -1092,7 +1095,8 @@ pub async fn execute_pipeline(
                                         let _ = cancel.send(true);
                                         env_clone.report_stage_error();
                                         let diag = FshDiag::new(e);
-                                        let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
+                                        let _ =
+                                            out_tx.send(PipelinePayload::Structured(diag)).await;
                                     }
                                 }
                                 restore_inline_env(&env_clone, saved_env_values, saved_top_values);
@@ -1218,10 +1222,8 @@ pub async fn execute_pipeline(
                                         if missing_column {
                                             continue;
                                         }
-                                        sub_env.scope.local_vars = Some(record_scope(
-                                            locals,
-                                            base_locals.as_ref(),
-                                        ));
+                                        sub_env.scope.local_vars =
+                                            Some(record_scope(locals, base_locals.as_ref()));
                                     } else {
                                         sub_env.scope.local_vars = base_locals.clone();
                                     }
@@ -1301,10 +1303,8 @@ pub async fn execute_pipeline(
                                                     locals.insert(k.to_string(), v.clone());
                                                 }
                                             }
-                                            sub_env.scope.local_vars = Some(record_scope(
-                                                locals,
-                                                base_locals.as_ref(),
-                                            ));
+                                            sub_env.scope.local_vars =
+                                                Some(record_scope(locals, base_locals.as_ref()));
                                         }
                                     } else {
                                         sub_env.scope.local_vars = base_locals.clone();
