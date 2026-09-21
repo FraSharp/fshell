@@ -21,6 +21,21 @@ mod tests {
     use super::BuiltinHandler;
     use super::*;
 
+    #[test]
+    fn test_hook_event_names_are_normalized() {
+        let env = Env::new();
+        assert!(crate::register_hook("SIGINT", "h1", &env).is_ok());
+        assert!(crate::register_hook("INT", "h2", &env).is_ok());
+        // `sigwinch` is dispatched, so it must be registerable.
+        assert!(crate::register_hook("sigwinch", "h3", &env).is_ok());
+        assert!(crate::register_hook("bogus", "h4", &env).is_err());
+        assert_eq!(
+            crate::get_hooks("sigint", &env),
+            vec!["h1".to_string(), "h2".to_string()]
+        );
+        assert_eq!(crate::get_hooks("sigwinch", &env), vec!["h3".to_string()]);
+    }
+
     #[tokio::test]
     async fn test_push_scope_chains_to_enclosing_frames() {
         let env = Env::new();

@@ -2726,6 +2726,20 @@ pub fn setup_signal_handlers(env: Env) {
                 return;
             }
         };
+        let mut sigusr1 = match signal(SignalKind::user_defined1()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to register SIGUSR1 handler: {}", e);
+                return;
+            }
+        };
+        let mut sigusr2 = match signal(SignalKind::user_defined2()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to register SIGUSR2 handler: {}", e);
+                return;
+            }
+        };
         'signal_loop: loop {
             if env.job_control.cancellation.load(Ordering::Acquire) {
                 break;
@@ -2803,6 +2817,18 @@ pub fn setup_signal_handlers(env: Env) {
                     let env_clone = env.clone();
                     tokio::spawn(async move {
                         run_hooks("sigchld", &env_clone).await;
+                    });
+                }
+                _ = sigusr1.recv() => {
+                    let env_clone = env.clone();
+                    tokio::spawn(async move {
+                        run_hooks("sigusr1", &env_clone).await;
+                    });
+                }
+                _ = sigusr2.recv() => {
+                    let env_clone = env.clone();
+                    tokio::spawn(async move {
+                        run_hooks("sigusr2", &env_clone).await;
                     });
                 }
             }
@@ -2950,17 +2976,38 @@ pub fn invalidate_git_cache(env: &Env) {
 
 // Hook system
 
+/// Canonical hook event names. Dispatched events must all appear here so they
+/// can be registered.
+pub const HOOK_EVENTS: [&str; 13] = [
+    "precmd", "preexec", "chpwd", "exit", "sigint", "sigterm", "sigusr1", "sigusr2", "sighup",
+    "sigquit", "sigchld", "sigwinch", "sigtstp",
+];
+
+/// Map a user-written event name to its canonical form: case-insensitive, and
+/// `INT`/`SIGINT` both accepted.
+fn normalize_hook_event(event: &str) -> Option<String> {
+    let lower = event.to_ascii_lowercase();
+    if HOOK_EVENTS.contains(&lower.as_str()) {
+        return Some(lower);
+    }
+    let with_prefix = format!("sig{lower}");
+    if HOOK_EVENTS.contains(&with_prefix.as_str()) {
+        return Some(with_prefix);
+    }
+    None
+}
+
 /// Register a function name as a hook for the given event.
 pub fn register_hook(event: &str, fn_name: &str, env: &Env) -> Result<(), String> {
-    let valid = [
-        "precmd", "preexec", "chpwd", "exit", "sigint", "sigterm", "sigusr1", "sigusr2", "sighup",
-        "sigquit", "sigchld",
-    ];
-    if !valid.contains(&event) {
-        return Err(format!("Unknown hook '{}'. Valid: {:?}", event, valid));
-    }
+    let normalized = normalize_hook_event(event).ok_or_else(|| {
+        format!(
+            "Unknown hook '{}'. Valid: {:?}",
+            event,
+            HOOK_EVENTS.as_slice()
+        )
+    })?;
     let mut hooks = env.hooks.registry.write();
-    let entry = hooks.entry(event.to_string()).or_default();
+    let entry = hooks.entry(normalized).or_default();
     if !entry.contains(&fn_name.to_string()) {
         entry.push(fn_name.to_string());
     }
@@ -2969,8 +3016,9 @@ pub fn register_hook(event: &str, fn_name: &str, env: &Env) -> Result<(), String
 
 /// Remove a function from a hook event.
 pub fn remove_hook(event: &str, fn_name: &str, env: &Env) -> Result<(), String> {
+    let normalized = normalize_hook_event(event).unwrap_or_else(|| event.to_ascii_lowercase());
     let mut hooks = env.hooks.registry.write();
-    if let Some(list) = hooks.get_mut(event) {
+    if let Some(list) = hooks.get_mut(&normalized) {
         list.retain(|n| n != fn_name);
     }
     Ok(())
