@@ -1039,29 +1039,59 @@ pub fn eval_expr<'a>(
                     Ok(Val::String(path.to_string_lossy().to_string()))
                 }
                 ProcessSubstDirection::Output => {
-                    let tmp = tempfile::NamedTempFile::new()
-                        .map_err(|e| EngineError::from(format!("process substitution: {}", e)))?;
-                    let path = tmp.path().to_path_buf();
-                    let temp_path = tmp.into_temp_path();
-                    let path_clone = path.clone();
-                    let env_clone = env.clone();
-                    let mut pipeline_clone = pipeline.clone();
-                    pipeline_clone.stages.insert(
-                        0,
-                        PipelineStage::Read {
-                            path: Expr::String(vec![fshell_core::StringPart::Lit(
-                                path_clone.to_string_lossy().to_string(),
-                            )]),
-                        },
-                    );
+                    // `>(pipeline)` hands the command a writable path; the
+                    // pipeline consumes what is written to it. An empty regular
+                    // file could never do that, so use a FIFO: the command opens
+                    // it for writing, the consumer reads until the writer closes.
+                    let dir = tempfile::TempDir::new()
+                        .map_err(|e| EngineError::from(format!("process substitution: {e}")))?;
+                    let fifo = dir.path().join("fifo");
+                    let c_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+                        fifo.as_os_str(),
+                    ))
+                    .map_err(|_| {
+                        EngineError::from("process substitution: invalid fifo path".to_string())
+                    })?;
+                    // SAFETY: `c_path` is a valid NUL-terminated filesystem path.
+                    if unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) } != 0 {
+                        return Err(EngineError::from(format!(
+                            "process substitution: mkfifo: {}",
+                            std::io::Error::last_os_error()
+                        )));
+                    }
 
+                    let mut stages = Vec::with_capacity(pipeline.stages.len() + 1);
+                    stages.push(PipelineStage::Read {
+                        path: Expr::String(vec![fshell_core::StringPart::Lit(
+                            fifo.to_string_lossy().to_string(),
+                        )]),
+                    });
+                    stages.extend(pipeline.stages.iter().cloned());
+                    let consumer = fshell_core::Pipeline { stages };
+
+                    let env_clone = env.clone();
                     tokio::task::spawn(async move {
-                        let (out_tx, _out_rx) = tokio::sync::mpsc::channel(100);
-                        let _ = crate::execute_pipeline(&pipeline_clone, &env_clone, out_tx).await;
+                        // Keep the FIFO (and its directory) alive until the
+                        // consumer finishes.
+                        let _dir = dir;
+                        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(100);
+                        let pipe = tokio::spawn(async move {
+                            let _ = crate::execute_pipeline(&consumer, &env_clone, out_tx).await;
+                        });
+                        while let Some(payload) = out_rx.recv().await {
+                            match payload {
+                                PipelinePayload::Data(v) => write_val_stdout(&v),
+                                PipelinePayload::Bytes(b) => {
+                                    use std::io::Write;
+                                    let _ = std::io::stdout().write_all(&b);
+                                }
+                                PipelinePayload::Structured(_) => {}
+                            }
+                        }
+                        let _ = pipe.await;
                     });
 
-                    env.temp_files.lock().push(temp_path);
-                    Ok(Val::String(path.to_string_lossy().to_string()))
+                    Ok(Val::String(fifo.to_string_lossy().to_string()))
                 }
             },
             Expr::If {

@@ -605,6 +605,33 @@ async fn test_write_then_2_to_1_merges_stderr_into_file() {
 }
 
 #[tokio::test]
+async fn test_output_process_substitution_delivers_data() {
+    // `cmd >(consumer)` gives the command a writable path whose writes the
+    // consumer processes.
+    let ctx = TestContext::new();
+    let out = ctx.temp_path().join("psub-out.txt");
+    let script = format!(
+        "sh -c 'echo from-fifo > \"$1\"' _ >(tee \"{}\")",
+        out.display()
+    );
+    ctx.eval_script(&script).await.unwrap();
+
+    // The consumer runs asynchronously; give it a moment to flush.
+    let mut content = String::new();
+    for _ in 0..100 {
+        content = std::fs::read_to_string(&out).unwrap_or_default();
+        if content.contains("from-fifo") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        content.contains("from-fifo"),
+        "process substitution delivered nothing: {content:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_yaml_boundary_is_plain_data() {
     let env = setup_test_env();
     let data = Val::Map({
