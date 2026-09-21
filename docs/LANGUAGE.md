@@ -304,7 +304,7 @@ comparisons evaluate to `Val::Bool`:
 
 | operator | description | example |
 |---|---|---|
-| `==` | structural equality | `status == 200` |
+| `==` | equality (`Int`/`Float` compare numerically) | `status == 200` |
 | `!=` | inequality | `status != 404` |
 | `<` | less than | `cpu < 20.0` |
 | `<=` | less than or equal | `retries <= 3` |

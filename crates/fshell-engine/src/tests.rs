@@ -481,6 +481,22 @@ mod tests {
     }
 
     #[test]
+    fn test_binop_eq_promotes_int_and_float() {
+        assert_eq!(
+            eval_binop(BinOp::Eq, Val::Int(1), Val::Float(1.0)).unwrap(),
+            Val::Bool(true)
+        );
+        assert_eq!(
+            eval_binop(BinOp::Neq, Val::Int(1), Val::Float(1.0)).unwrap(),
+            Val::Bool(false)
+        );
+        assert_eq!(
+            eval_binop(BinOp::Eq, Val::Float(1.5), Val::Int(2)).unwrap(),
+            Val::Bool(false)
+        );
+    }
+
+    #[test]
     fn test_binop_eq_cross_type() {
         assert_eq!(
             eval_binop(BinOp::Eq, Val::Int(1), Val::Bool(true)).unwrap(),

@@ -1177,6 +1177,26 @@ pub(crate) fn matches_pattern(val: &Val, pattern: &fshell_core::MatchPattern) ->
     match_pattern_into(val, pattern, &mut bindings)
 }
 
+/// Equality for the `==`/`!=` operators.
+///
+/// `Int` and `Float` compare numerically so that `1 == 1.0` agrees with
+/// `1 <= 1.0` (the ordering operators already promote across the two). Every
+/// other pair falls back to structural equality. `NaN == NaN` is true, matching
+/// `Val`'s `PartialEq`.
+fn values_equal(l: &Val, r: &Val) -> bool {
+    fn as_float(v: &Val) -> Option<f64> {
+        match v {
+            Val::Float(f) => Some(*f),
+            Val::Int(i) => Some(*i as f64),
+            _ => None,
+        }
+    }
+    match (as_float(l), as_float(r)) {
+        (Some(a), Some(b)) => (a.is_nan() && b.is_nan()) || a == b,
+        _ => l == r,
+    }
+}
+
 pub(crate) fn eval_binop(op: BinOp, l: Val, r: Val) -> Result<Val, EngineError> {
     // Helper: coerce Int to Float when one side is Float.
     fn to_float(v: &Val) -> Option<f64> {
@@ -1269,8 +1289,8 @@ pub(crate) fn eval_binop(op: BinOp, l: Val, r: Val) -> Result<Val, EngineError> 
                 span: None,
             }),
         },
-        BinOp::Eq => Ok(Val::Bool(l == r)),
-        BinOp::Neq => Ok(Val::Bool(l != r)),
+        BinOp::Eq => Ok(Val::Bool(values_equal(&l, &r))),
+        BinOp::Neq => Ok(Val::Bool(!values_equal(&l, &r))),
         BinOp::Lt => {
             if let (Some(a), Some(b)) = (to_float(&l), to_float(&r)) {
                 return Ok(Val::Bool(a < b));
