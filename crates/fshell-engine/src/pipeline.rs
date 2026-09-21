@@ -929,13 +929,33 @@ pub async fn execute_pipeline(
                         // Check native user-defined functions (single-lock
                         // read to avoid TOCTOU between lookup and body capture).
                         let user_fn = env_clone.fns.read().get(&name).cloned();
-                        if let Some((params, _ret_type, body)) = user_fn {
+                        if let Some((params, ret_type, body)) = user_fn {
                             tokio::spawn(async move {
                                 let _fn_guard = crate::profiler::ProfilerState::guard(
                                     &env_clone.profiler,
                                     &format!("fn_call {}", name),
                                     crate::profiler::ProfilerCategory::FnCall,
                                 );
+
+                                // Arity is exact: a call with the wrong number of
+                                // arguments is an error rather than silently
+                                // filling missing parameters with Null.
+                                if evaluated_args.len() != params.len() {
+                                    env_clone.report_stage_error();
+                                    let diag = fshell_core::diagnostic::FshDiag::from(
+                                        fshell_core::ShellError::new(
+                                            fshell_core::diagnostic::ErrorCode::InvalidArgument,
+                                            format!(
+                                                "function `{name}` expects {} argument{}, got {}",
+                                                params.len(),
+                                                if params.len() == 1 { "" } else { "s" },
+                                                evaluated_args.len()
+                                            ),
+                                        ),
+                                    );
+                                    let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
+                                    return;
+                                }
 
                                 // Build a properly scoped environment: clone the shared state
                                 // but use local_vars for function parameters so we never
@@ -1018,6 +1038,19 @@ pub async fn execute_pipeline(
                                             }
                                         },
                                     }
+                                }
+                                // Enforce the declared `-> T` return type.
+                                if let Some(expected) = &ret_type
+                                    && let Some(v) = &last_val
+                                    && let Err(e) = check_type_constraint(
+                                        v,
+                                        &TypeConstraint::Primitive(expected.clone()),
+                                    )
+                                {
+                                    env_clone.report_stage_error();
+                                    let diag = fshell_core::diagnostic::FshDiag::from(e);
+                                    let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
+                                    return;
                                 }
                                 // Forward last expression or return value to pipeline.
                                 if let Some(v) = last_val

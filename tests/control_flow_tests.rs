@@ -93,6 +93,28 @@ async fn test_function_param_visible_inside_pipeline_filter() {
     );
 }
 
+#[tokio::test]
+async fn test_function_arity_is_enforced() {
+    let ctx = TestContext::new();
+    let ok = ctx.eval_script("fn add(a, b) { let s = $a + $b }; add 1 2").await;
+    assert!(ok.is_ok(), "correct arity must succeed: {ok:?}");
+    let err = ctx.eval_script("fn add(a, b) { let s = $a + $b }; add 1").await;
+    assert!(err.is_err(), "calling with too few arguments must error");
+    let err = ctx.eval_script("fn add(a, b) { let s = $a + $b }; add 1 2 3").await;
+    assert!(err.is_err(), "calling with too many arguments must error");
+}
+
+#[tokio::test]
+async fn test_function_return_type_is_enforced() {
+    let ctx = TestContext::new();
+    let ok = ctx
+        .eval_script(r#"fn f() -> String { return "hi" }; f"#)
+        .await;
+    assert!(ok.is_ok(), "matching return type must succeed: {ok:?}");
+    let err = ctx.eval_script("fn f() -> String { return 42 }; f").await;
+    assert!(err.is_err(), "mismatched return type must error");
+}
+
 // Match execution
 
 #[tokio::test]

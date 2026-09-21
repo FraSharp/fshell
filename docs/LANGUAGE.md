@@ -514,7 +514,10 @@ fn start_service(cfg: { host: String, port: Int, .. }) {
 ### return values & scoping
 
 - `return <expr>` stops function execution and returns the given `Val`.
-- a function without an explicit `return` returns `Val::Null`.
+- otherwise a function returns the value of its last expression; a function
+  whose body has no value expression returns `Val::Null`.
+- calls are arity-checked: passing the wrong number of arguments is an error.
+- a declared return type (`-> T`) is validated against the returned value.
 - functions execute in their own local scope (`local_vars`), which is linked to the enclosing scope: parameters stay visible inside loop bodies and pipeline stages, and updating a parameter inside a block remains visible after it.
 
 ---
