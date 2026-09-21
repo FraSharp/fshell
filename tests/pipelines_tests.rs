@@ -611,7 +611,7 @@ async fn test_output_process_substitution_delivers_data() {
     let ctx = TestContext::new();
     let out = ctx.temp_path().join("psub-out.txt");
     let script = format!(
-        "sh -c 'echo from-fifo > \"$1\"' _ >(tee \"{}\")",
+        "sh -c 'echo from-fifo > \"$1\"' _ >(cat > \"{}\")",
         out.display()
     );
     ctx.eval_script(&script).await.unwrap();

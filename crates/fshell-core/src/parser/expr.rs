@@ -1571,6 +1571,21 @@ impl Parser {
             }
             stages.push(self.parse_next_stage(stages.is_empty())?);
             self.skip_whitespace();
+            // Trailing redirections for this stage, e.g. `>(gzip > out.gz)`.
+            while let Some(r) = self.parse_redirect()? {
+                if matches!(
+                    r,
+                    PipelineStage::Read { .. }
+                        | PipelineStage::Heredoc { .. }
+                        | PipelineStage::HereString { .. }
+                ) {
+                    let last = stages.len() - 1;
+                    stages.insert(last, r);
+                } else {
+                    stages.push(r);
+                }
+                self.skip_whitespace();
+            }
 
             if self.peek() == Some(')') {
                 self.next_char();

@@ -2696,6 +2696,17 @@ mod tests {
     }
 
     #[test]
+    fn test_process_substitution_with_redirect() {
+        // A redirect inside the substitution body must parse.
+        let result = Parser::new(r#"diff >(cat > /tmp/out) <(cat)"#).parse_statements();
+        assert!(
+            result.is_ok(),
+            "redirect inside process substitution must parse: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
     fn test_raw_string_argument() {
         // `grep r"\.tmp$"` — a raw string in command-argument position.
         let stage = last_stage_of(r#"ls | grep r"\.tmp$""#);
