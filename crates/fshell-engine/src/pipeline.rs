@@ -7,6 +7,7 @@ use crate::{
     expand_alias_with_args, expand_globs, get_suggested_command, is_external_command_at,
     pipeline_channel_size, render_bar_chart, render_table, run_boundary_operator,
 };
+use crate::eval::{json_value_to_val, val_to_json_value};
 use crate::{Flow, PipelineFailure};
 use fshell_core::ShellError;
 use fshell_core::lock::{Mutex, RwLock};
@@ -1929,20 +1930,25 @@ pub async fn execute_pipeline(
                             .map_err(|e| format!("JSON serialize error: {}", e))
                     },
                 ),
+                // YAML/MessagePack carry a plain data representation (the same
+                // shape `@json` uses), not the internal `{type, value}` envelope,
+                // so the output interoperates with external tools.
                 SerializationFormat::Yaml => run_boundary_operator(
                     current_rx,
                     out_tx,
                     &env_clone,
                     |s| {
-                        serde_yaml::from_str::<Val>(s)
+                        serde_yaml::from_str::<serde_json::Value>(s)
+                            .map(json_value_to_val)
                             .map_err(|e| format!("YAML parse error: {}", e))
                     },
                     |b| {
-                        serde_yaml::from_slice::<Val>(b)
+                        serde_yaml::from_slice::<serde_json::Value>(b)
+                            .map(json_value_to_val)
                             .map_err(|e| format!("YAML parse error: {}", e))
                     },
                     |v| {
-                        serde_yaml::to_string(&v)
+                        serde_yaml::to_string(&val_to_json_value(&v))
                             .map(|s| PipelinePayload::Data(Arc::new(Val::String(s))))
                             .map_err(|e| format!("YAML serialize error: {}", e))
                     },
@@ -1952,15 +1958,17 @@ pub async fn execute_pipeline(
                     out_tx,
                     &env_clone,
                     |s| {
-                        rmp_serde::from_slice::<Val>(s.as_bytes())
+                        rmp_serde::from_slice::<serde_json::Value>(s.as_bytes())
+                            .map(json_value_to_val)
                             .map_err(|e| format!("MsgPack parse error: {}", e))
                     },
                     |b| {
-                        rmp_serde::from_slice::<Val>(b)
+                        rmp_serde::from_slice::<serde_json::Value>(b)
+                            .map(json_value_to_val)
                             .map_err(|e| format!("MsgPack parse error: {}", e))
                     },
                     |v| {
-                        rmp_serde::to_vec(&v)
+                        rmp_serde::to_vec(&val_to_json_value(&v))
                             .map(|b| PipelinePayload::Data(Arc::new(Val::Blob(b))))
                             .map_err(|e| format!("MsgPack serialize error: {}", e))
                     },

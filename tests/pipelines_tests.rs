@@ -560,6 +560,45 @@ async fn test_pipeline_empty_input() {
 }
 
 #[tokio::test]
+async fn test_yaml_boundary_is_plain_data() {
+    let env = setup_test_env();
+    let data = Val::Map({
+        let mut m = indexmap::IndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
+        m.insert(ustr::ustr("a"), Val::Int(1));
+        m
+    });
+    env.vars.write().insert("data".to_string(), data.clone());
+
+    // Encoding must be plain YAML, not the internal `{type, value}` envelope.
+    let mut parser = Parser::new("$data | @yaml");
+    let stmts = parser.parse_statements().unwrap();
+    let out = if let Stmt::Expr(expr) = stmts[0].unpack() {
+        eval_expr(expr, &env).await.unwrap()
+    } else {
+        panic!("expected expression statement");
+    };
+    let yaml = match out {
+        Val::List(items) => match items.into_iter().next() {
+            Some(Val::String(s)) => s,
+            other => panic!("expected YAML string, got {other:?}"),
+        },
+        other => panic!("expected list, got {other:?}"),
+    };
+    assert!(yaml.contains("a: 1"), "expected plain YAML, got: {yaml}");
+    assert!(!yaml.contains("type:"), "internal envelope leaked: {yaml}");
+
+    // Encode then decode round-trips to the original value.
+    let mut parser = Parser::new("$data | @yaml | @yaml");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        assert_eq!(res, Val::List(vec![data]));
+    } else {
+        panic!("expected expression statement");
+    }
+}
+
+#[tokio::test]
 async fn test_pipeline_grep_regex() {
     let env = setup_test_env();
     env.vars.write().insert(
