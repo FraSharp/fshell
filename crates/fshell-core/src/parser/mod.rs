@@ -2600,6 +2600,35 @@ mod tests {
     }
 
     #[test]
+    fn test_bare_identifier_member_access() {
+        // `a.b` in expression position is field access, not the string "a.b".
+        let stmts = Parser::new("let x = user.name").parse_statements().unwrap();
+        let Stmt::Let { expr, .. } = stmts[0].unpack() else {
+            panic!("Expected Stmt::Let");
+        };
+        match expr.unpack() {
+            Expr::MemberAccess { expr, member } => {
+                assert_eq!(expr.unpack(), &Expr::Ident("user".to_string()));
+                assert_eq!(member, "name");
+            }
+            other => panic!("Expected MemberAccess, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_command_arg_dotted_path_stays_string() {
+        // A dotted token in command-argument position is still a path string.
+        let stage = last_stage_of("cat app.toml");
+        let PipelineStage::CommandCall { args, .. } = &stage else {
+            panic!("Expected CommandCall, got {stage:?}");
+        };
+        assert_eq!(
+            args[0].unpack(),
+            &Expr::String(vec![StringPart::Lit("app.toml".to_string())])
+        );
+    }
+
+    #[test]
     fn test_raw_string_literal() {
         let stmts = Parser::new(r#"let re = r"\.rs$""#)
             .parse_statements()

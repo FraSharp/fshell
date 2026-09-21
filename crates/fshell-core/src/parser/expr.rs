@@ -1291,8 +1291,23 @@ impl Parser {
                 }
             }
             _ => {
-                // Check if it is an identifier followed by path/glob/KV chars
+                // A bare identifier followed adjacently by `.name` is member
+                // access (`user.name`, `cfg.host`), not a path. Path-like dotted
+                // tokens (`./x`, `../y`, `file.txt` as an argument) go through
+                // `parse_command_arg`, which does not use this branch.
                 let ident = self.peek_identifier();
+                if let Some(name) = &ident {
+                    let end = self.pos + name.len();
+                    if end + 1 < self.input.len()
+                        && self.input[end] == '.'
+                        && (self.input[end + 1].is_ascii_alphabetic()
+                            || self.input[end + 1] == '_')
+                    {
+                        let name = self.parse_identifier()?;
+                        return Ok(Expr::Ident(name));
+                    }
+                }
+                // Check if it is an identifier followed by path/glob/KV chars
                 let is_path_or_kv = if let Some(ident) = &ident {
                     let next_pos = self.pos + ident.len();
                     next_pos < self.input.len()
