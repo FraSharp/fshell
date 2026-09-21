@@ -1133,6 +1133,11 @@ async fn eval_simple_command(
 
     let capture_stdout = io_cfg.capture_stdout || redir.stdout_file.is_some();
 
+    let is_decl_cmd = matches!(
+        cmd_name.as_str(),
+        "export" | "readonly" | "declare" | "typeset" | "local"
+    );
+
     let mut saved_prefix_vars: Vec<(String, Option<Val>)> = Vec::new();
     if !prefix_assignments.is_empty() {
         let mut vars = env.vars.write();
@@ -1140,7 +1145,12 @@ async fn eval_simple_command(
             let prev = vars.get(name).cloned();
             saved_prefix_vars.push((name.clone(), prev));
             vars.insert(name.clone(), Val::String(value.clone()));
-            if let Some(Val::Map(map)) = vars.get_mut("env") {
+            // A declaration builtin declares a shell variable; only a plain
+            // command's prefix assignment becomes part of that command's
+            // environment.
+            if !is_decl_cmd
+                && let Some(Val::Map(map)) = vars.get_mut("env")
+            {
                 map.insert(ustr::ustr(name), Val::String(value.clone()));
             }
         }
@@ -1158,16 +1168,17 @@ async fn eval_simple_command(
     )
     .await;
 
-    let is_decl = matches!(
-        cmd_name.as_str(),
-        "export" | "readonly" | "declare" | "typeset" | "local"
-    );
-
-    if is_decl {
+    if is_decl_cmd {
         for (name, _) in prefix_assignments {
             let val = env.vars.read().get(name.as_str()).cloned();
             if let Some(val) = val {
-                env.set_exported_var(name.as_str(), val);
+                if cmd_name == "export" {
+                    env.set_exported_var(name.as_str(), val);
+                } else {
+                    // `local`/`readonly`/`declare`/`typeset` declare a shell
+                    // variable; they must not export it to the environment.
+                    env.set_shell_var(name.as_str(), val);
+                }
             }
         }
     } else if !saved_prefix_vars.is_empty() {
@@ -1504,7 +1515,39 @@ async fn eval_simple_command_inner(
             let code = handle_posix_wait(args, env).await?;
             return Ok((code, None));
         }
-        "umask" | "alias" | "unalias" | "ulimit" | "times" | "jobs" => {
+        "umask" => {
+            match args.first() {
+                None => {
+                    // Reading the mask requires a set-then-restore round trip.
+                    let current = unsafe { libc::umask(0o022 as libc::mode_t) };
+                    unsafe { libc::umask(current) };
+                    let text = format!("{:04o}\n", current);
+                    let out = write_builtin_output(
+                        &text,
+                        redir,
+                        io_cfg.stdout_stream.as_ref(),
+                        io_cfg.capture_stdout,
+                    )
+                    .await?;
+                    return Ok((0, out));
+                }
+                Some(mask_arg) => {
+                    let parsed = i32::from_str_radix(mask_arg.trim_start_matches('0'), 8)
+                        .or_else(|_| i32::from_str_radix(mask_arg, 8));
+                    match parsed {
+                        Ok(mask) => {
+                            unsafe { libc::umask(mask as libc::mode_t) };
+                            return Ok((0, None));
+                        }
+                        Err(_) => {
+                            eprintln!("umask: invalid mask: {mask_arg}");
+                            return Ok((1, None));
+                        }
+                    }
+                }
+            }
+        }
+        "alias" | "unalias" | "ulimit" | "times" | "jobs" => {
             return Ok((0, None));
         }
         "hash" => {

@@ -297,6 +297,13 @@ async fn test_posix_heredoc_quoted_delimiter_literal() {
 }
 
 #[tokio::test]
+async fn test_posix_umask_query_and_set() {
+    let env = setup_posix_env();
+    let (_, out) = run_posix_capture("umask 022; umask", &env).await;
+    assert_eq!(out.trim(), "0022");
+}
+
+#[tokio::test]
 async fn test_posix_herestring() {
     let env = setup_posix_env();
     let script = "cat <<< 'hello from herestring'";
