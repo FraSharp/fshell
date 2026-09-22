@@ -1829,7 +1829,7 @@ async fn handle_posix_wait(args: &[String], env: &Env) -> Result<i32, PosixError
                     }
                     env.background_notify.notified().await;
                 }
-                last_code = *env.prompt.last_exit_code.read() as i32;
+                last_code = env.exit_code() as i32;
                 continue;
             }
         }
@@ -1857,7 +1857,7 @@ async fn handle_posix_wait(args: &[String], env: &Env) -> Result<i32, PosixError
                     }
                     env.background_notify.notified().await;
                 }
-                last_code = *env.prompt.last_exit_code.read() as i32;
+                last_code = env.exit_code() as i32;
             } else {
                 // No job, try direct waitpid (may be external child)
                 let mut status = 0;

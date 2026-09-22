@@ -258,6 +258,23 @@ mod tests {
         assert_eq!(outcome.exit_code, 5);
     }
 
+    #[test]
+    fn invocation_status_is_isolated_until_finished() {
+        let env = Env::new();
+        env.set_published_exit_code(7);
+
+        let invocation = env.begin_invocation();
+        invocation.set_exit_code(42);
+
+        assert_eq!(invocation.exit_code(), 42);
+        assert_eq!(env.exit_code(), 7);
+        assert_eq!(*env.prompt.last_exit_code.read(), 7);
+
+        env.finish_invocation(&invocation);
+        assert_eq!(env.exit_code(), 42);
+        assert_eq!(*env.prompt.last_exit_code.read(), 42);
+    }
+
     #[tokio::test]
     async fn test_exit_stmt_bare_exit() {
         let env = Env::new();
@@ -2054,7 +2071,7 @@ mod tests {
     async fn test_exit_code_variables_and_shadowing() {
         let env = Env::new();
         // Set last exit code to 42
-        *env.prompt.last_exit_code.write() = 42;
+        env.set_exit_code(42);
 
         // Check eval_expr resolves status and ?
         assert_eq!(

@@ -214,7 +214,7 @@ pub async fn run() {
                 std::process::exit(1);
             }
             Ok(_) => {
-                let code = *env.prompt.last_exit_code.read() as i32;
+                let code = env.exit_code() as i32;
                 std::process::exit(code);
             }
             Err(e) => render_and_exit(e, cmd, "command", &env),
@@ -362,7 +362,7 @@ pub async fn run() {
                         std::process::exit(1);
                     }
                     Ok(_) => {
-                        let code = *env.prompt.last_exit_code.read() as i32;
+                        let code = env.exit_code() as i32;
                         std::process::exit(code);
                     }
                     Err(e) => render_and_exit(e, &content, script_path, &env),
@@ -461,10 +461,7 @@ fn restore_handoff_state(env: &fshell_engine::Env, state: fshell_engine::handoff
             hooks.insert(k, v);
         }
     }
-    {
-        let mut code = env.prompt.last_exit_code.write();
-        *code = state.last_exit_code;
-    }
+    env.set_published_exit_code(state.last_exit_code);
     {
         let mut dur = env.prompt.last_duration.write();
         *dur = std::time::Duration::from_secs_f64(state.last_duration_secs);

@@ -1190,9 +1190,8 @@ pub async fn execute_pipeline(
                                     Ok(()) => {
                                         if env_clone.is_last_stage {
                                             let is_pipefail = env_clone.options.read().pipefail;
-                                            let mut ec = env_clone.prompt.last_exit_code.write();
-                                            if !is_pipefail || *ec == 0 {
-                                                *ec = 0;
+                                            if !is_pipefail || env_clone.exit_code() == 0 {
+                                                env_clone.set_exit_code(0);
                                             }
                                         }
                                     }
@@ -1224,9 +1223,8 @@ pub async fn execute_pipeline(
                                     Ok(()) => {
                                         if env_clone.is_last_stage {
                                             let is_pipefail = env_clone.options.read().pipefail;
-                                            let mut ec = env_clone.prompt.last_exit_code.write();
-                                            if !is_pipefail || *ec == 0 {
-                                                *ec = 0;
+                                            if !is_pipefail || env_clone.exit_code() == 0 {
+                                                env_clone.set_exit_code(0);
                                             }
                                         }
                                     }
@@ -2812,6 +2810,13 @@ pub fn populate_env_from_host(env: &Env) {
 /// Parse and evaluate fshell source text (a script or inline command).
 /// Prints results for expression statements in plain text.
 pub async fn run_script(input: &str, env: &Env) -> Result<Flow, EngineError> {
+    let invocation = env.begin_invocation();
+    let result = run_script_inner(input, &invocation).await;
+    env.finish_invocation(&invocation);
+    result
+}
+
+async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
     // Early POSIX delegation for `find ... -exec ... {} +` which parses as fsh
     // but fails at execution (type mismatch). Route via bash where it is valid.
     if crate::login::looks_like_posix(input)
@@ -2918,7 +2923,7 @@ pub(crate) fn run_script_stmt<'a>(
                 if !flow.is_normal() {
                     return Ok(flow);
                 }
-                let last_ec = *env.prompt.last_exit_code.read();
+                let last_ec = env.exit_code();
                 if last_ec == 0 {
                     run_script_stmt(b, env).await
                 } else {
@@ -2941,7 +2946,7 @@ pub(crate) fn run_script_stmt<'a>(
                 }
                 match res {
                     Ok(Flow::Normal) => {
-                        let last_ec = *env.prompt.last_exit_code.read();
+                        let last_ec = env.exit_code();
                         if last_ec != 0 {
                             run_script_stmt(b, env).await
                         } else {
@@ -2955,10 +2960,7 @@ pub(crate) fn run_script_stmt<'a>(
             Stmt::Expr(expr) => {
                 if let Expr::Pipeline(pipeline) = expr.unpack() {
                     let pipefail = env.options.read().pipefail;
-                    {
-                        let mut ec = env.prompt.last_exit_code.write();
-                        *ec = 0;
-                    }
+                    env.set_exit_code(0);
                     let mut rx = spawn_pipeline_stream(pipeline, env);
                     let mut errors: Vec<crate::PipelineFailure> = Vec::new();
                     while let Some(payload) = rx.recv().await {
@@ -2985,7 +2987,7 @@ pub(crate) fn run_script_stmt<'a>(
                         env.set_exit_code(code as i64);
                         return Ok(Flow::Exit(code));
                     }
-                    let last_ec = *env.prompt.last_exit_code.read();
+                    let last_ec = env.exit_code();
                     let outcome = crate::pipeline_finalize(errors, last_ec, pipefail);
                     return crate::apply_pipeline_outcome(env, outcome);
                 } else {

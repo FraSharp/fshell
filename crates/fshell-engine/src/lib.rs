@@ -10,6 +10,7 @@ use fshell_hash::FxHashMap;
 use miette::SourceSpan;
 pub mod ast_cache;
 pub mod error;
+pub mod execution;
 pub mod flow;
 pub mod keybindings;
 pub use error::EngineError;
@@ -966,6 +967,14 @@ pub struct Env {
     pub caps: caps::Caps,
     pub hooks: hooks::Hooks,
     pub prompt: prompt::Prompt,
+    /// Status for the command currently being evaluated.  It is replaced at
+    /// invocation boundaries and shared only by clones of that invocation
+    /// (pipeline stages, scoped evaluators, and their waiters).
+    pub(crate) execution: Arc<execution::ExecutionState>,
+    /// True for an environment created for a command invocation.  Nested
+    /// invocations merge into their parent execution state instead of
+    /// publishing directly to the interactive prompt.
+    pub(crate) is_invocation: bool,
     pub options: Arc<RwLock<ShellOptions>>,
     /// Count of pipeline backpressure events (channel full).
     pub backpressure_count: Arc<AtomicU64>,
@@ -1333,31 +1342,56 @@ impl Env {
         Ok(())
     }
 
-    /// Single source of truth for exit-status bookkeeping.
-    /// Sets BOTH `vars["?"]` and `prompt.last_exit_code` coherently.
-    /// `is_last_stage` / `pipefail` routing is handled by the call-site
-    /// finalizers (pipeline collectors); this helper just keeps the two
-    /// locations in sync. Replaces the previous pattern where some paths
-    /// set only one of the two, causing `false; echo $?` / `&&`/`||`
-    /// to observe stale state.
+    /// Return the status of the current logical invocation.
+    pub fn exit_code(&self) -> i64 {
+        self.execution.exit_code()
+    }
+
+    /// Start a new logical invocation while retaining persistent shell state.
+    /// Clones made from the returned environment share this invocation's
+    /// status; the parent environment does not observe it until
+    /// `finish_invocation` publishes the result.
+    pub fn begin_invocation(&self) -> Self {
+        let mut invocation = self.clone();
+        invocation.execution = Arc::new(execution::ExecutionState::new(self.exit_code()));
+        invocation.is_invocation = true;
+        invocation
+    }
+
+    /// Finish a child invocation and publish its status to the caller.
+    /// Nested invocations update their parent invocation only. A top-level
+    /// invocation also updates the prompt snapshot used by the REPL and
+    /// handoff/session state.
+    pub fn finish_invocation(&self, child: &Self) {
+        self.execution.set_exit_code(child.exit_code());
+        if let Some(diag) = child.get_last_error() {
+            self.execution.set_last_error(diag.clone());
+        }
+        if !self.is_invocation {
+            *self.prompt.last_exit_code.write() = child.exit_code();
+            if let Some(diag) = child.get_last_error() {
+                *self.prompt.last_error.write() = Some(diag);
+            }
+        }
+    }
+
+    /// Restore a status that is already a published shell-session value.
+    pub fn set_published_exit_code(&self, code: i64) {
+        self.set_exit_code(code);
+        *self.prompt.last_exit_code.write() = code;
+    }
+
+    /// Single source of truth for exit-status bookkeeping within an
+    /// invocation. Pipeline stage routing (`is_last_stage` / `pipefail`) is
+    /// handled by the caller; this only updates the invocation status.
     pub fn set_exit_code(&self, code: i64) {
-        {
-            let mut vars = self.vars.write();
-            vars.insert("?".to_string(), Val::Int(code));
-        }
-        {
-            let mut ec = self.prompt.last_exit_code.write();
-            *ec = code;
-        }
+        self.execution.set_exit_code(code);
     }
 
     /// Record a diagnostic as the last active failure in the shell session.
     pub fn set_last_error(&self, diag: fshell_core::diagnostic::FshDiag) {
         let val = diag.to_val();
-        {
-            let mut err_slot = self.prompt.last_error.write();
-            *err_slot = Some(diag);
-        }
+        self.execution.set_last_error(diag);
         {
             let mut vars = self.vars.write();
             vars.insert("last_error".to_string(), val.clone());
@@ -1377,15 +1411,12 @@ impl Env {
 
     /// Retrieve the most recent diagnostic recorded in the session.
     pub fn get_last_error(&self) -> Option<fshell_core::diagnostic::FshDiag> {
-        self.prompt.last_error.read().clone()
+        self.execution.last_error()
     }
 
     /// Clear the recorded last error.
     pub fn clear_last_error(&self) {
-        {
-            let mut err_slot = self.prompt.last_error.write();
-            *err_slot = None;
-        }
+        self.execution.clear_last_error();
     }
 
     /// Back-compat shim: report a generic stage failure (exit 1).
@@ -1792,6 +1823,8 @@ impl Env {
                 suggestion_deferred: Arc::new(AtomicBool::new(false)),
                 edit_suggestion: Arc::new(RwLock::new(None)),
             },
+            execution: Arc::new(execution::ExecutionState::new(0)),
+            is_invocation: false,
             options: Arc::new(RwLock::new(ShellOptions::default())),
             backpressure_count: Arc::new(AtomicU64::new(0)),
             is_loading_init_script: Arc::new(AtomicBool::new(false)),
@@ -1950,6 +1983,8 @@ impl Env {
                 suggestion_deferred: Arc::new(AtomicBool::new(false)),
                 edit_suggestion: Arc::new(RwLock::new(None)),
             },
+            execution: Arc::new(execution::ExecutionState::new(0)),
+            is_invocation: false,
             options: Arc::new(RwLock::new(ShellOptions::default())),
             backpressure_count: Arc::new(AtomicU64::new(0)),
             is_loading_init_script: Arc::new(AtomicBool::new(false)),
@@ -2047,6 +2082,8 @@ impl Env {
             caps: self.caps.clone(),
             hooks: self.hooks.clone(),
             prompt: self.prompt.clone(),
+            execution: self.execution.clone(),
+            is_invocation: self.is_invocation,
             options: self.options.clone(),
             backpressure_count: self.backpressure_count.clone(),
             is_loading_init_script: self.is_loading_init_script.clone(),
@@ -2528,22 +2565,13 @@ fn wait_for_job_inner(
             let is_foreground = *env.job_control.fg_mutex.lock() == Some(job_id);
             let _ = env.clear_foreground(job_id);
             let exit_code = 1;
-            {
-                let mut vars = lock_vars!(env.vars.write());
-                vars.insert("?".to_string(), Val::Int(exit_code as i64));
-            }
-            if is_foreground {
-                *env.prompt.last_exit_code.write() = exit_code as i64;
+            if !env.is_invocation || is_foreground {
+                env.set_exit_code(exit_code as i64);
             } else {
                 let is_pipefail = env.options.read().pipefail;
                 let should_set = env.is_last_stage || is_pipefail;
-                if should_set {
-                    let mut ec = env.prompt.last_exit_code.write();
-                    if !is_pipefail || *ec == 0 {
-                        *ec = exit_code as i64;
-                    }
-                    let mut vars = lock_vars!(env.vars.write());
-                    vars.insert("?".to_string(), Val::Int(exit_code as i64));
+                if should_set && (!is_pipefail || env.exit_code() == 0) {
+                    env.set_exit_code(exit_code as i64);
                 }
             }
             return exit_code;
@@ -2599,10 +2627,6 @@ fn wait_for_job_inner(
             drop(jobs);
             let is_foreground = *env.job_control.fg_mutex.lock() == Some(job_id);
             let _ = env.clear_foreground(job_id);
-            {
-                let mut vars = lock_vars!(env.vars.write());
-                vars.insert("?".to_string(), Val::Int(exit_code as i64));
-            }
             if !is_foreground && !was_disowned {
                 let (do_notify, threshold) = {
                     let opts = env.options.read();
@@ -2616,15 +2640,15 @@ fn wait_for_job_inner(
                 }
             }
             let pipefail = env.options.read().pipefail;
-            let should_update_last = is_foreground || env.is_last_stage || pipefail;
-            if should_update_last {
+            if !env.is_invocation {
+                env.set_exit_code(exit_code as i64);
+            } else if is_foreground || env.is_last_stage || pipefail {
                 if env.is_last_stage {
-                    let mut ec = env.prompt.last_exit_code.write();
-                    if !pipefail || *ec == 0 || exit_code != 0 {
-                        *ec = exit_code as i64;
+                    if !pipefail || env.exit_code() == 0 || exit_code != 0 {
+                        env.set_exit_code(exit_code as i64);
                     }
                 } else if pipefail && exit_code != 0 {
-                    *env.prompt.last_exit_code.write() = exit_code as i64;
+                    env.set_exit_code(exit_code as i64);
                 }
             }
             return exit_code;

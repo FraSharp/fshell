@@ -178,7 +178,7 @@ sh {
 "#;
     let res = run_script(script, &env).await;
     // With pipefail, false | true should yield exit code 1
-    assert!(res.is_err() || *env.prompt.last_exit_code.read() != 0);
+    assert!(res.is_err() || env.exit_code() != 0);
 }
 
 #[tokio::test]
@@ -191,5 +191,5 @@ sh {
 }
 "#;
     run_script(script, &env).await.unwrap();
-    assert_eq!(*env.prompt.last_exit_code.read(), 0);
+    assert_eq!(env.exit_code(), 0);
 }

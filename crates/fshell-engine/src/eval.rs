@@ -290,11 +290,7 @@ async fn try_run_startup_builtin(
 
     match handler(None, evaluated_args, env, out_tx, None) {
         Ok(()) => {
-            let last_ec = *Some(env.prompt.last_exit_code.read())?;
-            {
-                let mut vars = Some(env.vars.write())?;
-                vars.insert("?".to_string(), Val::Int(last_ec));
-            }
+            let last_ec = env.exit_code();
             let errexit = Some(env.options.read())?.errexit;
             if errexit && last_ec != 0 {
                 return Some(Ok(Flow::Exit(last_ec as i32)));
@@ -303,14 +299,7 @@ async fn try_run_startup_builtin(
         }
         Err(e) => {
             let msg = e.to_string();
-            {
-                let mut ec = env.prompt.last_exit_code.write();
-                *ec = 1;
-            }
-            {
-                let mut vars = env.vars.write();
-                vars.insert("?".to_string(), Val::Int(1));
-            }
+            env.set_exit_code(1);
             Some(Err(EngineError::PipelineError {
                 message: msg,
                 span: None,
@@ -760,17 +749,7 @@ fn resolve_ident_value(name: &str, env: &Env) -> Val {
 
 fn lookup_variable_fallback(name: &str, env: &Env) -> Result<Val, EngineError> {
     if name == "?" || name == "status" {
-        let code = env
-            .vars
-            .read()
-            .get("?")
-            .cloned()
-            .map(|v| match v {
-                Val::Int(i) => i,
-                other => other.to_text().parse::<i64>().unwrap_or(0),
-            })
-            .unwrap_or_else(|| *env.prompt.last_exit_code.read());
-        return Ok(Val::Int(code));
+        return Ok(Val::Int(env.exit_code()));
     }
     if name == "env" {
         env.ensure_env_populated();
@@ -1637,10 +1616,7 @@ fn try_eval_stmt_sync_inner(
             } else {
                 0
             };
-            {
-                let mut ec = env.prompt.last_exit_code.write();
-                *ec = code as i64;
-            }
+            env.set_exit_code(code as i64);
             Some(Ok(Flow::Exit(code)))
         }
         Stmt::Expr(expr) => {
@@ -1685,10 +1661,7 @@ fn try_eval_stmt_sync_inner(
                     Val::Bool(false) => 1,
                     _ => 0,
                 };
-                env.vars
-                    .write()
-                    .insert("?".to_string(), Val::Int(exit_code));
-                *env.prompt.last_exit_code.write() = exit_code;
+                env.set_exit_code(exit_code);
                 let errexit_enabled = env.options.read().errexit;
                 if errexit_enabled && exit_code != 0 {
                     return Some(Ok(Flow::Exit(exit_code as i32)));
@@ -1878,7 +1851,7 @@ async fn eval_stmt_inner(
                 // circuits and the outcome propagates unchanged.
                 return Ok(flow);
             }
-            let last_ec = *env.prompt.last_exit_code.read();
+            let last_ec = env.exit_code();
             if last_ec == 0 {
                 eval_stmt(b, env, unsafe_context).await
             } else {
@@ -1896,7 +1869,7 @@ async fn eval_stmt_inner(
                 // A normal completion consults $?; a hard error or logical
                 // false runs the right side unconditionally.
                 Ok(Flow::Normal) => {
-                    let last_ec = *env.prompt.last_exit_code.read();
+                    let last_ec = env.exit_code();
                     if last_ec != 0 {
                         eval_stmt(b, env, unsafe_context).await
                     } else {
@@ -1939,10 +1912,7 @@ async fn eval_stmt_inner(
                 // Reset the status register so the finalizer below reads this
                 // pipeline's own exit status, not a stale value left by a
                 // prior (possibly errexit-aborted) statement.
-                {
-                    let mut ec = env.prompt.last_exit_code.write();
-                    *ec = 0;
-                }
+                env.set_exit_code(0);
 
                 // Pipeline expressions must print output (like run_script_stmt does),
                 // not capture it. collect_pipeline would set is_captured=true and
@@ -1975,7 +1945,7 @@ async fn eval_stmt_inner(
                     return Ok(Flow::Exit(code));
                 }
                 let pipefail = env.options.read().pipefail;
-                let last_ec = *env.prompt.last_exit_code.read();
+                let last_ec = env.exit_code();
                 let outcome = crate::pipeline_finalize(errors, last_ec, pipefail);
                 return crate::apply_pipeline_outcome(env, outcome);
             } else {
@@ -1987,7 +1957,7 @@ async fn eval_stmt_inner(
                 env.set_exit_code(exit_code);
                 let errexit_enabled = env.options.read().errexit;
                 if errexit_enabled {
-                    let last_ec = *env.prompt.last_exit_code.read();
+                    let last_ec = env.exit_code();
                     if last_ec != 0 {
                         return Ok(Flow::Exit(last_ec as i32));
                     }
@@ -2449,10 +2419,7 @@ async fn eval_stmt_inner(
             } else {
                 0
             };
-            {
-                let mut ec = env.prompt.last_exit_code.write();
-                *ec = code as i64;
-            }
+            env.set_exit_code(code as i64);
             Ok(Flow::Exit(code))
         }
         // On signal handler — registered via hook system
@@ -2690,7 +2657,7 @@ async fn eval_stmt_inner(
         }
         Stmt::Background(stmt) => {
             let stmt = stmt.clone();
-            let env = env.clone();
+            let env = env.begin_invocation();
             let cmd_str = format!("{:?}", stmt);
             let job_id = env.background_count.fetch_add(1, Ordering::Relaxed) as usize + 1;
 

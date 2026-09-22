@@ -906,10 +906,7 @@ fn restore_session_state(env: &Env, state: fshell_engine::handoff::HandoffState)
             hooks.insert(k, v);
         }
     }
-    {
-        let mut exit_code = env.prompt.last_exit_code.write();
-        *exit_code = state.last_exit_code;
-    }
+    env.set_published_exit_code(state.last_exit_code);
     {
         let mut duration = env.prompt.last_duration.write();
         *duration = std::time::Duration::from_secs_f64(state.last_duration_secs);
@@ -1060,6 +1057,18 @@ fn try_bare_dir_cd(input: &str, env: &Env, tx: fshell_engine::PipeSender) -> boo
 }
 
 pub(crate) async fn handle_line_generic(
+    env: &Env,
+    line: &str,
+    pwd: &str,
+    session_id: &str,
+) -> Result<(), ()> {
+    let invocation = env.begin_invocation();
+    let result = handle_line_generic_inner(&invocation, line, pwd, session_id).await;
+    env.finish_invocation(&invocation);
+    result
+}
+
+async fn handle_line_generic_inner(
     env: &Env,
     line: &str,
     pwd: &str,
@@ -1415,10 +1424,7 @@ pub(crate) async fn handle_line_generic(
                 if let Stmt::Exit(_) = stmt.unpack() {
                     match eval_stmt(&stmt, env, false).await {
                         Ok(Flow::Exit(code)) => {
-                            {
-                                let mut ec = env.prompt.last_exit_code.write();
-                                *ec = code as i64;
-                            }
+                            env.set_exit_code(code as i64);
                             fshell_engine::run_hooks("exit", env).await;
                             return Err(());
                         }
@@ -1456,10 +1462,7 @@ pub(crate) async fn handle_line_generic(
                             let env_clone = env.clone();
                             let pipeline_clone = pipeline.clone();
                             let tx_err = tx.clone();
-                            {
-                                let mut ec = env.prompt.last_exit_code.write();
-                                *ec = 0;
-                            }
+                            env.set_exit_code(0);
                             fshell_core::debug_log!("pipeline: spawning execute_pipeline");
                             tokio::spawn(async move {
                                 fshell_core::debug_log!("pipeline: execute_pipeline started");
@@ -1548,7 +1551,7 @@ pub(crate) async fn handle_line_generic(
                                     }
                                 }
                             }
-                            let last_ec = *env.prompt.last_exit_code.read();
+                            let last_ec = env.exit_code();
                             exit_code = Some(
                                 if has_errors
                                     || env
@@ -1619,10 +1622,7 @@ pub(crate) async fn handle_line_generic(
                 } else {
                     match repl_display_stmt(&stmt, env, line_trimmed).await {
                         Ok(Flow::Exit(code)) => {
-                            {
-                                let mut ec = env.prompt.last_exit_code.write();
-                                *ec = code as i64;
-                            }
+                            env.set_exit_code(code as i64);
                             fshell_engine::run_hooks("exit", env).await;
                             return Err(());
                         }
@@ -1681,7 +1681,7 @@ pub(crate) async fn handle_line_generic(
                 }
                 let errexit_enabled = env.options.read().errexit;
                 if errexit_enabled {
-                    let last_ec = *env.prompt.last_exit_code.read();
+                    let last_ec = env.exit_code();
                     if last_ec != 0 {
                         break;
                     }
@@ -1797,7 +1797,7 @@ fn repl_display_stmt<'a>(
                 if !flow.is_normal() {
                     return Ok(flow);
                 }
-                let last_ec = *env.prompt.last_exit_code.read();
+                let last_ec = env.exit_code();
                 if last_ec == 0 {
                     repl_display_stmt(b, env, line_trimmed).await
                 } else {
@@ -1812,7 +1812,7 @@ fn repl_display_stmt<'a>(
                     | Ok(flow @ Flow::Return(_))
                     | Ok(flow @ Flow::Exit(_)) => Ok(flow),
                     Ok(Flow::Normal) => {
-                        let last_ec = *env.prompt.last_exit_code.read();
+                        let last_ec = env.exit_code();
                         if last_ec != 0 {
                             repl_display_stmt(b, env, line_trimmed).await
                         } else {
@@ -1826,10 +1826,7 @@ fn repl_display_stmt<'a>(
             }
             Stmt::Expr(expr) => match expr.unpack() {
                 Expr::Pipeline(pipeline) => {
-                    {
-                        let mut ec = env.prompt.last_exit_code.write();
-                        *ec = 0;
-                    }
+                    env.set_exit_code(0);
                     let pipefail = env.options.read().pipefail;
                     let (tx, mut rx) =
                         tokio::sync::mpsc::channel(fshell_engine::pipeline_channel_size(env));
@@ -1895,7 +1892,7 @@ fn repl_display_stmt<'a>(
                             }
                         }
                     }
-                    let last_ec = *env.prompt.last_exit_code.read();
+                    let last_ec = env.exit_code();
                     let exit_code = if has_errors && pipefail && last_ec == 0 {
                         1
                     } else {
@@ -2121,10 +2118,7 @@ mod tests {
             let mut dur = env.prompt.last_duration.write();
             *dur = start_time.elapsed();
         }
-        {
-            let mut code = env.prompt.last_exit_code.write();
-            *code = 0;
-        }
+        env.set_exit_code(0);
 
         // Check that the duration is > 0
         let snap = refresh_prompt_snapshot(&env, &current_pwd);

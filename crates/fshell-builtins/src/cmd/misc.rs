@@ -192,7 +192,6 @@ pub fn reload_builtin(
     let reactive_guard = env.reactive.pipelines.read();
     let options_guard = env.options.read();
     let hooks_guard = env.hooks.registry.read();
-    let exit_code_guard = env.prompt.last_exit_code.read();
     let duration_guard = env.prompt.last_duration.read();
 
     let state = fshell_engine::handoff::HandoffState {
@@ -214,12 +213,11 @@ pub fn reload_builtin(
         cwd: env.cwd().to_string_lossy().to_string(),
         options: options_guard.clone(),
         hooks: hooks_guard.clone(),
-        last_exit_code: *exit_code_guard,
+        last_exit_code: env.exit_code(),
         last_duration_secs: duration_guard.as_secs_f64(),
     };
 
     drop(duration_guard);
-    drop(exit_code_guard);
     drop(hooks_guard);
     drop(options_guard);
     drop(reactive_guard);

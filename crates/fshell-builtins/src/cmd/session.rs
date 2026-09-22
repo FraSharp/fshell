@@ -118,9 +118,7 @@ fn cmd_resume(id: Option<&str>, env: &Env, tx: PipeSender) -> Result<(), ShellEr
         match status {
             Ok(exit) => {
                 let code = exit.code().unwrap_or(1);
-                env.vars
-                    .write()
-                    .insert("?".to_string(), Val::Int(code.into()));
+                env.set_exit_code(code.into());
             }
             Err(e) => {
                 let _ = tx.blocking_send(PipelinePayload::Data(Arc::new(Val::String(format!(

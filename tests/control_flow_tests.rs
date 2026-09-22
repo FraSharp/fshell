@@ -924,12 +924,7 @@ async fn test_exit_code_tracking() {
     // Wait for the background waitpid thread (spawn_job_waiter) to set $?
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    let vars = env.vars.read();
-    assert_eq!(
-        vars.get("?"),
-        Some(&Val::Int(0)),
-        "true should set exit code 0"
-    );
+    assert_eq!(env.exit_code(), 0, "true should set exit code 0");
 }
 
 #[tokio::test]
@@ -955,12 +950,7 @@ async fn test_exit_code_tracking_failure() {
     // Wait for the background waitpid thread (spawn_job_waiter) to set $?
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    let vars = env.vars.read();
-    assert_eq!(
-        vars.get("?"),
-        Some(&Val::Int(42)),
-        "exit 42 should set exit code 42"
-    );
+    assert_eq!(env.exit_code(), 42, "exit 42 should set exit code 42");
 }
 
 #[tokio::test]
@@ -1111,7 +1101,7 @@ async fn test_exit_code_stored_in_prompt() {
     let stmts = parser.parse_statements().unwrap();
     let result = eval_stmt(&stmts[0], &env, false).await;
     assert!(matches!(result, Ok(fshell_engine::Flow::Exit(7))));
-    let ec = *env.prompt.last_exit_code.read();
+    let ec = env.exit_code();
     assert_eq!(ec, 7);
 }
 

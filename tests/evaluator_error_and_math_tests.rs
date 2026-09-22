@@ -47,12 +47,12 @@ async fn test_boolean_conditional_chain_evaluation() {
     // Logical OR short-circuits on true (exit 0)
     let res = run_script("true || false", &env).await;
     assert!(res.is_ok());
-    assert_eq!(env.vars.read().get("?"), Some(&Val::Int(0)));
+    assert_eq!(env.exit_code(), 0);
 
     // Logical AND short-circuits on false (exit 1)
     let res = run_script("false && true", &env).await;
     assert!(res.is_ok());
-    assert_eq!(env.vars.read().get("?"), Some(&Val::Int(1)));
+    assert_eq!(env.exit_code(), 1);
 }
 
 // ---------------------------------------------------------------------------

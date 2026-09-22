@@ -142,9 +142,7 @@ fn resolve_parameter(param: &Parameter, env: &fshell_engine::Env, positional: &[
         Parameter::Special(sp) => match sp {
             SpecialParameter::AllPositionalParameters { .. } => eff_pos.join(" "),
             SpecialParameter::PositionalParameterCount => eff_pos.len().to_string(),
-            SpecialParameter::LastExitStatus => Some(env.vars.read())
-                .and_then(|vars| vars.get("?").map(|v| v.to_text()))
-                .unwrap_or_else(|| "0".to_string()),
+            SpecialParameter::LastExitStatus => env.exit_code().to_string(),
             SpecialParameter::CurrentOptionFlags => "".to_string(),
             SpecialParameter::ProcessId => std::process::id().to_string(),
             SpecialParameter::LastBackgroundProcessId => "0".to_string(),

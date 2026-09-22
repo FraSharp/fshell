@@ -493,7 +493,7 @@ async fn test_happy_true_exit_zero() {
     eval_stmt(&p.parse_statements().unwrap()[0], &env, false)
         .await
         .unwrap();
-    assert_eq!(env.vars.read().get("?"), Some(&Val::Int(0)));
+    assert_eq!(env.exit_code(), 0);
 }
 
 #[tokio::test]
@@ -505,7 +505,7 @@ async fn test_happy_false_exit_one() {
     }
     let mut p = Parser::new("false");
     let _ = eval_stmt(&p.parse_statements().unwrap()[0], &env, false).await;
-    assert_eq!(env.vars.read().get("?"), Some(&Val::Int(1)));
+    assert_eq!(env.exit_code(), 1);
 }
 
 #[tokio::test]
@@ -515,7 +515,7 @@ async fn test_happy_and_chain() {
     eval_stmt(&p.parse_statements().unwrap()[0], &env, false)
         .await
         .unwrap();
-    assert_eq!(env.vars.read().get("?"), Some(&Val::Int(0)));
+    assert_eq!(env.exit_code(), 0);
 }
 
 #[tokio::test]
@@ -525,7 +525,7 @@ async fn test_happy_or_chain() {
     eval_stmt(&p.parse_statements().unwrap()[0], &env, false)
         .await
         .unwrap();
-    assert_eq!(env.vars.read().get("?"), Some(&Val::Int(0)));
+    assert_eq!(env.exit_code(), 0);
 }
 
 // =========================================================================
