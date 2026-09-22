@@ -4,7 +4,7 @@
 // crates/fshell-hash/benches/hasher_comparison.rs
 
 use core::hash::Hasher;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 fn bench_hasher_comparison(c: &mut Criterion) {
@@ -44,6 +44,8 @@ fn bench_hasher_comparison(c: &mut Criterion) {
         b"name", b"value", b"result", b"items", b"config", b"output", b"status", b"error",
         b"count", b"total",
     ];
+    let short_key_bytes = short_keys.iter().map(|key| key.len() as u64).sum();
+    group.throughput(criterion::Throughput::Bytes(short_key_bytes));
 
     group.bench_function("fxhash/10_short_keys", |b| {
         b.iter(|| {
@@ -78,5 +80,60 @@ fn bench_hasher_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_hasher_comparison);
+fn bench_map_operations(c: &mut Criterion) {
+    let keys: Vec<String> = (0..128).map(|index| format!("field-{index:04}")).collect();
+    let mut deterministic =
+        std::collections::HashMap::with_hasher(fshell_hash::MapBuildHasher::default());
+    let mut randomized = fshell_hash::RandomHashMap::default();
+    for (index, key) in keys.iter().cloned().enumerate() {
+        deterministic.insert(key.clone(), index);
+        randomized.insert(key, index);
+    }
+
+    let mut group = c.benchmark_group("map_operations_128_keys");
+    group.bench_function("lookup/deterministic_fast", |b| {
+        b.iter(|| {
+            for key in &keys {
+                black_box(deterministic.get(black_box(key)));
+            }
+        });
+    });
+    group.bench_function("lookup/randomized", |b| {
+        b.iter(|| {
+            for key in &keys {
+                black_box(randomized.get(black_box(key)));
+            }
+        });
+    });
+    group.bench_function("insert/deterministic_fast", |b| {
+        b.iter_batched(
+            || keys.clone(),
+            |owned_keys| {
+                let mut map =
+                    std::collections::HashMap::with_hasher(fshell_hash::MapBuildHasher::default());
+                for (index, key) in owned_keys.into_iter().enumerate() {
+                    map.insert(key, index);
+                }
+                black_box(map);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("insert/randomized", |b| {
+        b.iter_batched(
+            || keys.clone(),
+            |owned_keys| {
+                let mut map = fshell_hash::RandomHashMap::default();
+                for (index, key) in owned_keys.into_iter().enumerate() {
+                    map.insert(key, index);
+                }
+                black_box(map);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_hasher_comparison, bench_map_operations);
 criterion_main!(benches);

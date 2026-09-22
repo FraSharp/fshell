@@ -34,6 +34,8 @@ fn bench_comparison(c: &mut Criterion) {
         b"name", b"value", b"result", b"items", b"config", b"output", b"status", b"error",
         b"count", b"total",
     ];
+    let short_key_bytes = short_keys.iter().map(|key| key.len() as u64).sum();
+    group.throughput(criterion::Throughput::Bytes(short_key_bytes));
 
     group.bench_function("map_hasher/10_short_keys", |b| {
         b.iter(|| {
