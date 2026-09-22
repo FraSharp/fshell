@@ -1182,6 +1182,27 @@ async fn test_integration_and_or_short_circuit() {
 }
 
 #[tokio::test]
+async fn test_logical_or_does_not_swallow_hard_errors() {
+    let env = setup_test_env();
+    let mut parser = Parser::new("1 / 0 || let recovered = true");
+    let stmts = parser.parse_statements().unwrap();
+    let error = eval_stmt(&stmts[0], &env, false).await.unwrap_err();
+
+    assert!(matches!(error, EngineError::DivisionByZero { .. }));
+    assert_eq!(env.vars.read().get("recovered"), None);
+}
+
+#[tokio::test]
+async fn test_run_script_logical_or_does_not_swallow_hard_errors() {
+    let env = setup_test_env();
+    let error = fshell_engine::run_script("1 / 0 || echo recovered", &env)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, EngineError::DivisionByZero { .. }));
+}
+
+#[tokio::test]
 async fn test_arithmetic_expansion_basic() {
     let env = setup_test_env();
     let mut parser = Parser::new("let result = $((1 + 2))");

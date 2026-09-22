@@ -3290,7 +3290,8 @@ pub(crate) fn run_script_stmt<'a>(
                             Ok(Flow::Normal)
                         }
                     }
-                    Ok(Flow::ConditionFalse) | Err(_) => run_script_stmt(b, env).await,
+                    Ok(Flow::ConditionFalse) => run_script_stmt(b, env).await,
+                    Err(error) => Err(error),
                     Ok(flow) => Ok(flow),
                 }
             }

@@ -1864,8 +1864,9 @@ async fn eval_stmt_inner(
                 Ok(flow @ (Flow::Break | Flow::Continue | Flow::Return(_) | Flow::Exit(_))) => {
                     Ok(flow)
                 }
-                // A normal completion consults $?; a hard error or logical
-                // false runs the right side unconditionally.
+                // A normal completion consults $?; only logical false runs
+                // the right side. Hard errors remain structured errors so
+                // `||` cannot hide diagnostics or bypass `try`/`catch`.
                 Ok(Flow::Normal) => {
                     let last_ec = env.exit_code();
                     if last_ec != 0 {
@@ -1874,7 +1875,8 @@ async fn eval_stmt_inner(
                         Ok(Flow::Normal)
                     }
                 }
-                Ok(Flow::ConditionFalse) | Err(_) => eval_stmt(b, env, unsafe_context).await,
+                Ok(Flow::ConditionFalse) => eval_stmt(b, env, unsafe_context).await,
+                Err(error) => Err(error),
             }
         }
         Stmt::Comment(_) => Ok(Flow::Normal),
