@@ -2582,34 +2582,46 @@ async fn eval_stmt_inner(
                     interval.tick().await;
 
                     let mut results = Vec::new();
+                    let mut tick_error = None;
                     for stmt in &body_clone {
                         match stmt.unpack() {
-                            Stmt::Expr(expr) => {
-                                if let Ok(val) = eval_expr(expr, &env_clone).await {
-                                    match val {
-                                        Val::List(list) => {
-                                            results.extend(list);
-                                        }
-                                        Val::Null => {}
-                                        other => {
-                                            results.push(other);
-                                        }
+                            Stmt::Expr(expr) => match eval_expr(expr, &env_clone).await {
+                                Ok(val) => match val {
+                                    Val::List(list) => results.extend(list),
+                                    Val::Null => {}
+                                    other => results.push(other),
+                                },
+                                Err(error) => {
+                                    tick_error = Some(error);
+                                    break;
+                                }
+                            },
+                            other_stmt => {
+                                match Box::pin(eval_stmt(other_stmt, &env_clone, false)).await {
+                                    Ok(_) => {}
+                                    Err(error) => {
+                                        tick_error = Some(error);
+                                        break;
                                     }
                                 }
-                            }
-                            other_stmt => {
-                                let _ = Box::pin(eval_stmt(other_stmt, &env_clone, false)).await;
                             }
                         }
                     }
 
-                    let _ = tx.send(Arc::new(results));
+                    if let Some(error) = tick_error {
+                        // A failed tick must not replace a valid snapshot with
+                        // partial data. Keep polling so transient failures can
+                        // recover, while making the diagnostic observable.
+                        env_clone.set_last_error(FshDiag::new(error));
+                    } else {
+                        let _ = tx.send(Arc::new(results));
 
-                    let _ = env_clone
-                        .reactive
-                        .tx
-                        .send(ReactiveEvent::TriggerCell(name_clone.clone()))
-                        .await;
+                        let _ = env_clone
+                            .reactive
+                            .tx
+                            .send(ReactiveEvent::TriggerCell(name_clone.clone()))
+                            .await;
+                    }
                 }
             });
 
