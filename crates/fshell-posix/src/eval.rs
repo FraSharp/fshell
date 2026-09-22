@@ -768,19 +768,28 @@ fn eval_binary_extended(
         brush_parser::ast::BinaryPredicate::LeftSortsBeforeRight => left < right,
         brush_parser::ast::BinaryPredicate::LeftSortsAfterRight => left > right,
         brush_parser::ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot => {
-            file_mtime(&env.resolve_path(left)) > file_mtime(&env.resolve_path(right))
+            crate::posix_builtins::test_builtin::eval_file_binary(
+                "-nt",
+                &env.resolve_path(left),
+                &env.resolve_path(right),
+            )
         }
         brush_parser::ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes => {
-            file_mtime(&env.resolve_path(left)) < file_mtime(&env.resolve_path(right))
+            crate::posix_builtins::test_builtin::eval_file_binary(
+                "-ot",
+                &env.resolve_path(left),
+                &env.resolve_path(right),
+            )
+        }
+        brush_parser::ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers => {
+            crate::posix_builtins::test_builtin::eval_file_binary(
+                "-ef",
+                &env.resolve_path(left),
+                &env.resolve_path(right),
+            )
         }
         _ => false,
     }
-}
-
-fn file_mtime(path: &std::path::Path) -> std::time::SystemTime {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(std::time::UNIX_EPOCH)
 }
 
 // Registry for POSIX functions scoped to Env (name -> compound command)
@@ -2218,7 +2227,7 @@ fn eval_test_args(args: &[String], env: &Env) -> Result<bool, String> {
         }
         3 => {
             if is_binary_primary(&clean_args[1]) {
-                eval_binary_primary(&clean_args[0], &clean_args[1], &clean_args[2])
+                eval_binary_primary(&clean_args[0], &clean_args[1], &clean_args[2], env)
             } else if clean_args[0] == "!" {
                 Ok(!eval_test_args(&clean_args[1..], env)?)
             } else if clean_args[0] == "(" && clean_args[2] == ")" {
@@ -2306,7 +2315,7 @@ fn eval_unary_primary(op: &str, val: &str, env: &Env) -> bool {
     }
 }
 
-fn eval_binary_primary(left: &str, op: &str, right: &str) -> Result<bool, String> {
+fn eval_binary_primary(left: &str, op: &str, right: &str, env: &Env) -> Result<bool, String> {
     match op {
         "=" | "==" => Ok(left == right),
         "!=" => Ok(left != right),
@@ -2318,6 +2327,11 @@ fn eval_binary_primary(left: &str, op: &str, right: &str) -> Result<bool, String
         "-le" => Ok(parse_test_int(left)? <= parse_test_int(right)?),
         "-gt" => Ok(parse_test_int(left)? > parse_test_int(right)?),
         "-ge" => Ok(parse_test_int(left)? >= parse_test_int(right)?),
+        "-nt" | "-ot" | "-ef" => Ok(crate::posix_builtins::test_builtin::eval_file_binary(
+            op,
+            &env.resolve_path(left),
+            &env.resolve_path(right),
+        )),
         _ => Ok(false),
     }
 }

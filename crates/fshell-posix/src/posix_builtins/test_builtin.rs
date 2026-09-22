@@ -92,15 +92,17 @@ fn eval_binary_test(
         brush_ast::BinaryPredicate::ArithmeticGreaterThanOrEqualTo => {
             Ok(parse_int(left)? >= parse_int(right)?)
         }
-        brush_ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot => {
-            Ok(file_mtime(&env.resolve_path(left)) > file_mtime(&env.resolve_path(right)))
-        }
-        brush_ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes => {
-            Ok(file_mtime(&env.resolve_path(left)) < file_mtime(&env.resolve_path(right)))
-        }
-        brush_ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers => {
-            Ok(file_mtime(&env.resolve_path(left)) == file_mtime(&env.resolve_path(right)))
-        }
+        brush_ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot => Ok(
+            eval_file_binary("-nt", &env.resolve_path(left), &env.resolve_path(right)),
+        ),
+        brush_ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes => Ok(
+            eval_file_binary("-ot", &env.resolve_path(left), &env.resolve_path(right)),
+        ),
+        brush_ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers => Ok(eval_file_binary(
+            "-ef",
+            &env.resolve_path(left),
+            &env.resolve_path(right),
+        )),
     }
 }
 
@@ -110,8 +112,44 @@ fn parse_int(s: &str) -> Result<i64, String> {
         .map_err(|error| format!("integer expression expected: {:?} ({})", s.trim(), error))
 }
 
-fn file_mtime(path: &std::path::Path) -> std::time::SystemTime {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(std::time::UNIX_EPOCH)
+pub(crate) fn eval_file_binary(op: &str, left: &std::path::Path, right: &std::path::Path) -> bool {
+    let left_metadata = std::fs::metadata(left).ok();
+    let right_metadata = std::fs::metadata(right).ok();
+
+    match op {
+        "-nt" => match (left_metadata.as_ref(), right_metadata.as_ref()) {
+            (Some(left), Some(right)) => match (left.modified(), right.modified()) {
+                (Ok(left), Ok(right)) => left > right,
+                _ => false,
+            },
+            (Some(_), None) => true,
+            _ => false,
+        },
+        "-ot" => match (left_metadata.as_ref(), right_metadata.as_ref()) {
+            (Some(left), Some(right)) => match (left.modified(), right.modified()) {
+                (Ok(left), Ok(right)) => left < right,
+                _ => false,
+            },
+            (None, Some(_)) => true,
+            _ => false,
+        },
+        "-ef" => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+
+                match (left_metadata.as_ref(), right_metadata.as_ref()) {
+                    (Some(left), Some(right)) => {
+                        left.dev() == right.dev() && left.ino() == right.ino()
+                    }
+                    _ => false,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
+        _ => false,
+    }
 }

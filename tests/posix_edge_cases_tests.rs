@@ -494,6 +494,30 @@ async fn test_posix_test_rejects_invalid_integer_operands() {
 }
 
 #[tokio::test]
+async fn test_posix_test_file_comparisons() {
+    let cwd_guard = CwdGuard::new_temp();
+    let env = setup_posix_env();
+    std::fs::write(cwd_guard.path().join("older"), "old").expect("create older file");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(cwd_guard.path().join("newer"), "new").expect("create newer file");
+    std::fs::hard_link(
+        cwd_guard.path().join("newer"),
+        cwd_guard.path().join("hardlink"),
+    )
+    .expect("create hard link");
+
+    assert_eq!(run_posix("[ newer -nt older ]", &env).await, 0);
+    assert_eq!(run_posix("[ older -ot newer ]", &env).await, 0);
+    assert_eq!(run_posix("[ newer -nt missing ]", &env).await, 0);
+    assert_eq!(run_posix("[ missing -ot newer ]", &env).await, 0);
+    assert_eq!(run_posix("[ newer -ef hardlink ]", &env).await, 0);
+    assert_eq!(run_posix("[ newer -ef older ]", &env).await, 1);
+
+    assert_eq!(run_posix("[[ newer -nt older ]]", &env).await, 0);
+    assert_eq!(run_posix("[[ newer -ef hardlink ]]", &env).await, 0);
+}
+
+#[tokio::test]
 async fn test_posix_printf_formatting() {
     let env = setup_posix_env();
     let (_, out) = run_posix_capture(r#"printf "Name: %s, Age: %d\n" Alice 30"#, &env).await;
