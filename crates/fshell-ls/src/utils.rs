@@ -326,14 +326,18 @@ pub fn calculate_output_buffer_size(
     _arena: &[u8],
     long_format: bool,
 ) -> usize {
-    let count = entries.len();
-    if long_format {
+    estimate_output_buffer_size(entries.len(), long_format)
+}
+
+fn estimate_output_buffer_size(count: usize, long_format: bool) -> usize {
+    let estimated = if long_format {
         // Long format: mode(11) + nlink(5) + user(20) + group(20) + size(20) + time(20) + inode(15) + git(2) + filename(255) = ~368
         count.saturating_mul(512)
     } else {
         // Column format: filename(255) + inode(15) + icon(2) + spacing(4) = ~276
         count.saturating_mul(256)
-    }
+    };
+    estimated.clamp(8 * 1024, LARGE_BUFFER_SIZE)
 }
 
 /// Check if a directory entry represents a directory.
@@ -391,5 +395,28 @@ pub fn is_directory(
     } else {
         // A dangling symlink is still a non-directory entry when following it.
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_buffer_estimate_has_a_bounded_capacity() {
+        assert_eq!(
+            estimate_output_buffer_size(10_000_000, false),
+            LARGE_BUFFER_SIZE
+        );
+        assert_eq!(
+            estimate_output_buffer_size(10_000_000, true),
+            LARGE_BUFFER_SIZE
+        );
+    }
+
+    #[test]
+    fn empty_listing_still_gets_a_useful_buffer_estimate() {
+        assert_eq!(estimate_output_buffer_size(0, false), 8 * 1024);
+        assert_eq!(estimate_output_buffer_size(0, true), 8 * 1024);
     }
 }
