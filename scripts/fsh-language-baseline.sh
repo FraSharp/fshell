@@ -33,25 +33,48 @@ for script_file in "$cases_dir"/*.fsh; do
 
     case_dir=$tmp_root/$case_name
     mkdir "$case_dir" || exit 2
+    case_script=$case_dir/$case_name.fsh
+    cp "$script_file" "$case_script" || exit 2
     script_text=$(cat "$script_file")
     if (cd "$case_dir" && "$fsh_bin" --no-color --error-format compact -c "$script_text") \
-        >"$tmp_root/fsh.out" 2>"$tmp_root/fsh.err"; then
-        status=0
+        >"$tmp_root/command.out" 2>"$tmp_root/command.err"; then
+        command_status=0
     else
-        status=$?
+        command_status=$?
+    fi
+    if (cd "$case_dir" && "$fsh_bin" --no-color --error-format compact "$case_script") \
+        >"$tmp_root/script.out" 2>"$tmp_root/script.err"; then
+        script_status=0
+    else
+        script_status=$?
     fi
     expected_rc=$(cat "$expected_status")
     count=$((count + 1))
 
-    if [ "$status" -eq "$expected_rc" ] && cmp -s "$tmp_root/fsh.out" "$expected_out" && [ ! -s "$tmp_root/fsh.err" ]; then
+    command_ok=1
+    if [ "$command_status" -ne "$expected_rc" ] || ! cmp -s "$tmp_root/command.out" "$expected_out" || [ -s "$tmp_root/command.err" ]; then
+        command_ok=0
+        echo "  -c status $command_status, expected $expected_rc"
+        diff -u "$expected_out" "$tmp_root/command.out" || true
+        if [ -s "$tmp_root/command.err" ]; then
+            echo "    stderr (-c):"
+            sed 's/^/      /' "$tmp_root/command.err"
+        fi
+    fi
+    script_ok=1
+    if [ "$script_status" -ne "$expected_rc" ] || ! cmp -s "$tmp_root/script.out" "$expected_out" || [ -s "$tmp_root/script.err" ]; then
+        script_ok=0
+        echo "  script status $script_status, expected $expected_rc"
+        diff -u "$expected_out" "$tmp_root/script.out" || true
+        if [ -s "$tmp_root/script.err" ]; then
+            echo "    stderr (script):"
+            sed 's/^/      /' "$tmp_root/script.err"
+        fi
+    fi
+    if [ "$command_ok" -eq 1 ] && [ "$script_ok" -eq 1 ]; then
         echo "PASS    $case_name"
     else
-        echo "FAIL    $case_name (status $status, expected $expected_rc)"
-        diff -u "$expected_out" "$tmp_root/fsh.out" || true
-        if [ -s "$tmp_root/fsh.err" ]; then
-            echo "  fsh stderr:"
-            sed 's/^/    /' "$tmp_root/fsh.err"
-        fi
+        echo "FAIL    $case_name"
         failures=$((failures + 1))
     fi
 done
