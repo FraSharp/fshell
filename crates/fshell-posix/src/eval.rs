@@ -698,7 +698,7 @@ fn eval_extended_test(expr: &ExtendedTestExpr, env: &Env) -> Result<bool, PosixE
         ExtendedTestExpr::BinaryTest(op, left, right) => {
             let lv = expand_word(&left.value, env, &ExpansionConfig::default(), &[])?.join(" ");
             let rv = expand_word(&right.value, env, &ExpansionConfig::default(), &[])?.join(" ");
-            Ok(eval_binary_extended(op, &lv, &rv, env))
+            Ok(eval_binary_extended(op, &lv, &rv, env)?)
         }
     }
 }
@@ -741,55 +741,64 @@ fn eval_binary_extended(
     left: &str,
     right: &str,
     env: &Env,
-) -> bool {
+) -> Result<bool, PosixError> {
     match op {
         brush_parser::ast::BinaryPredicate::StringExactlyMatchesString
-        | brush_parser::ast::BinaryPredicate::StringExactlyMatchesPattern => left == right,
+        | brush_parser::ast::BinaryPredicate::StringExactlyMatchesPattern => Ok(left == right),
         brush_parser::ast::BinaryPredicate::StringDoesNotExactlyMatchString
-        | brush_parser::ast::BinaryPredicate::StringDoesNotExactlyMatchPattern => left != right,
+        | brush_parser::ast::BinaryPredicate::StringDoesNotExactlyMatchPattern => Ok(left != right),
         brush_parser::ast::BinaryPredicate::ArithmeticEqualTo => {
-            left.parse::<i64>().unwrap_or(0) == right.parse::<i64>().unwrap_or(0)
+            Ok(parse_test_int_for_extended(left)? == parse_test_int_for_extended(right)?)
         }
         brush_parser::ast::BinaryPredicate::ArithmeticNotEqualTo => {
-            left.parse::<i64>().unwrap_or(0) != right.parse::<i64>().unwrap_or(0)
+            Ok(parse_test_int_for_extended(left)? != parse_test_int_for_extended(right)?)
         }
         brush_parser::ast::BinaryPredicate::ArithmeticLessThan => {
-            left.parse::<i64>().unwrap_or(0) < right.parse::<i64>().unwrap_or(0)
+            Ok(parse_test_int_for_extended(left)? < parse_test_int_for_extended(right)?)
         }
         brush_parser::ast::BinaryPredicate::ArithmeticLessThanOrEqualTo => {
-            left.parse::<i64>().unwrap_or(0) <= right.parse::<i64>().unwrap_or(0)
+            Ok(parse_test_int_for_extended(left)? <= parse_test_int_for_extended(right)?)
         }
         brush_parser::ast::BinaryPredicate::ArithmeticGreaterThan => {
-            left.parse::<i64>().unwrap_or(0) > right.parse::<i64>().unwrap_or(0)
+            Ok(parse_test_int_for_extended(left)? > parse_test_int_for_extended(right)?)
         }
         brush_parser::ast::BinaryPredicate::ArithmeticGreaterThanOrEqualTo => {
-            left.parse::<i64>().unwrap_or(0) >= right.parse::<i64>().unwrap_or(0)
+            Ok(parse_test_int_for_extended(left)? >= parse_test_int_for_extended(right)?)
         }
-        brush_parser::ast::BinaryPredicate::LeftSortsBeforeRight => left < right,
-        brush_parser::ast::BinaryPredicate::LeftSortsAfterRight => left > right,
+        brush_parser::ast::BinaryPredicate::LeftSortsBeforeRight => Ok(left < right),
+        brush_parser::ast::BinaryPredicate::LeftSortsAfterRight => Ok(left > right),
         brush_parser::ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot => {
-            crate::posix_builtins::test_builtin::eval_file_binary(
+            Ok(crate::posix_builtins::test_builtin::eval_file_binary(
                 "-nt",
                 &env.resolve_path(left),
                 &env.resolve_path(right),
-            )
+            ))
         }
         brush_parser::ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes => {
-            crate::posix_builtins::test_builtin::eval_file_binary(
+            Ok(crate::posix_builtins::test_builtin::eval_file_binary(
                 "-ot",
                 &env.resolve_path(left),
                 &env.resolve_path(right),
-            )
+            ))
         }
         brush_parser::ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers => {
-            crate::posix_builtins::test_builtin::eval_file_binary(
+            Ok(crate::posix_builtins::test_builtin::eval_file_binary(
                 "-ef",
                 &env.resolve_path(left),
                 &env.resolve_path(right),
-            )
+            ))
         }
-        _ => false,
+        _ => Ok(false),
     }
+}
+
+fn parse_test_int_for_extended(s: &str) -> Result<i64, PosixError> {
+    parse_test_int(s).map_err(|message| {
+        PosixError::Engine(EngineError::Generic {
+            message,
+            span: None,
+        })
+    })
 }
 
 // Registry for POSIX functions scoped to Env (name -> compound command)

@@ -528,6 +528,20 @@ async fn test_posix_test_file_comparisons() {
 }
 
 #[tokio::test]
+async fn test_posix_extended_test_rejects_invalid_integer_operands() {
+    let env = setup_posix_env();
+    let parsed = parse_posix_script(r#"[[ "not-a-number" -eq 0 ]]"#)
+        .expect("failed to parse invalid extended test operand script");
+    let result = eval_source(&parsed, &env, &EvalConfig::default()).await;
+
+    assert!(matches!(
+        result,
+        Err(fshell_engine::EngineError::Generic { message, .. })
+            if message.contains("integer expression expected")
+    ));
+}
+
+#[tokio::test]
 async fn test_posix_printf_formatting() {
     let env = setup_posix_env();
     let (_, out) = run_posix_capture(r#"printf "Name: %s, Age: %d\n" Alice 30"#, &env).await;
