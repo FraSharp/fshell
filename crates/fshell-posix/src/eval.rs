@@ -6,7 +6,7 @@ use brush_parser::ast::*;
 use fshell_core::Val;
 use fshell_engine::{EngineError, Env, Signal};
 
-use crate::expand::{ExpansionConfig, expand_word, expand_word_as_pattern};
+use crate::expand::{ExpansionConfig, expand_assignment_word, expand_word, expand_word_as_pattern};
 use crate::parser::ParsedScript;
 
 /// How the POSIX evaluator was invoked.
@@ -1060,8 +1060,7 @@ async fn eval_simple_command(
                     };
                     let value = match &assign.value {
                         AssignmentValue::Scalar(word) => {
-                            expand_word(&word.value, env, &ExpansionConfig::default(), positional)?
-                                .join(" ")
+                            expand_assignment_word(&word.value, env, positional)?
                         }
                         AssignmentValue::Array(elems) => elems
                             .iter()
@@ -1104,8 +1103,7 @@ async fn eval_simple_command(
                     };
                     let value = match &assign.value {
                         AssignmentValue::Scalar(word) => {
-                            expand_word(&word.value, env, &ExpansionConfig::default(), positional)?
-                                .join(" ")
+                            expand_assignment_word(&word.value, env, positional)?
                         }
                         AssignmentValue::Array(elems) => elems
                             .iter()

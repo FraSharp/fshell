@@ -210,6 +210,17 @@ async fn posix_command_substitution() {
 }
 
 #[tokio::test]
+async fn posix_assignment_command_substitution_preserves_embedded_newlines() {
+    let env = setup_posix_env();
+    let code = run_posix("X=$(printf 'first\\nsecond\\n\\n')", &env).await;
+    assert_eq!(code, 0);
+    assert_eq!(
+        env.vars.read().get("X"),
+        Some(&Val::String("first\nsecond".to_string()))
+    );
+}
+
+#[tokio::test]
 async fn posix_arithmetic_expansion() {
     let env = setup_posix_env();
     let code = run_posix("X=$((1 + 2)); echo $X", &env).await;

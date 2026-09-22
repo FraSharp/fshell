@@ -218,6 +218,28 @@ pub fn expand_word(
     expand_word_internal(word_str, env, cfg, positional, true, false)
 }
 
+/// Expand a shell assignment value. POSIX assignment values do not undergo
+/// field splitting or pathname expansion, even when their expansions contain
+/// IFS whitespace or glob characters.
+pub(crate) fn expand_assignment_word(
+    word_str: &str,
+    env: &fshell_engine::Env,
+    positional: &[String],
+) -> Result<String, fshell_engine::EngineError> {
+    let values = expand_word_internal(
+        word_str,
+        env,
+        &ExpansionConfig {
+            do_glob: false,
+            ..Default::default()
+        },
+        positional,
+        false,
+        false,
+    )?;
+    Ok(values.join(" "))
+}
+
 /// Expand a shell word for a `case` pattern.  Quoted and escaped wildcard
 /// characters are retained as literal glob syntax (for example `[*]`) so the
 /// pattern matcher cannot accidentally turn them back into wildcards.
