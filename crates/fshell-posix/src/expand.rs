@@ -264,7 +264,7 @@ fn expand_word_internal(
                             expanded.push_str(&val);
                         }
                         WordPiece::CommandSubstitution(cmd) => {
-                            let out = run_command_subst(cmd, env);
+                            let out = run_command_subst(cmd, env)?;
                             expanded.push_str(&out);
                         }
                         WordPiece::ArithmeticExpression(expr) => {
@@ -289,11 +289,11 @@ fn expand_word_internal(
                 }
             }
             WordPiece::CommandSubstitution(cmd) => {
-                let out = run_command_subst(cmd, env);
+                let out = run_command_subst(cmd, env)?;
                 expanded.push_str(&out);
             }
             WordPiece::BackquotedCommandSubstitution(cmd) => {
-                let out = run_command_subst(cmd, env);
+                let out = run_command_subst(cmd, env)?;
                 expanded.push_str(&out);
             }
             WordPiece::ArithmeticExpression(expr) => {
@@ -751,46 +751,37 @@ fn expand_glob(pattern: &str, cwd: &std::path::Path) -> Vec<String> {
     }
 }
 
-fn run_command_subst(cmd: &str, env: &fshell_engine::Env) -> String {
+fn run_command_subst(
+    cmd: &str,
+    env: &fshell_engine::Env,
+) -> Result<String, fshell_engine::EngineError> {
     let child_env = crate::bridge::fork_env_for_subshell(env);
-    if let Ok(parsed) = crate::parser::parse_posix_script(cmd) {
-        let bytes_res = std::thread::scope(|s| {
-            s.spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
+    let parsed = crate::parser::parse_posix_script(cmd)?;
+    let bytes = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .ok()
-                    .map(|rt| {
-                        rt.block_on(async {
-                            crate::eval::eval_source_capture(&parsed, &child_env).await
-                        })
-                    })
-                    .unwrap_or(Ok(Vec::new()))
+                    .map_err(|error| fshell_engine::EngineError::Generic {
+                        message: format!("command substitution runtime failed: {error}"),
+                        span: None,
+                    })?;
+                runtime
+                    .block_on(async { crate::eval::eval_source_capture(&parsed, &child_env).await })
             })
             .join()
-            .unwrap_or(Ok(Vec::new()))
-        });
+            .map_err(|_| fshell_engine::EngineError::Generic {
+                message: "command substitution task panicked".to_string(),
+                span: None,
+            })?
+    })?;
 
-        if let Ok(bytes) = bytes_res {
-            let mut s = String::from_utf8_lossy(&bytes).into_owned();
-            while s.ends_with('\n') || s.ends_with('\r') {
-                s.pop();
-            }
-            return s;
-        }
+    let mut output = String::from_utf8_lossy(&bytes).into_owned();
+    while output.ends_with('\n') || output.ends_with('\r') {
+        output.pop();
     }
-
-    let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
-    match output {
-        Ok(out) => {
-            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
-            while s.ends_with('\n') || s.ends_with('\r') {
-                s.pop();
-            }
-            s
-        }
-        Err(_) => String::new(),
-    }
+    Ok(output)
 }
 
 fn eval_arithmetic(expr: &str, env: &fshell_engine::Env) -> String {

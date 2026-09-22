@@ -314,6 +314,28 @@ async fn test_posix_nested_command_substitution() {
 }
 
 #[tokio::test]
+async fn test_posix_command_substitution_propagates_nested_expansion_errors() {
+    let env = setup_posix_env();
+    let parsed =
+        parse_posix_script(r#"printf '%s\n' "$(echo ${MISSING:?nested required})"; AFTER=ran"#)
+            .expect("failed to parse command-substitution script");
+    let result = eval_source(&parsed, &env, &EvalConfig::default()).await;
+
+    assert!(matches!(
+        result,
+        Err(fshell_engine::EngineError::ParameterExpansion {
+            parameter,
+            message,
+            ..
+        }) if parameter == "${MISSING}" && message == "nested required"
+    ));
+    assert!(
+        !env.vars.read().contains_key("AFTER"),
+        "the outer script must stop when its substitution fails"
+    );
+}
+
+#[tokio::test]
 async fn test_posix_command_substitution_backticks() {
     let env = setup_posix_env();
     let script = "echo `echo hello `";
