@@ -169,6 +169,42 @@ pub static TOPICS: &[HelpTopic] = &[
         related: &["help"],
     },
     HelpTopic {
+        name: "intent",
+        category: HelpCategory::Builtin,
+        summary: "Run a structured semantic action",
+        description: "The non-invasive front end for fshell's semantic layer. It consumes a structured Intent — the typed shape a small function-calling model (e.g. FunctionGemma) is expected to produce — and validates it, renders it, and optionally executes it through fshell's ordinary machinery (capabilities, destructive-command guard, sandbox). The input is always a typed action, never an arbitrary command string.\n\nAn Intent distinguishes perform ('kill PID 1234'), explain ('how do I kill PID 1234?'), inform ('what does SIGTERM do?'), and unsupported. Incomplete or ambiguous requests carry structured issues instead of invented values. By default nothing is executed; --run executes after a risk check. Destructive actions (signals, deletion, containers, service changes) require confirmation and are refused when non-interactive.\n\n--schema prints OpenAI-style function-calling tool definitions derived from the semantic types, for use with a future local model.",
+        syntax: "intent --json <JSON> | --file <PATH> | --actions | --schema [OPTIONS]",
+        examples: &[
+            HelpExample {
+                input: "intent --json '{\"kind\":\"memory_info\"}'",
+                explanation: "Show how the request would be performed on fsh and POSIX.",
+            },
+            HelpExample {
+                input: "intent --file plan.json --run",
+                explanation: "Validate and execute a semantic action from a file.",
+            },
+            HelpExample {
+                input: "intent --json '{\"kind\":\"find_files\",\"root\":\".\",\"extension\":\"log\"}' --run | count",
+                explanation: "Execute a semantic action and compose it in a pipeline.",
+            },
+            HelpExample {
+                input: "intent --actions",
+                explanation: "List the supported semantic actions and their risk.",
+            },
+        ],
+        flags: &[
+            HelpFlag { flag: "--json <JSON>", desc: "The Intent (or bare Action) to process; may also arrive on stdin" },
+            HelpFlag { flag: "--file <PATH>", desc: "Read the Intent JSON from a file" },
+            HelpFlag { flag: "--target <fsh|posix>", desc: "Execution target (default: fsh)" },
+            HelpFlag { flag: "--run", desc: "Execute the action after validation and the risk check" },
+            HelpFlag { flag: "--explain", desc: "Print both renderings and stop (never executes)" },
+            HelpFlag { flag: "--risk", desc: "Print only the risk classification" },
+            HelpFlag { flag: "--actions", desc: "List the supported semantic actions" },
+            HelpFlag { flag: "--schema", desc: "Print function-calling tool schemas" },
+        ],
+        related: &["ai", "help"],
+    },
+    HelpTopic {
         name: "ls",
         category: HelpCategory::Builtin,
         summary: "List directory contents",

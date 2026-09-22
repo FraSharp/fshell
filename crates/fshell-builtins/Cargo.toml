@@ -23,6 +23,7 @@ extract = []
 fshell-core = { path = "../fshell-core" }
 fshell-capabilities = { path = "../fshell-capabilities" }
 fshell-engine = { path = "../fshell-engine" }
+fshell-semantic = { path = "../fshell-semantic" }
 fshell-render = { path = "../fshell-render" }
 tokio = { workspace = true }
 serde = { workspace = true }
