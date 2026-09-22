@@ -1261,6 +1261,15 @@ impl Parser {
                     self.skip_horizontal_whitespace();
                     let len_str = self.parse_identifier()?;
                     if let Ok(len) = len_str.parse::<usize>() {
+                        if len > MAX_HASH_XOF_OUTPUT_BYTES {
+                            return Err(ParseError::SyntaxError {
+                                message: format!(
+                                    "XOF output length exceeds the {} byte shell limit",
+                                    MAX_HASH_XOF_OUTPUT_BYTES
+                                ),
+                                span: self.current_span(),
+                            });
+                        }
                         xof_len = len;
                         if let HashMode::Xof(_) = mode {
                             mode = HashMode::Xof(xof_len);

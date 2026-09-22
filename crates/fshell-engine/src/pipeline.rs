@@ -2144,6 +2144,14 @@ async fn execute_pipeline_with_input_and_cancellation(
                 });
             }
             PipelineStage::Hash { mode, per_record } => {
+                if let fshell_core::HashMode::Xof(len) = mode
+                    && len > fshell_core::MAX_HASH_XOF_OUTPUT_BYTES
+                {
+                    return Err(format!(
+                        "XOF output length exceeds the {} byte shell limit",
+                        fshell_core::MAX_HASH_XOF_OUTPUT_BYTES
+                    ));
+                }
                 spawn_stage!(async move {
                     if let Some(mut rx) = current_rx {
                         if per_record {
@@ -2169,8 +2177,13 @@ async fn execute_pipeline_with_input_and_cancellation(
                                             fshell_core::HashMode::Hash512 => 64,
                                             fshell_core::HashMode::Xof(len) => len,
                                         };
-                                        if let Ok(bytes) = serde_json::to_vec(val_arc.as_ref()) {
-                                            hasher.update(&bytes);
+                                        match val_arc.as_ref() {
+                                            Val::Blob(bytes) => hasher.update(bytes),
+                                            value => {
+                                                if let Ok(bytes) = serde_json::to_vec(value) {
+                                                    hasher.update(&bytes);
+                                                }
+                                            }
                                         }
                                         let digest = hasher.finalize(output_len);
                                         let mut hash_hex = String::with_capacity(digest.len() * 2);
@@ -2272,8 +2285,13 @@ async fn execute_pipeline_with_input_and_cancellation(
                                 match payload {
                                     PipelinePayload::Data(val_arc) => {
                                         count += 1;
-                                        if let Ok(bytes) = serde_json::to_vec(val_arc.as_ref()) {
-                                            hasher.update(&bytes);
+                                        match val_arc.as_ref() {
+                                            Val::Blob(bytes) => hasher.update(bytes),
+                                            value => {
+                                                if let Ok(bytes) = serde_json::to_vec(value) {
+                                                    hasher.update(&bytes);
+                                                }
+                                            }
                                         }
                                     }
                                     PipelinePayload::Bytes(b) => {

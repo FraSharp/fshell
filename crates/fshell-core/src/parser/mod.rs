@@ -3148,4 +3148,28 @@ mod tests {
         assert!(matches!(left.stages[1], PipelineStage::Write { .. }));
         assert!(matches!(right.stages[1], PipelineStage::Write { .. }));
     }
+
+    #[test]
+    fn hash_stage_rejects_xof_output_over_shell_limit() {
+        let source = format!(
+            "echo input | hash -a xof -o {}",
+            MAX_HASH_XOF_OUTPUT_BYTES + 1
+        );
+        assert!(Parser::new(&source).parse_statements().is_err());
+    }
+
+    #[test]
+    fn hash_stage_accepts_xof_output_at_shell_limit() {
+        let source = format!("echo input | hash -a xof -o {MAX_HASH_XOF_OUTPUT_BYTES}");
+        assert!(Parser::new(&source).parse_statements().is_ok());
+    }
+
+    #[test]
+    fn hash_stage_rejects_negative_xof_output() {
+        assert!(
+            Parser::new("echo input | hash -a xof -o -1")
+                .parse_statements()
+                .is_err()
+        );
+    }
 }

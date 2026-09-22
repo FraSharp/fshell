@@ -226,6 +226,13 @@ pub enum HashMode {
     Xof(usize),
 }
 
+/// Maximum XOF output accepted by shell hash commands and pipeline stages.
+///
+/// The library API remains unbounded for callers that manage allocation limits
+/// themselves. Shell input is user-controlled, so it has a conservative 1 MiB
+/// output cap.
+pub const MAX_HASH_XOF_OUTPUT_BYTES: usize = 1024 * 1024;
+
 /// Supported boundary serialization formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SerializationFormat {

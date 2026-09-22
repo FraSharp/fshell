@@ -83,6 +83,31 @@ async fn test_integration_pipeline_hash() {
             }
         }
     }
+
+    let blob = vec![0x00, 0x80, 0xff, 0x41];
+    env.vars
+        .write()
+        .insert("blob_data".to_string(), Val::Blob(blob.clone()));
+    let mut parser = Parser::new("$blob_data | hash --per-record");
+    let stmts = parser.parse_statements().unwrap();
+    let Stmt::Expr(expr) = stmts[0].unpack() else {
+        panic!("Expected expression statement");
+    };
+    let res = eval_expr(expr, &env).await.unwrap();
+    let Val::List(items) = res else {
+        panic!("Expected list result");
+    };
+    let Val::Map(map) = &items[0] else {
+        panic!("Expected map result");
+    };
+    let expected_hash = fshell_hash::fhash256(&blob)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        map.get(&ustr::ustr("_hash")),
+        Some(&Val::String(expected_hash))
+    );
 }
 
 #[tokio::test]

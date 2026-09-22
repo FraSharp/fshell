@@ -50,12 +50,20 @@ pub fn hash_builtin(
                     if i + 1 < args.len() {
                         match &args[i + 1] {
                             Val::Int(n) => {
-                                xof_len = *n as usize;
+                                let Ok(parsed_len) = usize::try_from(*n) else {
+                                    return Err(BuiltinError::InvalidArgument {
+                                        cmd: "hash".into(),
+                                        arg: format!("invalid -o value: {}", n),
+                                        span,
+                                    }
+                                    .into());
+                                };
+                                xof_len = validate_xof_len(parsed_len, span)?;
                                 i += 2;
                             }
                             Val::String(n_str) => {
                                 if let Ok(n) = n_str.parse::<usize>() {
-                                    xof_len = n;
+                                    xof_len = validate_xof_len(n, span)?;
                                     i += 2;
                                 } else {
                                     return Err(BuiltinError::InvalidArgument {
@@ -126,8 +134,8 @@ pub fn hash_builtin(
                 while let Some(payload) = rx.recv().await {
                     match payload {
                         PipelinePayload::Data(val_arc) => match val_arc.as_ref() {
-                            Val::String(s) => {
-                                hasher.update(s.as_bytes());
+                            Val::Blob(bytes) => {
+                                hasher.update(bytes);
                             }
                             other => {
                                 if let Ok(bytes) = serde_json::to_vec(other) {
@@ -135,9 +143,8 @@ pub fn hash_builtin(
                                 }
                             }
                         },
-                        PipelinePayload::Bytes(_) => {
-                            // Bytes payloads are dropped by this stage.
-                            continue;
+                        PipelinePayload::Bytes(bytes) => {
+                            hasher.update(&bytes);
                         }
                         PipelinePayload::Structured(_) => {}
                     }
@@ -228,11 +235,80 @@ fn make_hasher(algo: &str, xof_len: usize) -> Result<(fshell_hash::Hasher, usize
     match algo {
         "256" => Ok((fshell_hash::Hasher::new(0x00, 16), 32)),
         "512" => Ok((fshell_hash::Hasher::new(0x04, 16), 64)),
-        "xof" => Ok((fshell_hash::Hasher::new(0x02, 16), xof_len)),
+        "xof" => Ok((
+            fshell_hash::Hasher::new(0x02, 16),
+            validate_xof_len(xof_len, None)?,
+        )),
         _ => Err(BuiltinError::InvalidArgument {
             cmd: "hash".into(),
             arg: format!("unknown algorithm '{}'", algo),
             span: None,
         }),
+    }
+}
+
+fn validate_xof_len(len: usize, span: Option<SourceSpan>) -> Result<usize, BuiltinError> {
+    if len > fshell_core::MAX_HASH_XOF_OUTPUT_BYTES {
+        return Err(BuiltinError::InvalidArgument {
+            cmd: "hash".into(),
+            arg: format!(
+                "XOF output length exceeds the {} byte shell limit",
+                fshell_core::MAX_HASH_XOF_OUTPUT_BYTES
+            ),
+            span,
+        });
+    }
+    Ok(len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stream_hash_includes_all_raw_byte_payloads() {
+        let env = Env::new();
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(2);
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(2);
+
+        hash_builtin(Some(input_rx), Vec::new(), &env, output_tx, None).unwrap();
+        input_tx
+            .send(PipelinePayload::Bytes(b"raw".to_vec().into()))
+            .await
+            .unwrap();
+        input_tx
+            .send(PipelinePayload::Bytes(b"\0bytes".to_vec().into()))
+            .await
+            .unwrap();
+        drop(input_tx);
+
+        let expected = fshell_hash::fhash256(b"raw\0bytes")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        match output_rx.recv().await.unwrap() {
+            PipelinePayload::Data(value) => {
+                assert_eq!(value.as_ref(), &Val::String(expected));
+            }
+            other => panic!("expected hash output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xof_shell_output_limit_is_enforced() {
+        assert!(make_hasher("xof", fshell_core::MAX_HASH_XOF_OUTPUT_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn hash_command_rejects_negative_xof_output() {
+        let env = Env::new();
+        let (output_tx, _output_rx) = tokio::sync::mpsc::channel(1);
+        let args = vec![
+            Val::String("-a".into()),
+            Val::String("xof".into()),
+            Val::String("-o".into()),
+            Val::Int(-1),
+        ];
+        assert!(hash_builtin(None, args, &env, output_tx, None).is_err());
     }
 }
