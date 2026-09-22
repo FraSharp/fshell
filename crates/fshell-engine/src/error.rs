@@ -74,6 +74,20 @@ pub enum EngineError {
         span: Option<SourceSpan>,
     },
 
+    #[error("Parameter expansion failed for {parameter}: {message}")]
+    #[diagnostic(
+        code = "FSH-SHELL-001",
+        help(
+            "Set the parameter before expanding it, or use a default expansion such as `${{parameter:-value}}`."
+        )
+    )]
+    ParameterExpansion {
+        parameter: String,
+        message: String,
+        #[label("required parameter is unset or empty")]
+        span: Option<SourceSpan>,
+    },
+
     #[error("{message}")]
     #[diagnostic(
         code = "FSH-IO-003",
@@ -155,6 +169,7 @@ impl EngineError {
             EngineError::DivisionByZero { span, .. } => *span,
             EngineError::PipelineError { span, .. } => *span,
             EngineError::MutationNotAllowed { span, .. } => *span,
+            EngineError::ParameterExpansion { span, .. } => *span,
             EngineError::IoError { span, .. } => *span,
             EngineError::Generic { span, .. } => *span,
             EngineError::Parse(_) => None,
@@ -171,6 +186,7 @@ impl EngineError {
             EngineError::DivisionByZero { span, .. } => *span = Some(new_span),
             EngineError::PipelineError { span, .. } => *span = Some(new_span),
             EngineError::MutationNotAllowed { span, .. } => *span = Some(new_span),
+            EngineError::ParameterExpansion { span, .. } => *span = Some(new_span),
             EngineError::IoError { span, .. } => *span = Some(new_span),
             EngineError::Generic { span, .. } => *span = Some(new_span),
             EngineError::Parse(_) => {}
@@ -193,6 +209,7 @@ impl DiagnosticExt for EngineError {
             EngineError::DivisionByZero { .. } => "arithmetic",
             EngineError::PipelineError { .. } => "pipeline",
             EngineError::MutationNotAllowed { .. } => "security",
+            EngineError::ParameterExpansion { .. } => "shell",
             EngineError::IoError { .. } => "io",
             EngineError::Generic { .. } => "general",
             EngineError::Parse(p) => p.category(),
@@ -209,6 +226,7 @@ impl DiagnosticExt for EngineError {
             EngineError::DivisionByZero { .. } => Some(ErrorCode::DivisionByZero),
             EngineError::PipelineError { .. } => Some(ErrorCode::PipelineError),
             EngineError::MutationNotAllowed { .. } => Some(ErrorCode::ImmutableVariable),
+            EngineError::ParameterExpansion { .. } => Some(ErrorCode::ParameterExpansion),
             EngineError::IoError { .. } => Some(ErrorCode::IoError),
             EngineError::Generic { .. } => Some(ErrorCode::General),
             EngineError::Parse(p) => p.code_enum(),

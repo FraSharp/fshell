@@ -125,121 +125,81 @@ fn get_effective_positional(env: &fshell_engine::Env, fallback: &[String]) -> Ve
 }
 
 /// Resolve a Parameter to its string value from Env.
-fn resolve_parameter(param: &Parameter, env: &fshell_engine::Env, positional: &[String]) -> String {
+fn resolve_parameter_with_presence(
+    param: &Parameter,
+    env: &fshell_engine::Env,
+    positional: &[String],
+) -> (String, bool) {
     let eff_pos = get_effective_positional(env, positional);
     match param {
         Parameter::Positional(n) => {
             if *n == 0 {
                 // $0 is shell name; expose as "fsh"
-                "fsh".to_string()
+                ("fsh".to_string(), true)
             } else {
-                eff_pos
+                let value = eff_pos
                     .get((*n as usize).saturating_sub(1))
                     .cloned()
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                let is_set = (*n as usize).saturating_sub(1) < eff_pos.len();
+                (value, is_set)
             }
         }
         Parameter::Special(sp) => match sp {
-            SpecialParameter::AllPositionalParameters { .. } => eff_pos.join(" "),
-            SpecialParameter::PositionalParameterCount => eff_pos.len().to_string(),
-            SpecialParameter::LastExitStatus => env.exit_code().to_string(),
-            SpecialParameter::CurrentOptionFlags => "".to_string(),
-            SpecialParameter::ProcessId => std::process::id().to_string(),
-            SpecialParameter::LastBackgroundProcessId => "0".to_string(),
-            SpecialParameter::ShellName => "fsh".to_string(),
+            SpecialParameter::AllPositionalParameters { .. } => (eff_pos.join(" "), true),
+            SpecialParameter::PositionalParameterCount => (eff_pos.len().to_string(), true),
+            SpecialParameter::LastExitStatus => (env.exit_code().to_string(), true),
+            SpecialParameter::CurrentOptionFlags => (String::new(), true),
+            SpecialParameter::ProcessId => (std::process::id().to_string(), true),
+            SpecialParameter::LastBackgroundProcessId => ("0".to_string(), true),
+            SpecialParameter::ShellName => ("fsh".to_string(), true),
         },
         Parameter::Named(name) => {
             // Check special vars first
             if let Some(v) = env.special_vars.resolve(name) {
-                return v.to_text();
+                return (v.to_text(), true);
             }
             if let Some(ref locals) = env.local_vars
                 && let Some(val) = locals.get(name.as_str())
             {
-                return val.to_text();
+                return (val.to_text(), true);
             }
-            Some(env.vars.read())
-                .and_then(|vars| vars.get(name.as_str()).map(|v| v.to_text()))
-                .unwrap_or_default()
+            env.vars
+                .read()
+                .get(name.as_str())
+                .map(|v| (v.to_text(), true))
+                .unwrap_or_else(|| (String::new(), false))
         }
         Parameter::NamedWithIndex { name, index } => {
             // Treat as array element — fall back to variable lookup with index suffix
             let key = format!("{}[{}]", name, index);
-            Some(env.vars.read())
-                .and_then(|vars| vars.get(&key).map(|v| v.to_text()))
-                .unwrap_or_default()
+            env.vars
+                .read()
+                .get(&key)
+                .map(|v| (v.to_text(), true))
+                .unwrap_or_else(|| (String::new(), false))
         }
-        Parameter::NamedWithAllIndices { name, .. } => Some(env.vars.read())
-            .and_then(|vars| {
-                vars.get(name.as_str()).map(|v| match v {
+        Parameter::NamedWithAllIndices { name, .. } => env
+            .vars
+            .read()
+            .get(name.as_str())
+            .map(|v| {
+                let value = match v {
                     Val::List(items) => items
                         .iter()
                         .map(|x| x.to_text())
                         .collect::<Vec<_>>()
                         .join(" "),
                     other => other.to_text(),
-                })
+                };
+                (value, true)
             })
-            .unwrap_or_default(),
+            .unwrap_or_else(|| (String::new(), false)),
     }
 }
 
-/// Minimal glob matcher for POSIX pathname expansion.
-/// Supports `*`, `?`, `[...]`. Uses walkdir for `*` at filesystem level.
-fn expand_glob(pattern: &str, cwd: &std::path::Path) -> Vec<String> {
-    // Use the fshell glob machinery if available, else fallback.
-    // We do a conservative filesystem glob using glob crate semantics.
-    // For now, use globset for matching but restrict to current directory expansion.
-    let has_glob = pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
-    if !has_glob {
-        return vec![pattern.to_string()];
-    }
-    // Build glob pattern relative
-    let glob = match glob::Pattern::new(pattern) {
-        Ok(p) => p,
-        Err(_) => return vec![pattern.to_string()],
-    };
-
-    // Enumerate directory entries at appropriate depth. For simplicity, support non-recursive
-    // patterns (no **). If pattern contains '/', split directory traversal.
-    let mut matches: Vec<String> = Vec::new();
-    // Walk up to 1 level deep for simple patterns; full walk for patterns with '/'
-    let candidates: Vec<std::path::PathBuf> = if pattern.contains('/') {
-        walkdir::WalkDir::new(cwd)
-            .max_depth(6)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path().strip_prefix(cwd).unwrap_or(e.path()).to_path_buf())
-            .collect()
-    } else {
-        std::fs::read_dir(cwd)
-            .ok()
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .map(|e| e.file_name().into())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    for path in candidates {
-        let s = path.to_string_lossy().to_string();
-        if glob.matches(&s) {
-            // Skip dotfiles unless pattern explicitly starts with .
-            if s.starts_with('.') && !pattern.starts_with('.') {
-                continue;
-            }
-            matches.push(s);
-        }
-    }
-
-    if matches.is_empty() {
-        // POSIX: non-matching glob is left as-is when nullglob is off (default)
-        vec![pattern.to_string()]
-    } else {
-        matches.sort();
-        matches
-    }
+fn resolve_parameter(param: &Parameter, env: &fshell_engine::Env, positional: &[String]) -> String {
+    resolve_parameter_with_presence(param, env, positional).0
 }
 
 /// Expand a single POSIX word into zero or more expanded strings.
@@ -254,9 +214,19 @@ pub fn expand_word(
     env: &fshell_engine::Env,
     cfg: &ExpansionConfig,
     positional: &[String],
-) -> Vec<String> {
+) -> Result<Vec<String>, fshell_engine::EngineError> {
+    expand_word_internal(word_str, env, cfg, positional, true)
+}
+
+fn expand_word_internal(
+    word_str: &str,
+    env: &fshell_engine::Env,
+    cfg: &ExpansionConfig,
+    positional: &[String],
+    do_field_split: bool,
+) -> Result<Vec<String>, fshell_engine::EngineError> {
     if word_str == "$@" || word_str == "\"$@\"" {
-        return get_effective_positional(env, positional);
+        return Ok(get_effective_positional(env, positional));
     }
 
     let opts = ParserOptions {
@@ -270,7 +240,7 @@ pub fn expand_word(
 
     let pieces = match word::parse(word_str, &opts) {
         Ok(p) => p,
-        Err(_) => return vec![word_str.to_string()],
+        Err(_) => return Ok(vec![word_str.to_string()]),
     };
 
     // Phase 1: build the expanded string
@@ -290,7 +260,7 @@ pub fn expand_word(
                     match &inner.piece {
                         WordPiece::Text(t) => expanded.push_str(t),
                         WordPiece::ParameterExpansion(pe) => {
-                            let val = eval_parameter_expr(pe, env, positional);
+                            let val = eval_parameter_expr(pe, env, positional)?;
                             expanded.push_str(&val);
                         }
                         WordPiece::CommandSubstitution(cmd) => {
@@ -307,7 +277,7 @@ pub fn expand_word(
                 }
             }
             WordPiece::ParameterExpansion(pe) => {
-                let val = eval_parameter_expr(pe, env, positional);
+                let val = eval_parameter_expr(pe, env, positional)?;
                 expanded.push_str(&val);
             }
             WordPiece::TildeExpansion(te) => {
@@ -354,7 +324,7 @@ pub fn expand_word(
                     | WordPiece::BackquotedCommandSubstitution(_)
             )
         });
-        if contains_expansion {
+        if contains_expansion && do_field_split {
             split_ifs(&expanded, &ifs)
         } else if expanded.contains(' ') || expanded.contains('\t') || expanded.contains('\n') {
             // No expansion but word contains IFS whitespace? Don't split bare words like "hello world" from quoted source — but unquoted "a  b" should? Keep as single field to avoid breaking simple args.
@@ -375,9 +345,9 @@ pub fn expand_word(
                 result.extend(expand_glob(&field, &env.cwd()));
             }
         }
-        result
+        Ok(result)
     } else {
-        fields
+        Ok(fields)
     }
 }
 
@@ -385,9 +355,9 @@ fn eval_parameter_expr(
     expr: &word::ParameterExpr,
     env: &fshell_engine::Env,
     positional: &[String],
-) -> String {
+) -> Result<String, fshell_engine::EngineError> {
     use word::ParameterExpr as PE;
-    match expr {
+    let value = match expr {
         PE::Parameter { parameter, .. } => resolve_parameter(parameter, env, positional),
         PE::ParameterLength { parameter, .. } => {
             let val = resolve_parameter(parameter, env, positional);
@@ -399,23 +369,10 @@ fn eval_parameter_expr(
             test_type,
             ..
         } => {
-            let val = resolve_parameter(parameter, env, positional);
-            let is_unset_or_null = val.is_empty();
-            let is_unset = {
-                let check = |p: &Parameter| match p {
-                    Parameter::Named(n) => Some(env.vars.read())
-                        .and_then(|vars| vars.get(n.as_str()).cloned())
-                        .is_none(),
-                    Parameter::Positional(n) => {
-                        positional.get((*n as usize).saturating_sub(1)).is_none()
-                    }
-                    _ => false,
-                };
-                check(parameter)
-            };
+            let (val, is_set) = resolve_parameter_with_presence(parameter, env, positional);
             let should_use_default = match test_type {
-                word::ParameterTestType::UnsetOrNull => is_unset_or_null,
-                word::ParameterTestType::Unset => is_unset,
+                word::ParameterTestType::UnsetOrNull => !is_set || val.is_empty(),
+                word::ParameterTestType::Unset => !is_set,
             };
             if should_use_default {
                 default_value.clone().unwrap_or_default()
@@ -426,10 +383,15 @@ fn eval_parameter_expr(
         PE::AssignDefaultValues {
             parameter,
             default_value,
+            test_type,
             ..
         } => {
-            let val = resolve_parameter(parameter, env, positional);
-            if val.is_empty() {
+            let (val, is_set) = resolve_parameter_with_presence(parameter, env, positional);
+            let should_assign = match test_type {
+                word::ParameterTestType::UnsetOrNull => !is_set || val.is_empty(),
+                word::ParameterTestType::Unset => !is_set,
+            };
+            if should_assign {
                 let default = default_value.clone().unwrap_or_default();
                 if let Parameter::Named(name) = parameter {
                     env.vars
@@ -444,28 +406,56 @@ fn eval_parameter_expr(
         PE::IndicateErrorIfNullOrUnset {
             parameter,
             error_message,
+            test_type,
             ..
         } => {
-            let val = resolve_parameter(parameter, env, positional);
-            if val.is_empty() {
-                let msg = error_message
-                    .clone()
-                    .unwrap_or_else(|| format!("parameter {:?} is unset or null", parameter));
-                // In POSIX this is a fatal error; we return empty and let caller handle via error reporting
-                // For now, write to stderr and return empty
-                eprintln!("fsh: {}: {}", parameter, msg);
-                String::new()
-            } else {
-                val
+            let (val, is_set) = resolve_parameter_with_presence(parameter, env, positional);
+            let should_error = match test_type {
+                word::ParameterTestType::UnsetOrNull => !is_set || val.is_empty(),
+                word::ParameterTestType::Unset => !is_set,
+            };
+            if should_error {
+                let message = match error_message {
+                    Some(raw) => expand_word_internal(
+                        raw,
+                        env,
+                        &ExpansionConfig {
+                            do_glob: false,
+                            ..Default::default()
+                        },
+                        positional,
+                        false,
+                    )?
+                    .join(""),
+                    None => match test_type {
+                        word::ParameterTestType::UnsetOrNull => {
+                            format!("parameter {parameter} is unset or null")
+                        }
+                        word::ParameterTestType::Unset => {
+                            format!("parameter {parameter} is unset")
+                        }
+                    },
+                };
+                return Err(fshell_engine::EngineError::ParameterExpansion {
+                    parameter: parameter.to_string(),
+                    message,
+                    span: None,
+                });
             }
+            val
         }
         PE::UseAlternativeValue {
             parameter,
             alternative_value,
+            test_type,
             ..
         } => {
-            let val = resolve_parameter(parameter, env, positional);
-            if val.is_empty() {
+            let (val, is_set) = resolve_parameter_with_presence(parameter, env, positional);
+            let should_use_alternative = match test_type {
+                word::ParameterTestType::UnsetOrNull => !is_set || val.is_empty(),
+                word::ParameterTestType::Unset => !is_set,
+            };
+            if should_use_alternative {
                 String::new()
             } else {
                 alternative_value.clone().unwrap_or_default()
@@ -480,17 +470,18 @@ fn eval_parameter_expr(
                     do_glob: false,
                     ..Default::default()
                 };
-                let pat_expanded = expand_word(pat, env, &no_glob_cfg, positional).join("");
+                let pat_expanded =
+                    expand_word_internal(pat, env, &no_glob_cfg, positional, false)?.join("");
                 if let Ok(g) = globset::Glob::new(&pat_expanded) {
                     let matcher = g.compile_matcher();
                     for (idx, _) in val.char_indices() {
                         let prefix = &val[..idx];
                         if matcher.is_match(prefix) {
-                            return val[idx..].to_string();
+                            return Ok(val[idx..].to_string());
                         }
                     }
                     if matcher.is_match(&val) {
-                        return String::new();
+                        return Ok(String::new());
                     }
                 }
                 val
@@ -507,16 +498,17 @@ fn eval_parameter_expr(
                     do_glob: false,
                     ..Default::default()
                 };
-                let pat_expanded = expand_word(pat, env, &no_glob_cfg, positional).join("");
+                let pat_expanded =
+                    expand_word_internal(pat, env, &no_glob_cfg, positional, false)?.join("");
                 if let Ok(g) = globset::Glob::new(&pat_expanded) {
                     let matcher = g.compile_matcher();
                     if matcher.is_match(&val) {
-                        return String::new();
+                        return Ok(String::new());
                     }
                     for (idx, _) in val.char_indices().rev() {
                         let prefix = &val[..idx];
                         if matcher.is_match(prefix) {
-                            return val[idx..].to_string();
+                            return Ok(val[idx..].to_string());
                         }
                     }
                 }
@@ -534,17 +526,18 @@ fn eval_parameter_expr(
                     do_glob: false,
                     ..Default::default()
                 };
-                let pat_expanded = expand_word(pat, env, &no_glob_cfg, positional).join("");
+                let pat_expanded =
+                    expand_word_internal(pat, env, &no_glob_cfg, positional, false)?.join("");
                 if let Ok(g) = globset::Glob::new(&pat_expanded) {
                     let matcher = g.compile_matcher();
                     for (idx, _) in val.char_indices().rev() {
                         let suffix = &val[idx..];
                         if matcher.is_match(suffix) {
-                            return val[..idx].to_string();
+                            return Ok(val[..idx].to_string());
                         }
                     }
                     if matcher.is_match(&val) {
-                        return String::new();
+                        return Ok(String::new());
                     }
                 }
                 val
@@ -561,16 +554,17 @@ fn eval_parameter_expr(
                     do_glob: false,
                     ..Default::default()
                 };
-                let pat_expanded = expand_word(pat, env, &no_glob_cfg, positional).join("");
+                let pat_expanded =
+                    expand_word_internal(pat, env, &no_glob_cfg, positional, false)?.join("");
                 if let Ok(g) = globset::Glob::new(&pat_expanded) {
                     let matcher = g.compile_matcher();
                     if matcher.is_match(&val) {
-                        return String::new();
+                        return Ok(String::new());
                     }
                     for (idx, _) in val.char_indices() {
                         let suffix = &val[idx..];
                         if matcher.is_match(suffix) {
-                            return val[..idx].to_string();
+                            return Ok(val[..idx].to_string());
                         }
                     }
                 }
@@ -590,7 +584,8 @@ fn eval_parameter_expr(
                 do_glob: false,
                 ..Default::default()
             };
-            let offset_str = expand_word(&offset.value, env, &no_glob_cfg, positional).join("");
+            let offset_str =
+                expand_word_internal(&offset.value, env, &no_glob_cfg, positional, false)?.join("");
             let off: i64 = offset_str.trim().parse().unwrap_or(0);
             let chars: Vec<char> = val.chars().collect();
             let len = chars.len() as i64;
@@ -600,7 +595,9 @@ fn eval_parameter_expr(
                 (off as usize).min(chars.len())
             };
             let end = if let Some(len_expr) = length {
-                let len_str = expand_word(&len_expr.value, env, &no_glob_cfg, positional).join("");
+                let len_str =
+                    expand_word_internal(&len_expr.value, env, &no_glob_cfg, positional, false)?
+                        .join("");
                 let l: i64 = len_str.trim().parse().unwrap_or(0);
                 if l < 0 {
                     chars.len()
@@ -624,7 +621,7 @@ fn eval_parameter_expr(
                 do_glob: false,
                 ..Default::default()
             };
-            let pat = expand_word(pattern, env, &no_glob_cfg, positional).join("");
+            let pat = expand_word_internal(pattern, env, &no_glob_cfg, positional, false)?.join("");
             let repl = replacement.clone().unwrap_or_default();
             match match_kind {
                 word::SubstringMatchKind::FirstOccurrence => {
@@ -692,6 +689,65 @@ fn eval_parameter_expr(
         // Unhandled parameter-expression forms resolve to empty rather than
         // being misinterpreted as a variable name.
         _ => String::new(),
+    };
+    Ok(value)
+}
+
+/// Minimal glob matcher for POSIX pathname expansion.
+/// Supports `*`, `?`, `[...]`. Uses walkdir for `*` at filesystem level.
+fn expand_glob(pattern: &str, cwd: &std::path::Path) -> Vec<String> {
+    // Use the fshell glob machinery if available, else fallback.
+    // We do a conservative filesystem glob using glob crate semantics.
+    // For now, use globset for matching but restrict to current directory expansion.
+    let has_glob = pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
+    if !has_glob {
+        return vec![pattern.to_string()];
+    }
+    // Build glob pattern relative
+    let glob = match glob::Pattern::new(pattern) {
+        Ok(p) => p,
+        Err(_) => return vec![pattern.to_string()],
+    };
+
+    // Enumerate directory entries at appropriate depth. For simplicity, support non-recursive
+    // patterns (no **). If pattern contains '/', split directory traversal.
+    let mut matches: Vec<String> = Vec::new();
+    // Walk up to 1 level deep for simple patterns; full walk for patterns with '/'
+    let candidates: Vec<std::path::PathBuf> = if pattern.contains('/') {
+        walkdir::WalkDir::new(cwd)
+            .max_depth(6)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().strip_prefix(cwd).unwrap_or(e.path()).to_path_buf())
+            .collect()
+    } else {
+        std::fs::read_dir(cwd)
+            .ok()
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().into())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    for path in candidates {
+        let s = path.to_string_lossy().to_string();
+        if glob.matches(&s) {
+            // Skip dotfiles unless pattern explicitly starts with .
+            if s.starts_with('.') && !pattern.starts_with('.') {
+                continue;
+            }
+            matches.push(s);
+        }
+    }
+
+    if matches.is_empty() {
+        // POSIX: non-matching glob is left as-is when nullglob is off (default)
+        vec![pattern.to_string()]
+    } else {
+        matches.sort();
+        matches
     }
 }
 
@@ -808,7 +864,7 @@ mod tests {
     fn test_expand_simple_word() {
         let env = fshell_engine::Env::for_command();
         let cfg = ExpansionConfig::default();
-        let r = expand_word("hello", &env, &cfg, &[]);
+        let r = expand_word("hello", &env, &cfg, &[]).unwrap();
         assert_eq!(r, vec!["hello"]);
     }
 
@@ -819,7 +875,7 @@ mod tests {
             .write()
             .insert("FOO".to_string(), Val::String("bar".to_string()));
         let cfg = ExpansionConfig::default();
-        let r = expand_word("$FOO", &env, &cfg, &[]);
+        let r = expand_word("$FOO", &env, &cfg, &[]).unwrap();
         assert_eq!(r, vec!["bar"]);
     }
 
@@ -827,7 +883,7 @@ mod tests {
     fn test_expand_default_value() {
         let env = fshell_engine::Env::for_command();
         let cfg = ExpansionConfig::default();
-        let r = expand_word("${UNSET:-default}", &env, &cfg, &[]);
+        let r = expand_word("${UNSET:-default}", &env, &cfg, &[]).unwrap();
         assert_eq!(r, vec!["default"]);
     }
 
@@ -838,7 +894,7 @@ mod tests {
             .write()
             .insert("FOO".to_string(), Val::String("hello".to_string()));
         let cfg = ExpansionConfig::default();
-        let r = expand_word("${#FOO}", &env, &cfg, &[]);
+        let r = expand_word("${#FOO}", &env, &cfg, &[]).unwrap();
         assert_eq!(r, vec!["5"]);
     }
 
@@ -849,7 +905,7 @@ mod tests {
             .write()
             .insert("FOO".to_string(), Val::String("hello".to_string()));
         let cfg = ExpansionConfig::default();
-        let r = expand_word("${FOO:1:3}", &env, &cfg, &[]);
+        let r = expand_word("${FOO:1:3}", &env, &cfg, &[]).unwrap();
         assert_eq!(r, vec!["ell"]);
     }
 
@@ -860,7 +916,7 @@ mod tests {
             .write()
             .insert("FOO".to_string(), Val::String("hello".to_string()));
         let cfg = ExpansionConfig::default();
-        let r = expand_word("${FOO#hel}", &env, &cfg, &[]);
+        let r = expand_word("${FOO#hel}", &env, &cfg, &[]).unwrap();
         assert_eq!(r, vec!["lo"]);
     }
 
@@ -871,7 +927,7 @@ mod tests {
             .write()
             .insert("FOO".to_string(), Val::String("hello".to_string()));
         let cfg = ExpansionConfig::default();
-        let r = expand_word("${FOO%lo}", &env, &cfg, &[]);
+        let r = expand_word("${FOO%lo}", &env, &cfg, &[]).unwrap();
         assert_eq!(r, vec!["hel"]);
     }
 }

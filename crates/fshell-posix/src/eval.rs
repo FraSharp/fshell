@@ -370,7 +370,7 @@ impl RedirectionContext {
                                 ..Default::default()
                             },
                             positional,
-                        );
+                        )?;
                         let filename = expanded.join(" ");
                         let raw_path = std::path::PathBuf::from(filename);
                         let path = if raw_path.is_absolute() {
@@ -401,7 +401,7 @@ impl RedirectionContext {
                     }
                     IoFileRedirectTarget::Duplicate(w) => {
                         let dest =
-                            expand_word(&w.value, env, &ExpansionConfig::default(), positional)
+                            expand_word(&w.value, env, &ExpansionConfig::default(), positional)?
                                 .join(" ");
                         if dest == "1" && fd == 2 {
                             self.stderr_to_stdout = true;
@@ -437,7 +437,7 @@ impl RedirectionContext {
                                 ..Default::default()
                             },
                             positional,
-                        )
+                        )?
                         .join("");
                         out_lines.push(expanded);
                     } else {
@@ -459,7 +459,7 @@ impl RedirectionContext {
                         ..Default::default()
                     },
                     positional,
-                )
+                )?
                 .join(" ");
                 let mut content = expanded;
                 content.push('\n');
@@ -474,7 +474,7 @@ impl RedirectionContext {
                         ..Default::default()
                     },
                     positional,
-                );
+                )?;
                 let filename = expanded.join(" ");
                 let raw_path = std::path::PathBuf::from(filename);
                 let path = if raw_path.is_absolute() {
@@ -614,13 +614,19 @@ async fn eval_command_stream(
             let mut redir = RedirectionContext::default();
             if let Some(list) = redirects {
                 for r in &list.0 {
-                    if let Err(e) = redir.apply_item(r, env, &cfg.positional) {
-                        eprintln!("{e}");
-                        env.set_exit_code(1);
-                        if cfg.errexit {
-                            return Err(PosixError::Exit(1));
+                    match redir.apply_item(r, env, &cfg.positional) {
+                        Ok(()) => {}
+                        Err(error @ PosixError::Engine(EngineError::ParameterExpansion { .. })) => {
+                            return Err(error);
                         }
-                        return Ok((1, None));
+                        Err(e) => {
+                            eprintln!("{e}");
+                            env.set_exit_code(1);
+                            if cfg.errexit {
+                                return Err(PosixError::Exit(1));
+                            }
+                            return Ok((1, None));
+                        }
                     }
                 }
             }
@@ -669,26 +675,30 @@ async fn eval_command_stream(
             Ok((0, None))
         }
         Command::ExtendedTest(expr_cmd, _redirects) => {
-            let result = eval_extended_test(&expr_cmd.expr, env);
+            let result = eval_extended_test(&expr_cmd.expr, env)?;
             Ok((if result { 0 } else { 1 }, None))
         }
     }
 }
 
-fn eval_extended_test(expr: &ExtendedTestExpr, env: &Env) -> bool {
+fn eval_extended_test(expr: &ExtendedTestExpr, env: &Env) -> Result<bool, PosixError> {
     match expr {
-        ExtendedTestExpr::And(a, b) => eval_extended_test(a, env) && eval_extended_test(b, env),
-        ExtendedTestExpr::Or(a, b) => eval_extended_test(a, env) || eval_extended_test(b, env),
-        ExtendedTestExpr::Not(inner) => !eval_extended_test(inner, env),
+        ExtendedTestExpr::And(a, b) => {
+            Ok(eval_extended_test(a, env)? && eval_extended_test(b, env)?)
+        }
+        ExtendedTestExpr::Or(a, b) => {
+            Ok(eval_extended_test(a, env)? || eval_extended_test(b, env)?)
+        }
+        ExtendedTestExpr::Not(inner) => Ok(!eval_extended_test(inner, env)?),
         ExtendedTestExpr::Parenthesized(inner) => eval_extended_test(inner, env),
         ExtendedTestExpr::UnaryTest(op, word) => {
-            let val = expand_word(&word.value, env, &ExpansionConfig::default(), &[]).join(" ");
-            eval_unary_extended(op, &val, env)
+            let val = expand_word(&word.value, env, &ExpansionConfig::default(), &[])?.join(" ");
+            Ok(eval_unary_extended(op, &val, env))
         }
         ExtendedTestExpr::BinaryTest(op, left, right) => {
-            let lv = expand_word(&left.value, env, &ExpansionConfig::default(), &[]).join(" ");
-            let rv = expand_word(&right.value, env, &ExpansionConfig::default(), &[]).join(" ");
-            eval_binary_extended(op, &lv, &rv, env)
+            let lv = expand_word(&left.value, env, &ExpansionConfig::default(), &[])?.join(" ");
+            let rv = expand_word(&right.value, env, &ExpansionConfig::default(), &[])?.join(" ");
+            Ok(eval_binary_extended(op, &lv, &rv, env))
         }
     }
 }
@@ -833,7 +843,7 @@ async fn eval_compound_command_stream(
                         env,
                         &ExpansionConfig::default(),
                         &cfg.positional,
-                    ));
+                    )?);
                 }
                 expanded
             } else {
@@ -930,7 +940,7 @@ async fn eval_compound_command_stream(
                 env,
                 &ExpansionConfig::default(),
                 &cfg.positional,
-            )
+            )?
             .join(" ");
             for item in &case_clause.cases {
                 let mut matched = false;
@@ -948,7 +958,7 @@ async fn eval_compound_command_stream(
                             ..Default::default()
                         },
                         &cfg.positional,
-                    );
+                    )?;
                     for pat_str in expanded_pats {
                         if pattern_matches(&pat_str, &value_expanded) {
                             matched = true;
@@ -1024,7 +1034,7 @@ async fn eval_simple_command(
                     };
                     let value = match &assign.value {
                         AssignmentValue::Scalar(word) => {
-                            expand_word(&word.value, env, &ExpansionConfig::default(), positional)
+                            expand_word(&word.value, env, &ExpansionConfig::default(), positional)?
                                 .join(" ")
                         }
                         AssignmentValue::Array(elems) => elems
@@ -1058,7 +1068,7 @@ async fn eval_simple_command(
                             ..Default::default()
                         },
                         positional,
-                    );
+                    )?;
                     args.extend(expanded);
                 }
                 CommandPrefixOrSuffixItem::AssignmentWord(assign, _) => {
@@ -1068,7 +1078,7 @@ async fn eval_simple_command(
                     };
                     let value = match &assign.value {
                         AssignmentValue::Scalar(word) => {
-                            expand_word(&word.value, env, &ExpansionConfig::default(), positional)
+                            expand_word(&word.value, env, &ExpansionConfig::default(), positional)?
                                 .join(" ")
                         }
                         AssignmentValue::Array(elems) => elems
@@ -1089,13 +1099,19 @@ async fn eval_simple_command(
 
     let mut redir = RedirectionContext::default();
     for r in &redirects {
-        if let Err(e) = redir.apply_item(r, env, positional) {
-            eprintln!("{e}");
-            env.set_exit_code(1);
-            if cfg.errexit {
-                return Err(PosixError::Exit(1));
+        match redir.apply_item(r, env, positional) {
+            Ok(()) => {}
+            Err(error @ PosixError::Engine(EngineError::ParameterExpansion { .. })) => {
+                return Err(error);
             }
-            return Ok((1, None));
+            Err(e) => {
+                eprintln!("{e}");
+                env.set_exit_code(1);
+                if cfg.errexit {
+                    return Err(PosixError::Exit(1));
+                }
+                return Ok((1, None));
+            }
         }
     }
 
@@ -1118,7 +1134,7 @@ async fn eval_simple_command(
             ..Default::default()
         },
         positional,
-    );
+    )?;
     let (cmd_name, extra_args) = if !expanded_cmd_words.is_empty() {
         (
             expanded_cmd_words[0].clone(),
@@ -1315,7 +1331,7 @@ async fn eval_simple_command_inner(
             for arg in &exports {
                 if let Some((name, value)) = arg.split_once('=') {
                     let expanded_val =
-                        expand_word(value, env, &ExpansionConfig::default(), &cfg.positional)
+                        expand_word(value, env, &ExpansionConfig::default(), &cfg.positional)?
                             .join(" ");
                     env.set_exported_var(name, Val::String(expanded_val));
                 } else {

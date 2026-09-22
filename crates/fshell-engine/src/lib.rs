@@ -75,6 +75,7 @@ impl From<EngineError> for ShellError {
             EngineError::IoError { .. } => ErrorCode::IoError,
             EngineError::MatchNonExhaustive { .. } => ErrorCode::RuntimeError,
             EngineError::MutationNotAllowed { .. } => ErrorCode::CapabilityDenied,
+            EngineError::ParameterExpansion { .. } => ErrorCode::ParameterExpansion,
             EngineError::Parse(_) => ErrorCode::ParseError,
             EngineError::PipelineError { .. } => ErrorCode::PipelineError,
             EngineError::TypeMismatch { .. } => ErrorCode::TypeError,

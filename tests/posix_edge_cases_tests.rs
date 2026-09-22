@@ -57,6 +57,51 @@ async fn test_posix_param_expansion_defaults() {
 }
 
 #[tokio::test]
+async fn test_posix_required_parameter_expansion_is_fatal_and_typed() {
+    let env = setup_posix_env();
+    env.vars.write().insert(
+        "ERR_MSG".to_string(),
+        Val::String("required by deploy".to_string()),
+    );
+
+    let parsed = parse_posix_script(r#"printf '%s\n' "${MISSING:?$ERR_MSG}"; AFTER=ran"#)
+        .expect("failed to parse required-parameter script");
+    let result = eval_source(&parsed, &env, &EvalConfig::default()).await;
+    assert!(matches!(
+        result,
+        Err(fshell_engine::EngineError::ParameterExpansion {
+            parameter,
+            message,
+            ..
+        }) if parameter == "${MISSING}" && message == "required by deploy"
+    ));
+    assert!(
+        !env.vars.read().contains_key("AFTER"),
+        "the script must stop before executing statements after a required expansion"
+    );
+}
+
+#[tokio::test]
+async fn test_posix_parameter_question_only_fails_when_unset() {
+    let env = setup_posix_env();
+    env.vars
+        .write()
+        .insert("EMPTY".to_string(), Val::String(String::new()));
+
+    let parsed = parse_posix_script(r#": "${EMPTY?must-not-fail}"; AFTER=ran"#)
+        .expect("failed to parse unset-only parameter script");
+    let code = eval_source(&parsed, &env, &EvalConfig::default())
+        .await
+        .expect("a set-but-empty parameter must satisfy ?");
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        env.vars.read().get("AFTER").map(Val::to_text),
+        Some("ran".to_string())
+    );
+}
+
+#[tokio::test]
 async fn test_posix_param_expansion_substring_and_slicing() {
     let env = setup_posix_env();
 

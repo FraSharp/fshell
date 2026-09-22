@@ -28,6 +28,9 @@ pub enum ErrorCode {
     FunctionNotFound,  // FSH-SCOPE-002
     ImmutableVariable, // FSH-SCOPE-003
 
+    // Shell semantics
+    ParameterExpansion, // FSH-SHELL-001
+
     // Types & Constraints
     TypeError,           // FSH-TYPE-001
     TypeErrorArgCount,   // FSH-TYPE-002
@@ -103,6 +106,7 @@ impl ErrorCode {
             ErrorCode::VariableNotFound => "FSH-SCOPE-001",
             ErrorCode::FunctionNotFound => "FSH-SCOPE-002",
             ErrorCode::ImmutableVariable => "FSH-SCOPE-003",
+            ErrorCode::ParameterExpansion => "FSH-SHELL-001",
             ErrorCode::TypeError => "FSH-TYPE-001",
             ErrorCode::TypeErrorArgCount => "FSH-TYPE-002",
             ErrorCode::TypeConstraintError => "FSH-TYPE-003",
@@ -156,6 +160,7 @@ impl ErrorCode {
             ErrorCode::VariableNotFound => "VariableNotFound",
             ErrorCode::FunctionNotFound => "FunctionNotFound",
             ErrorCode::ImmutableVariable => "ImmutableVariable",
+            ErrorCode::ParameterExpansion => "ParameterExpansion",
             ErrorCode::TypeError => "TypeError",
             ErrorCode::TypeErrorArgCount => "ArgCountMismatch",
             ErrorCode::TypeConstraintError => "TypeConstraintError",
@@ -210,6 +215,7 @@ impl ErrorCode {
             ErrorCode::VariableNotFound
             | ErrorCode::FunctionNotFound
             | ErrorCode::ImmutableVariable => "scope",
+            ErrorCode::ParameterExpansion => "shell",
             ErrorCode::TypeError
             | ErrorCode::TypeErrorArgCount
             | ErrorCode::TypeConstraintError => "types",
@@ -279,6 +285,9 @@ impl ErrorCode {
             ErrorCode::FunctionNotFound => "A function was called that does not exist.",
             ErrorCode::ImmutableVariable => {
                 "Attempted to mutate an immutable or reactive cell value."
+            }
+            ErrorCode::ParameterExpansion => {
+                "A required shell parameter was unset or empty during expansion."
             }
             ErrorCode::TypeError => "Operands or arguments have incompatible data types.",
             ErrorCode::TypeErrorArgCount => {
@@ -371,6 +380,7 @@ impl FromStr for ErrorCode {
             "FSH-SCOPE-001" => Ok(ErrorCode::VariableNotFound),
             "FSH-SCOPE-002" => Ok(ErrorCode::FunctionNotFound),
             "FSH-SCOPE-003" => Ok(ErrorCode::ImmutableVariable),
+            "FSH-SHELL-001" => Ok(ErrorCode::ParameterExpansion),
             "FSH-TYPE-001" => Ok(ErrorCode::TypeError),
             "FSH-TYPE-002" => Ok(ErrorCode::TypeErrorArgCount),
             "FSH-TYPE-003" => Ok(ErrorCode::TypeConstraintError),
