@@ -2971,22 +2971,10 @@ pub(crate) fn run_script_stmt<'a>(
                                 let _ = std::io::stdout().write_all(&b);
                             }
                             PipelinePayload::Structured(d) => {
-                                let config = {
-                                    let opts = env.options.read();
-                                    fshell_render::RenderConfig {
-                                        format: opts.error_format,
-                                        color: opts.error_color,
-                                        is_interactive: false,
-                                    }
-                                };
                                 if crate::is_condition_false_diag(&d) {
                                     errors.push(PipelineFailure::ConditionFalse);
                                 } else {
-                                    env.set_last_error(d.clone());
-                                    errors.push(PipelineFailure::Hard(d.clone()));
-                                    let err_str =
-                                        fshell_render::render(d, None, "pipeline", &config);
-                                    eprintln!("{}", err_str);
+                                    errors.push(PipelineFailure::Hard(d));
                                 }
                             }
                         }
@@ -2998,18 +2986,8 @@ pub(crate) fn run_script_stmt<'a>(
                         return Ok(Flow::Exit(code));
                     }
                     let last_ec = *env.prompt.last_exit_code.read();
-                    let (exit_code, failure) = crate::pipeline_finalize(errors, last_ec, pipefail);
-                    env.set_exit_code(exit_code);
-                    if env.options.read().errexit && exit_code != 0 {
-                        return Ok(Flow::Exit(exit_code as i32));
-                    }
-                    match failure {
-                        Some(PipelineFailure::ConditionFalse) => return Ok(Flow::ConditionFalse),
-                        Some(PipelineFailure::Hard(diag)) => {
-                            return Err(crate::engine_error_from_diag(&diag));
-                        }
-                        None => {}
-                    }
+                    let outcome = crate::pipeline_finalize(errors, last_ec, pipefail);
+                    return crate::apply_pipeline_outcome(env, outcome);
                 } else {
                     let val = eval_expr(expr, env).await?;
                     if val != Val::Null && !matches!(val, Val::Bool(_)) {

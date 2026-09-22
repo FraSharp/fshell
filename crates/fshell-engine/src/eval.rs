@@ -1976,20 +1976,8 @@ async fn eval_stmt_inner(
                 }
                 let pipefail = env.options.read().pipefail;
                 let last_ec = *env.prompt.last_exit_code.read();
-                let (exit_code, failure) = crate::pipeline_finalize(errors, last_ec, pipefail);
-                env.set_exit_code(exit_code);
-                if env.options.read().errexit && exit_code != 0 {
-                    return Ok(Flow::Exit(exit_code as i32));
-                }
-                match failure {
-                    Some(PipelineFailure::ConditionFalse) => {
-                        return Ok(Flow::ConditionFalse);
-                    }
-                    Some(PipelineFailure::Hard(diag)) => {
-                        return Err(crate::engine_error_from_diag(&diag));
-                    }
-                    None => {}
-                }
+                let outcome = crate::pipeline_finalize(errors, last_ec, pipefail);
+                return crate::apply_pipeline_outcome(env, outcome);
             } else {
                 let val = eval_expr(expr, env).await?;
                 let exit_code = match &val {

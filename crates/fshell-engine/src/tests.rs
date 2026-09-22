@@ -183,9 +183,9 @@ mod tests {
 
     #[test]
     fn finalize_no_failures_keeps_last_exit_code() {
-        let (ec, err) = pipeline_finalize(Vec::new(), 7, false);
-        assert_eq!(ec, 7);
-        assert!(err.is_none());
+        let outcome = pipeline_finalize(Vec::new(), 7, false);
+        assert_eq!(outcome.exit_code, 7);
+        assert!(outcome.failure.is_none());
     }
 
     #[test]
@@ -194,16 +194,22 @@ mod tests {
             PipelineFailure::ConditionFalse,
             PipelineFailure::ConditionFalse,
         ];
-        let (ec, err) = pipeline_finalize(failures, 0, false);
-        assert_eq!(ec, 1);
-        assert!(matches!(err, Some(PipelineFailure::ConditionFalse)));
+        let outcome = pipeline_finalize(failures, 0, false);
+        assert_eq!(outcome.exit_code, 1);
+        assert!(matches!(
+            outcome.failure,
+            Some(PipelineFailure::ConditionFalse)
+        ));
     }
 
     #[test]
     fn finalize_condition_false_respects_nonzero_last_exit_code() {
-        let (ec, err) = pipeline_finalize(vec![PipelineFailure::ConditionFalse], 3, false);
-        assert_eq!(ec, 1);
-        assert!(matches!(err, Some(PipelineFailure::ConditionFalse)));
+        let outcome = pipeline_finalize(vec![PipelineFailure::ConditionFalse], 3, false);
+        assert_eq!(outcome.exit_code, 1);
+        assert!(matches!(
+            outcome.failure,
+            Some(PipelineFailure::ConditionFalse)
+        ));
     }
 
     #[test]
@@ -221,9 +227,9 @@ mod tests {
             PipelineFailure::ConditionFalse,
             PipelineFailure::Hard(hard_b),
         ];
-        let (ec, err) = pipeline_finalize(failures, 2, false);
-        assert_eq!(ec, 2);
-        match err {
+        let outcome = pipeline_finalize(failures, 2, false);
+        assert_eq!(outcome.exit_code, 2);
+        match outcome.failure {
             Some(PipelineFailure::Hard(diag)) => {
                 assert!(diag.report.to_string().contains("last failure"));
             }
@@ -237,9 +243,9 @@ mod tests {
             message: "boom".to_string(),
             span: None,
         }))];
-        let (ec, err) = pipeline_finalize(failures, 0, true);
-        assert_eq!(ec, 1);
-        assert!(err.is_some());
+        let outcome = pipeline_finalize(failures, 0, true);
+        assert_eq!(outcome.exit_code, 1);
+        assert!(outcome.failure.is_some());
     }
 
     #[test]
@@ -248,8 +254,8 @@ mod tests {
             message: "boom".to_string(),
             span: None,
         }))];
-        let (ec, _) = pipeline_finalize(failures, 5, true);
-        assert_eq!(ec, 5);
+        let outcome = pipeline_finalize(failures, 5, true);
+        assert_eq!(outcome.exit_code, 5);
     }
 
     #[tokio::test]

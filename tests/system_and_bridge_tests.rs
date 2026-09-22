@@ -165,6 +165,24 @@ async fn test_integration_bridge_fallthrough_echo() {
     }
 }
 
+#[test]
+fn test_cli_pipeline_diagnostic_is_rendered_once() {
+    let output = FshCmd::new()
+        .cmd("ls /definitely/missing/fshell-pipeline-outcome-regression")
+        .run()
+        .expect("failed to run fsh subprocess");
+
+    output
+        .assert_failure()
+        .assert_stderr_contains("FSH-PIPE-001");
+    assert_eq!(
+        output.stderr.matches("FSH-PIPE-001").count(),
+        1,
+        "pipeline diagnostics must have one rendering owner:\n{}",
+        output.stderr
+    );
+}
+
 #[tokio::test]
 async fn test_integration_redirections() {
     let env = setup_test_env();

@@ -2889,6 +2889,18 @@ pub(crate) enum PipelineFailure {
     Hard(fshell_core::FshDiag),
 }
 
+/// The single finalized outcome of a pipeline.
+///
+/// Pipeline stages may run concurrently and therefore cannot decide shell
+/// control flow or render diagnostics themselves. They report payloads and
+/// typed failures; the pipeline owner reduces those observations to this
+/// value exactly once.
+#[derive(Clone, Debug)]
+pub(crate) struct PipelineOutcome {
+    pub exit_code: i64,
+    pub failure: Option<PipelineFailure>,
+}
+
 /// Pure pipeline finalizer: computes exit code and typed failure from
 /// collected stage failures and the last stage's exit code. Logical `false`
 /// failures yield exit 1 without hard-error rendering; with `pipefail`, any
@@ -2897,7 +2909,7 @@ pub(crate) fn pipeline_finalize(
     failures: Vec<PipelineFailure>,
     last_ec: i64,
     pipefail: bool,
-) -> (i64, Option<PipelineFailure>) {
+) -> PipelineOutcome {
     let mut saw_condition_false = false;
     let mut last_hard: Option<PipelineFailure> = None;
     for failure in &failures {
@@ -2927,7 +2939,32 @@ pub(crate) fn pipeline_finalize(
     } else {
         None
     };
-    (exit_code, err)
+    PipelineOutcome {
+        exit_code,
+        failure: err,
+    }
+}
+
+/// Apply a finalized pipeline outcome to shell control flow.
+///
+/// This is deliberately the only engine-level conversion from pipeline
+/// failures to `Flow`/`EngineError`. Callers may render the returned error at
+/// their UI boundary, but the pipeline evaluator never renders diagnostics
+/// while it is still collecting stage results.
+pub(crate) fn apply_pipeline_outcome(
+    env: &Env,
+    outcome: PipelineOutcome,
+) -> Result<Flow, EngineError> {
+    env.set_exit_code(outcome.exit_code);
+    if env.options.read().errexit && outcome.exit_code != 0 {
+        return Ok(Flow::Exit(outcome.exit_code as i32));
+    }
+
+    match outcome.failure {
+        Some(PipelineFailure::ConditionFalse) => Ok(Flow::ConditionFalse),
+        Some(PipelineFailure::Hard(diag)) => Err(engine_error_from_diag(&diag)),
+        None => Ok(Flow::Normal),
+    }
 }
 
 /// Recover an `EngineError` from a hard stage diagnostic. Prefers the typed
