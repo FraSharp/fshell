@@ -147,7 +147,7 @@ where
     let expected_root = unsafe { expected_root.assume_init() };
     let root_identity = result.root_identity;
     if expected_root.st_dev as u64 != root_identity.device
-        || expected_root.st_ino as u64 != root_identity.inode
+        || expected_root.st_ino != root_identity.inode
         || ((expected_root.st_mode & S_IFMT) == S_IFDIR) != root_identity.is_dir
     {
         return Err(io::Error::new(
@@ -194,7 +194,7 @@ where
     // SAFETY: fstat succeeded, initializing opened_root.
     let opened_root = unsafe { opened_root.assume_init() };
     if opened_root.st_dev as u64 != root_identity.device
-        || opened_root.st_ino as u64 != root_identity.inode
+        || opened_root.st_ino != root_identity.inode
     {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,

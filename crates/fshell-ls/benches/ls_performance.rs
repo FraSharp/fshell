@@ -147,16 +147,14 @@ fn bench_render(c: &mut Criterion) {
             |b, (cfg, result)| {
                 b.iter(|| {
                     let mut sink = io::sink();
-                    black_box(
-                        render_to_with_width(
-                            black_box(result),
-                            black_box(cfg),
-                            &mut sink,
-                            BENCH_WIDTH,
-                            |_| true,
-                        )
-                        .expect("render listing"),
-                    );
+                    render_to_with_width(
+                        black_box(result),
+                        black_box(cfg),
+                        &mut sink,
+                        BENCH_WIDTH,
+                        |_| true,
+                    )
+                    .expect("render listing");
                 });
             },
         );
@@ -169,16 +167,14 @@ fn bench_render(c: &mut Criterion) {
             |b, (cfg, result)| {
                 b.iter(|| {
                     let mut sink = io::sink();
-                    black_box(
-                        render_to_with_width(
-                            black_box(result),
-                            black_box(cfg),
-                            &mut sink,
-                            BENCH_WIDTH,
-                            |_| true,
-                        )
-                        .expect("render listing"),
-                    );
+                    render_to_with_width(
+                        black_box(result),
+                        black_box(cfg),
+                        &mut sink,
+                        BENCH_WIDTH,
+                        |_| true,
+                    )
+                    .expect("render listing");
                 });
             },
         );
@@ -192,16 +188,14 @@ fn bench_render(c: &mut Criterion) {
             |b, (cfg, result)| {
                 b.iter(|| {
                     let mut sink = io::sink();
-                    black_box(
-                        render_to_with_width(
-                            black_box(result),
-                            black_box(cfg),
-                            &mut sink,
-                            BENCH_WIDTH,
-                            |_| true,
-                        )
-                        .expect("render listing"),
-                    );
+                    render_to_with_width(
+                        black_box(result),
+                        black_box(cfg),
+                        &mut sink,
+                        BENCH_WIDTH,
+                        |_| true,
+                    )
+                    .expect("render listing");
                 });
             },
         );
@@ -220,16 +214,14 @@ fn bench_end_to_end(c: &mut Criterion) {
             b.iter(|| {
                 let result = list_dir(black_box(cfg)).expect("scan fixture");
                 let mut sink = io::sink();
-                black_box(
-                    render_to_with_width(
-                        black_box(&result),
-                        black_box(cfg),
-                        &mut sink,
-                        BENCH_WIDTH,
-                        |_| true,
-                    )
-                    .expect("render listing"),
-                );
+                render_to_with_width(
+                    black_box(&result),
+                    black_box(cfg),
+                    &mut sink,
+                    BENCH_WIDTH,
+                    |_| true,
+                )
+                .expect("render listing");
             });
         });
 
@@ -240,16 +232,14 @@ fn bench_end_to_end(c: &mut Criterion) {
             b.iter(|| {
                 let result = list_dir(black_box(cfg)).expect("scan tree root");
                 let mut sink = io::sink();
-                black_box(
-                    render_to_with_width(
-                        black_box(&result),
-                        black_box(cfg),
-                        &mut sink,
-                        BENCH_WIDTH,
-                        |_| true,
-                    )
-                    .expect("render tree"),
-                );
+                render_to_with_width(
+                    black_box(&result),
+                    black_box(cfg),
+                    &mut sink,
+                    BENCH_WIDTH,
+                    |_| true,
+                )
+                .expect("render tree");
             });
         });
 
@@ -260,16 +250,14 @@ fn bench_end_to_end(c: &mut Criterion) {
             b.iter(|| {
                 let result = list_dir(black_box(cfg)).expect("scan git fixture");
                 let mut sink = io::sink();
-                black_box(
-                    render_to_with_width(
-                        black_box(&result),
-                        black_box(cfg),
-                        &mut sink,
-                        BENCH_WIDTH,
-                        |_| true,
-                    )
-                    .expect("render git listing"),
-                );
+                render_to_with_width(
+                    black_box(&result),
+                    black_box(cfg),
+                    &mut sink,
+                    BENCH_WIDTH,
+                    |_| true,
+                )
+                .expect("render git listing");
             });
         });
     }

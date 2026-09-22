@@ -270,17 +270,17 @@ pub fn list_dir_with_git_status_cache(
     metadata_result?;
 
     // Git status
-    if config.git {
-        if let Some(snapshot) = git_status_cache.snapshot_for(&config.path, config.dereference)? {
-            apply_git_status(
-                &mut entries,
-                &arena,
-                &config.path,
-                list_as_single_file,
-                config.dereference,
-                snapshot,
-            )?;
-        }
+    if config.git
+        && let Some(snapshot) = git_status_cache.snapshot_for(&config.path, config.dereference)?
+    {
+        apply_git_status(
+            &mut entries,
+            &arena,
+            &config.path,
+            list_as_single_file,
+            config.dereference,
+            snapshot,
+        )?;
     }
 
     // Sort
@@ -626,27 +626,29 @@ mod tests {
 
     #[test]
     fn recursive_scans_reuse_git_status_per_worktree() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("create Git status cache fixture");
         let git_dir = temp.path().join(".git");
         let child_dir = temp.path().join("child");
-        fs::create_dir_all(&git_dir).unwrap();
-        fs::create_dir(&child_dir).unwrap();
-        fs::write(temp.path().join("root.txt"), b"root").unwrap();
-        fs::write(child_dir.join("nested.txt"), b"nested").unwrap();
+        fs::create_dir_all(&git_dir).expect("create fixture Git directory");
+        fs::create_dir(&child_dir).expect("create fixture child directory");
+        fs::write(temp.path().join("root.txt"), b"root").expect("create root fixture file");
+        fs::write(child_dir.join("nested.txt"), b"nested").expect("create nested fixture file");
 
         let mut index = b"DIRC".to_vec();
         index.extend_from_slice(&2u32.to_be_bytes());
         index.extend_from_slice(&0u32.to_be_bytes());
         let index_path = git_dir.join("index");
-        fs::write(&index_path, index).unwrap();
+        fs::write(&index_path, index).expect("write empty fixture Git index");
 
         let mut cache = GitStatusCache::default();
-        list_dir_with_git_status_cache(&config(temp.path().to_path_buf()), &mut cache).unwrap();
+        list_dir_with_git_status_cache(&config(temp.path().to_path_buf()), &mut cache)
+            .expect("scan root fixture and populate Git status cache");
 
         // If the second scan recomputes repository status, it will fail to parse
         // the now-removed index instead of using the operation's cached snapshot.
-        fs::remove_file(index_path).unwrap();
-        let child_result = list_dir_with_git_status_cache(&config(child_dir), &mut cache).unwrap();
+        fs::remove_file(index_path).expect("remove fixture Git index after caching status");
+        let child_result = list_dir_with_git_status_cache(&config(child_dir), &mut cache)
+            .expect("scan child using cached Git status");
         assert!(untracked_file(&child_result, b"nested.txt"));
         assert_eq!(cache.snapshots.len(), 1);
     }
