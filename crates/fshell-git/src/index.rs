@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+use fshell_hash::FxHashMap;
 
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
@@ -21,7 +24,7 @@ pub struct IndexEntry {
 pub struct Index {
     version: u32,
     entries: Vec<IndexEntry>,
-    path_lookup: HashMap<PathBuf, usize>,
+    path_lookup: FxHashMap<PathBuf, usize>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,11 +72,17 @@ impl Index {
             return Err(IndexError::UnsupportedVersion(version));
         }
 
+        let max_entries = data.len().saturating_sub(12) / 64;
+        if num_entries as usize > max_entries {
+            return Err(IndexError::TruncatedEntry(data.len()));
+        }
         let mut entries = Vec::with_capacity(num_entries as usize);
-        let mut offset = 12;
+        let mut offset: usize = 12;
+        let mut previous_path = Vec::new();
 
         for _ in 0..num_entries {
-            if offset + 62 > data.len() {
+            let entry_start = offset;
+            if offset.checked_add(62).is_none_or(|end| end > data.len()) {
                 return Err(IndexError::TruncatedEntry(offset));
             }
 
@@ -139,21 +148,47 @@ impl Index {
             // Stage is bits 12-13 of flags (0-3)
             let stage = ((flags >> 12) & 0x3) as u8;
 
-            let path_start = offset + 62;
-            let path_end = data[path_start..]
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(data.len() - path_start);
-            let path = PathBuf::from(
-                String::from_utf8_lossy(&data[path_start..path_start + path_end]).to_string(),
-            );
-
-            let entry_len = 62 + path_end + 1;
-            let padded_len = (entry_len + 7) & !7;
-            offset += padded_len;
+            let path_start = entry_start + 62;
+            offset = path_start;
+            let path = if version == 4 {
+                let strip_len = decode_v4_strip_len(data, &mut offset)?;
+                let prefix_len = previous_path
+                    .len()
+                    .checked_sub(strip_len)
+                    .ok_or(IndexError::CorruptedEntry(offset))?;
+                let suffix_start = offset;
+                let suffix_len = data[suffix_start..]
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .ok_or(IndexError::TruncatedEntry(suffix_start))?;
+                let mut path = Vec::with_capacity(prefix_len + suffix_len);
+                path.extend_from_slice(&previous_path[..prefix_len]);
+                path.extend_from_slice(&data[suffix_start..suffix_start + suffix_len]);
+                offset = suffix_start + suffix_len + 1;
+                path
+            } else {
+                let path_end = data[path_start..]
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .ok_or(IndexError::TruncatedEntry(path_start))?;
+                let path = data[path_start..path_start + path_end].to_vec();
+                let entry_len = 62usize
+                    .checked_add(path_end)
+                    .and_then(|len| len.checked_add(1))
+                    .ok_or(IndexError::CorruptedEntry(offset))?;
+                let padded_len = entry_len
+                    .checked_add(7)
+                    .ok_or(IndexError::CorruptedEntry(offset))?
+                    & !7;
+                offset = entry_start
+                    .checked_add(padded_len)
+                    .ok_or(IndexError::CorruptedEntry(entry_start))?;
+                path
+            };
+            previous_path = path.clone();
 
             entries.push(IndexEntry {
-                path,
+                path: PathBuf::from(OsStr::from_bytes(&path)),
                 sha1,
                 mode,
                 size,
@@ -164,7 +199,7 @@ impl Index {
             });
         }
 
-        let mut path_lookup = HashMap::with_capacity(num_entries as usize);
+        let mut path_lookup = FxHashMap::default();
         for (i, entry) in entries.iter().enumerate() {
             path_lookup.insert(entry.path.clone(), i);
         }
@@ -202,6 +237,29 @@ impl Index {
     pub fn version(&self) -> u32 {
         self.version
     }
+}
+
+fn decode_v4_strip_len(data: &[u8], offset: &mut usize) -> Result<usize, IndexError> {
+    let start = *offset;
+    let mut byte = *data
+        .get(*offset)
+        .ok_or(IndexError::TruncatedEntry(*offset))?;
+    *offset += 1;
+    let mut value = usize::from(byte & 0x7f);
+
+    while byte & 0x80 != 0 {
+        byte = *data
+            .get(*offset)
+            .ok_or(IndexError::TruncatedEntry(*offset))?;
+        *offset += 1;
+        value = value
+            .checked_add(1)
+            .and_then(|current| current.checked_mul(128))
+            .and_then(|current| current.checked_add(usize::from(byte & 0x7f)))
+            .ok_or(IndexError::CorruptedEntry(start))?;
+    }
+
+    Ok(value)
 }
 
 #[cfg(test)]
