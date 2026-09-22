@@ -1400,6 +1400,46 @@ async fn test_external_pipeline_streaming_early_exit() {
 }
 
 #[tokio::test]
+async fn test_execute_pipeline_waits_for_stage_tasks() {
+    let env = setup_test_env();
+    env.register_async_builtin(
+        "delayed-output",
+        |_input, _args, _env, tx, _span| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            tx.send(PipelinePayload::Data(std::sync::Arc::new(Val::String(
+                "done".into(),
+            ))))
+            .await
+            .map_err(|error| fshell_core::ShellError::from(error.to_string()))?;
+            Ok(())
+        },
+    );
+    let mut parser = fshell_core::Parser::new("delayed-output");
+    let stmts = parser.parse_statements().unwrap();
+    let pipeline = match stmts[0].clone().into_unpack() {
+        Stmt::Expr(expr) => match expr.into_unpack() {
+            Expr::Pipeline(pipeline) => pipeline,
+            other => panic!("expected pipeline, got {other:?}"),
+        },
+        other => panic!("expected expression statement, got {other:?}"),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let started = std::time::Instant::now();
+    fshell_engine::execute_pipeline(&pipeline, &env, tx)
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(20),
+        "execute_pipeline returned before its stage task completed"
+    );
+    assert!(matches!(
+        rx.recv().await,
+        Some(PipelinePayload::Data(value)) if *value == Val::String("done".into())
+    ));
+    assert!(rx.recv().await.is_none(), "pipeline output must be closed");
+}
+
+#[tokio::test]
 async fn test_external_pipeline_chunked_streaming_and_count() {
     let env = setup_test_env();
     let mut parser =

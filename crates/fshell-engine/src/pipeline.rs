@@ -348,6 +348,14 @@ pub fn execute_pipeline_owned(
     Box::pin(async move { execute_pipeline(&pipeline, &env, tx).await })
 }
 
+async fn join_stage_tasks(stage_tasks: Vec<tokio::task::JoinHandle<()>>) -> Result<(), String> {
+    for task in stage_tasks {
+        task.await
+            .map_err(|error| format!("pipeline stage task failed: {error}"))?;
+    }
+    Ok(())
+}
+
 /// Set up tokio inter-stage channels and run pipeline steps.
 pub async fn execute_pipeline(
     pipeline: &Pipeline,
@@ -414,6 +422,17 @@ pub async fn execute_pipeline(
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let mut current_rx: Option<PipeStream> = None;
+    let mut stage_tasks = Vec::new();
+    macro_rules! spawn_stage {
+        ($future:expr) => {{
+            stage_tasks.push(tokio::spawn($future));
+        }};
+    }
+    macro_rules! spawn_blocking_stage {
+        ($closure:expr) => {{
+            stage_tasks.push(tokio::task::spawn_blocking($closure));
+        }};
+    }
 
     for (idx, stage) in stages.iter().enumerate() {
         if env.pipeline_cancelled() {
@@ -508,7 +527,7 @@ pub async fn execute_pipeline(
                         }
                         found.ok_or_else(|| format!("Undefined variable: {}", var_name))?
                     };
-                    tokio::spawn(async move {
+                    spawn_stage!(async move {
                         match val {
                             Val::List(list) => {
                                 for item in list {
@@ -547,7 +566,7 @@ pub async fn execute_pipeline(
                             extra_args.push(eval_expr(&arg, &env_clone).await?);
                         }
 
-                        tokio::spawn(async move {
+                        spawn_stage!(async move {
                             if *cancel_alias.borrow() {
                                 return;
                             }
@@ -846,7 +865,7 @@ pub async fn execute_pipeline(
                                                     .sigint_pending
                                                     .store(false, Ordering::SeqCst);
                                                 env_clone.report_stage_error_code(127);
-                                                return Ok(());
+                                                return join_stage_tasks(stage_tasks).await;
                                             }
                                             let mut pfd = libc::pollfd {
                                                 fd: 0,
@@ -917,7 +936,7 @@ pub async fn execute_pipeline(
                                             .prompt
                                             .suggestion_deferred
                                             .store(true, Ordering::Release);
-                                        return Ok(());
+                                        return join_stage_tasks(stage_tasks).await;
                                     }
                                 }
                             }
@@ -928,7 +947,7 @@ pub async fn execute_pipeline(
                         // with a synthetic comment body.
                         let is_posix_fn = env_clone.posix_fns.read().contains_key(&name);
                         if is_posix_fn && let Some(handler) = crate::posix_handler() {
-                            tokio::spawn(async move {
+                            spawn_stage!(async move {
                                 let evaluated_arg_strs: Vec<String> = evaluated_args
                                     .iter()
                                     .map(|v| match v {
@@ -958,14 +977,14 @@ pub async fn execute_pipeline(
                                     }
                                 }
                             });
-                            return Ok(());
+                            return join_stage_tasks(stage_tasks).await;
                         }
 
                         // Check native user-defined functions (single-lock
                         // read to avoid TOCTOU between lookup and body capture).
                         let user_fn = env_clone.fns.read().get(&name).cloned();
                         if let Some((params, ret_type, body)) = user_fn {
-                            tokio::spawn(async move {
+                            spawn_stage!(async move {
                                 let _fn_guard = crate::profiler::ProfilerState::guard(
                                     &env_clone.profiler,
                                     &format!("fn_call {}", name),
@@ -1174,7 +1193,7 @@ pub async fn execute_pipeline(
                             let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();
                             let cancel = cancel_tx.clone();
-                            tokio::spawn(async move {
+                            spawn_stage!(async move {
                                 if *stage_cancel.borrow() {
                                     return;
                                 }
@@ -1209,7 +1228,7 @@ pub async fn execute_pipeline(
                             let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();
                             let cancel = cancel_tx.clone();
-                            tokio::task::spawn_blocking(move || {
+                            spawn_blocking_stage!(move || {
                                 if *stage_cancel.borrow() {
                                     return;
                                 }
@@ -1243,7 +1262,7 @@ pub async fn execute_pipeline(
                             let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();
                             let cancel = cancel_tx.clone();
-                            tokio::spawn(async move {
+                            spawn_stage!(async move {
                                 if *stage_cancel.borrow() {
                                     return;
                                 }
@@ -1281,7 +1300,7 @@ pub async fn execute_pipeline(
                         } else if let Some(fallback) = env_clone.get_fallback_handler() {
                             let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();
-                            tokio::task::spawn_blocking(move || {
+                            spawn_blocking_stage!(move || {
                                 if *stage_cancel.borrow() {
                                     return;
                                 }
@@ -1318,7 +1337,7 @@ pub async fn execute_pipeline(
             PipelineStage::Filter { condition } => {
                 let _stage_cancel = cancel_rx.clone();
                 let needed = referenced_idents(&condition);
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     if let Some(mut rx) = current_rx {
                         // Clone env once and reuse across items to avoid per-item Arc batching
                         let mut sub_env = env_clone.clone();
@@ -1457,7 +1476,7 @@ pub async fn execute_pipeline(
             PipelineStage::Map { projections } => {
                 let needed: FxHashSet<String> =
                     projections.iter().flat_map(referenced_idents).collect();
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     if let Some(mut rx) = current_rx {
                         // Clone env once and reuse across items to avoid per-item Arc batching
                         let mut sub_env = env_clone.clone();
@@ -1535,7 +1554,7 @@ pub async fn execute_pipeline(
             }
             PipelineStage::Sort { column, descending } => {
                 let sort_max_items = env.options.read().sort_max_items;
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     if let Some(mut rx) = current_rx {
                         let mut items = Vec::new();
                         while let Some(payload) = rx.recv().await {
@@ -1617,7 +1636,7 @@ pub async fn execute_pipeline(
                 });
             }
             PipelineStage::Grep { pattern } => {
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     let pat_val = match eval_expr(&pattern, &env_clone).await {
                         Ok(Val::String(s)) => s,
                         Ok(other) => other.to_text(),
@@ -1686,7 +1705,7 @@ pub async fn execute_pipeline(
                 let no_color = !env_clone.options.read().error_color;
                 let is_tty = crate::is_stdout_a_tty();
                 let use_color = is_tty && !no_color;
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     let pat_val = match eval_expr(&pattern, &env_clone).await {
                         Ok(Val::String(s)) => s,
                         Ok(other) => other.to_text(),
@@ -1744,7 +1763,7 @@ pub async fn execute_pipeline(
                 });
             }
             PipelineStage::Count => {
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     let mut count = 0i64;
                     // Byte streams are line-oriented; a chunk that does not end in a
                     // newline still contributes a final (possibly partial) line.
@@ -1784,7 +1803,7 @@ pub async fn execute_pipeline(
                 });
             }
             PipelineStage::Hash { mode, per_record } => {
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     if let Some(mut rx) = current_rx {
                         if per_record {
                             while let Some(payload) = rx.recv().await {
@@ -1958,7 +1977,7 @@ pub async fn execute_pipeline(
                     }
                 };
 
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     if let Some(mut rx) = current_rx {
                         let mut yielded = 0;
                         while yielded < limit_count {
@@ -2016,7 +2035,7 @@ pub async fn execute_pipeline(
             }
             PipelineStage::Traverse { edge_label } => {
                 let _stage_cancel = cancel_rx.clone();
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
                             if env_clone.pipeline_cancelled() || *_stage_cancel.borrow() {
@@ -2275,7 +2294,7 @@ pub async fn execute_pipeline(
                     );
                 }
                 SerializationFormat::Table => {
-                    tokio::spawn(async move {
+                    spawn_stage!(async move {
                         let mut items: Vec<Val> = Vec::new();
                         if let Some(mut rx) = current_rx {
                             while let Some(payload) = rx.recv().await {
@@ -2313,7 +2332,7 @@ pub async fn execute_pipeline(
                     });
                 }
                 SerializationFormat::Bar => {
-                    tokio::spawn(async move {
+                    spawn_stage!(async move {
                         let mut items: Vec<Val> = Vec::new();
                         if let Some(mut rx) = current_rx {
                             while let Some(payload) = rx.recv().await {
@@ -2354,7 +2373,7 @@ pub async fn execute_pipeline(
             PipelineStage::FdRedirect { src_fd, dst_fd } => {
                 // Handle fd-to-fd redirection (e.g., `2>&1` means stderr -> stdout).
                 // In fshell's pipeline model, this means merging the two payload channels.
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
                             if env_clone.pipeline_cancelled() {
@@ -2456,7 +2475,7 @@ pub async fn execute_pipeline(
                         .await;
                     continue;
                 }
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     let mut opts = OpenOptions::new();
                     opts.write(true).create(true);
                     if append {
@@ -2630,7 +2649,7 @@ pub async fn execute_pipeline(
                     continue;
                 }
 
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     use tokio::io::AsyncBufReadExt;
                     match tokio::fs::File::open(&path_buf).await {
                         Ok(file) => {
@@ -2691,7 +2710,7 @@ pub async fn execute_pipeline(
                     Val::String(s) => s,
                     other => other.to_text(),
                 };
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     for line in text.lines() {
                         if env_clone.pipeline_cancelled() {
                             break;
@@ -2734,7 +2753,7 @@ pub async fn execute_pipeline(
                 }
                 // Here-string is single string (may contain newlines); send as one item without trailing \n for pipeline consistency
                 let send_text = text.trim_end_matches('\n').to_string();
-                tokio::spawn(async move {
+                spawn_stage!(async move {
                     let _ = crate::send_with_backpressure(
                         &env_clone,
                         &out_tx,
@@ -2746,7 +2765,7 @@ pub async fn execute_pipeline(
         }
         current_rx = Some(stage_rx);
     }
-    Ok(())
+    join_stage_tasks(stage_tasks).await
 }
 
 fn get_path_helper_paths() -> Vec<String> {
