@@ -5,6 +5,7 @@ use crate::args::Config;
 use crate::colors::{BLUE, CYAN, GREEN, RESET};
 use crate::platform::get_dirent_name;
 use crate::utils::{escape_name, escape_name_cow};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use libc::{
     O_DIRECTORY, O_RDONLY, S_IFDIR, S_IFLNK, S_IFMT, S_IXUSR, close, closedir, dirfd, dup,
     fdopendir, fstat, fstatat, open, openat, readdir,
@@ -12,6 +13,25 @@ use libc::{
 use std::ffi::{CString, OsStr};
 use std::io::{self, BufWriter, Write};
 use std::os::unix::ffi::OsStrExt;
+
+fn tree_exclude_matcher(config: &Config) -> io::Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in &config.tree_exclude {
+        let glob = Glob::new(pattern).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid tree exclusion pattern '{pattern}': {err}"),
+            )
+        })?;
+        builder.add(glob);
+    }
+    builder.build().map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid tree exclusion patterns: {err}"),
+        )
+    })
+}
 
 /// RAII guard that closes a file descriptor on drop.
 struct FdGuard(i32);
@@ -114,6 +134,7 @@ where
     // Default tree depth is bounded (20 levels) to avoid runaway recursion on
     // pathological/deep structures; users can override with `ls tree --depth N`.
     let max_depth = config.tree_depth.unwrap_or(20);
+    let exclude = tree_exclude_matcher(config)?;
     if max_depth > 128 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -212,6 +233,7 @@ where
         max_depth,
         Some(result),
         &check_read_dir,
+        &exclude,
     )
 }
 
@@ -225,6 +247,7 @@ fn visit_dir_iterative<F>(
     max_depth: usize,
     root_result: Option<&crate::scan::ListResult>,
     check_read_dir: &F,
+    exclude: &GlobSet,
 ) -> io::Result<()>
 where
     F: Fn(&std::path::Path) -> bool,
@@ -286,7 +309,9 @@ where
                     })
                     .unwrap_or(libc::DT_UNKNOWN)
             };
-            entries.push((start, name_bytes.len(), d_type));
+            if !(d_type == libc::DT_DIR && exclude.is_match(OsStr::from_bytes(name_bytes))) {
+                entries.push((start, name_bytes.len(), d_type));
+            }
         }
     } else {
         loop {
@@ -314,9 +339,41 @@ where
             let start = arena.len();
             arena.extend_from_slice(name_bytes);
             arena.push(0);
-            entries.push((start, name_bytes.len(), entry.d_type));
+            if !(entry.d_type == libc::DT_DIR && exclude.is_match(OsStr::from_bytes(name_bytes))) {
+                entries.push((start, name_bytes.len(), entry.d_type));
+            }
         }
     }
+
+    let mut visible_entries = Vec::with_capacity(entries.len());
+    for (start, len, d_type) in entries {
+        let name = &arena[start..start + len];
+        let is_dir = if d_type == libc::DT_DIR {
+            true
+        } else if d_type == libc::DT_UNKNOWN || (config.dereference && d_type == libc::DT_LNK) {
+            let name_ptr = unsafe { arena.as_ptr().add(start) as *const libc::c_char };
+            let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
+            let res = unsafe {
+                fstatat(
+                    fd,
+                    name_ptr,
+                    stat_buf.as_mut_ptr(),
+                    if config.dereference {
+                        0
+                    } else {
+                        libc::AT_SYMLINK_NOFOLLOW
+                    },
+                )
+            };
+            res == 0 && (unsafe { stat_buf.assume_init().st_mode } & S_IFMT) == S_IFDIR
+        } else {
+            false
+        };
+        if !(is_dir && exclude.is_match(OsStr::from_bytes(name))) {
+            visible_entries.push((start, len, d_type));
+        }
+    }
+    let mut entries = visible_entries;
 
     entries.sort_by(|&(a_start, a_len, _), &(b_start, b_len, _)| {
         arena[a_start..a_start + a_len].cmp(&arena[b_start..b_start + b_len])
@@ -324,19 +381,10 @@ where
 
     let count = entries.len();
     for (i, &(start, len, d_type)) in entries.iter().enumerate() {
-        let is_last = i == count - 1;
-
         let name_bytes = &arena[start..start + len];
         let display_name = escape_name_cow(name_bytes);
         // SAFETY: start + len is within the arena, and arena[start + len] is null
         let name_ptr = unsafe { arena.as_ptr().add(start) as *const libc::c_char };
-
-        out.write_all(prefix.as_bytes())?;
-        if is_last {
-            out.write_all("└── ".as_bytes())?;
-        } else {
-            out.write_all("├── ".as_bytes())?;
-        }
 
         let mut is_dir = d_type == libc::DT_DIR;
         let mut is_link = d_type == libc::DT_LNK;
@@ -373,6 +421,16 @@ where
                     is_exec = (stat.st_mode & S_IXUSR) != 0;
                 }
             }
+        }
+
+        // Excluded directories were removed before sorting and branch layout.
+        let is_last = i == count - 1;
+
+        out.write_all(prefix.as_bytes())?;
+        if is_last {
+            out.write_all("└── ".as_bytes())?;
+        } else {
+            out.write_all("├── ".as_bytes())?;
         }
 
         if config.use_color {
@@ -459,6 +517,7 @@ where
                             max_depth - 1,
                             None,
                             check_read_dir,
+                            exclude,
                         )?;
                         prefix.truncate(original_len);
                     } else {

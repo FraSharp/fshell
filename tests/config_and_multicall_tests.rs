@@ -690,6 +690,35 @@ fn test_multicall_ls_tree() {
 }
 
 #[test]
+fn test_multicall_ls_tree_excludes_directories_at_any_depth() {
+    let (cmd, _symlink) = FshCmd::multicall("ls");
+    let test_dir = cmd.temp_path().join("tree_exclude_test");
+    std::fs::create_dir_all(test_dir.join("keep").join("cache")).unwrap();
+    std::fs::create_dir_all(test_dir.join("cache")).unwrap();
+    std::fs::write(test_dir.join("keep").join("visible.txt"), b"visible").unwrap();
+    std::fs::write(test_dir.join("cache").join("hidden.txt"), b"hidden").unwrap();
+
+    let output = cmd
+        .arg("--tree")
+        .arg("--exclude")
+        .arg("cache")
+        .arg(&test_dir)
+        .run()
+        .expect("multicall ls --tree --exclude execution failed");
+
+    output
+        .assert_success()
+        .assert_stdout_contains("visible.txt");
+    assert!(!output.stdout.contains("hidden.txt"));
+    assert!(
+        !output
+            .stdout
+            .lines()
+            .any(|line| line.trim_end().ends_with("cache"))
+    );
+}
+
+#[test]
 fn test_multicall_ls_pipe_strips_ansi() {
     let (cmd, _symlink) = FshCmd::multicall("ls");
     let test_dir = cmd.temp_path().join("pipe_test");

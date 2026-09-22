@@ -51,6 +51,7 @@ fn parse_ls_args_to_rrls_config(
         icons: false,
         tree: false,
         depth: None,
+        exclude: Vec::new(),
         show_hidden: false,
         long: false,
         list_dirs: false,
@@ -147,6 +148,7 @@ fn parse_ls_args_to_rrls_config(
                             .to_string());
                         }
                     }
+                    "exclude" => ls.exclude.push(val.to_string()),
                     _ => {
                         return Err(BuiltinError::InvalidArgument {
                             cmd: "ls".into(),
@@ -189,6 +191,18 @@ fn parse_ls_args_to_rrls_config(
                             }
                         } else {
                             return Err("ls: option '--depth' requires an argument".to_string());
+                        }
+                    }
+                    "exclude" => {
+                        if idx < args.len() {
+                            if let Val::String(pattern) = &args[idx] {
+                                ls.exclude.push(pattern.clone());
+                                idx += 1;
+                            } else {
+                                return Err("ls: --exclude requires a string value".to_string());
+                            }
+                        } else {
+                            return Err("ls: option '--exclude' requires an argument".to_string());
                         }
                     }
                     "group-directories-first" => ls.group_dirs = true,
@@ -260,6 +274,7 @@ fn parse_ls_args_to_rrls_config(
         use_color: ls.color,
         tree: ls.tree,
         tree_depth: ls.depth,
+        tree_exclude: ls.exclude,
         group_directories_first: ls.group_dirs,
         show_icons: ls.icons,
         git: ls.git,
@@ -278,6 +293,7 @@ struct LsArgs {
     icons: bool,
     tree: bool,
     depth: Option<usize>,
+    exclude: Vec<String>,
     show_hidden: bool,
     long: bool,
     list_dirs: bool,

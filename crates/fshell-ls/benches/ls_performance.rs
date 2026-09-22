@@ -34,6 +34,7 @@ fn config(path: &Path) -> Config {
         use_color: false,
         tree: false,
         tree_depth: None,
+        tree_exclude: Vec::new(),
         group_directories_first: false,
         show_icons: false,
         git: false,

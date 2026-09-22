@@ -209,7 +209,7 @@ pub static TOPICS: &[HelpTopic] = &[
         category: HelpCategory::Builtin,
         summary: "List directory contents",
         description: "List directory entries under capability checks. Each entry is emitted as a record with fields for name, size, type, and metadata. Requires read capability on the target path.",
-        syntax: "ls [path] [-a] [-v]",
+        syntax: "ls [path] [-a] [-v] [--tree] [--exclude <glob>]",
         examples: &[
             HelpExample {
                 input: "ls",
@@ -227,6 +227,10 @@ pub static TOPICS: &[HelpTopic] = &[
                 input: "ls -v",
                 explanation: "Verbose output including permissions field.",
             },
+            HelpExample {
+                input: "ls --tree --exclude node_modules .",
+                explanation: "Show the directory tree without descending into directories named node_modules.",
+            },
         ],
         flags: &[
             HelpFlag {
@@ -236,6 +240,14 @@ pub static TOPICS: &[HelpTopic] = &[
             HelpFlag {
                 flag: "-v",
                 desc: "Verbose: include permissions field in output",
+            },
+            HelpFlag {
+                flag: "--tree",
+                desc: "Render the directory tree",
+            },
+            HelpFlag {
+                flag: "--exclude <glob>",
+                desc: "In tree mode, omit matching directory names and skip reading them; repeatable",
             },
         ],
         related: &["cd", "capabilities"],

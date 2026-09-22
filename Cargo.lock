@@ -1226,6 +1226,7 @@ dependencies = [
  "criterion",
  "fshell-git",
  "fshell-hash",
+ "globset",
  "libc",
  "parking_lot",
  "rayon",

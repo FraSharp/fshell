@@ -15,6 +15,7 @@ fshell-git = { path = "../fshell-git" }
 fshell-hash = { workspace = true }
 rayon = { workspace = true }
 parking_lot = { workspace = true }
+globset = { workspace = true }
 
 [lints]
 workspace = true

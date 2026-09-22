@@ -129,7 +129,12 @@ git-aware directory listing emitting `Val::Map` records with typed fields (`name
 ls
 ls -l /etc
 ls | filter type == "file" and size > 1K | sort size desc | @table
+ls --tree --exclude node_modules --exclude 'target*' .
 ```
+
+In tree mode, repeat `--exclude <glob>` to omit matching directory names and
+skip opening or reading those directories. Patterns match each directory's
+basename at every depth; `--exclude=<glob>` is also accepted.
 
 ### `files`
 recursively scans directory trees and yields structured file metadata records.
