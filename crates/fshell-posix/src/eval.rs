@@ -1430,8 +1430,15 @@ async fn eval_simple_command_inner(
             } else {
                 args
             };
-            let code = eval_test_args(test_args, env);
-            return Ok((if code { 0 } else { 1 }, None));
+            let code = match eval_test_args(test_args, env) {
+                Ok(true) => 0,
+                Ok(false) => 1,
+                Err(error) => {
+                    eprintln!("test: {error}");
+                    2
+                }
+            };
+            return Ok((code, None));
         }
         "echo" => {
             let mut no_newline = false;
@@ -2190,7 +2197,7 @@ async fn run_external_command(
     }
 }
 
-fn eval_test_args(args: &[String], env: &Env) -> bool {
+fn eval_test_args(args: &[String], env: &Env) -> Result<bool, String> {
     let clean_args: &[String] = if let Some(last) = args.last()
         && last == "]"
     {
@@ -2200,41 +2207,41 @@ fn eval_test_args(args: &[String], env: &Env) -> bool {
     };
 
     match clean_args.len() {
-        0 => false,
-        1 => !clean_args[0].is_empty(),
+        0 => Ok(false),
+        1 => Ok(!clean_args[0].is_empty()),
         2 => {
             if clean_args[0] == "!" {
-                clean_args[1].is_empty()
+                Ok(clean_args[1].is_empty())
             } else {
-                eval_unary_primary(&clean_args[0], &clean_args[1], env)
+                Ok(eval_unary_primary(&clean_args[0], &clean_args[1], env))
             }
         }
         3 => {
             if is_binary_primary(&clean_args[1]) {
                 eval_binary_primary(&clean_args[0], &clean_args[1], &clean_args[2])
             } else if clean_args[0] == "!" {
-                !eval_test_args(&clean_args[1..], env)
+                Ok(!eval_test_args(&clean_args[1..], env)?)
             } else if clean_args[0] == "(" && clean_args[2] == ")" {
-                !clean_args[1].is_empty()
+                Ok(!clean_args[1].is_empty())
             } else {
-                false
+                Ok(false)
             }
         }
         4 => {
             if clean_args[0] == "!" {
-                !eval_test_args(&clean_args[1..], env)
+                Ok(!eval_test_args(&clean_args[1..], env)?)
             } else if clean_args[0] == "(" && clean_args[3] == ")" {
                 eval_test_args(&clean_args[1..3], env)
             } else {
                 match brush_parser::test_command::parse(clean_args) {
                     Ok(expr) => crate::posix_builtins::test_builtin::eval_test_expr(&expr, env),
-                    Err(_) => false,
+                    Err(error) => Err(format!("invalid test expression: {error}")),
                 }
             }
         }
         _ => match brush_parser::test_command::parse(clean_args) {
             Ok(expr) => crate::posix_builtins::test_builtin::eval_test_expr(&expr, env),
-            Err(_) => false,
+            Err(error) => Err(format!("invalid test expression: {error}")),
         },
     }
 }
@@ -2299,22 +2306,24 @@ fn eval_unary_primary(op: &str, val: &str, env: &Env) -> bool {
     }
 }
 
-fn eval_binary_primary(left: &str, op: &str, right: &str) -> bool {
+fn eval_binary_primary(left: &str, op: &str, right: &str) -> Result<bool, String> {
     match op {
-        "=" | "==" => left == right,
-        "!=" => left != right,
-        "<" => left < right,
-        ">" => left > right,
-        "-eq" => parse_test_int(left) == parse_test_int(right),
-        "-ne" => parse_test_int(left) != parse_test_int(right),
-        "-lt" => parse_test_int(left) < parse_test_int(right),
-        "-le" => parse_test_int(left) <= parse_test_int(right),
-        "-gt" => parse_test_int(left) > parse_test_int(right),
-        "-ge" => parse_test_int(left) >= parse_test_int(right),
-        _ => false,
+        "=" | "==" => Ok(left == right),
+        "!=" => Ok(left != right),
+        "<" => Ok(left < right),
+        ">" => Ok(left > right),
+        "-eq" => Ok(parse_test_int(left)? == parse_test_int(right)?),
+        "-ne" => Ok(parse_test_int(left)? != parse_test_int(right)?),
+        "-lt" => Ok(parse_test_int(left)? < parse_test_int(right)?),
+        "-le" => Ok(parse_test_int(left)? <= parse_test_int(right)?),
+        "-gt" => Ok(parse_test_int(left)? > parse_test_int(right)?),
+        "-ge" => Ok(parse_test_int(left)? >= parse_test_int(right)?),
+        _ => Ok(false),
     }
 }
 
-fn parse_test_int(s: &str) -> i64 {
-    s.trim().parse::<i64>().unwrap_or(0)
+fn parse_test_int(s: &str) -> Result<i64, String> {
+    s.trim()
+        .parse::<i64>()
+        .map_err(|error| format!("integer expression expected: {:?} ({})", s.trim(), error))
 }

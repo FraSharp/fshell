@@ -482,6 +482,18 @@ async fn test_posix_test_brackets() {
 }
 
 #[tokio::test]
+async fn test_posix_test_rejects_invalid_integer_operands() {
+    let env = setup_posix_env();
+    let parsed = parse_posix_script(r#"test "not-a-number" -eq 0"#)
+        .expect("failed to parse invalid test operand script");
+    let code = eval_source(&parsed, &env, &EvalConfig::default())
+        .await
+        .expect("an invalid test operand should be a command status, not an engine failure");
+
+    assert_eq!(code, 2);
+}
+
+#[tokio::test]
 async fn test_posix_printf_formatting() {
     let env = setup_posix_env();
     let (_, out) = run_posix_capture(r#"printf "Name: %s, Age: %d\n" Alice 30"#, &env).await;

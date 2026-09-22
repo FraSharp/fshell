@@ -4,15 +4,18 @@
 use brush_parser::ast as brush_ast;
 
 /// Evaluate a POSIX test(1) expression (brush's TestExpr) against Env.
-pub fn eval_test_expr(expr: &brush_ast::TestExpr, env: &fshell_engine::Env) -> bool {
+pub fn eval_test_expr(
+    expr: &brush_ast::TestExpr,
+    env: &fshell_engine::Env,
+) -> Result<bool, String> {
     match expr {
-        brush_ast::TestExpr::False => false,
-        brush_ast::TestExpr::Literal(s) => !s.is_empty(),
-        brush_ast::TestExpr::And(a, b) => eval_test_expr(a, env) && eval_test_expr(b, env),
-        brush_ast::TestExpr::Or(a, b) => eval_test_expr(a, env) || eval_test_expr(b, env),
-        brush_ast::TestExpr::Not(inner) => !eval_test_expr(inner, env),
+        brush_ast::TestExpr::False => Ok(false),
+        brush_ast::TestExpr::Literal(s) => Ok(!s.is_empty()),
+        brush_ast::TestExpr::And(a, b) => Ok(eval_test_expr(a, env)? && eval_test_expr(b, env)?),
+        brush_ast::TestExpr::Or(a, b) => Ok(eval_test_expr(a, env)? || eval_test_expr(b, env)?),
+        brush_ast::TestExpr::Not(inner) => Ok(!eval_test_expr(inner, env)?),
         brush_ast::TestExpr::Parenthesized(inner) => eval_test_expr(inner, env),
-        brush_ast::TestExpr::UnaryTest(op, val) => eval_unary_test(op, val, env),
+        brush_ast::TestExpr::UnaryTest(op, val) => Ok(eval_unary_test(op, val, env)),
         brush_ast::TestExpr::BinaryTest(op, left, right) => eval_binary_test(op, left, right, env),
     }
 }
@@ -62,43 +65,49 @@ fn eval_binary_test(
     left: &str,
     right: &str,
     env: &fshell_engine::Env,
-) -> bool {
+) -> Result<bool, String> {
     match op {
         brush_ast::BinaryPredicate::StringExactlyMatchesString
-        | brush_ast::BinaryPredicate::StringExactlyMatchesPattern => left == right,
+        | brush_ast::BinaryPredicate::StringExactlyMatchesPattern => Ok(left == right),
         brush_ast::BinaryPredicate::StringDoesNotExactlyMatchString
-        | brush_ast::BinaryPredicate::StringDoesNotExactlyMatchPattern => left != right,
-        brush_ast::BinaryPredicate::LeftSortsBeforeRight => left < right,
-        brush_ast::BinaryPredicate::LeftSortsAfterRight => left > right,
+        | brush_ast::BinaryPredicate::StringDoesNotExactlyMatchPattern => Ok(left != right),
+        brush_ast::BinaryPredicate::LeftSortsBeforeRight => Ok(left < right),
+        brush_ast::BinaryPredicate::LeftSortsAfterRight => Ok(left > right),
         brush_ast::BinaryPredicate::StringMatchesRegex
         | brush_ast::BinaryPredicate::StringContainsSubstring => {
             // Simplify: contains check
-            left.contains(right)
+            Ok(left.contains(right))
         }
-        brush_ast::BinaryPredicate::ArithmeticEqualTo => parse_int(left) == parse_int(right),
-        brush_ast::BinaryPredicate::ArithmeticNotEqualTo => parse_int(left) != parse_int(right),
-        brush_ast::BinaryPredicate::ArithmeticLessThan => parse_int(left) < parse_int(right),
+        brush_ast::BinaryPredicate::ArithmeticEqualTo => Ok(parse_int(left)? == parse_int(right)?),
+        brush_ast::BinaryPredicate::ArithmeticNotEqualTo => {
+            Ok(parse_int(left)? != parse_int(right)?)
+        }
+        brush_ast::BinaryPredicate::ArithmeticLessThan => Ok(parse_int(left)? < parse_int(right)?),
         brush_ast::BinaryPredicate::ArithmeticLessThanOrEqualTo => {
-            parse_int(left) <= parse_int(right)
+            Ok(parse_int(left)? <= parse_int(right)?)
         }
-        brush_ast::BinaryPredicate::ArithmeticGreaterThan => parse_int(left) > parse_int(right),
+        brush_ast::BinaryPredicate::ArithmeticGreaterThan => {
+            Ok(parse_int(left)? > parse_int(right)?)
+        }
         brush_ast::BinaryPredicate::ArithmeticGreaterThanOrEqualTo => {
-            parse_int(left) >= parse_int(right)
+            Ok(parse_int(left)? >= parse_int(right)?)
         }
         brush_ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot => {
-            file_mtime(&env.resolve_path(left)) > file_mtime(&env.resolve_path(right))
+            Ok(file_mtime(&env.resolve_path(left)) > file_mtime(&env.resolve_path(right)))
         }
         brush_ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes => {
-            file_mtime(&env.resolve_path(left)) < file_mtime(&env.resolve_path(right))
+            Ok(file_mtime(&env.resolve_path(left)) < file_mtime(&env.resolve_path(right)))
         }
         brush_ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers => {
-            file_mtime(&env.resolve_path(left)) == file_mtime(&env.resolve_path(right))
+            Ok(file_mtime(&env.resolve_path(left)) == file_mtime(&env.resolve_path(right)))
         }
     }
 }
 
-fn parse_int(s: &str) -> i64 {
-    s.trim().parse::<i64>().unwrap_or(0)
+fn parse_int(s: &str) -> Result<i64, String> {
+    s.trim()
+        .parse::<i64>()
+        .map_err(|error| format!("integer expression expected: {:?} ({})", s.trim(), error))
 }
 
 fn file_mtime(path: &std::path::Path) -> std::time::SystemTime {
