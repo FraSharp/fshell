@@ -21,6 +21,21 @@ const ICON_DIR: &str = "d";
 const ICON_FILE: &str = " ";
 const ICON_EXECUTABLE: &str = "*";
 
+fn entry_name<'a>(item: &FileInfo, arena: &'a [u8]) -> io::Result<&'a [u8]> {
+    let range = item.entry.range(arena.len()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file entry points outside the filename arena",
+        )
+    })?;
+    arena.get(range).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file entry points outside the filename arena",
+        )
+    })
+}
+
 fn get_icon_for_file(name_bytes: &[u8], is_dir: bool, is_exec: bool) -> &'static str {
     if is_dir {
         return ICON_DIR;
@@ -114,10 +129,7 @@ pub fn print_columns(
     // Fast path: single column
     if n == 1 {
         let item = &items[0];
-        let entry = item.entry;
-        let start = entry.start();
-        let len = entry.len();
-        let name_bytes = unsafe { arena.get_unchecked(start..start + len) };
+        let name_bytes = entry_name(item, arena)?;
 
         if show_inode {
             if let Some(meta) = &item.metadata {
@@ -136,26 +148,21 @@ pub fn print_columns(
     // Calculate item lengths for column fitting
     // Pre-compute name widths to avoid calling String::from_utf8_lossy twice per item
     let mut name_widths = Vec::with_capacity(n);
-    let item_lens: Vec<usize> = items
-        .iter()
-        .map(|item| {
-            let entry = item.entry;
-            let start = entry.start();
-            let len = entry.len();
-            let name_bytes = unsafe { arena.get_unchecked(start..start + len) };
-            let name_width = String::from_utf8_lossy(name_bytes).width();
-            name_widths.push(name_width);
-            let mut l = name_width;
-            if show_inode {
-                if let Some(meta) = &item.metadata {
-                    l += num_digits(meta.ino) + 1;
-                } else {
-                    l += 2;
-                }
+    let mut item_lens = Vec::with_capacity(n);
+    for item in items {
+        let name_bytes = entry_name(item, arena)?;
+        let name_width = String::from_utf8_lossy(name_bytes).width();
+        name_widths.push(name_width);
+        let mut item_len = name_width;
+        if show_inode {
+            if let Some(meta) = &item.metadata {
+                item_len += num_digits(meta.ino) + 1;
+            } else {
+                item_len += 2;
             }
-            l
-        })
-        .collect();
+        }
+        item_lens.push(item_len);
+    }
 
     let pad = calculate_padding(n);
     let min_item_len = 1;
@@ -213,11 +220,11 @@ pub fn print_columns(
         for (col, &col_width) in best_col_widths.iter().enumerate() {
             let idx = col * best_rows + row;
             if idx < n {
-                let item = unsafe { items.get_unchecked(idx) };
+                let item = items.get(idx).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid column index")
+                })?;
                 let entry = item.entry;
-                let start = entry.start();
-                let len = entry.len();
-                let name_bytes = unsafe { arena.get_unchecked(start..start + len) };
+                let name_bytes = entry_name(item, arena)?;
 
                 let is_exec = item
                     .metadata
@@ -410,10 +417,7 @@ pub fn print_long_listing(
             out.write_all(time_str.as_bytes())?;
             out.write_all(b" ")?;
 
-            // SAFETY: Entry stores valid range within arena
-            let name_bytes = unsafe {
-                arena.get_unchecked(item.entry.start()..item.entry.start() + item.entry.len())
-            };
+            let name_bytes = entry_name(item, arena)?;
 
             if use_color {
                 if item.entry.is_dir() {
@@ -473,10 +477,7 @@ pub fn print_one_per_line(
 
     for item in items {
         let entry = item.entry;
-        let start = entry.start();
-        let len = entry.len();
-        // SAFETY: Entry guarantees valid range within arena
-        let name_bytes = unsafe { arena.get_unchecked(start..start + len) };
+        let name_bytes = entry_name(item, arena)?;
 
         if show_inode {
             if let Some(meta) = &item.metadata {

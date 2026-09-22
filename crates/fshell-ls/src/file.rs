@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::args::GitStatus;
+use std::ops::Range;
 
 #[derive(Clone)]
 pub struct Metadata {
@@ -19,34 +20,47 @@ pub struct Metadata {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-#[allow(clippy::len_without_is_empty)]
 pub struct Entry {
-    pub start: u32,
-    pub len_and_type: u32,
+    start: usize,
+    len: usize,
+    is_dir: bool,
 }
 
 impl Entry {
     #[inline]
     pub fn new(start: usize, len: usize, is_dir: bool) -> Self {
-        Entry {
-            start: start as u32,
-            len_and_type: (len as u32) | if is_dir { 1 << 31 } else { 0 },
-        }
+        Entry { start, len, is_dir }
     }
 
     #[inline]
     pub fn start(self) -> usize {
-        self.start as usize
+        self.start
     }
 
     #[inline]
     pub fn len(self) -> usize {
-        (self.len_and_type & 0x7FFF_FFFF) as usize
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.len == 0
     }
 
     #[inline]
     pub fn is_dir(self) -> bool {
-        (self.len_and_type & (1 << 31)) != 0
+        self.is_dir
+    }
+
+    /// Return the entry's filename range when it is valid for an arena.
+    ///
+    /// `Entry` is part of the public API, so callers may construct a
+    /// `FileInfo` independently of `list_dir`. Consumers must not assume that
+    /// its offsets are valid merely because they are represented as `usize`.
+    #[inline]
+    pub fn range(self, arena_len: usize) -> Option<Range<usize>> {
+        let end = self.start.checked_add(self.len)?;
+        (end <= arena_len).then_some(self.start..end)
     }
 }
 
