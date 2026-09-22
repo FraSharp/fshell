@@ -14,7 +14,6 @@ fshell-engine = { path = "../fshell-engine" }
 tokio = { workspace = true }
 brush-parser = { workspace = true }
 glob = { workspace = true }
-walkdir.workspace = true
 ustr.workspace = true
 async-recursion = { workspace = true }
 bytes = { workspace = true }

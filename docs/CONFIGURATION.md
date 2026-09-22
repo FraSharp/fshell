@@ -81,6 +81,7 @@ unsetopt pipefail   # disable option
 | `confirm_destructive` | `true` | require confirmation for destructive commands (`rm -rf /` etc.) |
 | `quiet_aliases` | `false` | suppress warnings when an alias shadows a builtin or user function |
 | `nullglob` | `false` | glob patterns matching nothing expand to empty rather than literal pattern |
+| `noglob` | `false` | disable pathname expansion for unquoted command arguments |
 | `nocaseglob` | `false` | case-insensitive pathname expansion |
 | `noclobber` | `false` | prevent file overwrites via `>` redirection |
 | `noexec` | `false` | parse syntax and validate AST without executing |

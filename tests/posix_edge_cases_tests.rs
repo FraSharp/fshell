@@ -30,6 +30,32 @@ async fn run_posix_capture(script: &str, env: &Env) -> (i32, String) {
     (code, out)
 }
 
+#[tokio::test]
+async fn test_posix_pathname_expansion_uses_logical_cwd_and_set_f_disables_it() {
+    let env = setup_posix_env();
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"a").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), b"b").unwrap();
+    std::fs::write(tmp.path().join(".hidden.txt"), b"hidden").unwrap();
+    env.set_cwd(tmp.path().to_path_buf());
+
+    let (code, out) = run_posix_capture("set -f; printf '<%s>\\n' *.txt", &env).await;
+
+    assert_eq!(code, 0);
+    assert_eq!(out, "<*.txt>\n");
+
+    let script = format!("set +f; printf '<%s>\\n' {}/*.txt", tmp.path().display());
+    let (_, out) = run_posix_capture(&script, &env).await;
+    assert_eq!(
+        out,
+        format!(
+            "<{}/a.txt>\n<{}/b.txt>\n",
+            tmp.path().display(),
+            tmp.path().display()
+        )
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 1. POSIX Parameter Expansion Edge Cases
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ use brush_parser::ast::*;
 use fshell_core::Val;
 use fshell_engine::{EngineError, Env, Signal};
 
-use crate::expand::{ExpansionConfig, expand_word};
+use crate::expand::{ExpansionConfig, expand_word, expand_word_as_pattern};
 use crate::parser::ParsedScript;
 
 /// How the POSIX evaluator was invoked.
@@ -859,7 +859,10 @@ async fn eval_compound_command_stream(
                     expanded.extend(expand_word(
                         &w.value,
                         env,
-                        &ExpansionConfig::default(),
+                        &ExpansionConfig {
+                            do_glob: !env.options.read().noglob,
+                            ..Default::default()
+                        },
                         &cfg.positional,
                     )?);
                 }
@@ -956,7 +959,10 @@ async fn eval_compound_command_stream(
             let value_expanded = expand_word(
                 &case_clause.value.value,
                 env,
-                &ExpansionConfig::default(),
+                &ExpansionConfig {
+                    do_glob: false,
+                    ..Default::default()
+                },
                 &cfg.positional,
             )?
             .join(" ");
@@ -968,7 +974,7 @@ async fn eval_compound_command_stream(
                         matched = true;
                         break;
                     }
-                    let expanded_pats = expand_word(
+                    let expanded_pats = expand_word_as_pattern(
                         &pat.value,
                         env,
                         &ExpansionConfig {
@@ -1084,7 +1090,7 @@ async fn eval_simple_command(
                         &w.value,
                         env,
                         &ExpansionConfig {
-                            do_glob: true,
+                            do_glob: !env.options.read().noglob,
                             ..Default::default()
                         },
                         positional,

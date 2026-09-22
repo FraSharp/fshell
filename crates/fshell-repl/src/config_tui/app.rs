@@ -881,6 +881,7 @@ impl<'a> App<'a> {
             errexit: opts.errexit,
             nounset: opts.nounset,
             nullglob: opts.nullglob,
+            noglob: opts.noglob,
             nocaseglob: opts.nocaseglob,
             noclobber: opts.noclobber,
             noexec: opts.noexec,

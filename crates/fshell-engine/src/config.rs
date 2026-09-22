@@ -320,6 +320,7 @@ pub struct SettingsSnapshot {
     pub errexit: bool,
     pub nounset: bool,
     pub nullglob: bool,
+    pub noglob: bool,
     pub nocaseglob: bool,
     pub noclobber: bool,
     pub noexec: bool,
@@ -372,6 +373,9 @@ pub fn collect_settings_lines(s: &SettingsSnapshot) -> Vec<String> {
     }
     if s.nullglob {
         lines.push("setopt nullglob".into());
+    }
+    if s.noglob {
+        lines.push("setopt noglob".into());
     }
     if s.nocaseglob {
         lines.push("setopt nocaseglob".into());
@@ -522,6 +526,7 @@ mod tests {
             errexit: false,
             nounset: true,
             nullglob: false,
+            noglob: false,
             nocaseglob: false,
             noclobber: false,
             noexec: false,
@@ -562,6 +567,7 @@ mod tests {
             errexit: true,
             nounset: false,
             nullglob: true,
+            noglob: true,
             nocaseglob: true,
             noclobber: true,
             noexec: true,
@@ -588,6 +594,7 @@ mod tests {
         assert!(lines.contains(&"setopt errexit".into()));
         assert!(lines.contains(&"unsetopt nounset".into()));
         assert!(lines.contains(&"setopt nullglob".into()));
+        assert!(lines.contains(&"setopt noglob".into()));
         assert!(lines.contains(&"setopt nocaseglob".into()));
         assert!(lines.contains(&"setopt noclobber".into()));
         assert!(lines.contains(&"setopt noexec".into()));

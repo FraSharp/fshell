@@ -215,7 +215,19 @@ pub fn expand_word(
     cfg: &ExpansionConfig,
     positional: &[String],
 ) -> Result<Vec<String>, fshell_engine::EngineError> {
-    expand_word_internal(word_str, env, cfg, positional, true)
+    expand_word_internal(word_str, env, cfg, positional, true, false)
+}
+
+/// Expand a shell word for a `case` pattern.  Quoted and escaped wildcard
+/// characters are retained as literal glob syntax (for example `[*]`) so the
+/// pattern matcher cannot accidentally turn them back into wildcards.
+pub(crate) fn expand_word_as_pattern(
+    word_str: &str,
+    env: &fshell_engine::Env,
+    cfg: &ExpansionConfig,
+    positional: &[String],
+) -> Result<Vec<String>, fshell_engine::EngineError> {
+    expand_word_internal(word_str, env, cfg, positional, false, true)
 }
 
 fn expand_word_internal(
@@ -224,6 +236,7 @@ fn expand_word_internal(
     cfg: &ExpansionConfig,
     positional: &[String],
     do_field_split: bool,
+    preserve_pattern_quoting: bool,
 ) -> Result<Vec<String>, fshell_engine::EngineError> {
     if word_str == "$@" || word_str == "\"$@\"" {
         return Ok(get_effective_positional(env, positional));
@@ -243,74 +256,132 @@ fn expand_word_internal(
         Err(_) => return Ok(vec![word_str.to_string()]),
     };
 
-    // Phase 1: build the expanded string
+    // Phase 1: build the expanded value and a parallel glob pattern.  The
+    // value is what the command receives; the pattern escapes wildcard
+    // characters originating in quotes or backslash escapes, while leaving
+    // unquoted text and unquoted expansions eligible for pathname expansion.
     let mut expanded = String::new();
+    let mut glob_pattern = String::new();
+    let mut has_glob = false;
     let mut had_quoted = false;
 
     for wp in &pieces {
         match &wp.piece {
-            WordPiece::Text(t) => expanded.push_str(t),
+            WordPiece::Text(t) => {
+                append_unquoted(&mut expanded, &mut glob_pattern, &mut has_glob, t)
+            }
             WordPiece::SingleQuotedText(t) => {
-                expanded.push_str(t);
+                append_literal(
+                    &mut expanded,
+                    &mut glob_pattern,
+                    t,
+                    preserve_pattern_quoting,
+                );
                 had_quoted = true;
             }
             WordPiece::DoubleQuotedSequence(seq) => {
                 had_quoted = true;
                 for inner in seq {
                     match &inner.piece {
-                        WordPiece::Text(t) => expanded.push_str(t),
+                        WordPiece::Text(t) => append_literal(
+                            &mut expanded,
+                            &mut glob_pattern,
+                            t,
+                            preserve_pattern_quoting,
+                        ),
                         WordPiece::ParameterExpansion(pe) => {
                             let val = eval_parameter_expr(pe, env, positional)?;
-                            expanded.push_str(&val);
+                            append_literal(
+                                &mut expanded,
+                                &mut glob_pattern,
+                                &val,
+                                preserve_pattern_quoting,
+                            );
                         }
                         WordPiece::CommandSubstitution(cmd) => {
                             let out = run_command_subst(cmd, env)?;
-                            expanded.push_str(&out);
+                            append_literal(
+                                &mut expanded,
+                                &mut glob_pattern,
+                                &out,
+                                preserve_pattern_quoting,
+                            );
                         }
                         WordPiece::ArithmeticExpression(expr) => {
                             let out = eval_arithmetic(&expr.value, env)?;
-                            expanded.push_str(&out);
+                            append_literal(
+                                &mut expanded,
+                                &mut glob_pattern,
+                                &out,
+                                preserve_pattern_quoting,
+                            );
                         }
-                        WordPiece::EscapeSequence(s) => expanded.push_str(s),
+                        WordPiece::EscapeSequence(s) => append_literal(
+                            &mut expanded,
+                            &mut glob_pattern,
+                            unescape_word_piece(s),
+                            preserve_pattern_quoting,
+                        ),
                         _ => {}
                     }
                 }
             }
             WordPiece::ParameterExpansion(pe) => {
                 let val = eval_parameter_expr(pe, env, positional)?;
-                expanded.push_str(&val);
+                append_unquoted(&mut expanded, &mut glob_pattern, &mut has_glob, &val);
             }
             WordPiece::TildeExpansion(te) => {
                 let home = env.home_dir().to_string_lossy().into_owned();
                 match te {
-                    word::TildeExpr::Home => expanded.push_str(&home),
-                    word::TildeExpr::UserHome(_) => expanded.push_str(&home),
-                    _ => expanded.push_str(&home),
+                    word::TildeExpr::Home | word::TildeExpr::UserHome(_) => append_literal(
+                        &mut expanded,
+                        &mut glob_pattern,
+                        &home,
+                        preserve_pattern_quoting,
+                    ),
+                    _ => append_literal(
+                        &mut expanded,
+                        &mut glob_pattern,
+                        &home,
+                        preserve_pattern_quoting,
+                    ),
                 }
             }
             WordPiece::CommandSubstitution(cmd) => {
                 let out = run_command_subst(cmd, env)?;
-                expanded.push_str(&out);
+                append_unquoted(&mut expanded, &mut glob_pattern, &mut has_glob, &out);
             }
             WordPiece::BackquotedCommandSubstitution(cmd) => {
                 let out = run_command_subst(cmd, env)?;
-                expanded.push_str(&out);
+                append_unquoted(&mut expanded, &mut glob_pattern, &mut has_glob, &out);
             }
             WordPiece::ArithmeticExpression(expr) => {
                 let out = eval_arithmetic(&expr.value, env)?;
-                expanded.push_str(&out);
+                append_unquoted(&mut expanded, &mut glob_pattern, &mut has_glob, &out);
             }
             WordPiece::AnsiCQuotedText(t) => {
-                expanded.push_str(&unescape_ansi_c(t));
+                let value = unescape_ansi_c(t);
+                append_literal(
+                    &mut expanded,
+                    &mut glob_pattern,
+                    &value,
+                    preserve_pattern_quoting,
+                );
+                had_quoted = true;
             }
-            WordPiece::EscapeSequence(s) => expanded.push_str(s),
+            WordPiece::EscapeSequence(s) => append_literal(
+                &mut expanded,
+                &mut glob_pattern,
+                unescape_word_piece(s),
+                preserve_pattern_quoting,
+            ),
             _ => {}
         }
     }
 
     // Phase 2: field splitting (only if not quoted)
     let fields = if had_quoted {
-        vec![expanded]
+        vec![expanded.clone()]
     } else {
         let ifs = effective_ifs(cfg, env);
         // If expansion came from unquoted parameter/command substitution, split.
@@ -328,27 +399,63 @@ fn expand_word_internal(
             split_ifs(&expanded, &ifs)
         } else if expanded.contains(' ') || expanded.contains('\t') || expanded.contains('\n') {
             // No expansion but word contains IFS whitespace? Don't split bare words like "hello world" from quoted source — but unquoted "a  b" should? Keep as single field to avoid breaking simple args.
-            vec![expanded]
+            vec![expanded.clone()]
         } else {
-            vec![expanded]
+            vec![expanded.clone()]
         }
     };
 
     // Phase 3: pathname expansion
-    if cfg.do_glob {
+    if cfg.do_glob && has_glob {
         let mut result = Vec::new();
-        for field in fields {
-            // Don't glob if field came from quoted context
-            if had_quoted {
-                result.push(field);
-            } else {
-                result.extend(expand_glob(&field, &env.cwd()));
+        if fields.len() == 1 {
+            result.extend(expand_glob(&glob_pattern, &expanded, &env.cwd()));
+        } else {
+            // Unquoted field splitting can produce multiple independent
+            // pathname patterns.  Expand only fields that still contain
+            // wildcard syntax.
+            for field in fields {
+                if field.contains('*') || field.contains('?') || field.contains('[') {
+                    result.extend(expand_glob(&field, &field, &env.cwd()));
+                } else {
+                    result.push(field);
+                }
             }
         }
         Ok(result)
     } else {
         Ok(fields)
     }
+}
+
+fn append_literal(
+    expanded: &mut String,
+    glob_pattern: &mut String,
+    value: &str,
+    preserve_pattern_quoting: bool,
+) {
+    let escaped = glob::Pattern::escape(value);
+    if preserve_pattern_quoting {
+        expanded.push_str(&escaped);
+    } else {
+        expanded.push_str(value);
+    }
+    glob_pattern.push_str(&escaped);
+}
+
+fn append_unquoted(
+    expanded: &mut String,
+    glob_pattern: &mut String,
+    has_glob: &mut bool,
+    value: &str,
+) {
+    expanded.push_str(value);
+    glob_pattern.push_str(value);
+    *has_glob |= value.contains('*') || value.contains('?') || value.contains('[');
+}
+
+fn unescape_word_piece(value: &str) -> &str {
+    value.strip_prefix('\\').unwrap_or(value)
 }
 
 fn eval_parameter_expr(
@@ -425,6 +532,7 @@ fn eval_parameter_expr(
                         },
                         positional,
                         false,
+                        false,
                     )?
                     .join(""),
                     None => match test_type {
@@ -471,7 +579,8 @@ fn eval_parameter_expr(
                     ..Default::default()
                 };
                 let pat_expanded =
-                    expand_word_internal(pat, env, &no_glob_cfg, positional, false)?.join("");
+                    expand_word_internal(pat, env, &no_glob_cfg, positional, false, false)?
+                        .join("");
                 if let Ok(g) = globset::Glob::new(&pat_expanded) {
                     let matcher = g.compile_matcher();
                     for (idx, _) in val.char_indices() {
@@ -499,7 +608,8 @@ fn eval_parameter_expr(
                     ..Default::default()
                 };
                 let pat_expanded =
-                    expand_word_internal(pat, env, &no_glob_cfg, positional, false)?.join("");
+                    expand_word_internal(pat, env, &no_glob_cfg, positional, false, false)?
+                        .join("");
                 if let Ok(g) = globset::Glob::new(&pat_expanded) {
                     let matcher = g.compile_matcher();
                     if matcher.is_match(&val) {
@@ -527,7 +637,8 @@ fn eval_parameter_expr(
                     ..Default::default()
                 };
                 let pat_expanded =
-                    expand_word_internal(pat, env, &no_glob_cfg, positional, false)?.join("");
+                    expand_word_internal(pat, env, &no_glob_cfg, positional, false, false)?
+                        .join("");
                 if let Ok(g) = globset::Glob::new(&pat_expanded) {
                     let matcher = g.compile_matcher();
                     for (idx, _) in val.char_indices().rev() {
@@ -555,7 +666,8 @@ fn eval_parameter_expr(
                     ..Default::default()
                 };
                 let pat_expanded =
-                    expand_word_internal(pat, env, &no_glob_cfg, positional, false)?.join("");
+                    expand_word_internal(pat, env, &no_glob_cfg, positional, false, false)?
+                        .join("");
                 if let Ok(g) = globset::Glob::new(&pat_expanded) {
                     let matcher = g.compile_matcher();
                     if matcher.is_match(&val) {
@@ -585,7 +697,8 @@ fn eval_parameter_expr(
                 ..Default::default()
             };
             let offset_str =
-                expand_word_internal(&offset.value, env, &no_glob_cfg, positional, false)?.join("");
+                expand_word_internal(&offset.value, env, &no_glob_cfg, positional, false, false)?
+                    .join("");
             let off = crate::arithmetic::eval_arithmetic_expr(offset_str.trim(), env)
                 .map_err(crate::arithmetic::to_engine_error)?;
             let chars: Vec<char> = val.chars().collect();
@@ -596,9 +709,15 @@ fn eval_parameter_expr(
                 usize::try_from(off).unwrap_or(usize::MAX).min(chars.len())
             };
             let end = if let Some(len_expr) = length {
-                let len_str =
-                    expand_word_internal(&len_expr.value, env, &no_glob_cfg, positional, false)?
-                        .join("");
+                let len_str = expand_word_internal(
+                    &len_expr.value,
+                    env,
+                    &no_glob_cfg,
+                    positional,
+                    false,
+                    false,
+                )?
+                .join("");
                 let l = crate::arithmetic::eval_arithmetic_expr(len_str.trim(), env)
                     .map_err(crate::arithmetic::to_engine_error)?;
                 if l < 0 {
@@ -628,7 +747,8 @@ fn eval_parameter_expr(
                 do_glob: false,
                 ..Default::default()
             };
-            let pat = expand_word_internal(pattern, env, &no_glob_cfg, positional, false)?.join("");
+            let pat = expand_word_internal(pattern, env, &no_glob_cfg, positional, false, false)?
+                .join("");
             let repl = replacement.clone().unwrap_or_default();
             match match_kind {
                 word::SubstringMatchKind::FirstOccurrence => {
@@ -700,58 +820,67 @@ fn eval_parameter_expr(
     Ok(value)
 }
 
-/// Minimal glob matcher for POSIX pathname expansion.
-/// Supports `*`, `?`, `[...]`. Uses walkdir for `*` at filesystem level.
-fn expand_glob(pattern: &str, cwd: &std::path::Path) -> Vec<String> {
-    // Use the fshell glob machinery if available, else fallback.
-    // We do a conservative filesystem glob using glob crate semantics.
-    // For now, use globset for matching but restrict to current directory expansion.
-    let has_glob = pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
-    if !has_glob {
-        return vec![pattern.to_string()];
-    }
-    // Build glob pattern relative
-    let glob = match glob::Pattern::new(pattern) {
-        Ok(p) => p,
-        Err(_) => return vec![pattern.to_string()],
-    };
-
-    // Enumerate directory entries at appropriate depth. For simplicity, support non-recursive
-    // patterns (no **). If pattern contains '/', split directory traversal.
-    let mut matches: Vec<String> = Vec::new();
-    // Walk up to 1 level deep for simple patterns; full walk for patterns with '/'
-    let candidates: Vec<std::path::PathBuf> = if pattern.contains('/') {
-        walkdir::WalkDir::new(cwd)
-            .max_depth(6)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path().strip_prefix(cwd).unwrap_or(e.path()).to_path_buf())
-            .collect()
+/// Expand a POSIX pathname pattern against an explicit logical cwd.
+///
+/// The `glob` crate is used as the filesystem traversal engine rather than
+/// walking a bounded portion of the cwd.  The old implementation treated all
+/// slash-containing patterns as relative to the process cwd and capped the
+/// traversal depth, which made absolute paths and deeper directory trees
+/// silently fail to expand.  Building an absolute search pattern from the
+/// shell's logical cwd keeps this function correct for both ordinary commands
+/// and environments whose cwd differs from the process cwd.
+fn expand_glob(pattern: &str, fallback: &str, cwd: &std::path::Path) -> Vec<String> {
+    let is_absolute = std::path::Path::new(fallback).is_absolute();
+    let search_pattern = if is_absolute {
+        pattern.to_string()
     } else {
-        std::fs::read_dir(cwd)
-            .ok()
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .map(|e| e.file_name().into())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let cwd_pattern = glob::Pattern::escape(&cwd.to_string_lossy());
+        format!("{cwd_pattern}/{pattern}")
     };
 
-    for path in candidates {
-        let s = path.to_string_lossy().to_string();
-        if glob.matches(&s) {
-            // Skip dotfiles unless pattern explicitly starts with .
-            if s.starts_with('.') && !pattern.starts_with('.') {
-                continue;
-            }
-            matches.push(s);
+    let matcher = match glob::Pattern::new(&search_pattern) {
+        Ok(pattern) => pattern,
+        // Invalid bracket expressions are ordinary unmatched shell words.
+        Err(_) => return vec![fallback.to_string()],
+    };
+    let traversal_options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        // Filter hidden components with the complete pattern below.  The
+        // glob crate prunes dotfiles before matching when this is true, which
+        // incorrectly rejects patterns whose component explicitly begins '.'.
+        require_literal_leading_dot: false,
+    };
+    let paths = match glob::glob_with(&search_pattern, traversal_options) {
+        Ok(paths) => paths,
+        // Invalid bracket expressions are ordinary unmatched shell words.
+        Err(_) => return vec![fallback.to_string()],
+    };
+
+    let mut matches = Vec::new();
+    let matching_options = glob::MatchOptions {
+        require_literal_leading_dot: true,
+        ..traversal_options
+    };
+    for path in paths.flatten() {
+        if !matcher.matches_path_with(&path, matching_options) {
+            continue;
         }
+        let rendered = if is_absolute {
+            path.to_string_lossy().into_owned()
+        } else {
+            // `search_pattern` retains lexical `./` and `../` components, so
+            // stripping the logical cwd preserves the spelling the user gave.
+            path.strip_prefix(cwd)
+                .map(|relative| relative.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+        };
+        matches.push(rendered);
     }
 
     if matches.is_empty() {
-        // POSIX: non-matching glob is left as-is when nullglob is off (default)
-        vec![pattern.to_string()]
+        // POSIX leaves an unmatched pathname pattern unchanged.
+        vec![fallback.to_string()]
     } else {
         matches.sort();
         matches
@@ -853,8 +982,74 @@ mod tests {
 
     #[test]
     fn test_glob_no_match() {
-        let r = expand_glob("no_such_file_zzz_12345", std::path::Path::new("."));
+        let r = expand_glob(
+            "no_such_file_zzz_12345",
+            "no_such_file_zzz_12345",
+            std::path::Path::new("."),
+        );
         assert_eq!(r, vec!["no_such_file_zzz_12345"]);
+    }
+
+    #[test]
+    fn test_glob_expands_absolute_and_deep_logical_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut nested = tmp.path().to_path_buf();
+        for component in ["one", "two", "three", "four", "five", "six", "seven"] {
+            nested.push(component);
+        }
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("result.txt");
+        std::fs::write(&file, b"ok").unwrap();
+
+        let env = fshell_engine::Env::for_command();
+        env.set_cwd(tmp.path().to_path_buf());
+        let cfg = ExpansionConfig::default();
+        let relative =
+            expand_word("one/two/three/four/five/six/seven/*.txt", &env, &cfg, &[]).unwrap();
+        assert_eq!(
+            relative,
+            vec!["one/two/three/four/five/six/seven/result.txt"]
+        );
+
+        let absolute_pattern = format!("{}/*.txt", nested.display());
+        let absolute = expand_word(&absolute_pattern, &env, &cfg, &[]).unwrap();
+        assert_eq!(absolute, vec![file.to_string_lossy().into_owned()]);
+    }
+
+    #[test]
+    fn test_glob_preserves_dotfile_rules_and_unmatched_patterns() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("visible.txt"), b"ok").unwrap();
+        std::fs::write(tmp.path().join(".hidden.txt"), b"ok").unwrap();
+        std::fs::write(tmp.path().join("literal-visible.txt"), b"ok").unwrap();
+
+        let env = fshell_engine::Env::for_command();
+        env.set_cwd(tmp.path().to_path_buf());
+        let cfg = ExpansionConfig::default();
+        assert_eq!(
+            expand_word("*.txt", &env, &cfg, &[]).unwrap(),
+            vec!["literal-visible.txt", "visible.txt"]
+        );
+        assert_eq!(
+            expand_word(".*.txt", &env, &cfg, &[]).unwrap(),
+            vec![".hidden.txt"]
+        );
+        assert_eq!(
+            expand_word("missing-*.txt", &env, &cfg, &[]).unwrap(),
+            vec!["missing-*.txt"]
+        );
+        assert_eq!(
+            expand_word(r#""*.txt""#, &env, &cfg, &[]).unwrap(),
+            vec!["*.txt"]
+        );
+        assert_eq!(
+            expand_word(r"\*.txt", &env, &cfg, &[]).unwrap(),
+            vec!["*.txt"]
+        );
+        assert_eq!(
+            expand_word("literal-*.txt", &env, &cfg, &[]).unwrap(),
+            vec!["literal-visible.txt"]
+        );
     }
 
     #[test]

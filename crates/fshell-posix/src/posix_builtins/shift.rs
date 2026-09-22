@@ -75,8 +75,8 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<(), String> {
             "+x" => opts.xtrace = false,
             "-n" => opts.noexec = true,
             "+n" => opts.noexec = false,
-            "-f" => opts.nullglob = false, // disable glob = -f is noglob
-            "+f" => opts.nullglob = true,
+            "-f" => opts.noglob = true,
+            "+f" => opts.noglob = false,
             "--" => {
                 // Remaining are positional
                 let positional: Vec<fshell_core::Val> = args[i + 1..]

@@ -655,6 +655,7 @@ pub(crate) fn persist_settings(env: &Env) -> Result<(), ShellError> {
         errexit: opts.errexit,
         nounset: opts.nounset,
         nullglob: opts.nullglob,
+        noglob: opts.noglob,
         nocaseglob: opts.nocaseglob,
         noclobber: opts.noclobber,
         noexec: opts.noexec,
