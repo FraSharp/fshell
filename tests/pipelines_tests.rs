@@ -617,6 +617,24 @@ async fn test_run_script_keeps_native_builtin_authority_over_posix_fallback() {
 }
 
 #[tokio::test]
+async fn test_native_parse_errors_are_not_reinterpreted_by_posix_markers() {
+    let ctx = TestContext::new();
+    for input in [
+        "let x = | invalid; export foo",
+        "let x = | invalid; echo \"do\"; echo \"done\"",
+        "let x = | invalid; echo \";;\"",
+    ] {
+        let error = fshell_engine::run_script(input, &ctx.env)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, EngineError::Parse(_)),
+            "native parse error was reinterpreted for {input:?}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_write_then_2_to_1_merges_stderr_into_file() {
     // `cmd > file 2>&1` must put both stdout and stderr in the file.
     let ctx = TestContext::new();

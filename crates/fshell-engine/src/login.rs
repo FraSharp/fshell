@@ -184,68 +184,348 @@ pub fn resolve_source_files(is_login: bool, is_interactive: bool) -> Vec<PathBuf
     files
 }
 // POSIX detection & login cache management
-/// Heuristic detection for POSIX/bash shell scripts.
-pub fn looks_like_posix(content: &str) -> bool {
-    let trimmed = content.trim_start();
-    if let Some(first_line) = trimmed.lines().next()
-        && let Some(rest) = first_line.strip_prefix("#!")
-        && let Some(shell) = rest.split_whitespace().next()
-    {
-        let name = Path::new(shell)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if matches!(name.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
-            return true;
+#[derive(Debug, PartialEq, Eq)]
+enum PosixMarker {
+    Word { text: String, reserved: bool },
+    Symbol(char),
+    Newline,
+}
+
+/// Tokenize only the syntax that can identify a POSIX shell construct.
+///
+/// This is deliberately not a shell parser. It is a conservative boundary
+/// detector used after the native parser rejects input (and before plain
+/// `source` auto-detection). Quoted strings, escaped words, and comments must
+/// not be allowed to manufacture reserved-word or function-definition
+/// markers.
+fn lex_posix_markers(content: &str) -> Vec<PosixMarker> {
+    let chars: Vec<char> = content.chars().collect();
+    let mut markers = Vec::new();
+    let mut word = String::new();
+    let mut word_started = false;
+    let mut word_reserved = true;
+
+    let flush_word = |markers: &mut Vec<PosixMarker>,
+                      word: &mut String,
+                      word_started: &mut bool,
+                      word_reserved: &mut bool| {
+        if *word_started {
+            markers.push(PosixMarker::Word {
+                text: std::mem::take(word),
+                reserved: *word_reserved,
+            });
+            *word_started = false;
+            *word_reserved = true;
         }
-    }
-    trimmed.contains("function ")
-        || trimmed.contains("() {")
-        || trimmed.contains("()\n")
-        || trimmed.contains(" then ")
-        || trimmed.contains("\nelif ")
-        || trimmed.contains("\nfi\n")
-        || trimmed.contains(";;")
-        || trimmed.contains("\ncase ")
-        || trimmed.contains("\ndo\n")
-        || trimmed.contains("\ndone\n")
-        || trimmed.contains("export ")
-        || {
-            fn is_word(s: &str, w: &str) -> bool {
-                let mut i = 0;
-                let b = s.as_bytes();
-                let wb = w.as_bytes();
-                while i + wb.len() <= b.len() {
-                    if b[i..i + wb.len()].eq_ignore_ascii_case(wb) {
-                        let before_ok = i == 0 || {
-                            let c = b[i - 1] as char;
-                            !c.is_alphanumeric() && c != '_'
-                        };
-                        let after_ok = i + wb.len() == b.len() || {
-                            let c = b[i + wb.len()] as char;
-                            !c.is_alphanumeric() && c != '_'
-                        };
-                        if before_ok && after_ok {
-                            return true;
-                        }
+    };
+
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '\\' => {
+                word_started = true;
+                word_reserved = false;
+                if let Some(next) = chars.get(i + 1) {
+                    // A backslash-newline is a shell line continuation and
+                    // does not create a command boundary.
+                    if *next != '\n' {
+                        word.push(*next);
                     }
+                    i += 2;
+                } else {
                     i += 1;
                 }
-                false
             }
-            let has_do = is_word(trimmed, "do");
-            let has_done = is_word(trimmed, "done");
-            (has_do && has_done)
-                || (has_do
-                    && (is_word(trimmed, "for")
-                        || is_word(trimmed, "while")
-                        || is_word(trimmed, "until")))
-                || (is_word(trimmed, "find")
-                    && trimmed.contains(" -exec ")
-                    && (trimmed.trim_end().ends_with(" +")
-                        || trimmed.contains(" {} +")
-                        || trimmed.contains(" {} ;")))
+            '\'' | '"' => {
+                let quote = ch;
+                word_started = true;
+                word_reserved = false;
+                i += 1;
+                while i < chars.len() {
+                    let quoted = chars[i];
+                    if quoted == quote {
+                        i += 1;
+                        break;
+                    }
+                    if quote == '"'
+                        && quoted == '\\'
+                        && let Some(next) = chars.get(i + 1)
+                    {
+                        if *next != '\n' {
+                            word.push(*next);
+                        }
+                        i += 2;
+                    } else {
+                        word.push(quoted);
+                        i += 1;
+                    }
+                }
+            }
+            '#' if !word_started => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '\n' => {
+                flush_word(
+                    &mut markers,
+                    &mut word,
+                    &mut word_started,
+                    &mut word_reserved,
+                );
+                markers.push(PosixMarker::Newline);
+                i += 1;
+            }
+            c if c.is_whitespace() => {
+                flush_word(
+                    &mut markers,
+                    &mut word,
+                    &mut word_started,
+                    &mut word_reserved,
+                );
+                i += 1;
+            }
+            ';' | '|' | '&' | '(' | ')' | '{' | '}' | '<' | '>' => {
+                flush_word(
+                    &mut markers,
+                    &mut word,
+                    &mut word_started,
+                    &mut word_reserved,
+                );
+                markers.push(PosixMarker::Symbol(ch));
+                i += 1;
+            }
+            _ => {
+                word_started = true;
+                word.push(ch);
+                i += 1;
+            }
         }
+    }
+
+    flush_word(
+        &mut markers,
+        &mut word,
+        &mut word_started,
+        &mut word_reserved,
+    );
+    markers
+}
+
+fn is_word(marker: &PosixMarker, expected: &str) -> bool {
+    matches!(
+        marker,
+        PosixMarker::Word {
+            text,
+            reserved: true,
+        } if text == expected
+    )
+}
+
+fn is_command_boundary(marker: &PosixMarker) -> bool {
+    matches!(
+        marker,
+        PosixMarker::Newline
+            | PosixMarker::Symbol(';')
+            | PosixMarker::Symbol('|')
+            | PosixMarker::Symbol('&')
+            | PosixMarker::Symbol('(')
+            | PosixMarker::Symbol(')')
+            | PosixMarker::Symbol('{')
+            | PosixMarker::Symbol('}')
+    )
+}
+
+fn next_non_newline(markers: &[PosixMarker], mut index: usize) -> Option<usize> {
+    while matches!(markers.get(index), Some(PosixMarker::Newline)) {
+        index += 1;
+    }
+    (index < markers.len()).then_some(index)
+}
+
+fn has_reserved_command_word(markers: &[PosixMarker], start: usize, expected: &str) -> bool {
+    let mut command_start = false;
+    for marker in markers.iter().skip(start) {
+        if let PosixMarker::Word { .. } = marker {
+            if command_start && is_word(marker, expected) {
+                return true;
+            }
+            command_start = false;
+            if matches!(
+                marker,
+                PosixMarker::Word {
+                    text,
+                    reserved: true,
+                } if matches!(text.as_str(), "then" | "do" | "else" | "elif")
+            ) {
+                command_start = true;
+            }
+        } else if is_command_boundary(marker) {
+            command_start = true;
+        }
+    }
+    false
+}
+
+fn has_reserved_word(markers: &[PosixMarker], start: usize, expected: &str) -> bool {
+    markers
+        .iter()
+        .skip(start)
+        .any(|marker| is_word(marker, expected))
+}
+
+fn has_function_keyword(markers: &[PosixMarker], index: usize) -> bool {
+    let Some(name_index) = next_non_newline(markers, index + 1) else {
+        return false;
+    };
+    if !matches!(markers.get(name_index), Some(PosixMarker::Word { .. })) {
+        return false;
+    }
+    let Some(body_index) = next_non_newline(markers, name_index + 1) else {
+        return false;
+    };
+    if matches!(markers.get(body_index), Some(PosixMarker::Symbol('{'))) {
+        return true;
+    }
+    if !matches!(markers.get(body_index), Some(PosixMarker::Symbol('('))) {
+        return false;
+    }
+    let Some(close_index) = next_non_newline(markers, body_index + 1) else {
+        return false;
+    };
+    let Some(body_index) = next_non_newline(markers, close_index + 1) else {
+        return false;
+    };
+    matches!(
+        (markers.get(close_index), markers.get(body_index)),
+        (
+            Some(PosixMarker::Symbol(')')),
+            Some(PosixMarker::Symbol('{'))
+        )
+    )
+}
+
+fn has_named_function_definition(markers: &[PosixMarker], index: usize) -> bool {
+    let Some(open_index) = next_non_newline(markers, index + 1) else {
+        return false;
+    };
+    if !matches!(markers.get(open_index), Some(PosixMarker::Symbol('('))) {
+        return false;
+    }
+    let Some(close_index) = next_non_newline(markers, open_index + 1) else {
+        return false;
+    };
+    let Some(body_index) = next_non_newline(markers, close_index + 1) else {
+        return false;
+    };
+    matches!(
+        (markers.get(close_index), markers.get(body_index)),
+        (
+            Some(PosixMarker::Symbol(')')),
+            Some(PosixMarker::Symbol('{'))
+        )
+    )
+}
+
+fn has_posix_shebang(content: &str) -> bool {
+    let Some(first_line) = content.trim_start().lines().next() else {
+        return false;
+    };
+    let Some(rest) = first_line.strip_prefix("#!") else {
+        return false;
+    };
+    let mut words = rest.split_whitespace();
+    let Some(interpreter) = words.next() else {
+        return false;
+    };
+    let name = Path::new(interpreter)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if name == "env" {
+        let shell =
+            words.find(|word| *word != "--" && !word.starts_with('-') && !is_env_assignment(word));
+        return shell
+            .and_then(|shell| Path::new(shell).file_name())
+            .and_then(|name| name.to_str())
+            .is_some_and(is_posix_shell_name);
+    }
+    is_posix_shell_name(name)
+}
+
+fn is_env_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name.chars().enumerate().all(|(index, ch)| {
+            (index == 0 && (ch == '_' || ch.is_ascii_alphabetic()))
+                || (index > 0 && (ch == '_' || ch.is_ascii_alphanumeric()))
+        })
+}
+
+fn is_posix_shell_name(name: &str) -> bool {
+    matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
+}
+
+/// Detect POSIX/bash shell syntax without interpreting ordinary fshell text.
+///
+/// This is intentionally conservative. A shebang is authoritative; without
+/// one, only unquoted function definitions and control-flow forms are strong
+/// enough to cross the native/POSIX boundary. Ordinary commands such as
+/// `export`, `find -exec`, or arguments containing words like `do` are valid
+/// native fshell input and must not trigger delegation.
+pub fn looks_like_posix(content: &str) -> bool {
+    if has_posix_shebang(content) {
+        return true;
+    }
+
+    let markers = lex_posix_markers(content);
+    let mut command_start = true;
+    for (index, marker) in markers.iter().enumerate() {
+        match marker {
+            PosixMarker::Word { .. } => {
+                if command_start && is_word(marker, "function") {
+                    if has_function_keyword(&markers, index) {
+                        return true;
+                    }
+                } else if command_start && is_word(marker, "if") {
+                    if has_reserved_command_word(&markers, index + 1, "then") {
+                        return true;
+                    }
+                } else if command_start
+                    && (is_word(marker, "for")
+                        || is_word(marker, "while")
+                        || is_word(marker, "until"))
+                {
+                    if has_reserved_command_word(&markers, index + 1, "do") {
+                        return true;
+                    }
+                } else if command_start && is_word(marker, "case") {
+                    if has_reserved_word(&markers, index + 1, "in") {
+                        return true;
+                    }
+                } else if command_start && has_named_function_definition(&markers, index) {
+                    return true;
+                }
+
+                command_start = false;
+                if matches!(
+                    marker,
+                    PosixMarker::Word {
+                        text,
+                        reserved: true,
+                    } if matches!(text.as_str(), "then" | "do" | "else" | "elif")
+                ) {
+                    command_start = true;
+                }
+            }
+            marker if is_command_boundary(marker) => command_start = true,
+            _ => {}
+        }
+    }
+    false
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -473,6 +753,29 @@ mod tests {
         assert!(detect_login("-fshell", false));
         assert!(detect_login("fsh", true));
         assert!(!detect_login("fsh", false));
+    }
+
+    #[test]
+    fn test_posix_detection_requires_unquoted_shell_syntax() {
+        assert!(looks_like_posix(
+            "#!/usr/bin/env FSH_TEST=1 bash\necho hi\n"
+        ));
+        assert!(looks_like_posix("if true; then\n  echo yes\nfi\n"));
+        assert!(looks_like_posix(
+            "for item in one; do\n  echo $item\ndone\n"
+        ));
+        assert!(looks_like_posix("case $1 in\n  one) echo yes ;;\nesac\n"));
+        assert!(looks_like_posix("function greet() {\n  echo hi\n}\n"));
+        assert!(looks_like_posix(
+            "deactivate () {\n  unset VIRTUAL_ENV\n}\n"
+        ));
+
+        assert!(!looks_like_posix("export FOO=bar\n"));
+        assert!(!looks_like_posix("find . -exec true {} +\n"));
+        assert!(!looks_like_posix("echo function greet() {\n"));
+        assert!(!looks_like_posix("echo \"do\"; echo \"done\"\n"));
+        assert!(!looks_like_posix("echo ';;'\n"));
+        assert!(!looks_like_posix("# function greet() {\necho ready\n"));
     }
 
     #[test]
