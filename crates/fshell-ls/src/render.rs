@@ -5,11 +5,11 @@
 use crate::colors::{BLUE, CYAN, GREEN, RESET};
 use crate::file::FileInfo;
 use crate::utils::{
-    calculate_output_buffer_size, determine_buffer_size, format_size, format_time_with_now,
-    get_group_name, get_mode_string, get_user_name,
+    calculate_output_buffer_size, determine_buffer_size, escape_name, format_size,
+    format_time_with_now, get_group_name, get_mode_string, get_user_name,
 };
+use fshell_hash::FxHashMap;
 use libc::{S_IFLNK, S_IFMT, S_IXUSR};
-use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufWriter, Write};
 use terminal_size::{Width, terminal_size};
@@ -20,6 +20,11 @@ const SPACES: &str = "                                                          
 const ICON_DIR: &str = "d";
 const ICON_FILE: &str = " ";
 const ICON_EXECUTABLE: &str = "*";
+
+#[inline]
+fn is_executable(mode: u32) -> bool {
+    mode & ((S_IXUSR | libc::S_IXGRP | libc::S_IXOTH) as u32) != 0
+}
 
 fn entry_name<'a>(item: &FileInfo, arena: &'a [u8]) -> io::Result<&'a [u8]> {
     let range = item.entry.range(arena.len()).ok_or_else(|| {
@@ -126,34 +131,29 @@ pub fn print_columns(
 
     let n = items.len();
 
-    // Fast path: single column
-    if n == 1 {
-        let item = &items[0];
-        let name_bytes = entry_name(item, arena)?;
-
-        if show_inode {
-            if let Some(meta) = &item.metadata {
-                println!("{} {}", meta.ino, String::from_utf8_lossy(name_bytes));
-            } else {
-                println!("? {}", String::from_utf8_lossy(name_bytes));
-            }
-        } else if use_color {
-            print_colored_name(item, name_bytes, use_color);
-        } else {
-            println!("{}", String::from_utf8_lossy(name_bytes));
-        }
-        return Ok(());
-    }
-
     // Calculate item lengths for column fitting
     // Pre-compute name widths to avoid calling String::from_utf8_lossy twice per item
     let mut name_widths = Vec::with_capacity(n);
+    let mut display_names = Vec::with_capacity(n);
     let mut item_lens = Vec::with_capacity(n);
     for item in items {
         let name_bytes = entry_name(item, arena)?;
-        let name_width = String::from_utf8_lossy(name_bytes).width();
+        let display_name = escape_name(name_bytes);
+        let name_width = display_name.width();
         name_widths.push(name_width);
+        display_names.push(display_name);
         let mut item_len = name_width;
+        if show_icons {
+            item_len += get_icon_for_file(
+                name_bytes,
+                item.entry.is_dir(),
+                item.metadata
+                    .as_ref()
+                    .is_some_and(|m| is_executable(m.mode)),
+            )
+            .width()
+                + 1;
+        }
         if show_inode {
             if let Some(meta) = &item.metadata {
                 item_len += num_digits(meta.ino) + 1;
@@ -225,11 +225,12 @@ pub fn print_columns(
                 })?;
                 let entry = item.entry;
                 let name_bytes = entry_name(item, arena)?;
+                let display_name = &display_names[idx];
 
                 let is_exec = item
                     .metadata
                     .as_ref()
-                    .map(|m| (m.mode & (S_IXUSR as u32)) != 0)
+                    .map(|m| is_executable(m.mode))
                     .unwrap_or(false);
 
                 let mut printed_len = name_widths[idx];
@@ -253,27 +254,27 @@ pub fn print_columns(
 
                 if use_color {
                     if entry.is_dir() {
-                        out.write_all(BLUE.as_bytes())?;
-                        out.write_all(name_bytes)?;
+                        BLUE.write_to(&mut out)?;
+                        out.write_all(display_name.as_bytes())?;
                         out.write_all(RESET.as_bytes())?;
                     } else if let Some(meta) = &item.metadata {
                         let mode = meta.mode;
                         if (mode & (S_IFMT as u32)) == (S_IFLNK as u32) {
-                            out.write_all(CYAN.as_bytes())?;
-                            out.write_all(name_bytes)?;
+                            CYAN.write_to(&mut out)?;
+                            out.write_all(display_name.as_bytes())?;
                             out.write_all(RESET.as_bytes())?;
-                        } else if (mode & (S_IXUSR as u32)) != 0 {
-                            out.write_all(GREEN.as_bytes())?;
-                            out.write_all(name_bytes)?;
+                        } else if is_executable(mode) {
+                            GREEN.write_to(&mut out)?;
+                            out.write_all(display_name.as_bytes())?;
                             out.write_all(RESET.as_bytes())?;
                         } else {
-                            out.write_all(name_bytes)?;
+                            out.write_all(display_name.as_bytes())?;
                         }
                     } else {
-                        out.write_all(name_bytes)?;
+                        out.write_all(display_name.as_bytes())?;
                     }
                 } else {
-                    out.write_all(name_bytes)?;
+                    out.write_all(display_name.as_bytes())?;
                 }
 
                 if col + 1 < best_cols {
@@ -289,25 +290,7 @@ pub fn print_columns(
         out.write_all(b"\n")?;
     }
 
-    Ok(())
-}
-
-#[inline]
-fn print_colored_name(item: &FileInfo, name_bytes: &[u8], _use_color: bool) {
-    if item.entry.is_dir() {
-        print!("{}{}{}", BLUE, String::from_utf8_lossy(name_bytes), RESET);
-    } else if let Some(meta) = &item.metadata {
-        let mode = meta.mode;
-        if (mode & (S_IFMT as u32)) == (S_IFLNK as u32) {
-            print!("{}{}{}", CYAN, String::from_utf8_lossy(name_bytes), RESET);
-        } else if (mode & (S_IXUSR as u32)) != 0 {
-            print!("{}{}{}", GREEN, String::from_utf8_lossy(name_bytes), RESET);
-        } else {
-            print!("{}", String::from_utf8_lossy(name_bytes));
-        }
-    } else {
-        print!("{}", String::from_utf8_lossy(name_bytes));
-    }
+    out.flush()
 }
 
 /// Print files in long listing format (like `ls -l`).
@@ -331,6 +314,12 @@ pub fn print_long_listing(
     human_readable: bool,
     show_git: bool,
 ) -> io::Result<()> {
+    if items.iter().any(|item| item.metadata.is_none()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "long listing requires metadata for every entry",
+        ));
+    }
     let mut max_nlink_width = 0;
     let mut max_user_width = 0;
     let mut max_group_width = 0;
@@ -338,14 +327,14 @@ pub fn print_long_listing(
     let mut max_inode_width = 0;
     let mut total_blocks = 0;
 
-    let mut user_cache = HashMap::new();
-    let mut group_cache = HashMap::new();
+    let mut user_cache = FxHashMap::default();
+    let mut group_cache = FxHashMap::default();
     let mut buf = [0u8; 256];
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time should be after UNIX epoch")
-        .as_secs() as i64;
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
 
     for item in items {
         if let Some(meta) = &item.metadata {
@@ -367,11 +356,10 @@ pub fn print_long_listing(
         }
     }
 
-    println!("total {}", total_blocks);
-
     let stdout = io::stdout();
     let buf_size = calculate_output_buffer_size(items, arena, true);
     let mut out = BufWriter::with_capacity(buf_size, stdout.lock());
+    writeln!(out, "total {}", total_blocks)?;
 
     for item in items {
         if let Some(meta) = &item.metadata {
@@ -418,38 +406,39 @@ pub fn print_long_listing(
             out.write_all(b" ")?;
 
             let name_bytes = entry_name(item, arena)?;
+            let display_name = escape_name(name_bytes);
 
             if use_color {
                 if item.entry.is_dir() {
-                    out.write_all(BLUE.as_bytes())?;
-                    out.write_all(name_bytes)?;
+                    BLUE.write_to(&mut out)?;
+                    out.write_all(display_name.as_bytes())?;
                     out.write_all(RESET.as_bytes())?;
                 } else if (meta.mode & (S_IFMT as u32)) == (S_IFLNK as u32) {
-                    out.write_all(CYAN.as_bytes())?;
-                    out.write_all(name_bytes)?;
+                    CYAN.write_to(&mut out)?;
+                    out.write_all(display_name.as_bytes())?;
                     out.write_all(RESET.as_bytes())?;
-                } else if (meta.mode & (S_IXUSR as u32)) != 0 {
-                    out.write_all(GREEN.as_bytes())?;
-                    out.write_all(name_bytes)?;
+                } else if is_executable(meta.mode) {
+                    GREEN.write_to(&mut out)?;
+                    out.write_all(display_name.as_bytes())?;
                     out.write_all(RESET.as_bytes())?;
                 } else {
-                    out.write_all(name_bytes)?;
+                    out.write_all(display_name.as_bytes())?;
                 }
             } else {
-                out.write_all(name_bytes)?;
+                out.write_all(display_name.as_bytes())?;
             }
 
             if (meta.mode & (S_IFMT as u32)) == (S_IFLNK as u32) {
                 out.write_all(b" -> ")?;
                 if let Some(target) = &meta.symlink_target {
-                    out.write_all(target)?;
+                    out.write_all(escape_name(target).as_bytes())?;
                 }
             }
 
             out.write_all(b"\n")?;
         }
     }
-    Ok(())
+    out.flush()
 }
 
 /// Print files one per line (like `ls -1`).
@@ -478,6 +467,7 @@ pub fn print_one_per_line(
     for item in items {
         let entry = item.entry;
         let name_bytes = entry_name(item, arena)?;
+        let display_name = escape_name(name_bytes);
 
         if show_inode {
             if let Some(meta) = &item.metadata {
@@ -489,28 +479,28 @@ pub fn print_one_per_line(
 
         if use_color {
             if entry.is_dir() {
-                out.write_all(BLUE.as_bytes())?;
-                out.write_all(name_bytes)?;
+                BLUE.write_to(&mut out)?;
+                out.write_all(display_name.as_bytes())?;
                 out.write_all(RESET.as_bytes())?;
             } else if let Some(meta) = &item.metadata {
                 if (meta.mode & (S_IFMT as u32)) == (S_IFLNK as u32) {
-                    out.write_all(CYAN.as_bytes())?;
-                    out.write_all(name_bytes)?;
+                    CYAN.write_to(&mut out)?;
+                    out.write_all(display_name.as_bytes())?;
                     out.write_all(RESET.as_bytes())?;
-                } else if (meta.mode & (S_IXUSR as u32)) != 0 {
-                    out.write_all(GREEN.as_bytes())?;
-                    out.write_all(name_bytes)?;
+                } else if is_executable(meta.mode) {
+                    GREEN.write_to(&mut out)?;
+                    out.write_all(display_name.as_bytes())?;
                     out.write_all(RESET.as_bytes())?;
                 } else {
-                    out.write_all(name_bytes)?;
+                    out.write_all(display_name.as_bytes())?;
                 }
             } else {
-                out.write_all(name_bytes)?;
+                out.write_all(display_name.as_bytes())?;
             }
         } else {
-            out.write_all(name_bytes)?;
+            out.write_all(display_name.as_bytes())?;
         }
         out.write_all(b"\n")?;
     }
-    Ok(())
+    out.flush()
 }

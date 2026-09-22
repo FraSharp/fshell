@@ -6,39 +6,29 @@
 //! ANSI color codes for terminal output formatting.
 
 use parking_lot::Mutex;
-use std::ops::Deref;
+use std::io::{self, Write};
+use std::sync::LazyLock;
 
-static DIR_COLOR_STR: Mutex<&'static str> = Mutex::new("\x1b[34m");
-static LINK_COLOR_STR: Mutex<&'static str> = Mutex::new("\x1b[36m");
-static EXEC_COLOR_STR: Mutex<&'static str> = Mutex::new("\x1b[32m");
+static DIR_COLOR_STR: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new("\x1b[34m".to_owned()));
+static LINK_COLOR_STR: LazyLock<Mutex<String>> =
+    LazyLock::new(|| Mutex::new("\x1b[36m".to_owned()));
+static EXEC_COLOR_STR: LazyLock<Mutex<String>> =
+    LazyLock::new(|| Mutex::new("\x1b[32m".to_owned()));
 
 pub struct ColorCode {
-    cell: &'static Mutex<&'static str>,
-}
-
-impl Deref for ColorCode {
-    type Target = str;
-    fn deref(&self) -> &Self::Target {
-        let guard = self.cell.lock();
-        *guard
-    }
+    cell: &'static LazyLock<Mutex<String>>,
 }
 
 impl ColorCode {
-    pub fn as_bytes(&self) -> &[u8] {
-        self.deref().as_bytes()
-    }
-}
-
-impl AsRef<str> for ColorCode {
-    fn as_ref(&self) -> &str {
-        self.deref()
+    pub fn write_to<W: Write + ?Sized>(&self, output: &mut W) -> io::Result<()> {
+        let color = self.cell.lock();
+        output.write_all(color.as_bytes())
     }
 }
 
 impl std::fmt::Display for ColorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.deref())
+        f.write_str(&self.cell.lock())
     }
 }
 
@@ -57,10 +47,7 @@ pub const BOLD: &str = "\x1b[1m";
 
 /// Update color configurations globally for directory listing.
 pub fn set_colors(dir: &str, link: &str, exec: &str) {
-    let mut d = DIR_COLOR_STR.lock();
-    *d = Box::leak(dir.to_string().into_boxed_str());
-    let mut l = LINK_COLOR_STR.lock();
-    *l = Box::leak(link.to_string().into_boxed_str());
-    let mut e = EXEC_COLOR_STR.lock();
-    *e = Box::leak(exec.to_string().into_boxed_str());
+    *DIR_COLOR_STR.lock() = dir.to_owned();
+    *LINK_COLOR_STR.lock() = link.to_owned();
+    *EXEC_COLOR_STR.lock() = exec.to_owned();
 }

@@ -12,6 +12,7 @@ terminal_size = { workspace = true }
 libc = { workspace = true }
 unicode-width = { workspace = true }
 fshell-git = { path = "../fshell-git" }
+fshell-hash = { workspace = true }
 rayon = { workspace = true }
 parking_lot = { workspace = true }
 

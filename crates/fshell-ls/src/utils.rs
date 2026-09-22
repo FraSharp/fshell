@@ -2,18 +2,36 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 #![allow(clippy::unnecessary_cast)]
+use fshell_hash::FxHashMap;
 use libc::{
     S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFSOCK, S_IRGRP, S_IROTH, S_IRUSR,
     S_ISGID, S_ISUID, S_ISVTX, S_IWGRP, S_IWOTH, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR, fstatat,
     getgrgid_r, getpwuid_r, group, passwd,
 };
-use std::collections::HashMap;
 use std::ffi::CStr;
 use std::io::Write;
 
 use crate::file::FileInfo;
 
 pub const LARGE_BUFFER_SIZE: usize = 1024 * 1024;
+
+/// Produce a terminal-safe, loss-tolerant display form of filesystem bytes.
+/// Control characters are escaped so names cannot add lines, move the cursor,
+/// or inject terminal escape sequences into listings.
+pub fn escape_name(bytes: &[u8]) -> String {
+    let mut escaped = String::with_capacity(bytes.len());
+    for ch in String::from_utf8_lossy(bytes).chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => escaped.push_str(&format!("\\u{{{:x}}}", ch as u32)),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
+}
 
 /// Convert file mode bits to Unix permission string (e.g., "drwxr-xr-x").
 ///
@@ -159,7 +177,7 @@ pub fn format_time_with_now(mtime: i64, now: i64, buf: &mut [u8]) -> &str {
 /// # Returns
 ///
 /// Username or numeric UID as a string slice (borrowed from cache).
-pub fn get_user_name(uid: u32, cache: &mut HashMap<u32, String>) -> &str {
+pub fn get_user_name(uid: u32, cache: &mut FxHashMap<u32, String>) -> &str {
     cache.entry(uid).or_insert_with(|| {
         let mut pwd = unsafe { std::mem::zeroed::<passwd>() };
         let mut buf = [0 as libc::c_char; 4096];
@@ -198,7 +216,7 @@ pub fn get_user_name(uid: u32, cache: &mut HashMap<u32, String>) -> &str {
 /// # Returns
 ///
 /// Group name or numeric GID as a string slice (borrowed from cache).
-pub fn get_group_name(gid: u32, cache: &mut HashMap<u32, String>) -> &str {
+pub fn get_group_name(gid: u32, cache: &mut FxHashMap<u32, String>) -> &str {
     cache.entry(gid).or_insert_with(|| {
         let mut grp = unsafe { std::mem::zeroed::<group>() };
         let mut buf = [0 as libc::c_char; 4096];
@@ -311,10 +329,10 @@ pub fn calculate_output_buffer_size(
     let count = entries.len();
     if long_format {
         // Long format: mode(11) + nlink(5) + user(20) + group(20) + size(20) + time(20) + inode(15) + git(2) + filename(255) = ~368
-        count * 512
+        count.saturating_mul(512)
     } else {
         // Column format: filename(255) + inode(15) + icon(2) + spacing(4) = ~276
-        count * 256
+        count.saturating_mul(256)
     }
 }
 

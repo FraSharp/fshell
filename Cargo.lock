@@ -1224,6 +1224,7 @@ name = "fshell-ls"
 version = "0.1.0"
 dependencies = [
  "fshell-git",
+ "fshell-hash",
  "libc",
  "parking_lot",
  "rayon",

@@ -34,7 +34,7 @@ where
     F: Fn(&std::path::Path) -> bool,
 {
     if config.tree {
-        return tree::print_tree(config, check_read_dir);
+        return tree::print_tree_with_result(config, result, check_read_dir);
     }
 
     let ListResult { entries, arena } = result;

@@ -12,7 +12,9 @@ use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use miette::SourceSpan;
+use std::ffi::OsStr;
 use std::io::{BufRead, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -295,14 +297,16 @@ fn fileinfo_to_val_map(
     verbose: bool,
     raw: bool,
 ) -> fshell_core::FxIndexMap<ustr::Ustr, Val> {
-    let name_start = info.entry.start();
-    let name_end = name_start + info.entry.len();
-    let name_bytes = &arena[name_start..name_end];
-    let name_str = std::str::from_utf8(name_bytes).unwrap_or("?");
+    let name_bytes = info
+        .entry
+        .range(arena.len())
+        .and_then(|range| arena.get(range))
+        .unwrap_or_default();
+    let name_str = String::from_utf8_lossy(name_bytes);
 
     let is_dir = info.entry.is_dir();
     let mut map = fshell_core::FxIndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
-    map.insert(ustr::ustr("name"), Val::String(name_str.to_string()));
+    map.insert(ustr::ustr("name"), Val::String(name_str.into_owned()));
     map.insert(
         ustr::ustr("type"),
         Val::String(if is_dir {
@@ -316,7 +320,7 @@ fn fileinfo_to_val_map(
     let mut is_link = false;
 
     if let Some(ref meta) = info.metadata {
-        is_exec = (meta.mode & (libc::S_IXUSR as u32)) != 0;
+        is_exec = (meta.mode & ((libc::S_IXUSR | libc::S_IXGRP | libc::S_IXOTH) as u32)) != 0;
         is_link = (meta.mode & (libc::S_IFMT as u32)) == (libc::S_IFLNK as u32);
 
         if raw {
@@ -385,10 +389,9 @@ fn do_recursive_walk(
         base: &std::path::Path,
     ) -> Option<std::path::PathBuf> {
         if entry.entry.is_dir() {
-            let start = entry.entry.start();
-            let end = start + entry.entry.len();
-            let name = std::str::from_utf8(&arena[start..end]).ok()?;
-            Some(base.join(name))
+            let range = entry.entry.range(arena.len())?;
+            let name = arena.get(range)?;
+            Some(base.join(OsStr::from_bytes(name)))
         } else {
             None
         }
@@ -412,30 +415,41 @@ fn do_recursive_walk(
         let mut sub_config = config.clone();
         sub_config.path = dir.clone();
 
-        let allowed = env.caps.caps.read().check_read_dir(&sub_config.path);
-        if allowed && let Ok(sub_result) = fshell_ls::list_dir(&sub_config) {
+        let allowed = env.caps.caps.read().check_read_dir(&sub_config.path)
+            || sub_config
+                .path
+                .canonicalize()
+                .ok()
+                .as_ref()
+                .is_some_and(|canonical| env.caps.caps.read().check_read_dir(canonical));
+        if allowed {
+            let sub_result = fshell_ls::list_dir(&sub_config)
+                .map_err(|err| format!("{}: {err}", sub_config.path.display()))?;
             for entry in &sub_result.entries {
                 if let Some(subdir_path) = is_dir_entry(entry, &sub_result.arena, &dir) {
                     dirs_to_visit.push(subdir_path);
                 }
             }
             for entry in sub_result.entries {
-                let start = entry.entry.start();
-                let end = start + entry.entry.len();
-                if let Ok(name_str) = std::str::from_utf8(&sub_result.arena[start..end]) {
-                    let full_entry_path = dir.join(name_str);
-                    let rel_path = full_entry_path
-                        .strip_prefix(root)
-                        .unwrap_or(&full_entry_path)
-                        .to_string_lossy()
-                        .to_string();
-                    let offset = arena.len();
-                    arena.extend_from_slice(rel_path.as_bytes());
-                    let mut entry_clone = entry.clone();
-                    entry_clone.entry =
-                        fshell_ls::Entry::new(offset, rel_path.len(), entry.entry.is_dir());
-                    entries.push(entry_clone);
-                }
+                let Some(range) = entry.entry.range(sub_result.arena.len()) else {
+                    return Err("ls: invalid entry range while walking recursively".into());
+                };
+                let name = sub_result
+                    .arena
+                    .get(range)
+                    .ok_or_else(|| "ls: invalid entry range while walking recursively")?;
+                let full_entry_path = dir.join(OsStr::from_bytes(name));
+                let rel_path = full_entry_path
+                    .strip_prefix(root)
+                    .unwrap_or(&full_entry_path)
+                    .to_string_lossy()
+                    .to_string();
+                let offset = arena.len();
+                arena.extend_from_slice(rel_path.as_bytes());
+                let mut entry_clone = entry.clone();
+                entry_clone.entry =
+                    fshell_ls::Entry::new(offset, rel_path.len(), entry.entry.is_dir());
+                entries.push(entry_clone);
             }
         }
     }
@@ -504,7 +518,10 @@ pub fn ls_builtin(
             env.enforce_capability("ls", CapAction::ReadDir(t_config.path.clone()))?;
 
             if targets.len() > 1 {
-                println!("{}:", target.display());
+                println!(
+                    "{}:",
+                    fshell_ls::utils::escape_name(target.as_os_str().as_bytes())
+                );
             }
 
             if config.recursive && !config.tree {
@@ -524,35 +541,37 @@ pub fn ls_builtin(
                     let mut sub_config = t_config.clone();
                     sub_config.path = current_path.clone();
 
-                    if let Ok(sub_result) = fshell_ls::list_dir(&sub_config) {
-                        if !is_first {
-                            println!();
-                        }
-                        is_first = false;
-                        println!("{}:", current_path.display());
-
-                        let _ = fshell_ls::render(&sub_result, &sub_config, |p| {
-                            env.caps.caps.read().check_read_dir(p)
-                                || p.canonicalize()
-                                    .ok()
-                                    .as_ref()
-                                    .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
-                        });
-
-                        let mut subdirs = Vec::new();
-                        for entry in &sub_result.entries {
-                            if entry.entry.is_dir() {
-                                let start = entry.entry.start();
-                                let end = start + entry.entry.len();
-                                if let Ok(name) = std::str::from_utf8(&sub_result.arena[start..end])
-                                {
-                                    subdirs.push(current_path.join(name));
-                                }
-                            }
-                        }
-                        subdirs.reverse();
-                        paths.extend(subdirs);
+                    let sub_result = fshell_ls::list_dir(&sub_config)
+                        .map_err(|e| format!("{}: {e}", sub_config.path.display()))?;
+                    if !is_first {
+                        println!();
                     }
+                    is_first = false;
+                    println!(
+                        "{}:",
+                        fshell_ls::utils::escape_name(current_path.as_os_str().as_bytes())
+                    );
+
+                    fshell_ls::render(&sub_result, &sub_config, |p| {
+                        env.caps.caps.read().check_read_dir(p)
+                            || p.canonicalize()
+                                .ok()
+                                .as_ref()
+                                .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
+                    })
+                    .map_err(|e| format!("{}: {e}", sub_config.path.display()))?;
+
+                    let mut subdirs = Vec::new();
+                    for entry in &sub_result.entries {
+                        if entry.entry.is_dir()
+                            && let Some(range) = entry.entry.range(sub_result.arena.len())
+                            && let Some(name) = sub_result.arena.get(range)
+                        {
+                            subdirs.push(current_path.join(OsStr::from_bytes(name)));
+                        }
+                    }
+                    subdirs.reverse();
+                    paths.extend(subdirs);
                 }
             } else {
                 let all_entries = fshell_ls::list_dir(&t_config)
@@ -582,7 +601,13 @@ pub fn ls_builtin(
             env.enforce_capability("ls", CapAction::ReadDir(t_config.path.clone()))?;
 
             if targets.len() > 1 {
-                buf.extend_from_slice(format!("{}:\n", target.display()).as_bytes());
+                buf.extend_from_slice(
+                    format!(
+                        "{}:\n",
+                        fshell_ls::utils::escape_name(target.as_os_str().as_bytes())
+                    )
+                    .as_bytes(),
+                );
             }
 
             fshell_ls::tree::render_tree(&t_config, &mut buf, |p| {
