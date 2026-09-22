@@ -1247,33 +1247,57 @@ async fn eval_simple_command_inner(
         ":" | "true" => return Ok((0, None)),
         "false" => return Ok((1, None)),
         "exit" => {
-            let code = args
-                .first()
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
+            if args.len() > 1 {
+                eprintln!("exit: too many arguments");
+                return Ok((1, None));
+            }
+            let code = match parse_status_argument(args.first(), env.exit_code()) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("exit: {error}");
+                    return Err(PosixError::Exit(2));
+                }
+            };
             return Err(PosixError::Exit(code));
         }
         "return" => {
-            let code = args
-                .first()
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
+            if args.len() > 1 {
+                eprintln!("return: too many arguments");
+                return Ok((1, None));
+            }
+            let code = match parse_status_argument(args.first(), env.exit_code()) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("return: {error}");
+                    return Err(PosixError::Return(2));
+                }
+            };
             return Err(PosixError::Return(code));
         }
         "break" => return Err(PosixError::Break),
         "continue" => return Err(PosixError::Continue),
         "shift" => {
-            let n = args
-                .first()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(1);
-            crate::posix_builtins::shift::shift_posix(env, n).map_err(|e| {
-                PosixError::Engine(EngineError::Generic {
-                    message: e,
-                    span: None,
-                })
-            })?;
-            return Ok((0, None));
+            if args.len() > 1 {
+                eprintln!("shift: too many arguments");
+                return Ok((2, None));
+            }
+            let n = match args.first() {
+                None => 1,
+                Some(value) => match value.parse::<usize>() {
+                    Ok(n) => n,
+                    Err(error) => {
+                        eprintln!("shift: invalid count {:?}: {}", value, error);
+                        return Ok((2, None));
+                    }
+                },
+            };
+            match crate::posix_builtins::shift::shift_posix(env, n) {
+                Ok(()) => return Ok((0, None)),
+                Err(error) => {
+                    eprintln!("{error}");
+                    return Ok((1, None));
+                }
+            }
         }
         "set" => {
             crate::posix_builtins::shift::set_posix(env, args).map_err(|e| {
@@ -1766,6 +1790,16 @@ async fn eval_simple_command_inner(
 
     // Fallback: subprocess execution with full I/O piping and redirections
     run_external_command(cmd_name, args, prefix_assignments, redir, io_cfg, env).await
+}
+
+fn parse_status_argument(value: Option<&String>, default: i64) -> Result<i32, String> {
+    let number = match value {
+        Some(value) => value.parse::<i64>().map_err(|error| {
+            format!("numeric argument required: {:?} ({})", value.trim(), error)
+        })?,
+        None => default,
+    };
+    Ok(number.rem_euclid(256) as i32)
 }
 
 fn handle_posix_trap(args: &[String], env: &Env) -> Result<String, PosixError> {

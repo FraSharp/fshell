@@ -572,6 +572,46 @@ async fn test_posix_shift_positional() {
 }
 
 #[tokio::test]
+async fn test_posix_status_builtins_reject_bad_arguments_and_normalize_codes() {
+    let env = setup_posix_env();
+    let parsed = parse_posix_script("exit not-a-number").expect("failed to parse exit script");
+    assert_eq!(
+        eval_source(&parsed, &env, &EvalConfig::default()).await,
+        Ok(2)
+    );
+
+    let env = setup_posix_env();
+    let parsed = parse_posix_script("false; exit").expect("failed to parse exit status script");
+    assert_eq!(
+        eval_source(&parsed, &env, &EvalConfig::default()).await,
+        Ok(1)
+    );
+
+    let env = setup_posix_env();
+    let parsed = parse_posix_script("return 300").expect("failed to parse return script");
+    assert_eq!(
+        eval_source(&parsed, &env, &EvalConfig::default()).await,
+        Ok(44)
+    );
+
+    let env = setup_posix_env();
+    let parsed = parse_posix_script("set -- a; shift 2")
+        .expect("failed to parse invalid shift count script");
+    assert_eq!(
+        eval_source(&parsed, &env, &EvalConfig::default()).await,
+        Ok(1)
+    );
+
+    let env = setup_posix_env();
+    let parsed = parse_posix_script("shift not-a-number")
+        .expect("failed to parse invalid shift operand script");
+    assert_eq!(
+        eval_source(&parsed, &env, &EvalConfig::default()).await,
+        Ok(2)
+    );
+}
+
+#[tokio::test]
 async fn test_posix_eval_builtin() {
     let env = setup_posix_env();
     let script = "CMD='EVALUATED_VAR=yes'; eval $CMD";
