@@ -8,6 +8,7 @@ use libc::{
     S_ISGID, S_ISUID, S_ISVTX, S_IWGRP, S_IWOTH, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR, fstatat,
     getgrgid_r, getpwuid_r, group, passwd,
 };
+use std::borrow::Cow;
 use std::ffi::CStr;
 use std::io::Write;
 
@@ -19,8 +20,31 @@ pub const LARGE_BUFFER_SIZE: usize = 1024 * 1024;
 /// Control characters are escaped so names cannot add lines, move the cursor,
 /// or inject terminal escape sequences into listings.
 pub fn escape_name(bytes: &[u8]) -> String {
-    let mut escaped = String::with_capacity(bytes.len());
-    for ch in String::from_utf8_lossy(bytes).chars() {
+    escape_name_cow(bytes).into_owned()
+}
+
+/// Return a terminal-safe display form, borrowing names that need no changes.
+///
+/// This avoids allocating for the common case of valid UTF-8 filenames without
+/// control characters or backslashes. Invalid UTF-8 and escaped names are owned.
+pub fn escape_name_cow(bytes: &[u8]) -> Cow<'_, str> {
+    if let Ok(name) = std::str::from_utf8(bytes)
+        && !name.chars().any(needs_escaping)
+    {
+        return Cow::Borrowed(name);
+    }
+
+    Cow::Owned(escape_lossy_name(bytes))
+}
+
+fn needs_escaping(ch: char) -> bool {
+    matches!(ch, '\\' | '\n' | '\r' | '\t') || ch.is_control()
+}
+
+fn escape_lossy_name(bytes: &[u8]) -> String {
+    let lossy_name = String::from_utf8_lossy(bytes);
+    let mut escaped = String::with_capacity(lossy_name.len());
+    for ch in lossy_name.chars() {
         match ch {
             '\\' => escaped.push_str("\\\\"),
             '\n' => escaped.push_str("\\n"),
@@ -401,6 +425,22 @@ pub fn is_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_utf8_names_are_borrowed() {
+        assert!(matches!(
+            escape_name_cow("plain-name_π".as_bytes()),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(escape_name(b"plain-name"), "plain-name");
+    }
+
+    #[test]
+    fn unsafe_and_invalid_names_keep_their_escaped_display_form() {
+        assert_eq!(escape_name_cow(b"a\\b\nc\x1b"), "a\\\\b\\nc\\u{1b}");
+        assert_eq!(escape_name_cow(b"bad\xffname"), "bad\u{fffd}name");
+        assert!(matches!(escape_name_cow(b"bad\xffname"), Cow::Owned(_)));
+    }
 
     #[test]
     fn output_buffer_estimate_has_a_bounded_capacity() {

@@ -4,7 +4,7 @@
 use crate::args::Config;
 use crate::colors::{BLUE, CYAN, GREEN, RESET};
 use crate::platform::get_dirent_name;
-use crate::utils::escape_name;
+use crate::utils::{escape_name, escape_name_cow};
 use libc::{
     O_DIRECTORY, O_RDONLY, S_IFDIR, S_IFLNK, S_IFMT, S_IXUSR, close, closedir, dirfd, dup,
     fdopendir, fstat, fstatat, open, openat, readdir,
@@ -327,7 +327,7 @@ where
         let is_last = i == count - 1;
 
         let name_bytes = &arena[start..start + len];
-        let display_name = escape_name(name_bytes);
+        let display_name = escape_name_cow(name_bytes);
         // SAFETY: start + len is within the arena, and arena[start + len] is null
         let name_ptr = unsafe { arena.as_ptr().add(start) as *const libc::c_char };
 

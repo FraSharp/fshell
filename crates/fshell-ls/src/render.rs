@@ -5,7 +5,7 @@
 use crate::colors::{BLUE, CYAN, GREEN, RESET};
 use crate::file::FileInfo;
 use crate::utils::{
-    calculate_output_buffer_size, determine_buffer_size, escape_name, format_size,
+    calculate_output_buffer_size, determine_buffer_size, escape_name, escape_name_cow, format_size,
     format_time_with_now, get_group_name, get_mode_string, get_user_name,
 };
 use fshell_hash::FxHashMap;
@@ -171,7 +171,7 @@ pub fn render_columns_to<W: Write + ?Sized>(
     let mut item_lens = Vec::with_capacity(n);
     for item in items {
         let name_bytes = entry_name(item, arena)?;
-        let display_name = escape_name(name_bytes);
+        let display_name = escape_name_cow(name_bytes);
         let name_width = display_name.width();
         name_widths.push(name_width);
         display_names.push(display_name);
@@ -461,7 +461,7 @@ pub fn render_long_listing_to<W: Write + ?Sized>(
             out.write_all(b" ")?;
 
             let name_bytes = entry_name(item, arena)?;
-            let display_name = escape_name(name_bytes);
+            let display_name = escape_name_cow(name_bytes);
 
             if use_color {
                 if item.entry.is_dir() {
@@ -534,7 +534,7 @@ pub fn render_one_per_line_to<W: Write + ?Sized>(
     for item in items {
         let entry = item.entry;
         let name_bytes = entry_name(item, arena)?;
-        let display_name = escape_name(name_bytes);
+        let display_name = escape_name_cow(name_bytes);
 
         if show_inode {
             if let Some(meta) = &item.metadata {
