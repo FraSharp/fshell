@@ -1387,7 +1387,7 @@ async fn eval_simple_command_inner(
             return Ok((code, remaining_stdin));
         }
         "printf" => {
-            let rendered = crate::posix_builtins::printf::format_printf(
+            let result = crate::posix_builtins::printf::format_printf_with_status(
                 args.first().map(|s| s.as_str()).unwrap_or(""),
                 if args.len() > 1 { &args[1..] } else { &[] },
             )
@@ -1397,14 +1397,17 @@ async fn eval_simple_command_inner(
                     span: None,
                 })
             })?;
+            for diagnostic in &result.diagnostics {
+                eprintln!("{diagnostic}");
+            }
             let out = write_builtin_output(
-                &rendered,
+                &result.output,
                 redir,
                 io_cfg.stdout_stream.as_ref(),
                 io_cfg.capture_stdout,
             )
             .await?;
-            return Ok((0, out));
+            return Ok((result.status, out));
         }
         "getopts" => {
             let code = crate::posix_builtins::getopts::getopts_posix(args, env).map_err(|e| {

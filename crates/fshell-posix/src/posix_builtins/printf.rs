@@ -8,6 +8,13 @@
 //! - Escape sequence handling (`\n`, `\t`, `\a`, `\b`, `\f`, `\r`, `\v`, `\\`, `\0NNN`, `\c`).
 //! - Format string recycling (re-using format until all arguments are consumed).
 
+#[derive(Debug)]
+pub struct PrintfResult {
+    pub output: String,
+    pub status: i32,
+    pub diagnostics: Vec<String>,
+}
+
 pub fn printf_posix(args: &[String]) -> Result<i32, String> {
     if args.is_empty() {
         return Ok(0);
@@ -16,37 +23,57 @@ pub fn printf_posix(args: &[String]) -> Result<i32, String> {
     let format = &args[0];
     let values = &args[1..];
 
-    let output = format_printf(format, values)?;
-    print!("{}", output);
-    Ok(0)
+    let result = format_printf_with_status(format, values)?;
+    for diagnostic in &result.diagnostics {
+        eprintln!("{diagnostic}");
+    }
+    print!("{}", result.output);
+    Ok(result.status)
 }
 
 pub fn format_printf(format: &str, args: &[String]) -> Result<String, String> {
+    Ok(format_printf_with_status(format, args)?.output)
+}
+
+pub fn format_printf_with_status(format: &str, args: &[String]) -> Result<PrintfResult, String> {
     let mut out = String::new();
     let mut arg_idx = 0;
+    let mut diagnostics = Vec::new();
 
     // In POSIX, if args are present, format string is repeated until all args are consumed.
     // If no args, format is evaluated once.
     loop {
-        let (rendered, advanced) = render_format_pass(format, args, arg_idx)?;
-        out.push_str(&rendered);
-        arg_idx += advanced;
+        let pass = render_format_pass(format, args, arg_idx)?;
+        out.push_str(&pass.output);
+        arg_idx += pass.advanced;
+        diagnostics.extend(pass.diagnostics);
 
         // If no arguments were provided or all arguments are consumed, stop
-        if args.is_empty() || arg_idx >= args.len() || advanced == 0 {
+        if args.is_empty() || arg_idx >= args.len() || pass.advanced == 0 {
             break;
         }
     }
 
-    Ok(out)
+    Ok(PrintfResult {
+        output: out,
+        status: if diagnostics.is_empty() { 0 } else { 1 },
+        diagnostics,
+    })
+}
+
+struct FormatPass {
+    output: String,
+    advanced: usize,
+    diagnostics: Vec<String>,
 }
 
 fn render_format_pass(
     format: &str,
     args: &[String],
     start_arg_idx: usize,
-) -> Result<(String, usize), String> {
+) -> Result<FormatPass, String> {
     let mut out = String::new();
+    let mut diagnostics = Vec::new();
     let mut chars = format.chars().peekable();
     let mut arg_idx = start_arg_idx;
 
@@ -78,7 +105,11 @@ fn render_format_pass(
                 }
                 Some('c') => {
                     // \c stops all further output
-                    return Ok((out, arg_idx - start_arg_idx));
+                    return Ok(FormatPass {
+                        output: out,
+                        advanced: arg_idx - start_arg_idx,
+                        diagnostics,
+                    });
                 }
                 Some(other) => {
                     out.push('\\');
@@ -197,7 +228,11 @@ fn render_format_pass(
                         out.push_str(&b_out);
                     }
                     if hit_c {
-                        return Ok((out, arg_idx - start_arg_idx));
+                        return Ok(FormatPass {
+                            output: out,
+                            advanced: arg_idx - start_arg_idx,
+                            diagnostics,
+                        });
                     }
                 }
                 Some('c') => {
@@ -209,7 +244,13 @@ fn render_format_pass(
                     }
                 }
                 Some('d') | Some('i') => {
-                    let num: i64 = parse_printf_int(next_arg);
+                    let num = match parse_printf_int(next_arg) {
+                        Ok(num) => num,
+                        Err(error) => {
+                            diagnostics.push(error);
+                            0
+                        }
+                    };
                     let mut num_str = num.to_string();
                     if let Some(spec) = &parsed_spec {
                         if spec.always_sign && num >= 0 {
@@ -223,7 +264,13 @@ fn render_format_pass(
                     }
                 }
                 Some('u') => {
-                    let num: u64 = parse_printf_int(next_arg) as u64;
+                    let num: u64 = match parse_printf_int(next_arg) {
+                        Ok(num) => num as u64,
+                        Err(error) => {
+                            diagnostics.push(error);
+                            0
+                        }
+                    };
                     let num_str = num.to_string();
                     if let Some(spec) = &parsed_spec {
                         out.push_str(&apply_formatting(&num_str, spec, true));
@@ -232,7 +279,13 @@ fn render_format_pass(
                     }
                 }
                 Some('o') => {
-                    let num: u64 = parse_printf_int(next_arg) as u64;
+                    let num: u64 = match parse_printf_int(next_arg) {
+                        Ok(num) => num as u64,
+                        Err(error) => {
+                            diagnostics.push(error);
+                            0
+                        }
+                    };
                     let num_str = format!("{:o}", num);
                     if let Some(spec) = &parsed_spec {
                         out.push_str(&apply_formatting(&num_str, spec, true));
@@ -241,7 +294,13 @@ fn render_format_pass(
                     }
                 }
                 Some('x') => {
-                    let num: u64 = parse_printf_int(next_arg) as u64;
+                    let num: u64 = match parse_printf_int(next_arg) {
+                        Ok(num) => num as u64,
+                        Err(error) => {
+                            diagnostics.push(error);
+                            0
+                        }
+                    };
                     let num_str = format!("{:x}", num);
                     if let Some(spec) = &parsed_spec {
                         out.push_str(&apply_formatting(&num_str, spec, true));
@@ -250,7 +309,13 @@ fn render_format_pass(
                     }
                 }
                 Some('X') => {
-                    let num: u64 = parse_printf_int(next_arg) as u64;
+                    let num: u64 = match parse_printf_int(next_arg) {
+                        Ok(num) => num as u64,
+                        Err(error) => {
+                            diagnostics.push(error);
+                            0
+                        }
+                    };
                     let num_str = format!("{:X}", num);
                     if let Some(spec) = &parsed_spec {
                         out.push_str(&apply_formatting(&num_str, spec, true));
@@ -259,7 +324,17 @@ fn render_format_pass(
                     }
                 }
                 Some('f') | Some('e') | Some('E') | Some('g') | Some('G') => {
-                    let num: f64 = next_arg.trim().parse::<f64>().unwrap_or(0.0);
+                    let num = match next_arg.trim().parse::<f64>() {
+                        Ok(num) => num,
+                        Err(error) => {
+                            diagnostics.push(format!(
+                                "printf: {:?}: invalid number ({})",
+                                next_arg.trim(),
+                                error
+                            ));
+                            0.0
+                        }
+                    };
                     let prec = parsed_spec.as_ref().and_then(|s| s.precision).unwrap_or(6);
                     let num_str = format!("{:.*}", prec, num);
                     if let Some(spec) = &parsed_spec {
@@ -277,7 +352,11 @@ fn render_format_pass(
         }
     }
 
-    Ok((out, arg_idx - start_arg_idx))
+    Ok(FormatPass {
+        output: out,
+        advanced: arg_idx - start_arg_idx,
+        diagnostics,
+    })
 }
 
 struct FormatSpec {
@@ -394,24 +473,28 @@ fn apply_formatting(val_str: &str, spec: &FormatSpec, is_number: bool) -> String
     s
 }
 
-fn parse_printf_int(s: &str) -> i64 {
+fn parse_printf_int(s: &str) -> Result<i64, String> {
     let t = s.trim();
     if t.is_empty() {
-        return 0;
+        return Ok(0);
     }
     // Check for character constant: 'a' -> 97
     if t.starts_with('\'') || t.starts_with('"') {
         let mut chars = t.chars().skip(1);
         if let Some(c) = chars.next() {
-            return c as i64;
+            return Ok(c as i64);
         }
+        return Err(format!("printf: {:?}: invalid number", t));
     }
     // Check hex/octal prefixes
     if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        i64::from_str_radix(hex, 16).unwrap_or(0)
+        i64::from_str_radix(hex, 16)
+            .map_err(|error| format!("printf: {:?}: invalid number ({})", t, error))
     } else if t.starts_with('0') && t.len() > 1 && t.chars().all(|c| ('0'..='7').contains(&c)) {
-        i64::from_str_radix(t, 8).unwrap_or(0)
+        i64::from_str_radix(t, 8)
+            .map_err(|error| format!("printf: {:?}: invalid number ({})", t, error))
     } else {
-        t.parse::<i64>().unwrap_or(0)
+        t.parse::<i64>()
+            .map_err(|error| format!("printf: {:?}: invalid number ({})", t, error))
     }
 }

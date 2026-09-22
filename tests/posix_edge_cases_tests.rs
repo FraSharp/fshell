@@ -555,6 +555,15 @@ async fn test_posix_printf_formatting() {
 }
 
 #[tokio::test]
+async fn test_posix_printf_reports_invalid_numeric_arguments() {
+    let env = setup_posix_env();
+    let (code, out) = run_posix_capture(r#"printf "%d\n" not-a-number"#, &env).await;
+
+    assert_eq!(code, 1);
+    assert_eq!(out, "0\n");
+}
+
+#[tokio::test]
 async fn test_posix_shift_positional() {
     let env = setup_posix_env();
     let script = "set -- a b c d; shift 2; echo $1 $2";
