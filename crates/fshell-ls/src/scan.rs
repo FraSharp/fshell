@@ -192,14 +192,16 @@ pub fn list_dir(config: &Config) -> io::Result<ListResult> {
     let flags = determine_metadata_needs(config);
 
     let num_items = entries.len();
-    let metadata_result = if num_items > 100 {
+    let metadata_result = if !flags.any() {
+        Ok(())
+    } else if num_items > 100 {
         use rayon::prelude::*;
         entries
             .par_iter_mut()
             .try_for_each(|item| collect_metadata(item, &arena, dir_fd, flags, config.dereference))
     } else {
         let mut result = Ok(());
-        for item in entries.iter_mut() {
+        for item in &mut entries {
             if let Err(err) = collect_metadata(item, &arena, dir_fd, flags, config.dereference) {
                 result = Err(err);
                 break;
