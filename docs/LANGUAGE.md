@@ -3,6 +3,7 @@
 fshell (`fsh`) is a structured-data shell with a rust-like scripting language and a polyglot posix engine.
 
 this document is the definitive language reference for `.fsh` syntax, expressions, statements, types, pipelines, and evaluation semantics.
+The executable native-language smoke baseline is documented in [FSH-LANGUAGE-BASELINE.md](FSH-LANGUAGE-BASELINE.md).
 
 ---
 
