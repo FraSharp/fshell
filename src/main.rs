@@ -31,9 +31,14 @@ fn main() {
         .map(|s| s.to_string())
         .unwrap_or_else(|| "fshell".to_string());
 
-    if program_name != "fsh" && program_name != "fshell" {
+    // login(1) starts login shells with a leading '-' in argv[0] (for
+    // example, `-fsh`). Keep the original argv[0] for `fshell::run()` so it
+    // can detect login mode, but remove that marker when deciding whether
+    // this multicall binary was invoked as a utility.
+    let dispatch_name = program_name.strip_prefix('-').unwrap_or(&program_name);
+    if dispatch_name != "fsh" && dispatch_name != "fshell" {
         let utility_args: Vec<String> = args.into_iter().skip(1).collect();
-        fshell::run_utility(&program_name, &utility_args);
+        fshell::run_utility(dispatch_name, &utility_args);
     }
 
     let rt = tokio::runtime::Builder::new_current_thread()

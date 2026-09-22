@@ -120,7 +120,10 @@ pub async fn run() {
 
     let is_login_argv0 = raw_program_name.starts_with('-');
     let program_name = if is_login_argv0 {
-        raw_program_name.trim_start_matches('-').to_string()
+        raw_program_name
+            .strip_prefix('-')
+            .unwrap_or(&raw_program_name)
+            .to_string()
     } else {
         raw_program_name.clone()
     };

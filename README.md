@@ -17,6 +17,7 @@ structured like nushell, familiar like zsh, clean like rust.
 ## table of contents
 
 - [installation & quick start](#installation--quick-start)
+- [use fshell as your login shell](#use-fshell-as-your-login-shell)
 - [why fshell](#why-fshell)
 - [side-by-side: fsh vs bash / zsh](#side-by-side-fsh-vs-bash--zsh)
   - [1. process inspection & filtering](#1-process-inspection--filtering)
@@ -85,6 +86,33 @@ fsh --posix setup.sh
 # launch in strict capability mode
 fsh -s
 ```
+
+### use fshell as your login shell
+
+Install `fsh` at a stable absolute path first. The Cargo installation above normally places it at `~/.cargo/bin/fsh`; check the actual path and confirm it is executable:
+
+```sh
+FshPath="$(command -v fsh)"
+test -x "$FshPath" && printf 'Using %s\n' "$FshPath"
+```
+
+`chsh` and system login tools commonly accept only shells listed in `/etc/shells`. Check whether the exact path is present:
+
+```sh
+grep -Fx "$FshPath" /etc/shells
+```
+
+If it is absent, add that exact absolute path to `/etc/shells` using your operating system's administrator procedure. On macOS and many Linux distributions this file is administrator-owned. Then set the account shell:
+
+```sh
+chsh -s "$FshPath"
+```
+
+Sign out and back in to exercise the account-login path. A direct terminal launch (`fsh`) or explicit login launch (`fsh --login`) is useful for checking startup, but does not by itself verify that your account's `chsh` setting works.
+
+To revert, use `chsh -s /bin/zsh` if zsh is installed at that path, or substitute the known working shell path for your system. Do not remove that fallback shell from `/etc/shells`.
+
+fshell detects the Unix login-shell `argv[0]` convention and loads its supported login environment. Existing Bash/Zsh startup files are evaluated by fshell's POSIX compatibility layer; shell-specific startup syntax and behavior may differ from running Bash or Zsh directly.
 
 ---
 
