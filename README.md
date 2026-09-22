@@ -382,8 +382,9 @@ everything is built into the binary:
 detailed documentation for every subsystem is in [`docs/`](docs/):
 
 - **[language reference](docs/LANGUAGE.md)**: complete `.fsh` syntax, types, expressions, pattern matching, reactive variables (`$=`), and modifiers.
-- **[architecture](docs/ARCHITECTURE.md)**: 14-crate workspace design, memory layout, tokio channel streaming, and multicall binaries.
+- **[architecture](docs/ARCHITECTURE.md)**: 15-crate workspace design, memory layout, tokio channel streaming, and multicall binaries.
 - **[pipelines](docs/PIPELINES.md)**: stream backpressure, `PipelinePayload` internals, all stage transformers, boundary operators, and `pipefail`.
+- **[semantic layer](docs/SEMANTIC.md)**: typed semantic actions for natural-language interaction, fsh/POSIX lowering, and FunctionGemma tool schemas.
 - **[posix compatibility](docs/POSIX-COMPATIBILITY.md)**: `fshell-posix` engine, 4-phase word expansion, arithmetic, and virtualenv sourcing.
 - **[security & capabilities](docs/SECURITY.md)**: capability tokens, 3-tier permissions, Landlock (Linux) / SBPL (macOS) sandboxing, and safety prompts.
 - **[built-in commands](docs/BUILTINS.md)**: complete reference for all ~117 builtins.

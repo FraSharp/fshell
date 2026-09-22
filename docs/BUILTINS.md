@@ -344,6 +344,22 @@ the path of the running `fsh` binary (`self [--exe|--pid|--version|--info]`,
 - `compgen`: generates completions.
 - `bind` / `bindkey`: inspect or set key bindings.
 
+### `intent`
+
+runs a *structured* semantic action — the typed shape a small function-calling model is
+expected to produce — and validates, renders and (optionally) executes it through the
+ordinary shell machinery. See `docs/SEMANTIC.md` for the full design.
+
+```fsh
+intent --json '{"kind":"memory_info"}'
+intent --file plan.json --run
+intent --actions
+intent --schema
+```
+
+the input is always a typed action, never an arbitrary command string. by default nothing
+is executed; `--run` executes after a structural risk check.
+
 ### not implemented
 
 `http`, `sql` and `chart` are registered but not implemented in this build; they
