@@ -345,7 +345,16 @@ pub fn execute_pipeline_owned(
     env: Env,
     tx: PipeSender,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
-    Box::pin(async move { execute_pipeline(&pipeline, &env, tx).await })
+    execute_pipeline_owned_with_input(pipeline, env, tx, None)
+}
+
+fn execute_pipeline_owned_with_input(
+    pipeline: Pipeline,
+    env: Env,
+    tx: PipeSender,
+    input: Option<PipeStream>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+    Box::pin(async move { execute_pipeline_with_input(&pipeline, &env, tx, input).await })
 }
 
 #[derive(Clone)]
@@ -695,13 +704,22 @@ pub async fn execute_pipeline(
     env: &Env,
     tx: PipeSender,
 ) -> Result<(), String> {
+    execute_pipeline_with_input(pipeline, env, tx, None).await
+}
+
+async fn execute_pipeline_with_input(
+    pipeline: &Pipeline,
+    env: &Env,
+    tx: PipeSender,
+    initial_input: Option<PipeStream>,
+) -> Result<(), String> {
     if pipeline.stages.is_empty() {
         return Ok(());
     }
     let stages = build_pipeline_plan(pipeline, env).await?;
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    let mut current_rx: Option<PipeStream> = None;
+    let mut current_rx = initial_input;
     let mut stage_tasks = Vec::new();
     macro_rules! spawn_stage {
         ($future:expr) => {{
@@ -869,11 +887,11 @@ pub async fn execute_pipeline(
                                 .store(true, Ordering::Relaxed);
                             let full_src = expand_alias_with_args(&expansion, &extra_args);
                             // Forward piped input by executing the expansion in
-                            // the same eval_stmt path that handles pipelines.
-                            // For now, alias expansion does not forward in_rx
-                            // (uncommon for most shell aliases); a future
-                            // enhancement can thread it through eval_stmt.
-                            drop(in_rx_alias);
+                            // the same pipeline executor used by the outer
+                            // command. The first pipeline statement consumes
+                            // the receiver; later statements in a multi-
+                            // statement alias have no implicit stdin.
+                            let mut alias_input = in_rx_alias;
                             let mut parser = fshell_core::Parser::new(&full_src);
                             let stmts = match parser.parse_statements() {
                                 Ok(s) => s,
@@ -895,11 +913,13 @@ pub async fn execute_pipeline(
                                             let pipeline_clone = pipeline.clone();
                                             let env_exec = env_for_alias.clone();
                                             let out_tx_exec = out_tx_alias.clone();
-                                            let handle = tokio::spawn(execute_pipeline_owned(
-                                                pipeline_clone,
-                                                env_exec,
-                                                out_tx_exec,
-                                            ));
+                                            let handle =
+                                                tokio::spawn(execute_pipeline_owned_with_input(
+                                                    pipeline_clone,
+                                                    env_exec,
+                                                    out_tx_exec,
+                                                    alias_input.take(),
+                                                ));
                                             if let Ok(Err(e)) = handle.await {
                                                 let _ = out_tx_alias
                                                     .send(PipelinePayload::Structured(e.into()))

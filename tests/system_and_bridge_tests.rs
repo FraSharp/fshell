@@ -144,6 +144,24 @@ async fn test_alias_expansion_pipeline_output() {
 }
 
 #[tokio::test]
+async fn test_alias_expansion_preserves_pipeline_input() {
+    let env = setup_test_env();
+    let mut parser = Parser::new("let result = $| echo one | total |\n");
+    let stmts = parser.parse_statements().unwrap();
+    env.register_alias("total", "count");
+
+    for stmt in &stmts {
+        fshell_engine::eval_stmt(stmt, &env, false).await.unwrap();
+    }
+
+    assert_eq!(
+        env.vars.read().get("result"),
+        Some(&Val::List(vec![Val::Int(1)])),
+        "an alias used as a pipeline stage must receive upstream data"
+    );
+}
+
+#[tokio::test]
 async fn test_integration_bridge_fallthrough_echo() {
     let env = setup_test_env();
     let mut parser = Parser::new(r##"echo "hello world""##);
