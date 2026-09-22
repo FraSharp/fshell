@@ -1111,21 +1111,25 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_plus_arg_still_concatenates() {
-        // `+` with surrounding whitespace stays the concat/addition operator.
+    fn test_parse_operator_like_command_args_as_literals() {
+        // Operators are ordinary command arguments. Expressions in command
+        // arguments must use explicit syntax such as `$((1 + 2))`.
         let mut p = Parser::new("echo 1 + 2");
         let stmts = p.parse_statements().unwrap();
         if let Stmt::Expr(expr) = stmts[0].unpack() {
             if let Expr::Pipeline(pipeline) = expr.unpack() {
                 if let PipelineStage::CommandCall { name, args, .. } = &pipeline.stages[0] {
                     assert_eq!(name, "echo");
-                    assert_eq!(args.len(), 1);
-                    assert!(matches!(&args[0], Expr::BinaryOp { op: BinOp::Add, .. }));
+                    assert_eq!(args.len(), 3);
+                    assert_eq!(
+                        args[1],
+                        Expr::String(vec![StringPart::Lit("+".to_string())])
+                    );
                 }
             }
         }
 
-        // Bare arithmetic `a + 1` still parses as an expression, not a command.
+        // Bare arithmetic still parses as an expression, not a command.
         let mut p2 = Parser::new("a + 1");
         let stmts2 = p2.parse_statements().unwrap();
         if let Stmt::Expr(expr) = stmts2[0].unpack() {

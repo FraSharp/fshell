@@ -922,45 +922,6 @@ impl Parser {
         Ok(Expr::String(parts))
     }
 
-    /// Preserve the language's explicit, whitespace-delimited expression
-    /// arguments (for example `echo 1 + 2`) without treating compact command
-    /// words such as `2026-09-20` as arithmetic.
-    pub(crate) fn command_arg_has_spaced_operator(&self) -> bool {
-        let mut p = self.pos;
-        while p < self.input.len()
-            && !self.input[p].is_whitespace()
-            && !matches!(self.input[p], '|' | ';' | '&' | '<' | '>' | ')' | '}')
-        {
-            p += 1;
-        }
-        if p == self.pos || p >= self.input.len() || !self.input[p].is_whitespace() {
-            return false;
-        }
-        // A spaced `-` following an option token is an ordinary command
-        // argument, not subtraction.  This is common for commands whose
-        // option value is the conventional stdin/stdout marker, e.g.
-        // `codesign --sign - path`.
-        if self.input[self.pos..p].starts_with(&['-']) {
-            return false;
-        }
-        while p < self.input.len() && self.input[p].is_whitespace() {
-            p += 1;
-        }
-        let op_len = if p + 1 < self.input.len()
-            && matches!(
-                (self.input[p], self.input[p + 1]),
-                ('=' | '!', '=') | ('&', '&') | ('|', '|')
-            ) {
-            2
-        } else if p < self.input.len() && matches!(self.input[p], '+' | '-' | '*' | '/') {
-            1
-        } else {
-            return false;
-        };
-        p += op_len;
-        p < self.input.len() && self.input[p].is_whitespace()
-    }
-
     pub(crate) fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
         let span = self.current_span();
         let _guard = super::RecursionGuard::new(&self.recursion_depth, span)?;

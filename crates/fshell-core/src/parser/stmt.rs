@@ -1562,18 +1562,7 @@ impl Parser {
                     {
                         break;
                     }
-                    let mut arg = if self.command_arg_has_spaced_operator() {
-                        let saved_redirect = self.redirect_mode;
-                        let saved_arg = self.cmd_arg_mode;
-                        self.redirect_mode = true;
-                        self.cmd_arg_mode = true;
-                        let parsed = self.parse_expr_with_pipeline(false);
-                        self.redirect_mode = saved_redirect;
-                        self.cmd_arg_mode = saved_arg;
-                        parsed?
-                    } else {
-                        self.parse_command_arg()?
-                    };
+                    let mut arg = self.parse_command_arg()?;
                     if (name == "export" || name == "unset")
                         && let Expr::Ident(id) = arg
                     {
