@@ -328,6 +328,26 @@ fn execute_pipeline_owned_with_input(
     Box::pin(async move { execute_pipeline_with_input(&pipeline, &env, tx, input).await })
 }
 
+fn execute_pipeline_owned_with_input_and_cancellation(
+    pipeline: Pipeline,
+    env: Env,
+    tx: PipeSender,
+    input: Option<PipeStream>,
+    cancel_tx: tokio::sync::watch::Sender<bool>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+    Box::pin(async move {
+        execute_pipeline_with_input_and_cancellation(
+            &pipeline,
+            &env,
+            tx,
+            input,
+            Some((cancel_tx, cancel_rx)),
+        )
+        .await
+    })
+}
+
 #[derive(Clone)]
 enum OutputRoute {
     Data,
@@ -684,12 +704,25 @@ async fn execute_pipeline_with_input(
     tx: PipeSender,
     initial_input: Option<PipeStream>,
 ) -> Result<(), String> {
+    execute_pipeline_with_input_and_cancellation(pipeline, env, tx, initial_input, None).await
+}
+
+async fn execute_pipeline_with_input_and_cancellation(
+    pipeline: &Pipeline,
+    env: &Env,
+    tx: PipeSender,
+    initial_input: Option<PipeStream>,
+    cancellation: Option<(
+        tokio::sync::watch::Sender<bool>,
+        tokio::sync::watch::Receiver<bool>,
+    )>,
+) -> Result<(), String> {
     if pipeline.stages.is_empty() {
         return Ok(());
     }
     let stages = build_pipeline_plan(pipeline, env).await?;
 
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (cancel_tx, cancel_rx) = cancellation.unwrap_or_else(|| tokio::sync::watch::channel(false));
     let mut current_rx = initial_input;
     let mut stage_tasks = Vec::new();
     macro_rules! spawn_stage {
@@ -884,13 +917,16 @@ async fn execute_pipeline_with_input(
                                             let pipeline_clone = pipeline.clone();
                                             let env_exec = env_for_alias.clone();
                                             let out_tx_exec = out_tx_alias.clone();
-                                            let handle =
-                                                tokio::spawn(execute_pipeline_owned_with_input(
+                                            let handle = tokio::spawn(
+                                                execute_pipeline_owned_with_input_and_cancellation(
                                                     pipeline_clone,
                                                     env_exec,
                                                     out_tx_exec,
                                                     alias_input.take(),
-                                                ));
+                                                    cancel_tx_alias.clone(),
+                                                    cancel_alias.clone(),
+                                                ),
+                                            );
                                             match handle.await {
                                                 Ok(Ok(())) => {}
                                                 Ok(Err(error)) => {
@@ -1649,10 +1685,10 @@ async fn execute_pipeline_with_input(
                         // stay visible inside the stage.
                         let base_locals = env_clone.local_vars.clone();
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.pipeline_cancelled() || *_stage_cancel.borrow() {
-                                break;
-                            }
+                            let cancelled =
+                                env_clone.pipeline_cancelled() || *_stage_cancel.borrow();
                             match payload {
+                                PipelinePayload::Data(_) if cancelled => continue,
                                 PipelinePayload::Data(val_arc) => {
                                     if let Val::Map(map) = &*val_arc {
                                         // A referenced identifier is a "column" when it is
@@ -1726,6 +1762,7 @@ async fn execute_pipeline_with_input(
                                         }
                                     }
                                 }
+                                PipelinePayload::Bytes(_) if cancelled => continue,
                                 PipelinePayload::Bytes(b) => {
                                     let text = String::from_utf8_lossy(&b);
                                     for line in text.lines() {
@@ -2342,10 +2379,10 @@ async fn execute_pipeline_with_input(
                 spawn_stage!(async move {
                     if let Some(mut rx) = current_rx {
                         while let Some(payload) = rx.recv().await {
-                            if env_clone.pipeline_cancelled() || *_stage_cancel.borrow() {
-                                break;
-                            }
+                            let cancelled =
+                                env_clone.pipeline_cancelled() || *_stage_cancel.borrow();
                             match payload {
+                                PipelinePayload::Data(_) if cancelled => continue,
                                 PipelinePayload::Data(val_arc) => match &*val_arc {
                                     Val::ObjectGraph { root, graph } => {
                                         let mut sub_env = env_clone.clone();
@@ -2406,6 +2443,7 @@ async fn execute_pipeline_with_input(
                                         break;
                                     }
                                 },
+                                PipelinePayload::Bytes(_) if cancelled => continue,
                                 PipelinePayload::Bytes(b) => {
                                     // Boundary conversion: raw bytes -> line-split string Vals.
                                     forward_bytes_as_lines(&out_tx, &b).await;

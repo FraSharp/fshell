@@ -7,7 +7,7 @@
 
 mod common;
 use common::*;
-use fshell_core::{Expr, ResourceHandle, Stmt};
+use fshell_core::{ErrorCode, Expr, ResourceHandle, ShellError, Stmt};
 use fshell_engine::{BuiltinHandler, EngineError, ReactiveEvent, execute_pipeline};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -182,6 +182,58 @@ async fn test_alias_pipeline_stage_failure_is_reported() {
         Err(EngineError::PipelineError { message, .. })
             if message.contains("alias 'panic_alias' pipeline task failed")
     ));
+}
+
+#[tokio::test]
+async fn test_alias_pipeline_failure_cancels_parent_pipeline_stages() {
+    let env = setup_test_env();
+    let emit_then_fail: BuiltinHandler = Arc::new(|_, _, _, tx, _| {
+        tx.blocking_send(PipelinePayload::Data(Arc::new(Val::Int(1))))
+            .expect("downstream alias pipeline stage should still be connected");
+        Err(ShellError::new(
+            ErrorCode::CommandFailed,
+            "intentional alias pipeline failure",
+        ))
+    });
+    env.register_builtin("emit_then_fail", emit_then_fail);
+    env.register_alias("failing_alias", "emit_then_fail");
+
+    let mut parser = Parser::new("failing_alias | filter true");
+    let stmts = parser
+        .parse_statements()
+        .expect("alias pipeline command should parse");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    execute_pipeline(
+        match stmts[0].unpack() {
+            Stmt::Expr(expr) => match expr.unpack() {
+                Expr::Pipeline(pipeline) => pipeline,
+                _ => panic!("expected pipeline expression"),
+            },
+            _ => panic!("expected expression statement"),
+        },
+        &env,
+        tx,
+    )
+    .await
+    .expect("parent pipeline should complete after forwarding the alias diagnostic");
+
+    let mut data = Vec::new();
+    let mut diagnostics = Vec::new();
+    while let Some(payload) = rx.recv().await {
+        match payload {
+            PipelinePayload::Data(value) => data.push((*value).clone()),
+            PipelinePayload::Structured(diag) => diagnostics.push(diag.to_string()),
+            PipelinePayload::Bytes(_) => {}
+        }
+    }
+
+    assert!(data.is_empty(), "cancelled parent stage leaked alias data");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("intentional alias pipeline failure")),
+        "data={data:?}, diagnostics={diagnostics:?}"
+    );
 }
 
 #[tokio::test]
