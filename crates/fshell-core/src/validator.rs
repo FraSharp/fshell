@@ -151,6 +151,14 @@ pub fn validate_input(input: &str) -> ValidationResult {
         return ValidationResult::Complete;
     }
 
+    // The parser is the authority for whether a complete input is valid. A
+    // generic delimiter scan cannot know that characters such as `[` may be
+    // literal arguments to an external command.
+    let parse_error = match Parser::new(input).parse_statements() {
+        Ok(_) => return ValidationResult::Complete,
+        Err(err) => err,
+    };
+
     // 1. Fast lexical scan for unclosed delimiters, quotes, and heredocs
     let lex = scan_delimiters(input, None);
 
@@ -191,27 +199,6 @@ pub fn validate_input(input: &str) -> ValidationResult {
                 prompt_hint: "posix",
             };
         } else {
-            return ValidationResult::Complete;
-        }
-    }
-
-    // 1.6 `find -exec ... {} +` / `\;` - `+` is find's terminator, not a trailing operator.
-    // The Pratt parser treats trailing `+` as `a + <missing>`, so `find ... {} +` would be
-    // `Invalid`. Detect the common `find ... -exec ... {} +|;` pattern and short-circuit.
-    {
-        let trimmed = input.trim();
-        if trimmed.contains(" -exec ")
-            && (trimmed.ends_with(" {} +")
-                || trimmed.ends_with(" {} ;")
-                || trimmed.ends_with(" {} \\;")
-                || trimmed.ends_with(" +")
-                || trimmed.ends_with(" \\;"))
-        {
-            // Also handle quoted variant `} +` already handled above, but be permissive
-            return ValidationResult::Complete;
-        }
-        // Generic: external command ending with standalone `+` after `}` is `find` style
-        if is_word(trimmed, "find") && (trimmed.ends_with(" +") || trimmed.ends_with(" ;")) {
             return ValidationResult::Complete;
         }
     }
@@ -334,92 +321,64 @@ pub fn validate_input(input: &str) -> ValidationResult {
         }
     }
 
-    // 3. Full parser verification
-    let mut parser = Parser::new(input);
-    match parser.parse_statements() {
-        Ok(_) => ValidationResult::Complete,
-        Err(err) => match err {
-            ParseError::UnexpectedEof { .. } => ValidationResult::Incomplete {
-                prompt_hint: "incomplete",
-            },
-            ParseError::ExpectedChar {
-                span,
-                expected,
-                found: _,
-            } => {
-                if expected == '{'
-                    || expected == '}'
-                    || expected == '('
-                    || expected == ')'
-                    || expected == '['
-                    || expected == ']'
-                {
-                    ValidationResult::Incomplete {
-                        prompt_hint: match expected {
-                            '{' | '}' => "brace",
-                            '(' | ')' => "paren",
-                            '[' | ']' => "bracket",
-                            _ => "incomplete",
-                        },
-                    }
-                } else {
-                    ValidationResult::Invalid {
-                        message: format!("Expected character '{}'", expected),
-                        span,
-                    }
-                }
-            }
-            ParseError::ExpectedToken {
-                span, ref expected, ..
-            } => {
-                if expected == "{"
-                    || expected == "}"
-                    || expected == "("
-                    || expected == ")"
-                    || expected == "["
-                    || expected == "]"
-                    || expected == "catch"
-                    || expected == "in"
-                    || expected == "=>"
-                    || expected == "caps"
-                {
-                    ValidationResult::Incomplete {
-                        prompt_hint: match expected.as_str() {
-                            "{" | "}" => "brace",
-                            "(" | ")" => "paren",
-                            "[" | "]" => "bracket",
-                            "catch" => "catch",
-                            "in" => "in",
-                            "=>" => "arm",
-                            _ => "incomplete",
-                        },
-                    }
-                } else {
-                    ValidationResult::Invalid {
-                        message: format!("Expected {}", expected),
-                        span,
-                    }
-                }
-            }
-            ParseError::SyntaxError { ref message, span } => {
-                let lower = message.to_lowercase();
-                if lower.contains("unterminated")
-                    || lower.contains("expected '{'")
-                    || lower.contains("expected 'in'")
-                    || lower.contains("expected block")
-                    || lower.contains("expected duration")
-                {
-                    ValidationResult::Incomplete {
-                        prompt_hint: "incomplete",
-                    }
-                } else {
-                    ValidationResult::Invalid {
-                        message: message.clone(),
-                        span,
-                    }
-                }
-            }
+    // 3. Classify the authoritative parser error after the continuation hints
+    // above have had a chance to provide a more useful prompt.
+    let at_eof = parse_error.span().offset() >= input.len();
+    match parse_error {
+        ParseError::UnexpectedEof { .. } => ValidationResult::Incomplete {
+            prompt_hint: "incomplete",
         },
+        ParseError::ExpectedChar {
+            span: _,
+            expected,
+            found,
+        } if at_eof || found == '\0' => ValidationResult::Incomplete {
+            prompt_hint: match expected {
+                '{' | '}' => "brace",
+                '(' | ')' => "paren",
+                '[' | ']' => "bracket",
+                _ => "incomplete",
+            },
+        },
+        ParseError::ExpectedChar {
+            span,
+            expected,
+            found: _,
+        } => ValidationResult::Invalid {
+            message: format!("Expected character '{}'", expected),
+            span,
+        },
+        ParseError::ExpectedToken {
+            span: _,
+            ref expected,
+            ..
+        } if at_eof => ValidationResult::Incomplete {
+            prompt_hint: match expected.as_str() {
+                "{" | "}" => "brace",
+                "(" | ")" => "paren",
+                "[" | "]" => "bracket",
+                "catch" => "catch",
+                "in" => "in",
+                "=>" => "arm",
+                _ => "incomplete",
+            },
+        },
+        ParseError::ExpectedToken { span, expected, .. } => ValidationResult::Invalid {
+            message: format!("Expected {}", expected),
+            span,
+        },
+        ParseError::SyntaxError { ref message, span } => {
+            if at_eof || message.to_lowercase().contains("unterminated") {
+                ValidationResult::Incomplete {
+                    prompt_hint: "incomplete",
+                }
+            } else {
+                ValidationResult::Invalid {
+                    message: message.clone(),
+                    span,
+                }
+            }
+        }
     }
 }
 
@@ -964,5 +923,26 @@ match env_target {
     done
 }"#;
         assert_eq!(validate_input(posix_block), ValidationResult::Complete);
+    }
+
+    #[test]
+    fn test_parser_acceptance_wins_over_generic_delimiter_scan() {
+        // `[` is a valid literal argument for an external command. The
+        // parser's command-argument mode knows that; a generic bracket scan
+        // must not force the REPL into continuation mode first.
+        assert_eq!(validate_input("echo ["), ValidationResult::Complete);
+        assert_eq!(validate_input("echo [foo"), ValidationResult::Complete);
+    }
+
+    #[test]
+    fn test_parser_mismatch_is_invalid_not_continuation() {
+        assert!(matches!(
+            validate_input("fn foo )"),
+            ValidationResult::Invalid { .. }
+        ));
+        assert!(matches!(
+            validate_input("for item nope"),
+            ValidationResult::Invalid { .. }
+        ));
     }
 }
