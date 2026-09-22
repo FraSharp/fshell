@@ -891,11 +891,32 @@ async fn execute_pipeline_with_input(
                                                     out_tx_exec,
                                                     alias_input.take(),
                                                 ));
-                                            if let Ok(Err(e)) = handle.await {
-                                                let _ = out_tx_alias
-                                                    .send(PipelinePayload::Structured(e.into()))
-                                                    .await;
-                                                return;
+                                            match handle.await {
+                                                Ok(Ok(())) => {}
+                                                Ok(Err(error)) => {
+                                                    let _ = out_tx_alias
+                                                        .send(PipelinePayload::Structured(
+                                                            format!(
+                                                                "alias '{}' pipeline task failed: {}",
+                                                                name, error
+                                                            )
+                                                            .into(),
+                                                        ))
+                                                        .await;
+                                                    return;
+                                                }
+                                                Err(join_error) => {
+                                                    let _ = out_tx_alias
+                                                        .send(PipelinePayload::Structured(
+                                                            format!(
+                                                                "alias '{}' pipeline task failed: {}",
+                                                                name, join_error
+                                                            )
+                                                            .into(),
+                                                        ))
+                                                        .await;
+                                                    return;
+                                                }
                                             }
                                         }
                                         _ => match eval_expr(expr, &env_for_alias).await {

@@ -8,8 +8,9 @@
 mod common;
 use common::*;
 use fshell_core::{Expr, ResourceHandle, Stmt};
-use fshell_engine::{EngineError, ReactiveEvent, execute_pipeline};
+use fshell_engine::{BuiltinHandler, EngineError, ReactiveEvent, execute_pipeline};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_integration_cd_and_paths() {
@@ -159,6 +160,28 @@ async fn test_alias_expansion_preserves_pipeline_input() {
         Some(&Val::List(vec![Val::Int(1)])),
         "an alias used as a pipeline stage must receive upstream data"
     );
+}
+
+#[tokio::test]
+async fn test_alias_pipeline_stage_failure_is_reported() {
+    let env = setup_test_env();
+    let panic_handler: BuiltinHandler = Arc::new(|_, _, _, _, _| {
+        std::panic::resume_unwind(Box::new("intentional alias-stage panic"));
+    });
+    env.register_builtin("panic_stage", panic_handler);
+    env.register_alias("panic_alias", "panic_stage");
+
+    let mut parser = Parser::new("panic_alias");
+    let stmts = parser
+        .parse_statements()
+        .expect("alias command should parse");
+    let result = eval_stmt(&stmts[0], &env, false).await;
+
+    assert!(matches!(
+        result,
+        Err(EngineError::PipelineError { message, .. })
+            if message.contains("alias 'panic_alias' pipeline task failed")
+    ));
 }
 
 #[tokio::test]
