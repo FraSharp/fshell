@@ -111,10 +111,6 @@ where
         ));
     }
 
-    let root_name = escape_name(config.path.as_os_str().as_bytes());
-    out.write_all(root_name.as_bytes())?;
-    out.write_all(b"\n")?;
-
     // Default tree depth is bounded (20 levels) to avoid runaway recursion on
     // pathological/deep structures; users can override with `ls tree --depth N`.
     let max_depth = config.tree_depth.unwrap_or(20);
@@ -124,10 +120,6 @@ where
             "tree depth exceeds the safe maximum of 128",
         ));
     }
-    if max_depth == 0 {
-        return Ok(());
-    }
-
     let c_path = CString::new(config.path.as_os_str().as_bytes()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -153,6 +145,25 @@ where
     }
     // SAFETY: fstatat succeeded, initializing expected_root.
     let expected_root = unsafe { expected_root.assume_init() };
+    let root_identity = result.root_identity;
+    if expected_root.st_dev as u64 != root_identity.device
+        || expected_root.st_ino as u64 != root_identity.inode
+        || ((expected_root.st_mode & S_IFMT) == S_IFDIR) != root_identity.is_dir
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "tree root changed after its directory listing was collected",
+        ));
+    }
+
+    let root_name = escape_name(config.path.as_os_str().as_bytes());
+    out.write_all(root_name.as_bytes())?;
+    out.write_all(b"\n")?;
+
+    if !root_identity.is_dir || config.list_dirs || max_depth == 0 {
+        return Ok(());
+    }
+
     let fd = unsafe {
         open(
             c_path.as_ptr(),
@@ -173,18 +184,18 @@ where
             format!("cannot open '{}': {}", config.path.display(), err),
         ));
     }
+    let fd = FdGuard(fd);
 
     let mut opened_root = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let root_stat_res = unsafe { fstat(fd, opened_root.as_mut_ptr()) };
+    let root_stat_res = unsafe { fstat(fd.0, opened_root.as_mut_ptr()) };
     if root_stat_res != 0 {
-        let err = io::Error::last_os_error();
-        unsafe { close(fd) };
-        return Err(err);
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: fstat succeeded, initializing opened_root.
     let opened_root = unsafe { opened_root.assume_init() };
-    if expected_root.st_dev != opened_root.st_dev || expected_root.st_ino != opened_root.st_ino {
-        unsafe { close(fd) };
+    if opened_root.st_dev as u64 != root_identity.device
+        || opened_root.st_ino as u64 != root_identity.inode
+    {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
             "tree root changed while it was being opened",
@@ -193,7 +204,7 @@ where
 
     let mut prefix = String::new();
     visit_dir_iterative(
-        FdGuard(fd),
+        fd,
         &config.path,
         &mut prefix,
         &mut out,

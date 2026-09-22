@@ -28,6 +28,15 @@ const INITIAL_ENTRIES_CAPACITY: usize = 512;
 pub struct ListResult {
     pub entries: Vec<FileInfo>,
     pub arena: Vec<u8>,
+    pub root_identity: RootIdentity,
+}
+
+/// Identity of the filesystem object from which a listing was collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub is_dir: bool,
 }
 
 struct DirGuard(*mut libc::DIR);
@@ -98,7 +107,7 @@ pub fn list_dir(config: &Config) -> io::Result<ListResult> {
     let path_is_dir = (path_stat.st_mode & S_IFMT) == S_IFDIR;
     let list_as_single_file = config.list_dirs || !path_is_dir;
 
-    let (mut entries, dir_guard, dir_fd) = if list_as_single_file {
+    let (mut entries, dir_guard, dir_fd, root_identity) = if list_as_single_file {
         let name_bytes = config.path.as_os_str().as_bytes();
         let start = arena.len();
         arena.extend_from_slice(name_bytes);
@@ -108,7 +117,16 @@ pub fn list_dir(config: &Config) -> io::Result<ListResult> {
             entry: Entry::new(start, name_bytes.len(), path_is_dir),
             metadata: None,
         });
-        (entries, None, libc::AT_FDCWD)
+        (
+            entries,
+            None,
+            libc::AT_FDCWD,
+            RootIdentity {
+                device: path_stat.st_dev as u64,
+                inode: path_stat.st_ino as u64,
+                is_dir: path_is_dir,
+            },
+        )
     } else {
         let mut open_flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
         if !config.dereference {
@@ -158,7 +176,16 @@ pub fn list_dir(config: &Config) -> io::Result<ListResult> {
         }
         let guard = DirGuard(dir);
         let entries = read_directory_entries(dir, dir_fd, config, &mut arena)?;
-        (entries, Some(guard), dir_fd)
+        (
+            entries,
+            Some(guard),
+            dir_fd,
+            RootIdentity {
+                device: opened_stat.st_dev as u64,
+                inode: opened_stat.st_ino as u64,
+                is_dir: true,
+            },
+        )
     };
 
     // Collect metadata
@@ -197,7 +224,11 @@ pub fn list_dir(config: &Config) -> io::Result<ListResult> {
     // Sort
     sort_entries(&mut entries, &arena, config);
 
-    Ok(ListResult { entries, arena })
+    Ok(ListResult {
+        entries,
+        arena,
+        root_identity,
+    })
 }
 
 /// Read all entries from an open directory stream.

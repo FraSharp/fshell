@@ -18,7 +18,7 @@ pub mod utils;
 // Convenience re-exports for the most common API surface
 pub use args::{Config, GitStatus, SortMode};
 pub use file::{Entry, FileInfo, Metadata};
-pub use scan::{ListResult, list_dir};
+pub use scan::{ListResult, RootIdentity, list_dir};
 
 /// Pretty-print directory listing results to stdout.
 ///
@@ -37,7 +37,7 @@ where
         return tree::print_tree_with_result(config, result, check_read_dir);
     }
 
-    let ListResult { entries, arena } = result;
+    let ListResult { entries, arena, .. } = result;
 
     if config.long_listing {
         render::print_long_listing(
