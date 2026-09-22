@@ -1,0 +1,120 @@
+[
+  {
+    "id": "free_ram",
+    "prompt": "how much ram is free",
+    "expected": { "mode": "perform", "action": { "kind": "memory_info" } },
+    "expect_issues": []
+  },
+  {
+    "id": "biggest_processes",
+    "prompt": "show the 5 biggest processes",
+    "expected": {
+      "mode": "perform",
+      "action": {
+        "kind": "list_processes",
+        "sort": { "by": "memory", "descending": true },
+        "limit": 5
+      }
+    },
+    "expect_issues": []
+  },
+  {
+    "id": "find_logs",
+    "prompt": "find .log files larger than 500 MB modified in the last week",
+    "expected": {
+      "mode": "perform",
+      "action": {
+        "kind": "find_files",
+        "root": ".",
+        "extension": "log",
+        "min_size": "500MB",
+        "modified_within": "7d"
+      }
+    },
+    "expect_issues": []
+  },
+  {
+    "id": "search_todos",
+    "prompt": "search for TODO in the source recursively",
+    "expected": {
+      "mode": "perform",
+      "action": { "kind": "search_text", "pattern": "TODO", "ignore_case": true }
+    },
+    "expect_issues": []
+  },
+  {
+    "id": "listening_8000",
+    "prompt": "why tf is port 8000 taken",
+    "expected": {
+      "mode": "perform",
+      "action": { "kind": "listening_ports", "port": 8000 }
+    },
+    "expect_issues": []
+  },
+  {
+    "id": "git_status",
+    "prompt": "show the current git status",
+    "expected": { "mode": "perform", "action": { "kind": "git_status" } },
+    "expect_issues": []
+  },
+  {
+    "id": "disk_usage",
+    "prompt": "how much disk space is left",
+    "expected": { "mode": "perform", "action": { "kind": "disk_usage" } },
+    "expect_issues": []
+  },
+  {
+    "id": "kill_pid",
+    "prompt": "kill pid 1234",
+    "expected": {
+      "mode": "perform",
+      "action": {
+        "kind": "signal_process",
+        "target": { "by": "pid", "pid": 1234 },
+        "signal": "TERM"
+      }
+    },
+    "expect_issues": []
+  },
+  {
+    "id": "how_to_kill_pid",
+    "prompt": "how do I kill pid 1234",
+    "expected": {
+      "mode": "explain",
+      "action": {
+        "kind": "signal_process",
+        "target": { "by": "pid", "pid": 1234 },
+        "signal": "TERM"
+      }
+    },
+    "expect_issues": []
+  },
+  {
+    "id": "sigterm_meaning",
+    "prompt": "what does SIGTERM mean",
+    "expected": {
+      "mode": "inform",
+      "info": { "kind": "signal", "signal": "TERM", "question": "what does SIGTERM mean" }
+    },
+    "expect_issues": []
+  },
+  {
+    "id": "run_nginx_missing_image",
+    "prompt": "run a docker container on port 8000",
+    "expected": {
+      "mode": "perform",
+      "action": { "kind": "run_container", "ports": [{ "host_port": 8000 }] }
+    },
+    "expect_issues": ["image"]
+  },
+  {
+    "id": "remove_chrome_ambiguous",
+    "prompt": "remove chrome",
+    "expected": {
+      "mode": "perform",
+      "action": { "kind": "delete_path" }
+    },
+    "expect_issues": ["path"],
+    "ambiguous": true
+  }
+]

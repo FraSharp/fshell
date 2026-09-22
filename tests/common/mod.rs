@@ -9,6 +9,7 @@ pub mod context;
 pub mod fixture_runner;
 pub mod fixtures;
 pub mod guard;
+pub mod semantic_fixtures;
 pub mod subprocess;
 
 // Re-export everything test files need.
@@ -17,6 +18,7 @@ pub use context::TestContext;
 pub use fixture_runner::{FixtureSpec, FixtureSuite};
 pub use fixtures::*;
 pub use guard::{CwdGuard, EnvVarGuard, ProcessLockGuard};
+pub use semantic_fixtures::SemanticCase;
 pub use subprocess::{FshCmd, FshOutput};
 
 pub use fshell_core::{FxIndexMap, Parser, Stmt, Val, remove_var, set_var};
