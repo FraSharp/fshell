@@ -39,7 +39,7 @@ fn real_repo_status() {
     );
     assert_eq!(
         status.get(std::path::Path::new("untracked.txt")),
-        Some(&fshell_git::status::Status::Added)
+        Some(&fshell_git::status::Status::Untracked)
     );
     assert_eq!(
         status.get(std::path::Path::new("debug.log")),

@@ -475,10 +475,12 @@ fn apply_git_status(
         if let Some(status) = statuses.get(relative_path) {
             meta.git_status = match status {
                 FgStatus::Added => GitStatus::New,
+                FgStatus::Renamed => GitStatus::Renamed,
                 FgStatus::Modified | FgStatus::TypeChange => GitStatus::Modified,
                 FgStatus::Deleted => GitStatus::Deleted,
                 FgStatus::Ignored => GitStatus::Ignored,
                 FgStatus::Conflicted => GitStatus::Conflicted,
+                FgStatus::Untracked => GitStatus::Untracked,
                 FgStatus::Clean => GitStatus::Clean,
             };
         }

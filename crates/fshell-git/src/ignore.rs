@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::repo::Repository;
@@ -65,7 +66,7 @@ impl IgnoreRules {
     }
 
     pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
-        let path_str = path.to_string_lossy();
+        let path_bytes = path.as_os_str().as_bytes();
         let mut ignored = false;
 
         for pattern in &self.patterns {
@@ -77,17 +78,16 @@ impl IgnoreRules {
                 // For anchored patterns without globs, match as prefix
                 // (e.g., "target" matches "target/debug/foo.o")
                 if !pattern.pattern.contains('*') && !pattern.pattern.contains('?') {
-                    path_str == pattern.pattern
-                        || path_str.starts_with(&format!("{}/", pattern.pattern))
+                    let pattern_bytes = pattern.pattern.as_bytes();
+                    path_bytes == pattern_bytes
+                        || (path_bytes.starts_with(pattern_bytes)
+                            && path_bytes.get(pattern_bytes.len()) == Some(&b'/'))
                 } else {
-                    glob_match(&pattern.pattern, &path_str)
+                    glob_match(pattern.pattern.as_bytes(), path_bytes)
                 }
             } else {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                glob_match(&pattern.pattern, &name)
+                let name = path.file_name().map(OsStrExt::as_bytes).unwrap_or_default();
+                glob_match(pattern.pattern.as_bytes(), name)
             };
 
             if matched {
@@ -99,8 +99,8 @@ impl IgnoreRules {
     }
 }
 
-fn glob_match(pattern: &str, text: &str) -> bool {
-    glob_match_inner(pattern.as_bytes(), text.as_bytes())
+fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+    glob_match_inner(pattern, text)
 }
 
 fn glob_match_inner(pattern: &[u8], text: &[u8]) -> bool {

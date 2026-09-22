@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use flate2::read::ZlibDecoder;
+use fshell_hash::FxHashMap;
 
 use crate::repo::{Error, Repository};
 
@@ -42,6 +45,12 @@ pub struct CommitInfo {
     pub parents: Vec<[u8; 20]>,
     pub author: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeEntry {
+    pub oid: [u8; 20],
+    pub mode: u32,
 }
 
 impl Repository {
@@ -114,6 +123,108 @@ impl Repository {
             author,
             message: message.trim_end().to_string(),
         })
+    }
+
+    /// Read a commit tree into a path-indexed map, preserving Unix path bytes.
+    pub fn read_tree_entries(
+        &self,
+        root_oid: &[u8; 20],
+    ) -> Result<FxHashMap<std::path::PathBuf, TreeEntry>, Error> {
+        enum Work {
+            Enter([u8; 20], std::path::PathBuf),
+            Exit([u8; 20]),
+        }
+        let mut entries = FxHashMap::default();
+        let mut ancestors = Vec::new();
+        let mut pending = vec![Work::Enter(*root_oid, Path::new("").to_path_buf())];
+
+        while let Some(work) = pending.pop() {
+            let (oid, prefix) = match work {
+                Work::Exit(oid) => {
+                    if ancestors.pop() != Some(oid) {
+                        return Err(Error::InvalidObject("invalid tree traversal state".into()));
+                    }
+                    continue;
+                }
+                Work::Enter(oid, prefix) => (oid, prefix),
+            };
+            if ancestors.len() >= 1024 || ancestors.contains(&oid) {
+                return Err(Error::InvalidObject(
+                    "cyclic or excessively deep tree".into(),
+                ));
+            }
+            ancestors.push(oid);
+            pending.push(Work::Exit(oid));
+
+            let object = self.read_object(&oid)?;
+            if object.typ != ObjectType::Tree {
+                return Err(Error::InvalidObject(format!(
+                    "expected tree, got {:?}",
+                    object.typ
+                )));
+            }
+
+            let mut offset = 0;
+            let mut child_trees = Vec::new();
+            while offset < object.data.len() {
+                let mode_start = offset;
+                let mode_end = object.data[offset..]
+                    .iter()
+                    .position(|&byte| byte == b' ')
+                    .map(|len| offset + len)
+                    .ok_or_else(|| {
+                        Error::InvalidObject("tree entry has no mode separator".into())
+                    })?;
+                let mode = std::str::from_utf8(&object.data[mode_start..mode_end])
+                    .ok()
+                    .and_then(|text| u32::from_str_radix(text, 8).ok())
+                    .ok_or_else(|| Error::InvalidObject("tree entry has invalid mode".into()))?;
+                let name_start = mode_end + 1;
+                let name_end = object.data[name_start..]
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .map(|len| name_start + len)
+                    .ok_or_else(|| {
+                        Error::InvalidObject("tree entry has no name terminator".into())
+                    })?;
+                let name = &object.data[name_start..name_end];
+                if name.is_empty() || name.contains(&b'/') {
+                    return Err(Error::InvalidObject("tree entry has invalid name".into()));
+                }
+                let oid_start = name_end + 1;
+                let oid_end = oid_start
+                    .checked_add(20)
+                    .filter(|&end| end <= object.data.len())
+                    .ok_or_else(|| Error::InvalidObject("truncated tree object id".into()))?;
+                let mut child_oid = [0u8; 20];
+                child_oid.copy_from_slice(&object.data[oid_start..oid_end]);
+                let path = prefix.join(OsStr::from_bytes(name));
+                offset = oid_end;
+
+                if mode & 0o170000 == 0o040000 {
+                    child_trees.push((child_oid, path));
+                } else if entries
+                    .insert(
+                        path,
+                        TreeEntry {
+                            oid: child_oid,
+                            mode,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(Error::InvalidObject("tree contains duplicate path".into()));
+                }
+            }
+            pending.extend(
+                child_trees
+                    .into_iter()
+                    .rev()
+                    .map(|(oid, path)| Work::Enter(oid, path)),
+            );
+        }
+
+        Ok(entries)
     }
 
     fn read_loose_object(&self, oid: &[u8; 20]) -> Result<ParsedObject, Error> {

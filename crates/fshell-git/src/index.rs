@@ -15,7 +15,11 @@ pub struct IndexEntry {
     pub mode: u32,
     pub size: u32,
     pub ctime_secs: i64,
+    pub ctime_nanos: u32,
     pub mtime_secs: i64,
+    pub mtime_nanos: u32,
+    pub dev: u32,
+    pub ino: u32,
     pub flags: u16,
     pub stage: u8, // 0-3, from flags bits 12-13
 }
@@ -91,7 +95,7 @@ impl Index {
                     .try_into()
                     .map_err(|_| IndexError::CorruptedEntry(offset))?,
             ) as i64;
-            let _ctime_nanos = u32::from_be_bytes(
+            let ctime_nanos = u32::from_be_bytes(
                 data[offset + 4..offset + 8]
                     .try_into()
                     .map_err(|_| IndexError::CorruptedEntry(offset + 4))?,
@@ -101,17 +105,17 @@ impl Index {
                     .try_into()
                     .map_err(|_| IndexError::CorruptedEntry(offset + 8))?,
             ) as i64;
-            let _mtime_nanos = u32::from_be_bytes(
+            let mtime_nanos = u32::from_be_bytes(
                 data[offset + 12..offset + 16]
                     .try_into()
                     .map_err(|_| IndexError::CorruptedEntry(offset + 12))?,
             );
-            let _dev = u32::from_be_bytes(
+            let dev = u32::from_be_bytes(
                 data[offset + 16..offset + 20]
                     .try_into()
                     .map_err(|_| IndexError::CorruptedEntry(offset + 16))?,
             );
-            let _ino = u32::from_be_bytes(
+            let ino = u32::from_be_bytes(
                 data[offset + 20..offset + 24]
                     .try_into()
                     .map_err(|_| IndexError::CorruptedEntry(offset + 20))?,
@@ -193,7 +197,11 @@ impl Index {
                 mode,
                 size,
                 ctime_secs,
+                ctime_nanos,
                 mtime_secs,
+                mtime_nanos,
+                dev,
+                ino,
                 flags,
                 stage,
             });

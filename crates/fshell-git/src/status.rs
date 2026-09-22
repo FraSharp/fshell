@@ -3,21 +3,25 @@
 
 use fshell_hash::FxHashMap;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::ignore::IgnoreRules;
 use crate::index::Index;
 use crate::repo::Repository;
+use fshell_hash::FxHashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Clean,
     Modified,
     Added,
+    Renamed,
     Deleted,
     TypeChange,
     Ignored,
     Conflicted,
+    Untracked,
 }
 
 impl Repository {
@@ -25,8 +29,60 @@ impl Repository {
         let index = Index::parse(self.git_dir())
             .map_err(|e| crate::repo::Error::InvalidIndex(e.to_string()))?;
 
+        let head_path = self.git_dir().join("HEAD");
+        let has_head = head_path.try_exists().map_err(crate::repo::Error::Io)?;
+        let head_entries = if has_head {
+            match self.head() {
+                Ok(head) => {
+                    let commit = self.read_commit(&head.oid)?;
+                    self.read_tree_entries(&commit.tree)?
+                }
+                Err(crate::repo::Error::InvalidRef(message))
+                    if message.starts_with("ref not found:") =>
+                {
+                    FxHashMap::default()
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            FxHashMap::default()
+        };
+
         let root_ignore = self.collect_ignore_rules(self.work_dir());
         let mut map = FxHashMap::default();
+
+        // Exact object-id matches are unambiguous rename candidates. Ambiguous
+        // duplicate-content pairs remain additions/deletions rather than being
+        // assigned an arbitrary source path.
+        let mut removed_by_oid: FxHashMap<([u8; 20], u32), Vec<PathBuf>> = FxHashMap::default();
+        let mut added_by_oid: FxHashMap<([u8; 20], u32), Vec<PathBuf>> = FxHashMap::default();
+        let indexed_paths: FxHashSet<PathBuf> =
+            index.iter().map(|entry| entry.path.clone()).collect();
+        for (path, head_entry) in &head_entries {
+            if !indexed_paths.contains(path) {
+                removed_by_oid
+                    .entry((head_entry.oid, head_entry.mode & 0o170000))
+                    .or_default()
+                    .push(path.clone());
+            }
+        }
+        for entry in index.iter().filter(|entry| entry.stage == 0) {
+            if !head_entries.contains_key(&entry.path) {
+                added_by_oid
+                    .entry((entry.sha1, entry.mode & 0o170000))
+                    .or_default()
+                    .push(entry.path.clone());
+            }
+        }
+        for (oid, old_paths) in &removed_by_oid {
+            if old_paths.len() == 1
+                && let Some(new_paths) = added_by_oid.get(oid)
+                && new_paths.len() == 1
+            {
+                map.insert(new_paths[0].clone(), Status::Renamed);
+                map.insert(old_paths[0].clone(), Status::Deleted);
+            }
+        }
 
         for entry in index.iter() {
             if entry.stage != 0 {
@@ -36,14 +92,10 @@ impl Repository {
 
             let work_path = self.work_dir().join(&entry.path);
 
-            if root_ignore.is_ignored(&entry.path, false) {
-                map.insert(entry.path.clone(), Status::Ignored);
-                continue;
-            }
-
             match fs::symlink_metadata(&work_path) {
                 Ok(meta) => {
                     if meta.is_dir() {
+                        map.insert(entry.path.clone(), Status::TypeChange);
                         continue;
                     }
 
@@ -69,23 +121,33 @@ impl Repository {
                         continue;
                     }
 
-                    let mtime = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    let size = meta.len() as u32;
+                    let staged_status = if map.get(&entry.path) == Some(&Status::Renamed) {
+                        Some(Status::Renamed)
+                    } else {
+                        match head_entries.get(&entry.path) {
+                            Some(head_entry)
+                                if head_entry.oid != entry.sha1
+                                    || head_entry.mode != entry.mode =>
+                            {
+                                Some(Status::Modified)
+                            }
+                            Some(_) => None,
+                            None => Some(Status::Added),
+                        }
+                    };
 
-                    if mtime != entry.mtime_secs || size != entry.size {
+                    if !metadata_matches_index(&meta, entry) {
                         map.insert(entry.path.clone(), Status::Modified);
+                    } else if let Some(status) = staged_status {
+                        map.insert(entry.path.clone(), status);
                     } else {
                         map.insert(entry.path.clone(), Status::Clean);
                     }
                 }
-                Err(_) => {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     map.insert(entry.path.clone(), Status::Deleted);
                 }
+                Err(error) => return Err(crate::repo::Error::Io(error)),
             }
         }
 
@@ -101,81 +163,62 @@ impl Repository {
         ignore: &IgnoreRules,
         map: &mut FxHashMap<PathBuf, Status>,
     ) -> Result<(), crate::repo::Error> {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
 
-                if name_str == ".git" {
+            if name == ".git" {
+                continue;
+            }
+
+            let relative = path.strip_prefix(self.work_dir()).unwrap_or(&path);
+            let file_type = entry.file_type()?;
+            let is_dir = file_type.is_dir();
+
+            if ignore.is_ignored(relative, is_dir) {
+                map.insert(relative.to_path_buf(), Status::Ignored);
+                continue;
+            }
+
+            if is_dir {
+                if path.join(".git").try_exists()? {
+                    if index.get(relative).is_none() && !map.contains_key(relative) {
+                        map.insert(relative.to_path_buf(), Status::Untracked);
+                    }
                     continue;
                 }
-
-                let relative = path.strip_prefix(self.work_dir()).unwrap_or(&path);
-
-                let is_dir = path.is_dir();
-
-                if ignore.is_ignored(relative, is_dir) {
-                    map.insert(relative.to_path_buf(), Status::Ignored);
-                    continue;
-                }
-
-                if is_dir {
-                    let nested_ignore = if path.join(".gitignore").is_file() {
-                        let mut rules = ignore.clone();
-                        let local_rules = self.load_ignore_rules(&path);
-                        rules.extend(local_rules);
-                        rules
-                    } else {
-                        ignore.clone()
-                    };
-                    self.scan_untracked(&path, index, &nested_ignore, map)?;
-                } else if index.get(relative).is_none() && !map.contains_key(relative) {
-                    map.insert(relative.to_path_buf(), Status::Added);
-                }
+                let nested_ignore = if path.join(".gitignore").is_file() {
+                    let mut rules = ignore.clone();
+                    let local_rules = self.load_ignore_rules(&path);
+                    rules.extend(local_rules);
+                    rules
+                } else {
+                    ignore.clone()
+                };
+                self.scan_untracked(&path, index, &nested_ignore, map)?;
+            } else if index.get(relative).is_none() && !map.contains_key(relative) {
+                map.insert(relative.to_path_buf(), Status::Untracked);
             }
         }
         Ok(())
     }
 
     pub fn file_status(&self, path: &Path) -> Result<Status, crate::repo::Error> {
-        let index = Index::parse(self.git_dir())
-            .map_err(|e| crate::repo::Error::InvalidIndex(e.to_string()))?;
-
         let relative = path.strip_prefix(self.work_dir()).unwrap_or(path);
-
-        let ignore = self.collect_ignore_rules(path);
-        if ignore.is_ignored(relative, path.is_dir()) {
-            return Ok(Status::Ignored);
-        }
-
-        if let Some(entry) = index.get(relative) {
-            if entry.stage != 0 {
-                return Ok(Status::Conflicted);
-            }
-
-            match fs::symlink_metadata(path) {
-                Ok(meta) => {
-                    let mtime = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    let size = meta.len() as u32;
-
-                    if mtime != entry.mtime_secs || size != entry.size {
-                        Ok(Status::Modified)
-                    } else {
-                        Ok(Status::Clean)
-                    }
-                }
-                Err(_) => Ok(Status::Deleted),
-            }
-        } else {
-            Ok(Status::Added)
-        }
+        let statuses = self.status()?;
+        Ok(statuses.get(relative).copied().unwrap_or(Status::Untracked))
     }
+}
+
+fn metadata_matches_index(meta: &fs::Metadata, entry: &crate::index::IndexEntry) -> bool {
+    meta.len() as u32 == entry.size
+        && meta.mtime() == entry.mtime_secs
+        && meta.mtime_nsec() as u32 == entry.mtime_nanos
+        && meta.ctime() == entry.ctime_secs
+        && meta.ctime_nsec() as u32 == entry.ctime_nanos
+        && meta.dev() as u32 == entry.dev
+        && meta.ino() as u32 == entry.ino
 }
 
 #[cfg(test)]
@@ -197,12 +240,28 @@ mod tests {
         buf.extend_from_slice(&(entries.len() as u32).to_be_bytes());
 
         for (path, mode, size, mtime) in entries {
-            buf.extend_from_slice(&0u32.to_be_bytes()); // ctime_secs
-            buf.extend_from_slice(&0u32.to_be_bytes()); // ctime_nanos
-            buf.extend_from_slice(&(*mtime as u32).to_be_bytes()); // mtime_secs
-            buf.extend_from_slice(&0u32.to_be_bytes()); // mtime_nanos
-            buf.extend_from_slice(&0u32.to_be_bytes());
-            buf.extend_from_slice(&0u32.to_be_bytes());
+            let metadata = fs::symlink_metadata(git_dir.parent().unwrap().join(path)).ok();
+            buf.extend_from_slice(
+                &(metadata.as_ref().map(MetadataExt::ctime).unwrap_or(0) as u32).to_be_bytes(),
+            );
+            buf.extend_from_slice(
+                &(metadata.as_ref().map(MetadataExt::ctime_nsec).unwrap_or(0) as u32).to_be_bytes(),
+            );
+            let indexed_mtime = if *mtime == 0 {
+                0
+            } else {
+                metadata.as_ref().map(MetadataExt::mtime).unwrap_or(*mtime)
+            };
+            buf.extend_from_slice(&(indexed_mtime as u32).to_be_bytes());
+            buf.extend_from_slice(
+                &(metadata.as_ref().map(MetadataExt::mtime_nsec).unwrap_or(0) as u32).to_be_bytes(),
+            );
+            buf.extend_from_slice(
+                &(metadata.as_ref().map(MetadataExt::dev).unwrap_or(0) as u32).to_be_bytes(),
+            );
+            buf.extend_from_slice(
+                &(metadata.as_ref().map(MetadataExt::ino).unwrap_or(0) as u32).to_be_bytes(),
+            );
             buf.extend_from_slice(&mode.to_be_bytes());
             buf.extend_from_slice(&0u32.to_be_bytes());
             buf.extend_from_slice(&0u32.to_be_bytes());
@@ -233,7 +292,7 @@ mod tests {
         );
         let repo = Repository::discover(tmp.path()).unwrap();
         let status = repo.status().unwrap();
-        assert_eq!(status.get(Path::new("hello.txt")), Some(&Status::Clean));
+        assert_eq!(status.get(Path::new("hello.txt")), Some(&Status::Added));
     }
 
     #[test]
@@ -268,7 +327,7 @@ mod tests {
         write_test_index(tmp.path().join(".git").as_path(), &[]);
         let repo = Repository::discover(tmp.path()).unwrap();
         let status = repo.status().unwrap();
-        assert_eq!(status.get(Path::new("new.txt")), Some(&Status::Added));
+        assert_eq!(status.get(Path::new("new.txt")), Some(&Status::Untracked));
     }
 
     #[test]
@@ -314,7 +373,7 @@ mod tests {
         assert_eq!(
             repo.file_status(tmp.path().join("test.txt").as_path())
                 .unwrap(),
-            Status::Clean
+            Status::Added
         );
     }
 }
