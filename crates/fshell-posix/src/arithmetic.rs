@@ -287,7 +287,7 @@ impl<'a> ArithParser<'a> {
         }
     }
 
-    fn resolve_var(&self, name: &str) -> i64 {
+    fn resolve_var(&self, name: &str) -> Result<i64, String> {
         let v_opt = if let Some(ref locals) = self.env.local_vars
             && let Some(v) = locals.get(name)
         {
@@ -297,21 +297,19 @@ impl<'a> ArithParser<'a> {
         };
         if let Some(v) = v_opt {
             let text = match v {
-                Val::Int(i) => return i,
-                Val::Float(f) => return f as i64,
+                Val::Int(i) => return Ok(i),
+                Val::Float(f) => return Ok(f as i64),
                 other => other.to_text(),
             };
             if let Ok(n) = text.trim().parse::<i64>() {
-                return n;
+                return Ok(n);
             }
             // Try recursive arithmetic evaluation if string looks like an expression
-            if !text.is_empty()
-                && let Ok(n) = eval_arithmetic_expr(&text, self.env)
-            {
-                return n;
+            if !text.is_empty() {
+                return eval_arithmetic_expr(&text, self.env);
             }
         }
-        0
+        Ok(0)
     }
 
     fn set_var(&self, name: &str, val: i64) {
@@ -356,7 +354,7 @@ impl<'a> ArithParser<'a> {
             if is_assign {
                 self.pos += 2; // consume ident and operator
                 let rhs = self.parse_assignment()?;
-                let current = self.resolve_var(&name);
+                let current = self.resolve_var(&name)?;
                 let new_val = match op_tok {
                     Token::Assign => rhs,
                     Token::PlusAssign => current.wrapping_add(rhs),
@@ -627,7 +625,7 @@ impl<'a> ArithParser<'a> {
             Some(Token::Increment) => {
                 self.next_tok();
                 if let Some(Token::Ident(name)) = self.next_tok() {
-                    let new_val = self.resolve_var(&name).wrapping_add(1);
+                    let new_val = self.resolve_var(&name)?.wrapping_add(1);
                     self.set_var(&name, new_val);
                     Ok(new_val)
                 } else {
@@ -637,7 +635,7 @@ impl<'a> ArithParser<'a> {
             Some(Token::Decrement) => {
                 self.next_tok();
                 if let Some(Token::Ident(name)) = self.next_tok() {
-                    let new_val = self.resolve_var(&name).wrapping_sub(1);
+                    let new_val = self.resolve_var(&name)?.wrapping_sub(1);
                     self.set_var(&name, new_val);
                     Ok(new_val)
                 } else {
@@ -684,7 +682,7 @@ impl<'a> ArithParser<'a> {
     fn parse_primary(&mut self) -> Result<i64, String> {
         match self.next_tok() {
             Some(Token::Number(n)) => Ok(n),
-            Some(Token::Ident(name)) => Ok(self.resolve_var(&name)),
+            Some(Token::Ident(name)) => self.resolve_var(&name),
             Some(Token::LParen) => {
                 let inner = self.parse_comma()?;
                 if self.next_tok() != Some(Token::RParen) {

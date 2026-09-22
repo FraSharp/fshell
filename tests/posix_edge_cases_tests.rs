@@ -281,6 +281,23 @@ async fn test_posix_arithmetic_command_errors_stop_script() {
     assert!(!env.vars.read().contains_key("AFTER"));
 }
 
+#[tokio::test]
+async fn test_posix_recursive_arithmetic_errors_are_not_coerced_to_zero() {
+    let env = setup_posix_env();
+    env.vars
+        .write()
+        .insert("EXPR".to_string(), Val::String("10 / 0".to_string()));
+    let parsed = parse_posix_script(r#"printf '%s\n' "$((EXPR + 1))"; AFTER=ran"#)
+        .expect("failed to parse recursive arithmetic script");
+    let result = eval_source(&parsed, &env, &EvalConfig::default()).await;
+
+    assert!(matches!(
+        result,
+        Err(fshell_engine::EngineError::DivisionByZero { .. })
+    ));
+    assert!(!env.vars.read().contains_key("AFTER"));
+}
+
 // ---------------------------------------------------------------------------
 // 3. POSIX IFS Field Splitting
 // ---------------------------------------------------------------------------
