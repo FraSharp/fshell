@@ -21,7 +21,9 @@ const SEED4: u64 = 0xC2B2E3922C78E5A3;
 /// for maximum throughput on small inputs (the common case for map keys).
 /// For larger inputs (≥64B), uses interleaved chains for ILP.
 ///
-/// Note: hash values are platform-dependent (native-endian).
+/// Hash values are deterministic and platform-dependent (native-endian). This
+/// hasher is not resistant to hash-flooding attacks; use it only for trusted
+/// keys where deterministic hashing is required.
 #[derive(Clone)]
 pub struct MapHasher {
     hash: u64,
@@ -154,7 +156,11 @@ impl Hasher for MapHasher {
     }
 }
 
-/// BuildHasher for `MapHasher`.
+/// Deterministic `BuildHasher` for [`MapHasher`].
+///
+/// This is a non-cryptographic, unkeyed hasher and is not resistant to
+/// hash-flooding attacks. Prefer the randomly seeded `RandomBuildHasher`
+/// for maps that may receive attacker-controlled keys.
 #[derive(Default, Clone, Copy)]
 pub struct MapBuildHasher;
 

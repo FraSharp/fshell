@@ -113,13 +113,37 @@ impl core::hash::BuildHasher for FhashBuildHasher {
 
 pub use fast_hash::{MapBuildHasher, MapHasher};
 
-// Convenience type aliases matching fxhash's API
+/// Randomly seeded hasher for maps that may contain attacker-controlled keys.
+///
+/// This aliases the standard library's `RandomState`; its implementation and
+/// algorithm may change with the Rust version. It is intended to reduce
+/// hash-flooding risk, not to provide general-purpose cryptographic hashing.
 #[cfg(feature = "std")]
-pub type FxBuildHasher = MapBuildHasher;
+pub type RandomBuildHasher = std::collections::hash_map::RandomState;
+
+/// Hash map whose hasher is randomly seeded for each map instance.
 #[cfg(feature = "std")]
-pub type FxHashMap<K, V> = std::collections::HashMap<K, V, MapBuildHasher>;
+pub type RandomHashMap<K, V> = std::collections::HashMap<K, V, RandomBuildHasher>;
+
+/// Hash set whose hasher is randomly seeded for each set instance.
 #[cfg(feature = "std")]
-pub type FxHashSet<V> = std::collections::HashSet<V, MapBuildHasher>;
+pub type RandomHashSet<V> = std::collections::HashSet<V, RandomBuildHasher>;
+
+/// Compatibility alias for the workspace's historical map hasher name.
+///
+/// Despite the `Fx` name, this is now randomly seeded. Use [`MapBuildHasher`]
+/// directly when deterministic, non-cryptographic hashing is specifically
+/// required for trusted keys.
+#[cfg(feature = "std")]
+pub type FxBuildHasher = RandomBuildHasher;
+
+/// Compatibility alias for [`RandomHashMap`].
+#[cfg(feature = "std")]
+pub type FxHashMap<K, V> = RandomHashMap<K, V>;
+
+/// Compatibility alias for [`RandomHashSet`].
+#[cfg(feature = "std")]
+pub type FxHashSet<V> = RandomHashSet<V>;
 
 #[cfg(feature = "digest")]
 impl digest::OutputSizeUser for Hasher {
