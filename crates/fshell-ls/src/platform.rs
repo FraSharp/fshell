@@ -8,6 +8,48 @@
 
 #[cfg(any(
     target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+#[inline]
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: libc exposes the calling thread's errno slot.
+    unsafe { libc::__error() }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+)))]
+#[inline]
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: libc exposes the calling thread's errno slot.
+    unsafe { libc::__errno_location() }
+}
+
+/// Clear errno before a libc iterator whose null return is ambiguous.
+#[inline]
+pub fn clear_errno() {
+    // SAFETY: errno_location points to this thread's writable errno slot.
+    unsafe { *errno_location() = 0 };
+}
+
+/// Return the errno value left by the current thread's last libc operation.
+#[inline]
+pub fn current_errno() -> libc::c_int {
+    // SAFETY: errno_location points to this thread's readable errno slot.
+    unsafe { *errno_location() }
+}
+
+#[cfg(any(
+    target_os = "macos",
     target_os = "freebsd",
     target_os = "netbsd",
     target_os = "openbsd",

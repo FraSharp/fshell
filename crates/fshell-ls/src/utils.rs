@@ -333,35 +333,45 @@ pub fn calculate_output_buffer_size(
 ///
 /// `true` if the entry is a directory (or a symlink pointing to one if resolving).
 #[inline]
-pub fn is_directory(entry: &libc::dirent, dir_fd: i32, resolve_symlinks: bool) -> bool {
+pub fn is_directory(
+    entry: &libc::dirent,
+    dir_fd: i32,
+    resolve_symlinks: bool,
+) -> std::io::Result<bool> {
     let d_type = entry.d_type;
 
     if d_type == libc::DT_DIR {
-        return true;
+        return Ok(true);
     }
 
-    if !resolve_symlinks {
-        return false;
+    if d_type == libc::DT_LNK && !resolve_symlinks {
+        return Ok(false);
     }
 
-    if d_type == libc::DT_LNK || d_type == libc::DT_UNKNOWN {
-        let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: dir_fd is valid, entry.d_name is null-terminated, stat_buf is valid
-        let res = unsafe {
-            fstatat(
-                dir_fd,
-                entry.d_name.as_ptr(),
-                stat_buf.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-
-        if res == 0 {
-            // SAFETY: fstatat succeeded, stat_buf is initialized
-            let stat_buf = unsafe { stat_buf.assume_init() };
-            return (stat_buf.st_mode & libc::S_IFMT) == libc::S_IFDIR;
-        }
+    if d_type != libc::DT_LNK && d_type != libc::DT_UNKNOWN {
+        return Ok(false);
     }
 
-    false
+    let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let flags = if resolve_symlinks {
+        0
+    } else {
+        libc::AT_SYMLINK_NOFOLLOW
+    };
+    // SAFETY: dir_fd is valid, entry.d_name is null-terminated, stat_buf is valid.
+    let res = unsafe { fstatat(dir_fd, entry.d_name.as_ptr(), stat_buf.as_mut_ptr(), flags) };
+
+    if res == 0 {
+        // SAFETY: fstatat succeeded, stat_buf is initialized.
+        let stat_buf = unsafe { stat_buf.assume_init() };
+        return Ok((stat_buf.st_mode & libc::S_IFMT) == libc::S_IFDIR);
+    }
+
+    let err = std::io::Error::last_os_error();
+    if d_type == libc::DT_UNKNOWN {
+        Err(err)
+    } else {
+        // A dangling symlink is still a non-directory entry when following it.
+        Ok(false)
+    }
 }

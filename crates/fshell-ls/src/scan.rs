@@ -12,30 +12,33 @@ use crate::utils::is_directory;
 use fshell_git::repo::Repository;
 use fshell_git::status::Status as FgStatus;
 
-use libc::{S_IFDIR, S_IFMT, closedir, dirfd, readdir};
-use std::collections::HashMap;
+use libc::{
+    O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, S_IFDIR, S_IFMT, close, dirfd, fdopendir, fstat,
+    open, readdir,
+};
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::path::Path;
 
 const INITIAL_ARENA_CAPACITY: usize = 8 * 1024;
 const INITIAL_ENTRIES_CAPACITY: usize = 512;
-
-/// How long a computed `git status` snapshot stays valid before it is
-/// recomputed. `ls` is frequently called repeatedly in the same repo (scripts,
-/// completions, adjacent directories); re-running the index read + worktree
-/// scan on every call is pure waste. A 400 ms TTL matches the FTUI hinter's
-/// `PATH_CACHE_TTL_MS` convention — imperceptibly stale in practice, and never
-/// longer than the gap between a user editing a file and re-running `ls`.
-const GIT_STATUS_CACHE_TTL: Duration = Duration::from_millis(400);
 
 /// Result of scanning a directory.
 pub struct ListResult {
     pub entries: Vec<FileInfo>,
     pub arena: Vec<u8>,
+}
+
+struct DirGuard(*mut libc::DIR);
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: the guard owns this valid DIR pointer.
+            unsafe { libc::closedir(self.0) };
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,76 +82,116 @@ pub fn list_dir(config: &Config) -> io::Result<ListResult> {
     let c_path = CString::new(config.path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
 
-    let mut dir: *mut libc::DIR = std::ptr::null_mut();
-
-    let path_exists_but_not_dir = if config.dereference {
-        std::fs::metadata(&config.path)
-            .map(|m| !m.is_dir())
-            .unwrap_or(false)
+    let mut path_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let stat_res = if config.dereference {
+        // SAFETY: c_path is a valid null-terminated path and path_stat is a valid output buffer.
+        unsafe { libc::stat(c_path.as_ptr(), path_stat.as_mut_ptr()) }
     } else {
-        std::fs::symlink_metadata(&config.path)
-            .map(|m| !m.is_dir())
-            .unwrap_or(false)
+        // SAFETY: c_path is a valid null-terminated path and path_stat is a valid output buffer.
+        unsafe { libc::lstat(c_path.as_ptr(), path_stat.as_mut_ptr()) }
     };
-    let list_as_single_file = config.list_dirs || path_exists_but_not_dir;
+    if stat_res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: stat/lstat returned success, so path_stat is initialized.
+    let path_stat = unsafe { path_stat.assume_init() };
+    let path_is_dir = (path_stat.st_mode & S_IFMT) == S_IFDIR;
+    let list_as_single_file = config.list_dirs || !path_is_dir;
 
-    let dir_fd = if list_as_single_file {
+    let (mut entries, dir_guard, dir_fd) = if list_as_single_file {
         let name_bytes = config.path.as_os_str().as_bytes();
         let start = arena.len();
         arena.extend_from_slice(name_bytes);
         arena.push(0);
 
-        let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: c_path is a valid null-terminated C string, and stat_buf points to a valid MaybeUninit stat struct.
-        let res = if config.dereference {
-            unsafe { libc::stat(c_path.as_ptr(), stat_buf.as_mut_ptr()) }
-        } else {
-            // SAFETY: c_path is a valid null-terminated C string, and stat_buf points to a valid MaybeUninit stat struct.
-            unsafe { libc::lstat(c_path.as_ptr(), stat_buf.as_mut_ptr()) }
-        };
-        // SAFETY: stat/lstat call returned 0 (success), meaning stat_buf is initialized.
-        let is_dir = res == 0 && unsafe { (stat_buf.assume_init().st_mode & S_IFMT) == S_IFDIR };
-
         entries.push(FileInfo {
-            entry: Entry::new(start, name_bytes.len(), is_dir),
+            entry: Entry::new(start, name_bytes.len(), path_is_dir),
             metadata: None,
         });
-        libc::AT_FDCWD
+        (entries, None, libc::AT_FDCWD)
     } else {
-        // SAFETY: c_path is a valid null-terminated C string representing a directory.
-        dir = unsafe { libc::opendir(c_path.as_ptr()) };
-        if dir.is_null() {
+        let mut open_flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
+        if !config.dereference {
+            open_flags |= O_NOFOLLOW;
+        }
+        // SAFETY: c_path is a valid null-terminated path.
+        let fd = unsafe { open(c_path.as_ptr(), open_flags) };
+        if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+
+        let mut opened_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fd was returned by open and opened_stat is a valid output buffer.
+        let opened_stat_res = unsafe { fstat(fd, opened_stat.as_mut_ptr()) };
+        if opened_stat_res != 0 {
+            let err = io::Error::last_os_error();
+            // SAFETY: fd is owned by this branch and has not been transferred.
+            unsafe { close(fd) };
+            return Err(err);
+        }
+        // SAFETY: fstat returned success, so opened_stat is initialized.
+        let opened_stat = unsafe { opened_stat.assume_init() };
+        if opened_stat.st_dev != path_stat.st_dev || opened_stat.st_ino != path_stat.st_ino {
+            // SAFETY: fd is owned by this branch and has not been transferred.
+            unsafe { close(fd) };
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "directory changed while it was being opened",
+            ));
+        }
+
+        // SAFETY: fd is a valid directory descriptor; ownership transfers to DIR on success.
+        let dir = unsafe { fdopendir(fd) };
+        if dir.is_null() {
+            let err = io::Error::last_os_error();
+            // SAFETY: fdopendir failed, so fd remains owned by this branch.
+            unsafe { close(fd) };
+            return Err(err);
+        }
         // SAFETY: dir is a valid non-null DIR pointer.
-        let fd = unsafe { dirfd(dir) };
-        entries = read_directory_entries(dir, fd, config, &mut arena)?;
-        fd
+        let dir_fd = unsafe { dirfd(dir) };
+        if dir_fd < 0 {
+            let err = io::Error::last_os_error();
+            // SAFETY: dir owns the descriptor and is valid.
+            unsafe { libc::closedir(dir) };
+            return Err(err);
+        }
+        let guard = DirGuard(dir);
+        let entries = read_directory_entries(dir, dir_fd, config, &mut arena)?;
+        (entries, Some(guard), dir_fd)
     };
 
     // Collect metadata
     let flags = determine_metadata_needs(config);
 
     let num_items = entries.len();
-    if num_items > 100 {
+    let metadata_result = if num_items > 100 {
         use rayon::prelude::*;
-        entries.par_iter_mut().for_each(|item| {
-            collect_metadata(item, &arena, dir_fd, flags, config.dereference);
-        });
+        entries
+            .par_iter_mut()
+            .try_for_each(|item| collect_metadata(item, &arena, dir_fd, flags, config.dereference))
     } else {
+        let mut result = Ok(());
         for item in entries.iter_mut() {
-            collect_metadata(item, &arena, dir_fd, flags, config.dereference);
+            if let Err(err) = collect_metadata(item, &arena, dir_fd, flags, config.dereference) {
+                result = Err(err);
+                break;
+            }
         }
-    }
-
-    if !dir.is_null() {
-        // SAFETY: dir is a valid non-null DIR pointer.
-        unsafe { closedir(dir) };
-    }
+        result
+    };
+    drop(dir_guard);
+    metadata_result?;
 
     // Git status
     if config.git {
-        apply_git_status(&mut entries, &arena, &config.path);
+        apply_git_status(
+            &mut entries,
+            &arena,
+            &config.path,
+            list_as_single_file,
+            config.dereference,
+        )?;
     }
 
     // Sort
@@ -173,9 +216,14 @@ fn read_directory_entries(
     let mut entries_data = Vec::with_capacity(INITIAL_ENTRIES_CAPACITY);
 
     loop {
+        crate::platform::clear_errno();
         // SAFETY: dir is a valid non-null DIR pointer.
         let entry_ptr = unsafe { readdir(dir) };
         if entry_ptr.is_null() {
+            let errno = crate::platform::current_errno();
+            if errno != 0 {
+                return Err(io::Error::from_raw_os_error(errno));
+            }
             break;
         }
 
@@ -190,7 +238,7 @@ fn read_directory_entries(
             continue;
         }
 
-        let is_dir = is_directory(entry, dir_fd, false);
+        let is_dir = is_directory(entry, dir_fd, config.dereference)?;
         let start = arena.len();
         arena.extend_from_slice(name_bytes);
         arena.push(0);
@@ -206,7 +254,10 @@ fn read_directory_entries(
 fn determine_metadata_needs(config: &Config) -> MetadataFlags {
     let verbose = config.verbose;
     MetadataFlags {
-        need_mode: config.long_listing || config.sort_mode != SortMode::Name || verbose,
+        need_mode: config.long_listing
+            || config.sort_mode != SortMode::Name
+            || verbose
+            || config.git,
         need_nlink: config.long_listing,
         need_uid_gid: config.long_listing,
         need_size: config.long_listing || config.sort_mode == SortMode::Size || verbose,
@@ -223,13 +274,26 @@ fn collect_metadata(
     dir_fd: i32,
     flags: MetadataFlags,
     dereference: bool,
-) {
+) -> io::Result<()> {
     if !flags.any() {
-        return;
+        return Ok(());
     }
 
-    // SAFETY: item.entry.start() is within the bounds of arena.
-    let name_ptr = unsafe { arena.as_ptr().add(item.entry.start()) as *const libc::c_char };
+    let range = item.entry.range(arena.len()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file entry points outside the filename arena",
+        )
+    })?;
+    if arena.get(range.end).copied() != Some(0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file entry is not terminated in the filename arena",
+        ));
+    }
+    // SAFETY: range.start is within arena and the entry's trailing byte was
+    // checked above to be the C-string terminator.
+    let name_ptr = unsafe { arena.as_ptr().add(range.start) as *const libc::c_char };
     let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
 
     // SAFETY: dir_fd is a valid directory file descriptor (or AT_FDCWD), name_ptr is a valid C string from the arena, and stat_buf points to a valid MaybeUninit stat struct.
@@ -247,57 +311,61 @@ fn collect_metadata(
         }
     };
 
-    if res == 0 {
-        // SAFETY: fstatat returned 0 (success), meaning stat_buf is initialized.
-        let stat = unsafe { stat_buf.assume_init() };
-
-        let symlink_target = if flags.need_symlink_target
-            && (stat.st_mode as u32 & S_IFMT as u32) == (libc::S_IFLNK as u32)
-        {
-            let mut link_buf = [0u8; 4096];
-            // SAFETY: dir_fd is valid, name_ptr is a valid C string from the arena, and link_buf is a valid stack-allocated byte array.
-            let link_len = unsafe {
-                libc::readlinkat(
-                    dir_fd,
-                    name_ptr,
-                    link_buf.as_mut_ptr() as *mut libc::c_char,
-                    link_buf.len(),
-                )
-            };
-            if link_len > 0 {
-                Some(link_buf[..link_len as usize].to_vec())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        item.metadata = Some(Metadata {
-            mode: if flags.need_mode {
-                stat.st_mode as u32
-            } else {
-                0
-            },
-            nlink: if flags.need_nlink {
-                stat.st_nlink as u64
-            } else {
-                0
-            },
-            uid: if flags.need_uid_gid { stat.st_uid } else { 0 },
-            gid: if flags.need_uid_gid { stat.st_gid } else { 0 },
-            size: if flags.need_size {
-                stat.st_size as u64
-            } else {
-                0
-            },
-            mtime: if flags.need_mtime { stat.st_mtime } else { 0 },
-            blocks: if flags.need_blocks { stat.st_blocks } else { 0 },
-            ino: if flags.need_ino { stat.st_ino } else { 0 },
-            symlink_target,
-            git_status: GitStatus::Clean,
-        });
+    if res != 0 {
+        return Err(io::Error::last_os_error());
     }
+    // SAFETY: fstatat returned 0 (success), meaning stat_buf is initialized.
+    let stat = unsafe { stat_buf.assume_init() };
+
+    let is_dir = (stat.st_mode & S_IFMT) == S_IFDIR;
+    item.entry.set_is_dir(is_dir);
+
+    let symlink_target = if flags.need_symlink_target
+        && (stat.st_mode as u32 & S_IFMT as u32) == (libc::S_IFLNK as u32)
+    {
+        let mut link_buf = [0u8; 4096];
+        // SAFETY: dir_fd is valid, name_ptr is a valid C string from the arena, and link_buf is a valid stack-allocated byte array.
+        let link_len = unsafe {
+            libc::readlinkat(
+                dir_fd,
+                name_ptr,
+                link_buf.as_mut_ptr() as *mut libc::c_char,
+                link_buf.len(),
+            )
+        };
+        if link_len < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Some(link_buf[..link_len as usize].to_vec())
+    } else {
+        None
+    };
+
+    item.metadata = Some(Metadata {
+        mode: if flags.need_mode {
+            stat.st_mode as u32
+        } else {
+            0
+        },
+        nlink: if flags.need_nlink {
+            stat.st_nlink as u64
+        } else {
+            0
+        },
+        uid: if flags.need_uid_gid { stat.st_uid } else { 0 },
+        gid: if flags.need_uid_gid { stat.st_gid } else { 0 },
+        size: if flags.need_size {
+            u64::try_from(stat.st_size).unwrap_or_default()
+        } else {
+            0
+        },
+        mtime: if flags.need_mtime { stat.st_mtime } else { 0 },
+        blocks: if flags.need_blocks { stat.st_blocks } else { 0 },
+        ino: if flags.need_ino { stat.st_ino } else { 0 },
+        symlink_target,
+        git_status: GitStatus::Clean,
+    });
+    Ok(())
 }
 
 fn sort_entries(entries_data: &mut [FileInfo], arena: &[u8], config: &Config) {
@@ -307,14 +375,14 @@ fn sort_entries(entries_data: &mut [FileInfo], arena: &[u8], config: &Config) {
             let b_is_dir = b.entry.is_dir();
             if a_is_dir != b_is_dir {
                 return if config.reverse_sort {
-                    b_is_dir.cmp(&a_is_dir)
-                } else {
                     a_is_dir.cmp(&b_is_dir)
+                } else {
+                    b_is_dir.cmp(&a_is_dir)
                 };
             }
         }
 
-        let cmp = match config.sort_mode {
+        let primary_cmp = match config.sort_mode {
             SortMode::Name => {
                 let name_a = &arena[a.entry.start()..a.entry.start() + a.entry.len()];
                 let name_b = &arena[b.entry.start()..b.entry.start() + b.entry.len()];
@@ -332,109 +400,88 @@ fn sort_entries(entries_data: &mut [FileInfo], arena: &[u8], config: &Config) {
             }
         };
 
-        if config.reverse_sort {
-            cmp.reverse()
+        let primary_cmp = if config.reverse_sort {
+            primary_cmp.reverse()
         } else {
-            cmp
+            primary_cmp
+        };
+        if primary_cmp != std::cmp::Ordering::Equal {
+            primary_cmp
+        } else {
+            let name_a = &arena[a.entry.start()..a.entry.start() + a.entry.len()];
+            let name_b = &arena[b.entry.start()..b.entry.start() + b.entry.len()];
+            let name_cmp = name_a.cmp(name_b);
+            if config.reverse_sort {
+                name_cmp.reverse()
+            } else {
+                name_cmp
+            }
         }
     });
 }
 
-fn with_git_repo<F, R>(path: &Path, f: F) -> Option<R>
-where
-    F: FnOnce(&Repository) -> R,
-{
-    thread_local! {
-        static CACHED: std::cell::RefCell<Option<(PathBuf, Repository)>> = const { std::cell::RefCell::new(None) };
-    }
+fn apply_git_status(
+    entries_data: &mut [FileInfo],
+    arena: &[u8],
+    path: &Path,
+    single: bool,
+    dereference: bool,
+) -> io::Result<()> {
+    let canonical_path =
+        if single && !dereference && std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+            let parent = path.parent().unwrap_or(Path::new(".")).canonicalize()?;
+            parent.join(path.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "file path has no final component",
+                )
+            })?)
+        } else {
+            path.canonicalize()?
+        };
+    let repo = match Repository::discover(&canonical_path) {
+        Ok(repo) => repo,
+        Err(fshell_git::repo::Error::NotFound) => return Ok(()),
+        Err(err) => return Err(io::Error::other(err)),
+    };
+    let workdir = repo.work_dir();
+    let statuses = repo.status().map_err(io::Error::other)?;
 
-    CACHED.with(|cache| {
-        let mut cache_borrow = cache.borrow_mut();
-        if let Some((ref workdir, ref repo)) = *cache_borrow
-            && path.starts_with(workdir)
-        {
-            return Some(f(repo));
-        }
+    let base_dir = if single {
+        canonical_path.parent().unwrap_or(workdir)
+    } else {
+        &canonical_path
+    };
 
-        // Cache miss / different repo
-        if let Ok(repo) = Repository::discover(path) {
-            let workdir_buf = repo.work_dir().to_path_buf();
-            let res = f(&repo);
-            *cache_borrow = Some((workdir_buf, repo));
-            return Some(res);
-        }
-        None
-    })
-}
+    for item in entries_data {
+        let Some(meta) = item.metadata.as_mut() else {
+            continue;
+        };
+        let Some(range) = item.entry.range(arena.len()) else {
+            continue;
+        };
+        let Some(name_bytes) = arena.get(range) else {
+            continue;
+        };
+        let entry_path = if single {
+            canonical_path.clone()
+        } else {
+            base_dir.join(std::ffi::OsStr::from_bytes(name_bytes))
+        };
+        let Ok(relative_path) = entry_path.strip_prefix(workdir) else {
+            continue;
+        };
 
-/// A cached `git status` snapshot for one repository root.
-type StatusSnapshot = (PathBuf, Instant, Arc<HashMap<PathBuf, FgStatus>>);
-
-fn apply_git_status(entries_data: &mut [FileInfo], arena: &[u8], path: &Path) {
-    thread_local! {
-        static STATUS_CACHE: std::cell::RefCell<Option<StatusSnapshot>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    let _ = with_git_repo(path, |repo| {
-        let workdir = repo.work_dir();
-        let rel_dir = path.strip_prefix(workdir).unwrap_or(Path::new(""));
-
-        // `repo.status()` re-reads the index and re-scans the worktree; reuse
-        // the last snapshot for this repo within the TTL instead.
-        let statuses: Arc<HashMap<PathBuf, FgStatus>> = STATUS_CACHE.with(|cache| {
-            let mut cache_borrow = cache.borrow_mut();
-            if let Some((cached_workdir, at, snap)) = &*cache_borrow
-                && cached_workdir.as_path() == workdir
-                && at.elapsed() < GIT_STATUS_CACHE_TTL
-            {
-                return Arc::clone(snap);
-            }
-            let snap = match repo.status() {
-                Ok(s) => Arc::new(s.into_iter().collect::<HashMap<PathBuf, FgStatus>>()),
-                Err(_) => return Arc::new(HashMap::new()),
-            };
-            *cache_borrow = Some((workdir.to_path_buf(), Instant::now(), snap.clone()));
-            snap
-        });
-
-        let mut status_map: HashMap<String, GitStatus> = HashMap::with_capacity(statuses.len());
-
-        for (file_path, status) in statuses.iter() {
-            let rel = if let Ok(r) = file_path.strip_prefix(workdir) {
-                r
-            } else {
-                file_path.as_path()
-            };
-            let git_status = match status {
+        if let Some(status) = statuses.get(relative_path) {
+            meta.git_status = match status {
                 FgStatus::Added => GitStatus::New,
-                FgStatus::Modified => GitStatus::Modified,
+                FgStatus::Modified | FgStatus::TypeChange => GitStatus::Modified,
                 FgStatus::Deleted => GitStatus::Deleted,
                 FgStatus::Ignored => GitStatus::Ignored,
                 FgStatus::Conflicted => GitStatus::Conflicted,
-                FgStatus::TypeChange => GitStatus::Modified,
                 FgStatus::Clean => GitStatus::Clean,
             };
-            status_map.insert(rel.to_string_lossy().to_string(), git_status);
         }
-
-        for item in entries_data.iter_mut() {
-            let start = item.entry.start();
-            let len = item.entry.len();
-            let name_bytes = &arena[start..start + len];
-
-            if let Ok(name) = std::str::from_utf8(name_bytes) {
-                let rel_path = if rel_dir.as_os_str().is_empty() {
-                    name.to_owned()
-                } else {
-                    format!("{}/{}", rel_dir.to_string_lossy(), name)
-                };
-                if let Some(ref mut meta) = item.metadata
-                    && let Some(git_status) = status_map.get(&rel_path)
-                {
-                    meta.git_status = *git_status;
-                }
-            }
-        }
-    });
+    }
+    Ok(())
 }

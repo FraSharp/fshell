@@ -52,6 +52,11 @@ impl Entry {
         self.is_dir
     }
 
+    #[inline]
+    pub(crate) fn set_is_dir(&mut self, is_dir: bool) {
+        self.is_dir = is_dir;
+    }
+
     /// Return the entry's filename range when it is valid for an arena.
     ///
     /// `Entry` is part of the public API, so callers may construct a
