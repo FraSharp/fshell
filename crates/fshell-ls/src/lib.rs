@@ -18,7 +18,9 @@ pub mod utils;
 // Convenience re-exports for the most common API surface
 pub use args::{Config, GitStatus, SortMode};
 pub use file::{Entry, FileInfo, Metadata};
-pub use scan::{ListResult, RootIdentity, list_dir};
+pub use scan::{
+    GitStatusCache, ListResult, RootIdentity, list_dir, list_dir_with_git_status_cache,
+};
 
 /// Pretty-print directory listing results to stdout.
 ///

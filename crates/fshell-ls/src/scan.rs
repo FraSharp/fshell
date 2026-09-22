@@ -11,6 +11,7 @@ use crate::file::{Entry, FileInfo, Metadata};
 use crate::utils::is_directory;
 use fshell_git::repo::Repository;
 use fshell_git::status::Status as FgStatus;
+use fshell_hash::FxHashMap;
 
 use libc::{
     O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, S_IFDIR, S_IFMT, close, dirfd, fdopendir, fstat,
@@ -37,6 +38,49 @@ pub struct RootIdentity {
     pub device: u64,
     pub inode: u64,
     pub is_dir: bool,
+}
+
+/// Repository status snapshots reused across scans in one recursive listing.
+///
+/// Keep one cache for a top-level operation. Separate repositories encountered
+/// below the root receive separate snapshots.
+#[derive(Default)]
+pub struct GitStatusCache {
+    snapshots: FxHashMap<std::path::PathBuf, GitStatusSnapshot>,
+}
+
+struct GitStatusSnapshot {
+    workdir: std::path::PathBuf,
+    statuses: FxHashMap<std::path::PathBuf, FgStatus>,
+}
+
+impl GitStatusCache {
+    fn snapshot_for(
+        &mut self,
+        path: &Path,
+        dereference: bool,
+    ) -> io::Result<Option<&GitStatusSnapshot>> {
+        let canonical_path = canonical_git_path(path, dereference)?;
+        let repo = match Repository::discover(&canonical_path) {
+            Ok(repo) => repo,
+            Err(fshell_git::repo::Error::NotFound) => return Ok(None),
+            Err(err) => return Err(io::Error::other(err)),
+        };
+        let workdir = repo.work_dir().to_path_buf();
+
+        if !self.snapshots.contains_key(&workdir) {
+            let statuses = repo.status().map_err(io::Error::other)?;
+            self.snapshots.insert(
+                workdir.clone(),
+                GitStatusSnapshot {
+                    workdir: workdir.clone(),
+                    statuses,
+                },
+            );
+        }
+
+        Ok(self.snapshots.get(&workdir))
+    }
 }
 
 struct DirGuard(*mut libc::DIR);
@@ -85,6 +129,19 @@ impl MetadataFlags {
 ///
 /// This is the main entry point used by fshell's builtin ls.
 pub fn list_dir(config: &Config) -> io::Result<ListResult> {
+    let mut git_status_cache = GitStatusCache::default();
+    list_dir_with_git_status_cache(config, &mut git_status_cache)
+}
+
+/// Scan a directory while reusing Git status snapshots from a shared cache.
+///
+/// Use this for recursive scans within one top-level operation. The cache
+/// discovers the nearest repository for each path and computes each worktree's
+/// status only once.
+pub fn list_dir_with_git_status_cache(
+    config: &Config,
+    git_status_cache: &mut GitStatusCache,
+) -> io::Result<ListResult> {
     let mut arena: Vec<u8> = Vec::with_capacity(INITIAL_ARENA_CAPACITY);
     let mut entries = Vec::with_capacity(INITIAL_ENTRIES_CAPACITY);
 
@@ -214,13 +271,16 @@ pub fn list_dir(config: &Config) -> io::Result<ListResult> {
 
     // Git status
     if config.git {
-        apply_git_status(
-            &mut entries,
-            &arena,
-            &config.path,
-            list_as_single_file,
-            config.dereference,
-        )?;
+        if let Some(snapshot) = git_status_cache.snapshot_for(&config.path, config.dereference)? {
+            apply_git_status(
+                &mut entries,
+                &arena,
+                &config.path,
+                list_as_single_file,
+                config.dereference,
+                snapshot,
+            )?;
+        }
     }
 
     // Sort
@@ -453,32 +513,32 @@ fn sort_entries(entries_data: &mut [FileInfo], arena: &[u8], config: &Config) {
     });
 }
 
+fn canonical_git_path(path: &Path, dereference: bool) -> io::Result<std::path::PathBuf> {
+    if !dereference && std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        let parent = path.parent().unwrap_or(Path::new(".")).canonicalize()?;
+        let file_name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file path has no final component",
+            )
+        })?;
+        Ok(parent.join(file_name))
+    } else {
+        path.canonicalize()
+    }
+}
+
 fn apply_git_status(
     entries_data: &mut [FileInfo],
     arena: &[u8],
     path: &Path,
     single: bool,
     dereference: bool,
+    snapshot: &GitStatusSnapshot,
 ) -> io::Result<()> {
-    let canonical_path =
-        if single && !dereference && std::fs::symlink_metadata(path)?.file_type().is_symlink() {
-            let parent = path.parent().unwrap_or(Path::new(".")).canonicalize()?;
-            parent.join(path.file_name().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "file path has no final component",
-                )
-            })?)
-        } else {
-            path.canonicalize()?
-        };
-    let repo = match Repository::discover(&canonical_path) {
-        Ok(repo) => repo,
-        Err(fshell_git::repo::Error::NotFound) => return Ok(()),
-        Err(err) => return Err(io::Error::other(err)),
-    };
-    let workdir = repo.work_dir();
-    let statuses = repo.status().map_err(io::Error::other)?;
+    let canonical_path = canonical_git_path(path, dereference)?;
+    let workdir = &snapshot.workdir;
+    let statuses = &snapshot.statuses;
 
     let base_dir = if single {
         canonical_path.parent().unwrap_or(workdir)
@@ -519,4 +579,75 @@ fn apply_git_status(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::SortMode;
+    use std::fs;
+
+    fn config(path: std::path::PathBuf) -> Config {
+        Config {
+            path,
+            show_all: false,
+            list_dirs: false,
+            long_listing: false,
+            one_per_line: false,
+            human_readable: false,
+            raw: false,
+            show_inode: false,
+            sort_mode: SortMode::Name,
+            reverse_sort: false,
+            use_color: false,
+            tree: false,
+            tree_depth: None,
+            group_directories_first: false,
+            show_icons: false,
+            git: true,
+            dereference: false,
+            recursive: false,
+            verbose: false,
+        }
+    }
+
+    fn untracked_file(result: &ListResult, name: &[u8]) -> bool {
+        result.entries.iter().any(|item| {
+            let Some(range) = item.entry.range(result.arena.len()) else {
+                return false;
+            };
+            result.arena.get(range) == Some(name)
+                && item
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.git_status == GitStatus::Untracked)
+        })
+    }
+
+    #[test]
+    fn recursive_scans_reuse_git_status_per_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let git_dir = temp.path().join(".git");
+        let child_dir = temp.path().join("child");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::create_dir(&child_dir).unwrap();
+        fs::write(temp.path().join("root.txt"), b"root").unwrap();
+        fs::write(child_dir.join("nested.txt"), b"nested").unwrap();
+
+        let mut index = b"DIRC".to_vec();
+        index.extend_from_slice(&2u32.to_be_bytes());
+        index.extend_from_slice(&0u32.to_be_bytes());
+        let index_path = git_dir.join("index");
+        fs::write(&index_path, index).unwrap();
+
+        let mut cache = GitStatusCache::default();
+        list_dir_with_git_status_cache(&config(temp.path().to_path_buf()), &mut cache).unwrap();
+
+        // If the second scan recomputes repository status, it will fail to parse
+        // the now-removed index instead of using the operation's cached snapshot.
+        fs::remove_file(index_path).unwrap();
+        let child_result = list_dir_with_git_status_cache(&config(child_dir), &mut cache).unwrap();
+        assert!(untracked_file(&child_result, b"nested.txt"));
+        assert_eq!(cache.snapshots.len(), 1);
+    }
 }

@@ -379,6 +379,7 @@ fn do_recursive_walk(
     env: &Env,
     root: &std::path::Path,
     canonical_cache: &mut FxHashMap<std::path::PathBuf, std::path::PathBuf>,
+    git_status_cache: &mut fshell_ls::scan::GitStatusCache,
 ) -> Result<(Vec<fshell_ls::FileInfo>, Vec<u8>), String> {
     let mut visited = FxHashSet::default();
     visited.insert(canonicalize_cached(root, canonical_cache));
@@ -424,8 +425,9 @@ fn do_recursive_walk(
             || env.caps.caps.read().check_read_dir(&canonical);
         if allowed {
             visited.insert(canonical);
-            let sub_result = fshell_ls::list_dir(&sub_config)
-                .map_err(|err| format!("{}: {err}", sub_config.path.display()))?;
+            let sub_result =
+                fshell_ls::list_dir_with_git_status_cache(&sub_config, git_status_cache)
+                    .map_err(|err| format!("{}: {err}", sub_config.path.display()))?;
             for entry in &sub_result.entries {
                 if let Some(subdir_path) = is_dir_entry(entry, &sub_result.arena, &dir)? {
                     dirs_to_visit.push(subdir_path);
@@ -526,6 +528,7 @@ pub fn ls_builtin(
             }
 
             if config.recursive && !config.tree {
+                let mut git_status_cache = fshell_ls::scan::GitStatusCache::default();
                 let mut paths = vec![t_config.path.clone()];
                 let mut is_first = true;
                 while let Some(current_path) = paths.pop() {
@@ -542,8 +545,11 @@ pub fn ls_builtin(
                     let mut sub_config = t_config.clone();
                     sub_config.path = current_path.clone();
 
-                    let sub_result = fshell_ls::list_dir(&sub_config)
-                        .map_err(|e| format!("{}: {e}", sub_config.path.display()))?;
+                    let sub_result = fshell_ls::list_dir_with_git_status_cache(
+                        &sub_config,
+                        &mut git_status_cache,
+                    )
+                    .map_err(|e| format!("{}: {e}", sub_config.path.display()))?;
                     if !is_first {
                         println!();
                     }
@@ -652,8 +658,13 @@ pub fn ls_builtin(
         env.track_read(t_config.path.clone());
         env.enforce_capability("ls", CapAction::ReadDir(t_config.path.clone()))?;
 
-        let result = fshell_ls::list_dir(&t_config)
-            .map_err(|e| format!("{}: {}", t_config.path.display(), e))?;
+        let mut git_status_cache = fshell_ls::scan::GitStatusCache::default();
+        let result = if config.recursive {
+            fshell_ls::list_dir_with_git_status_cache(&t_config, &mut git_status_cache)
+        } else {
+            fshell_ls::list_dir(&t_config)
+        }
+        .map_err(|e| format!("{}: {}", t_config.path.display(), e))?;
         let do_raw = config.raw;
 
         if config.recursive {
@@ -664,6 +675,7 @@ pub fn ls_builtin(
                 env,
                 &t_config.path,
                 &mut canonical_cache,
+                &mut git_status_cache,
             )?;
             let entries_local = walk.0;
             let arena_local = walk.1;
