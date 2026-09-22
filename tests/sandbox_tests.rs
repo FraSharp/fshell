@@ -323,7 +323,8 @@ async fn test_destructive_rm_root_blocked_in_non_interactive() {
         tx,
         false,
         None,
-    );
+    )
+    .await;
 
     assert!(
         res.is_err(),
@@ -356,7 +357,8 @@ async fn test_safe_rm_target_allowed() {
         tx,
         false,
         None,
-    );
+    )
+    .await;
 
     assert!(
         res.is_ok(),
@@ -389,7 +391,8 @@ async fn test_unsetopt_confirm_destructive_allows_rm() {
         tx,
         false,
         None,
-    );
+    )
+    .await;
 
     assert!(
         res.is_ok(),

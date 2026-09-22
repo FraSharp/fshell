@@ -1778,6 +1778,7 @@ impl Env {
                 async_builtins: Arc::new(RwLock::new(FxHashMap::default())),
                 aliases: Arc::new(RwLock::new(indexmap::IndexMap::new())),
                 fallback: Arc::new(RwLock::new(None)),
+                async_fallback: Arc::new(RwLock::new(None)),
                 config_tui_handler: Arc::new(RwLock::new(None)),
                 builtins_cache: Arc::new(Mutex::new(None)),
                 local_vars: None,
@@ -1936,6 +1937,7 @@ impl Env {
                 async_builtins: Arc::new(RwLock::new(FxHashMap::default())),
                 aliases: Arc::new(RwLock::new(indexmap::IndexMap::new())),
                 fallback: Arc::new(RwLock::new(None)),
+                async_fallback: Arc::new(RwLock::new(None)),
                 config_tui_handler: Arc::new(RwLock::new(None)),
                 builtins_cache: Arc::new(Mutex::new(None)),
                 local_vars: None,
@@ -2073,6 +2075,7 @@ impl Env {
                 async_builtins: self.scope.async_builtins.clone(),
                 aliases: self.scope.aliases.clone(),
                 fallback: self.scope.fallback.clone(),
+                async_fallback: self.scope.async_fallback.clone(),
                 config_tui_handler: self.scope.config_tui_handler.clone(),
                 builtins_cache: self.scope.builtins_cache.clone(),
                 cwd: self.scope.cwd.clone(),
@@ -2288,6 +2291,23 @@ impl Env {
     /// Get the fallback handler, if set.
     pub fn get_fallback_handler(&self) -> Option<FallbackHandler> {
         let reg = self.fallback.read();
+        reg.clone()
+    }
+
+    /// Set the asynchronous fallback used for external commands.
+    ///
+    /// Async fallbacks own the complete lifetime of a command stage: the
+    /// returned future must not resolve until process exit and all output
+    /// forwarding are complete. The synchronous fallback remains available
+    /// for compatibility with extensions that cannot be migrated yet.
+    pub fn set_async_fallback_handler(&self, handler: AsyncFallbackHandler) {
+        let mut reg = self.scope.async_fallback.write();
+        *reg = Some(handler);
+    }
+
+    /// Get the asynchronous external-command fallback, if registered.
+    pub fn get_async_fallback_handler(&self) -> Option<AsyncFallbackHandler> {
+        let reg = self.scope.async_fallback.read();
         reg.clone()
     }
 
@@ -3192,6 +3212,21 @@ pub type FallbackHandler = Arc<
             bool,
             Option<SourceSpan>,
         ) -> Result<(), ShellError>
+        + Send
+        + Sync,
+>;
+
+#[allow(clippy::type_complexity)]
+pub type AsyncFallbackHandler = Arc<
+    dyn Fn(
+            &str,
+            Vec<Val>,
+            Option<PipeStream>,
+            Env,
+            PipeSender,
+            bool,
+            Option<SourceSpan>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ShellError>> + Send>>
         + Send
         + Sync,
 >;

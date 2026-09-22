@@ -1239,6 +1239,45 @@ pub async fn execute_pipeline(
                                 // Restore inline env vars
                                 restore_inline_env(&env_clone, saved_env_values, saved_top_values);
                             });
+                        } else if let Some(fallback) = env_clone.get_async_fallback_handler() {
+                            let handler_span = if span.is_empty() { None } else { Some(span) };
+                            let stage_cancel = cancel_rx.clone();
+                            let cancel = cancel_tx.clone();
+                            tokio::spawn(async move {
+                                if *stage_cancel.borrow() {
+                                    return;
+                                }
+                                let has_next = !is_last;
+                                if let Err(e) = fallback(
+                                    &name,
+                                    evaluated_args,
+                                    current_rx,
+                                    env_clone.clone(),
+                                    out_tx.clone(),
+                                    has_next,
+                                    handler_span,
+                                )
+                                .await
+                                {
+                                    let _ = cancel.send(true);
+                                    let code = if e.code == fshell_core::ErrorCode::CommandNotFound
+                                    {
+                                        127
+                                    } else {
+                                        1
+                                    };
+                                    env_clone.report_stage_error_code(code);
+                                    let _ = out_tx
+                                        .send(PipelinePayload::Structured(
+                                            fshell_core::diagnostic::FshDiag::from(e),
+                                        ))
+                                        .await;
+                                }
+                                // Async fallbacks own stage completion, including
+                                // process I/O draining. Restore inline variables
+                                // only after that completion boundary.
+                                restore_inline_env(&env_clone, saved_env_values, saved_top_values);
+                            });
                         } else if let Some(fallback) = env_clone.get_fallback_handler() {
                             let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();

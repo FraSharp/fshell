@@ -223,10 +223,10 @@ pub fn caps_audit_builtin(
     Ok(())
 }
 
-pub fn strict_builtin(
+pub async fn strict_builtin(
     in_rx: Option<PipeStream>,
     args: Vec<Val>,
-    env: &Env,
+    env: Env,
     tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
@@ -266,10 +266,32 @@ pub fn strict_builtin(
         .strict_mode_temp_count
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    let result = if let Some(handler) = env.get_builtin(&name) {
-        handler(in_rx, cmd_args, env, tx, span)
+    let result = if let Some(handler) = env.get_async_builtin(&name) {
+        handler(in_rx, cmd_args, env.clone(), tx, span).await
+    } else if let Some(handler) = env.get_builtin(&name) {
+        let handler_env = env.clone();
+        tokio::task::spawn_blocking(move || handler(in_rx, cmd_args, &handler_env, tx, span))
+            .await
+            .map_err(|error| {
+                ShellError::new(
+                    ErrorCode::CommandFailed,
+                    format!("strict builtin failed: {error}"),
+                )
+            })?
+    } else if let Some(fallback) = env.get_async_fallback_handler() {
+        fallback(&name, cmd_args, in_rx, env.clone(), tx, false, span).await
     } else if let Some(fallback) = env.get_fallback_handler() {
-        fallback(&name, cmd_args, in_rx, env, tx, false, span)
+        let handler_env = env.clone();
+        tokio::task::spawn_blocking(move || {
+            fallback(&name, cmd_args, in_rx, &handler_env, tx, false, span)
+        })
+        .await
+        .map_err(|error| {
+            ShellError::new(
+                ErrorCode::CommandFailed,
+                format!("strict fallback failed: {error}"),
+            )
+        })?
     } else {
         Err(ShellError::command_not_found(&name, span))
     };

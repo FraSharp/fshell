@@ -5,7 +5,9 @@ use fshell_core::lock::{Mutex, RwLock};
 use fshell_hash::FxHashMap;
 use std::sync::Arc;
 
-use crate::{AsyncBuiltinHandler, BuiltinHandler, FallbackHandler, Stmt, Val};
+use crate::{
+    AsyncBuiltinHandler, AsyncFallbackHandler, BuiltinHandler, FallbackHandler, Stmt, Val,
+};
 use fshell_core::Param;
 
 pub type ConfigTuiHandler = Arc<dyn Fn(&crate::Env) -> Result<(), String> + Send + Sync>;
@@ -118,6 +120,7 @@ pub struct Scope {
     pub async_builtins: Arc<RwLock<FxHashMap<String, AsyncBuiltinHandler>>>,
     pub aliases: Arc<RwLock<indexmap::IndexMap<String, String>>>,
     pub fallback: Arc<RwLock<Option<FallbackHandler>>>,
+    pub async_fallback: Arc<RwLock<Option<AsyncFallbackHandler>>>,
     pub config_tui_handler: Arc<RwLock<Option<ConfigTuiHandler>>>,
     pub local_vars: Option<Arc<LocalScope>>,
     pub builtins_cache: Arc<Mutex<Option<Vec<String>>>>,

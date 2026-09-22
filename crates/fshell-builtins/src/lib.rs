@@ -29,6 +29,7 @@ pub mod ff;
 pub mod files;
 pub mod help;
 pub mod integrations;
+pub mod intent;
 pub mod json;
 pub mod mux;
 pub mod ps;
@@ -165,7 +166,6 @@ pub fn init(env: &Env) {
         ("test".to_string(), Arc::new(test_builtin)),
         ("[".to_string(), Arc::new(bracket_builtin)),
         ("printf".to_string(), Arc::new(printf_builtin)),
-        ("exec".to_string(), Arc::new(exec_builtin)),
         ("prompt".to_string(), Arc::new(prompt_builtin)),
         ("complete".to_string(), Arc::new(complete::complete_builtin)),
         ("compgen".to_string(), Arc::new(complete::compgen_builtin)),
@@ -178,6 +178,7 @@ pub fn init(env: &Env) {
         ("trap".to_string(), Arc::new(trap::trap_builtin)),
         ("profile".to_string(), Arc::new(profile_builtin)),
         ("self".to_string(), Arc::new(cmd::self_cmd::self_builtin)),
+        ("intent".to_string(), Arc::new(intent::intent_builtin)),
         ("http".to_string(), Arc::new(http_stub)),
         ("sql".to_string(), Arc::new(sql_stub)),
         ("chart".to_string(), Arc::new(chart_stub)),
@@ -219,7 +220,6 @@ pub fn init(env: &Env) {
         ));
         entries.push(("process-spawn".to_string(), Arc::new(process_spawn_builtin)));
         entries.push(("caps-audit".to_string(), Arc::new(caps_audit_builtin)));
-        entries.push(("strict".to_string(), Arc::new(strict_builtin)));
         entries.push(("sandbox".to_string(), Arc::new(sandbox::sandbox_builtin)));
         entries.push(("unsafe".to_string(), Arc::new(sandbox::unsafe_builtin)));
     }
@@ -242,6 +242,9 @@ pub fn init(env: &Env) {
     entries.push(("vault".to_string(), Arc::new(cmd::vault::vault_builtin)));
 
     env.register_builtins(entries);
+    env.register_async_builtin("exec", exec_builtin);
+    #[cfg(feature = "sandbox")]
+    env.register_async_builtin("strict", strict_builtin);
     env.register_alias("cksum", "hash");
 }
 

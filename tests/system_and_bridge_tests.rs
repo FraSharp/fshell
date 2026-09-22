@@ -478,6 +478,37 @@ async fn test_integration_command_binaries_override() {
 }
 
 #[tokio::test]
+async fn test_external_completion_drains_all_output() {
+    let env = setup_test_env();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+    fshell_bridge::run_external(
+        "sh",
+        vec![
+            Val::String("-c".into()),
+            Val::String("printf first; sleep 0.05; printf second".into()),
+        ],
+        None,
+        &env,
+        tx,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let mut output = String::new();
+    while let Some(payload) = rx.recv().await {
+        match payload {
+            PipelinePayload::Data(value) => output.push_str(&value.to_text()),
+            PipelinePayload::Bytes(bytes) => output.push_str(&String::from_utf8_lossy(&bytes)),
+            PipelinePayload::Structured(diag) => panic!("unexpected diagnostic: {diag:?}"),
+        }
+    }
+    assert_eq!(output, "firstsecond");
+}
+
+#[tokio::test]
 async fn test_mock_installer_pipeline() {
     let env = setup_test_env();
 

@@ -316,7 +316,7 @@ fn check_destructive_command(
 }
 
 /// Spawns external shell commands executing legacy binaries securely.
-pub fn run_external(
+pub async fn run_external(
     name: &str,
     mut args: Vec<Val>,
     mut in_rx: Option<PipeStream>,
@@ -1017,31 +1017,38 @@ pub fn run_external(
         }));
     }
 
-    // Synchronously wait for child exit to capture exit code deterministically.
-    // This replaces the previous fire-and-forget waiter + Condvar pattern which
-    // raced with the statement finalizer that read last_exit_code before the
-    // waiter landed. We are already inside a spawn_blocking context (called
-    // from pipeline's spawn_blocking), so blocking waitpid here is correct and
-    // does not stall the async executor. I/O forwarding tasks remain async
-    // and continue to drain pipes concurrently.
-    let _exit_code = fshell_engine::wait_for_job_sync(env, pid, job_id, &cmd_str, is_interactive);
+    // Waiting for the process and forwarding its output are one completion
+    // boundary. The waitpid implementation owns job-control bookkeeping, so
+    // keep it on the blocking pool while the async I/O tasks continue draining
+    // stdout/stderr concurrently.
+    let wait_env = env.clone();
+    let wait_cmd = cmd_str.clone();
+    let wait_task = tokio::task::spawn_blocking(move || {
+        fshell_engine::wait_for_job_sync(&wait_env, pid, job_id, &wait_cmd, is_interactive)
+    });
+    let _exit_code = wait_task.await.map_err(|error| {
+        ShellError::new(
+            ErrorCode::CommandFailed,
+            format!("external command waiter failed: {error}"),
+        )
+    })?;
 
-    // Observe the stdout/stderr forwarding tasks so a panic is not silently
-    // detached. They cannot be awaited here: this function is called both from
-    // the pipeline's `spawn_blocking` (where `Handle::block_on` panics) and
-    // directly from async callers (where any blocking wait would deadlock a
-    // current-thread runtime). Consumers still observe a fully-drained stream
-    // because these tasks hold sender clones until they finish.
-    if !io_tasks.is_empty() {
-        let task_env = env.clone();
-        tokio::spawn(async move {
-            for task in io_tasks {
-                if let Err(error) = task.await {
-                    task_env.report_stage_error();
-                    eprintln!("external command I/O task failed: {error}");
-                }
-            }
-        });
+    // Do not let a stage resolve while an output task still owns a sender. The
+    // final sender drop is what closes the pipeline stream, so awaiting every
+    // task gives callers a precise guarantee: command completion means all
+    // child output and diagnostics have been delivered or explicitly failed.
+    let mut io_error = None;
+    for task in io_tasks {
+        if let Err(error) = task.await {
+            env.report_stage_error();
+            io_error = Some(ShellError::new(
+                ErrorCode::CommandFailed,
+                format!("external command I/O task failed: {error}"),
+            ));
+        }
+    }
+    if let Some(error) = io_error {
+        return Err(error);
     }
 
     if cnf_debug {
@@ -1081,8 +1088,9 @@ fn parse_json_value(json: serde_json::Value) -> Val {
 }
 
 pub fn init(env: &Env) {
-    env.set_fallback_handler(Arc::new(|name, args, in_rx, env, tx, has_next, span| {
-        run_external(name, args, in_rx, env, tx, has_next, span)
+    env.set_async_fallback_handler(Arc::new(|name, args, in_rx, env, tx, has_next, span| {
+        let name = name.to_string();
+        Box::pin(async move { run_external(&name, args, in_rx, &env, tx, has_next, span).await })
     }));
 }
 

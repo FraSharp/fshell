@@ -1520,10 +1520,10 @@ pub fn prompt_builtin(
     }
 }
 
-pub fn exec_builtin(
+pub async fn exec_builtin(
     in_rx: Option<PipeStream>,
     args: Vec<Val>,
-    env: &Env,
+    env: Env,
     tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
@@ -1536,29 +1536,22 @@ pub fn exec_builtin(
     // command runs as a regular external job and its exit code becomes $?.
     let cmd_name = args[0].to_text();
     let cmd_args: Vec<Val> = args[1..].to_vec();
-    let env_clone = env.clone();
-    let tx_clone = tx.clone();
-    if let Some(handler) = env.get_fallback_handler() {
-        let handler_span = span;
-        tokio::spawn(async move {
-            if let Err(e) = handler(
-                &cmd_name,
-                cmd_args,
-                in_rx,
-                &env_clone,
-                tx_clone,
-                false,
-                handler_span,
-            ) {
-                let _ = tx
-                    .send(PipelinePayload::Structured(e.to_string().into()))
-                    .await;
-            }
-        });
-    } else {
-        return Err("exec: no fallback handler available".into());
+    if let Some(handler) = env.get_async_fallback_handler() {
+        return handler(&cmd_name, cmd_args, in_rx, env, tx, false, span).await;
     }
-    Ok(())
+    if let Some(handler) = env.get_fallback_handler() {
+        return tokio::task::spawn_blocking(move || {
+            handler(&cmd_name, cmd_args, in_rx, &env, tx, false, span)
+        })
+        .await
+        .map_err(|error| {
+            ShellError::new(
+                fshell_core::diagnostic::ErrorCode::CommandFailed,
+                format!("exec fallback failed: {error}"),
+            )
+        })?;
+    }
+    Err("exec: no fallback handler available".into())
 }
 
 #[cfg(test)]
