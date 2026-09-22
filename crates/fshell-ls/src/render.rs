@@ -41,6 +41,17 @@ fn entry_name<'a>(item: &FileInfo, arena: &'a [u8]) -> io::Result<&'a [u8]> {
     })
 }
 
+fn write_left_aligned<W: Write>(out: &mut W, value: &str, width: usize) -> io::Result<()> {
+    out.write_all(value.as_bytes())?;
+    let mut padding = width.saturating_sub(value.width());
+    while padding > 0 {
+        let chunk = padding.min(SPACES.len());
+        out.write_all(&SPACES.as_bytes()[..chunk])?;
+        padding -= chunk;
+    }
+    Ok(())
+}
+
 fn get_icon_for_file(name_bytes: &[u8], is_dir: bool, is_exec: bool) -> &'static str {
     if is_dir {
         return ICON_DIR;
@@ -341,10 +352,10 @@ pub fn print_long_listing(
             max_nlink_width = max_nlink_width.max(num_digits(meta.nlink));
 
             let user = get_user_name(meta.uid, &mut user_cache);
-            max_user_width = max_user_width.max(user.len());
+            max_user_width = max_user_width.max(escape_name(user.as_bytes()).width());
 
             let group = get_group_name(meta.gid, &mut group_cache);
-            max_group_width = max_group_width.max(group.len());
+            max_group_width = max_group_width.max(escape_name(group.as_bytes()).width());
 
             let size_s = format_size(meta.size, human_readable, &mut buf);
             max_size_width = max_size_width.max(size_s.len());
@@ -389,11 +400,13 @@ pub fn print_long_listing(
 
             write!(out, "{:>width$} ", meta.nlink, width = max_nlink_width)?;
 
-            let user = get_user_name(meta.uid, &mut user_cache);
-            write!(out, "{:<width$} ", user, width = max_user_width)?;
+            let user = escape_name(get_user_name(meta.uid, &mut user_cache).as_bytes());
+            write_left_aligned(&mut out, &user, max_user_width)?;
+            out.write_all(b" ")?;
 
-            let group = get_group_name(meta.gid, &mut group_cache);
-            write!(out, "{:<width$} ", group, width = max_group_width)?;
+            let group = escape_name(get_group_name(meta.gid, &mut group_cache).as_bytes());
+            write_left_aligned(&mut out, &group, max_group_width)?;
+            out.write_all(b" ")?;
 
             let mut size_buf = [0u8; 64];
             let size_str = format_size(meta.size, human_readable, &mut size_buf);
