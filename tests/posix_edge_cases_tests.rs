@@ -272,6 +272,16 @@ async fn test_posix_arithmetic_division_by_zero_does_not_panic() {
 }
 
 #[tokio::test]
+async fn test_posix_arithmetic_octal_overflow_is_an_error() {
+    let env = setup_posix_env();
+    let res = fshell_posix::arithmetic::eval_arithmetic_expr("077777777777777777777777", &env);
+    assert!(
+        res.is_err(),
+        "out-of-range octal literals must not silently become zero"
+    );
+}
+
+#[tokio::test]
 async fn test_posix_arithmetic_expansion_errors_stop_script() {
     let env = setup_posix_env();
     let parsed = parse_posix_script(r#"printf '%s\n' "$((10 / 0))"; AFTER=ran"#)

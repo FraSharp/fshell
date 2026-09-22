@@ -126,7 +126,8 @@ fn tokenize(s: &str) -> Result<Vec<Token>, String> {
                     && num_str.len() > 1
                     && num_str.chars().all(|c| ('0'..='7').contains(&c))
                 {
-                    i64::from_str_radix(&num_str, 8).unwrap_or(0)
+                    i64::from_str_radix(&num_str, 8)
+                        .map_err(|e| format!("Invalid octal number {num_str}: {e}"))?
                 } else {
                     num_str
                         .parse::<i64>()
