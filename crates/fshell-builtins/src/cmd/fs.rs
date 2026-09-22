@@ -11,6 +11,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
+use fshell_hash::{FxHashMap, FxHashSet};
 use miette::SourceSpan;
 use std::ffi::OsStr;
 use std::io::{BufRead, Write};
@@ -364,7 +365,7 @@ fn fileinfo_to_val_map(
 
 fn canonicalize_cached(
     path: &std::path::Path,
-    cache: &mut std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
+    cache: &mut FxHashMap<std::path::PathBuf, std::path::PathBuf>,
 ) -> std::path::PathBuf {
     cache
         .entry(path.to_path_buf())
@@ -377,38 +378,42 @@ fn do_recursive_walk(
     config: &fshell_ls::Config,
     env: &Env,
     root: &std::path::Path,
-    canonical_cache: &mut std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
+    canonical_cache: &mut FxHashMap<std::path::PathBuf, std::path::PathBuf>,
 ) -> Result<(Vec<fshell_ls::FileInfo>, Vec<u8>), String> {
-    let mut visited: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
+    let mut visited = FxHashSet::default();
     visited.insert(canonicalize_cached(root, canonical_cache));
 
     fn is_dir_entry(
         entry: &fshell_ls::FileInfo,
         arena: &[u8],
         base: &std::path::Path,
-    ) -> Option<std::path::PathBuf> {
+    ) -> Result<Option<std::path::PathBuf>, String> {
         if entry.entry.is_dir() {
-            let range = entry.entry.range(arena.len())?;
-            let name = arena.get(range)?;
-            Some(base.join(OsStr::from_bytes(name)))
+            let range = entry.entry.range(arena.len()).ok_or_else(|| {
+                "ls: invalid directory entry range while walking recursively".to_owned()
+            })?;
+            let name = arena.get(range).ok_or_else(|| {
+                "ls: invalid directory entry range while walking recursively".to_owned()
+            })?;
+            Ok(Some(base.join(OsStr::from_bytes(name))))
         } else {
-            None
+            Ok(None)
         }
     }
 
-    let mut dirs_to_visit: Vec<std::path::PathBuf> = initial
-        .entries
-        .iter()
-        .filter_map(|e| is_dir_entry(e, &initial.arena, root))
-        .collect();
+    let mut dirs_to_visit = Vec::new();
+    for entry in &initial.entries {
+        if let Some(path) = is_dir_entry(entry, &initial.arena, root)? {
+            dirs_to_visit.push(path);
+        }
+    }
 
     let mut entries = initial.entries.clone();
     let mut arena = initial.arena.clone();
 
     while let Some(dir) = dirs_to_visit.pop() {
         let canonical = canonicalize_cached(&dir, canonical_cache);
-        if !visited.insert(canonical) {
+        if visited.contains(&canonical) {
             continue;
         }
 
@@ -416,17 +421,13 @@ fn do_recursive_walk(
         sub_config.path = dir.clone();
 
         let allowed = env.caps.caps.read().check_read_dir(&sub_config.path)
-            || sub_config
-                .path
-                .canonicalize()
-                .ok()
-                .as_ref()
-                .is_some_and(|canonical| env.caps.caps.read().check_read_dir(canonical));
+            || env.caps.caps.read().check_read_dir(&canonical);
         if allowed {
+            visited.insert(canonical);
             let sub_result = fshell_ls::list_dir(&sub_config)
                 .map_err(|err| format!("{}: {err}", sub_config.path.display()))?;
             for entry in &sub_result.entries {
-                if let Some(subdir_path) = is_dir_entry(entry, &sub_result.arena, &dir) {
+                if let Some(subdir_path) = is_dir_entry(entry, &sub_result.arena, &dir)? {
                     dirs_to_visit.push(subdir_path);
                 }
             }
@@ -442,10 +443,10 @@ fn do_recursive_walk(
                 let rel_path = full_entry_path
                     .strip_prefix(root)
                     .unwrap_or(&full_entry_path)
-                    .to_string_lossy()
-                    .to_string();
+                    .as_os_str()
+                    .as_bytes();
                 let offset = arena.len();
-                arena.extend_from_slice(rel_path.as_bytes());
+                arena.extend_from_slice(rel_path);
                 let mut entry_clone = entry.clone();
                 entry_clone.entry =
                     fshell_ls::Entry::new(offset, rel_path.len(), entry.entry.is_dir());
@@ -563,10 +564,13 @@ pub fn ls_builtin(
 
                     let mut subdirs = Vec::new();
                     for entry in &sub_result.entries {
-                        if entry.entry.is_dir()
-                            && let Some(range) = entry.entry.range(sub_result.arena.len())
-                            && let Some(name) = sub_result.arena.get(range)
-                        {
+                        if entry.entry.is_dir() {
+                            let range = entry.entry.range(sub_result.arena.len()).ok_or_else(
+                                || "ls: invalid directory entry range while walking recursively",
+                            )?;
+                            let name = sub_result.arena.get(range).ok_or_else(
+                                || "ls: invalid directory entry range while walking recursively",
+                            )?;
                             subdirs.push(current_path.join(OsStr::from_bytes(name)));
                         }
                     }
@@ -653,10 +657,7 @@ pub fn ls_builtin(
         let do_raw = config.raw;
 
         if config.recursive {
-            let mut canonical_cache: std::collections::HashMap<
-                std::path::PathBuf,
-                std::path::PathBuf,
-            > = std::collections::HashMap::new();
+            let mut canonical_cache = FxHashMap::default();
             let walk = do_recursive_walk(
                 &result,
                 &t_config,
