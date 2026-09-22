@@ -440,7 +440,7 @@ fn do_recursive_walk(
                 let name = sub_result
                     .arena
                     .get(range)
-                    .ok_or_else(|| "ls: invalid entry range while walking recursively")?;
+                    .ok_or("ls: invalid entry range while walking recursively")?;
                 let full_entry_path = dir.join(OsStr::from_bytes(name));
                 let rel_path = full_entry_path
                     .strip_prefix(root)
@@ -571,11 +571,11 @@ pub fn ls_builtin(
                     let mut subdirs = Vec::new();
                     for entry in &sub_result.entries {
                         if entry.entry.is_dir() {
-                            let range = entry.entry.range(sub_result.arena.len()).ok_or_else(
-                                || "ls: invalid directory entry range while walking recursively",
+                            let range = entry.entry.range(sub_result.arena.len()).ok_or(
+                                "ls: invalid directory entry range while walking recursively",
                             )?;
-                            let name = sub_result.arena.get(range).ok_or_else(
-                                || "ls: invalid directory entry range while walking recursively",
+                            let name = sub_result.arena.get(range).ok_or(
+                                "ls: invalid directory entry range while walking recursively",
                             )?;
                             subdirs.push(current_path.join(OsStr::from_bytes(name)));
                         }
