@@ -136,6 +136,28 @@ pub fn print_columns(
     show_inode: bool,
     show_icons: bool,
 ) -> io::Result<()> {
+    let stdout = io::stdout();
+    let capacity =
+        calculate_output_buffer_size(items, arena, false).max(determine_buffer_size(items.len()));
+    let mut out = BufWriter::with_capacity(capacity, stdout.lock());
+    match render_columns_to(
+        items, arena, term_width, use_color, show_inode, show_icons, &mut out,
+    ) {
+        Ok(()) => out.flush(),
+        Err(err) => Err(err),
+    }
+}
+
+/// Render column output to a caller-provided writer without adding buffering.
+pub fn render_columns_to<W: Write + ?Sized>(
+    items: &[FileInfo],
+    arena: &[u8],
+    term_width: usize,
+    use_color: bool,
+    show_inode: bool,
+    show_icons: bool,
+    mut out: &mut W,
+) -> io::Result<()> {
     if items.is_empty() {
         return Ok(());
     }
@@ -223,10 +245,6 @@ pub fn print_columns(
         }
     }
 
-    let stdout = io::stdout();
-    let buf_size = calculate_output_buffer_size(items, arena, false);
-    let mut out = BufWriter::with_capacity(buf_size.max(determine_buffer_size(n)), stdout.lock());
-
     for row in 0..best_rows {
         for (col, &col_width) in best_col_widths.iter().enumerate() {
             let idx = col * best_rows + row;
@@ -301,7 +319,7 @@ pub fn print_columns(
         out.write_all(b"\n")?;
     }
 
-    out.flush()
+    Ok(())
 }
 
 /// Print files in long listing format (like `ls -l`).
@@ -324,6 +342,33 @@ pub fn print_long_listing(
     show_inode: bool,
     human_readable: bool,
     show_git: bool,
+) -> io::Result<()> {
+    let stdout = io::stdout();
+    let capacity = calculate_output_buffer_size(items, arena, true);
+    let mut out = BufWriter::with_capacity(capacity, stdout.lock());
+    match render_long_listing_to(
+        items,
+        arena,
+        use_color,
+        show_inode,
+        human_readable,
+        show_git,
+        &mut out,
+    ) {
+        Ok(()) => out.flush(),
+        Err(err) => Err(err),
+    }
+}
+
+/// Render long-listing output to a caller-provided writer without buffering.
+pub fn render_long_listing_to<W: Write + ?Sized>(
+    items: &[FileInfo],
+    arena: &[u8],
+    use_color: bool,
+    show_inode: bool,
+    human_readable: bool,
+    show_git: bool,
+    mut out: &mut W,
 ) -> io::Result<()> {
     if items.iter().any(|item| item.metadata.is_none()) {
         return Err(io::Error::new(
@@ -367,9 +412,6 @@ pub fn print_long_listing(
         }
     }
 
-    let stdout = io::stdout();
-    let buf_size = calculate_output_buffer_size(items, arena, true);
-    let mut out = BufWriter::with_capacity(buf_size, stdout.lock());
     writeln!(out, "total {}", total_blocks)?;
 
     for item in items {
@@ -451,7 +493,7 @@ pub fn print_long_listing(
             out.write_all(b"\n")?;
         }
     }
-    out.flush()
+    Ok(())
 }
 
 /// Print files one per line (like `ls -1`).
@@ -472,11 +514,23 @@ pub fn print_one_per_line(
     show_inode: bool,
 ) -> io::Result<()> {
     let stdout = io::stdout();
-    let entries_len = items.len();
-    let buf_size =
-        calculate_output_buffer_size(items, arena, false).max(determine_buffer_size(entries_len));
-    let mut out = BufWriter::with_capacity(buf_size, stdout.lock());
+    let capacity =
+        calculate_output_buffer_size(items, arena, false).max(determine_buffer_size(items.len()));
+    let mut out = BufWriter::with_capacity(capacity, stdout.lock());
+    match render_one_per_line_to(items, arena, use_color, show_inode, &mut out) {
+        Ok(()) => out.flush(),
+        Err(err) => Err(err),
+    }
+}
 
+/// Render one-entry-per-line output to a caller-provided writer without buffering.
+pub fn render_one_per_line_to<W: Write + ?Sized>(
+    items: &[FileInfo],
+    arena: &[u8],
+    use_color: bool,
+    show_inode: bool,
+    mut out: &mut W,
+) -> io::Result<()> {
     for item in items {
         let entry = item.entry;
         let name_bytes = entry_name(item, arena)?;
@@ -515,5 +569,5 @@ pub fn print_one_per_line(
         }
         out.write_all(b"\n")?;
     }
-    out.flush()
+    Ok(())
 }

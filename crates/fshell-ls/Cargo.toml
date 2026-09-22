@@ -18,3 +18,11 @@ parking_lot = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "ls_performance"
+harness = false

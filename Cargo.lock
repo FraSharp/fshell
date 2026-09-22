@@ -1223,11 +1223,13 @@ dependencies = [
 name = "fshell-ls"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "fshell-git",
  "fshell-hash",
  "libc",
  "parking_lot",
  "rayon",
+ "tempfile",
  "terminal_size",
  "unicode-width 0.2.2",
 ]

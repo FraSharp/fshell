@@ -4,7 +4,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::panic))]
 #![cfg(unix)]
 
-use std::io;
+use std::io::{self, BufWriter, Write};
 
 pub mod args;
 pub mod colors;
@@ -37,29 +37,87 @@ where
         return tree::print_tree_with_result(config, result, check_read_dir);
     }
 
-    let ListResult { entries, arena, .. } = result;
+    let capacity = if config.long_listing {
+        crate::utils::calculate_output_buffer_size(&result.entries, &result.arena, true)
+    } else {
+        crate::utils::calculate_output_buffer_size(&result.entries, &result.arena, false)
+            .max(crate::utils::determine_buffer_size(result.entries.len()))
+    };
+    let stdout = io::stdout();
+    let mut out = BufWriter::with_capacity(capacity, stdout.lock());
+    let rendered = render_to_with_width(
+        result,
+        config,
+        &mut out,
+        render::get_terminal_width(),
+        check_read_dir,
+    );
+    match rendered {
+        Ok(()) => out.flush(),
+        Err(err) => Err(err),
+    }
+}
 
-    if config.long_listing {
-        render::print_long_listing(
+/// Render a listing to the supplied writer without adding output buffering.
+pub fn render_to<W, F>(
+    result: &ListResult,
+    config: &Config,
+    out: &mut W,
+    check_read_dir: F,
+) -> io::Result<()>
+where
+    W: Write + ?Sized,
+    F: Fn(&std::path::Path) -> bool,
+{
+    render_to_with_width(
+        result,
+        config,
+        out,
+        render::get_terminal_width(),
+        check_read_dir,
+    )
+}
+
+/// Render with an explicit terminal width, allowing deterministic layout in
+/// non-terminal consumers and benchmarks.
+pub fn render_to_with_width<W, F>(
+    result: &ListResult,
+    config: &Config,
+    out: &mut W,
+    term_width: usize,
+    check_read_dir: F,
+) -> io::Result<()>
+where
+    W: Write + ?Sized,
+    F: Fn(&std::path::Path) -> bool,
+{
+    let entries = &result.entries;
+    let arena = &result.arena;
+
+    if config.tree {
+        tree::render_tree_with_result(config, result, out, check_read_dir)
+    } else if config.long_listing {
+        render::render_long_listing_to(
             entries,
             arena,
             config.use_color,
             config.show_inode,
             config.human_readable,
             config.git,
+            out,
         )
     } else if config.one_per_line {
-        render::print_one_per_line(entries, arena, config.use_color, config.show_inode)
+        render::render_one_per_line_to(entries, arena, config.use_color, config.show_inode, out)
     } else {
-        let term_width = render::get_terminal_width();
         let use_icons = config.show_icons && entries.len() <= 500;
-        render::print_columns(
+        render::render_columns_to(
             entries,
             arena,
             term_width,
             config.use_color,
             config.show_inode,
             use_icons,
+            out,
         )
     }
 }
