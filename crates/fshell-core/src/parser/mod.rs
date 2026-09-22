@@ -1137,6 +1137,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_dash_option_value_as_literal_argument() {
+        // A conventional `-` option value must not be parsed as subtraction
+        // from the preceding long option.
+        let mut p = Parser::new("codesign --force --sign - ~/dev/app.dylib");
+        let stmts = p.parse_statements().unwrap();
+        let Stmt::Expr(expr) = stmts[0].unpack() else {
+            panic!("Expected Stmt::Expr");
+        };
+        let Expr::Pipeline(pipeline) = expr.unpack() else {
+            panic!("Expected Expr::Pipeline");
+        };
+        let PipelineStage::CommandCall { name, args, .. } = &pipeline.stages[0] else {
+            panic!("Expected CommandCall stage");
+        };
+        assert_eq!(name, "codesign");
+        assert_eq!(args.len(), 4);
+        assert!(
+            args.iter()
+                .all(|arg| matches!(arg.unpack(), Expr::String(_)))
+        );
+        assert_eq!(
+            args[2].unpack(),
+            &Expr::String(vec![StringPart::Lit("-".into())])
+        );
+    }
+
+    #[test]
     fn test_parse_absolute_path_command() {
         let mut p = Parser::new("/bin/ls");
         let stmts = p.parse_statements().unwrap();

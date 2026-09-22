@@ -936,6 +936,13 @@ impl Parser {
         if p == self.pos || p >= self.input.len() || !self.input[p].is_whitespace() {
             return false;
         }
+        // A spaced `-` following an option token is an ordinary command
+        // argument, not subtraction.  This is common for commands whose
+        // option value is the conventional stdin/stdout marker, e.g.
+        // `codesign --sign - path`.
+        if self.input[self.pos..p].starts_with(&['-']) {
+            return false;
+        }
         while p < self.input.len() && self.input[p].is_whitespace() {
             p += 1;
         }
