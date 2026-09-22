@@ -349,7 +349,7 @@ contains no dependencies on other workspace crates. defines the AST grammar (`Ex
 maintains capability tokens, tracks permission grants, and verifies file path prefixes and socket rules before operations run.
 
 ### fshell-hash
-provides sponge-based hashing algorithms, SHA-2/SHA-3/BLAKE3 primitives, and exports `FxBuildHasher` used throughout the workspace for fast non-cryptographic hash tables.
+provides the custom fhash sponge digest, XOF, KDF, and MAC APIs, plus a deterministic non-cryptographic hasher. The workspace's historical `Fx*` map aliases use Rust's randomly seeded `RandomState` to reduce hash-flooding risk; callers can still select the deterministic hasher explicitly for trusted keys.
 
 ### fshell-engine
 the runtime engine. implements `eval_stmt`/`eval_expr` returning `Result<Flow, ShellError>` where `Flow { Normal, ConditionFalse, Break, Continue, Return(Val), Exit(i32) }` separates control flow from errors, pipeline orchestration via `PipelineFailure { ConditionFalse, Hard(FshDiag) }`, reactive watch cells, session handoffs, AST caching, and execution profiling.

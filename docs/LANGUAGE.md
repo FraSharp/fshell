@@ -739,10 +739,13 @@ service_graph | traverse "depends_on"
 ```
 
 #### `hash`
-computes cryptographic hashes on incoming data using `fshell-hash`:
+computes fhash digests using the custom `fshell-hash` sponge family. Byte
+payloads are hashed as-is; structured values use JSON serialization. Pass a
+file path to the `hash` builtin to hash exact file bytes. Shell XOF output is
+limited to 1 MiB:
 ```fsh
-cat archive.tar | hash -a 256
-cat records.json | hash --per-record -a 512
+hash archive.tar
+$records | hash --per-record -a 512
 ```
 
 ### redirections, heredocs, and here-strings

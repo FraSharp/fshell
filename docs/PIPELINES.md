@@ -235,17 +235,18 @@ dependency_graph | traverse "depends_on"
 
 ### `hash`
 
-computes cryptographic or sponge hashes over the stream via `fshell-hash`.
+hashes incoming raw byte payloads directly and structured values as their JSON
+serialization via the custom fhash family. Blob values are hashed as their raw
+bytes. For an exact digest of a file, pass the file path to the `hash` builtin;
+record-oriented `cat` output is not the original file byte stream. Shell XOF
+output is limited to 1 MiB.
 
 ```fsh
-# whole-stream hash (default 256-bit)
-cat archive.tar | hash
-
-# 512-bit algorithm
-cat archive.tar | hash -a 512
+# exact file-byte hash
+hash archive.tar
 
 # per-record hashing (appends `_hash` field to each incoming map)
-cat records.json | hash --per-record -a 256
+$records | hash --per-record -a 256
 ```
 
 ---

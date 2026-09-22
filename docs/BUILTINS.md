@@ -321,8 +321,9 @@ a leading flag (`sort -n`) makes the stage an external command instead (see
 
 ### `hash` / `cksum`
 
-computes sponge hashes over files or stream records (`-a 256|512`, `-o <len>`,
-`--per-record`); `cksum` is an alias.
+computes fhash digests over files or stream records (`-a 256|512|xof`,
+`-o <len>`, `--per-record`); `cksum` is an alias. File arguments are read as
+raw bytes. XOF output is limited to 1 MiB by shell commands.
 
 ### `read [<variable>]`
 
