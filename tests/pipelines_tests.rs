@@ -584,6 +584,39 @@ async fn test_stderr_merges_into_stdout_with_2_to_1() {
 }
 
 #[tokio::test]
+async fn test_external_find_exec_preserves_posix_placeholders() {
+    let ctx = TestContext::new();
+    let root = ctx.temp_path().join("find-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("marker.txt"), b"marker").unwrap();
+    let root = root.to_string_lossy();
+
+    let plus = format!(r#"find "{root}" -maxdepth 1 -type f -exec true {{}} +"#);
+    assert!(ctx.eval(&plus).await.is_ok(), "find -exec ... + failed");
+
+    let semicolon = format!(r#"find "{root}" -maxdepth 1 -type f -exec true {{}} \;"#);
+    assert!(
+        ctx.eval(&semicolon).await.is_ok(),
+        "find -exec ... \\; failed"
+    );
+}
+
+#[tokio::test]
+async fn test_run_script_keeps_native_builtin_authority_over_posix_fallback() {
+    let ctx = TestContext::new();
+    ctx.env
+        .register_async_builtin("find", |_, _, env, _, _| async move {
+            env.set_shell_var("FSH_NATIVE_FIND", Val::Bool(true));
+            Ok(())
+        });
+
+    fshell_engine::run_script("find . -maxdepth 0 -exec true {} +", &ctx.env)
+        .await
+        .unwrap();
+    assert_eq!(ctx.get_var("FSH_NATIVE_FIND"), Some(Val::Bool(true)));
+}
+
+#[tokio::test]
 async fn test_write_then_2_to_1_merges_stderr_into_file() {
     // `cmd > file 2>&1` must put both stdout and stderr in the file.
     let ctx = TestContext::new();

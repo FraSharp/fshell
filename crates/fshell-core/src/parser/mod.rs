@@ -1829,6 +1829,36 @@ mod tests {
     }
 
     #[test]
+    fn test_find_exec_placeholder_is_literal_command_argument() {
+        let stmts = Parser::new("find . -maxdepth 0 -exec true {} +")
+            .parse_statements()
+            .unwrap();
+        let Stmt::Expr(expr) = stmts[0].unpack() else {
+            panic!("Expected command expression");
+        };
+        let Expr::Pipeline(pipeline) = expr.unpack() else {
+            panic!("Expected pipeline expression");
+        };
+        let PipelineStage::CommandCall { args, .. } = &pipeline.stages[0] else {
+            panic!("Expected external command call");
+        };
+        assert!(args.iter().any(|arg| {
+            matches!(
+                arg.unpack(),
+                Expr::String(parts)
+                    if parts == &vec![StringPart::Lit("{}".to_string())]
+            )
+        }));
+        assert!(args.iter().any(|arg| {
+            matches!(
+                arg.unpack(),
+                Expr::String(parts)
+                    if parts == &vec![StringPart::Lit("+".to_string())]
+            )
+        }));
+    }
+
+    #[test]
     fn test_process_substitution() {
         let stmts = Parser::new("diff <(sort a) <(sort b)")
             .parse_statements()
@@ -2523,6 +2553,7 @@ mod tests {
         assert_echo_args("13.32.09.png", &["13.32.09.png"]);
         assert_echo_args("foo.bar", &["foo.bar"]);
         assert_echo_args(r"foo\ bar", &["foo bar"]);
+        assert_echo_args(r"\;", &[";"]);
     }
 
     #[test]

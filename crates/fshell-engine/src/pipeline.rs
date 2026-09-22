@@ -3167,19 +3167,6 @@ pub async fn run_script(input: &str, env: &Env) -> Result<Flow, EngineError> {
 }
 
 async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
-    // Early POSIX delegation for `find ... -exec ... {} +` which parses as fsh
-    // but fails at execution (type mismatch). Route via bash where it is valid.
-    if crate::login::looks_like_posix(input)
-        && let Some(handler) = crate::posix_handler()
-    {
-        // Only delegate if fsh would mis-handle it (find -exec) or if fsh parse would fail.
-        // We try POSIX first for find -exec, otherwise fall through to fsh.
-        if input.contains(" -exec ") {
-            let (code, _) = handler(input.to_string(), Vec::new(), env.clone(), false).await?;
-            env.set_exit_code(code as i64);
-            return Ok(Flow::Normal);
-        }
-    }
     let mut parser = Parser::new(input);
     let stmts = match parser.parse_statements() {
         Ok(s) => s,

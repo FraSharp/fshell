@@ -766,6 +766,19 @@ impl Parser {
                             }
                         }
                         Some(escaped) if escaped.is_whitespace() => literal.push(escaped),
+                        // Shell syntax characters lose their quoting
+                        // backslash before reaching argv. Keep the narrow
+                        // unknown-escape preservation below for regexes such
+                        // as `\\.rs$`, but do not pass `\\;` to utilities such
+                        // as `find`, which require a literal `;` terminator.
+                        Some(escaped)
+                            if matches!(
+                                escaped,
+                                '|' | ';' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | '[' | ']'
+                            ) =>
+                        {
+                            literal.push(escaped);
+                        }
                         Some(escaped) => {
                             // Keep unknown escapes intact for regexes and other
                             // command arguments; escaped whitespace is the one
@@ -859,6 +872,16 @@ impl Parser {
                     literal.push_str(&raw);
                 }
                 '{' if parts.is_empty() && literal.is_empty() && !self.is_brace_expansion() => {
+                    // `{}` is the standard opaque placeholder used by
+                    // `find -exec`. It is an external-command argument, not
+                    // an empty structured map; preserve the token exactly so
+                    // native external execution has POSIX-compatible argv.
+                    if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '}' {
+                        self.next_char();
+                        self.next_char();
+                        literal.push_str("{}");
+                        continue;
+                    }
                     // Preserve fshell map literals as structured command arguments.
                     let saved_arg = self.cmd_arg_mode;
                     self.cmd_arg_mode = false;

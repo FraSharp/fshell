@@ -1366,57 +1366,6 @@ async fn handle_line_generic_inner(
         }
     };
 
-    // Early POSIX delegation for `find ... -exec ... {} +` - fsh parses it but
-    // pipeline execution fails (type mismatch). Route directly to bash.
-    if fshell_engine::login::looks_like_posix(line_trimmed)
-        && line_trimmed.contains(" -exec ")
-        && let Some(handler) = fshell_engine::posix_handler()
-    {
-        match handler(line_trimmed.to_string(), Vec::new(), env.clone(), false).await {
-            Ok((code, _)) => {
-                env.set_exit_code(code as i64);
-                exit_code = Some(code as i64);
-                let duration_ms = start_time.elapsed().as_millis() as i64;
-                if let Some(row_id) = history_row_id {
-                    let _ = update_history_entry(row_id, duration_ms, exit_code.unwrap_or(0));
-                }
-                {
-                    let mut dur = env.prompt.last_duration.write();
-                    *dur = start_time.elapsed();
-                }
-                return Ok(());
-            }
-            Err(pe) => {
-                env.set_last_error_with_source(
-                    FshDiag::new(pe.clone()),
-                    line_trimmed.to_string(),
-                    "repl".to_string(),
-                );
-                let err_str = {
-                    let opts = env.options.read();
-                    let config = fshell_render::RenderConfig {
-                        format: opts.error_format,
-                        color: opts.error_color,
-                        is_interactive: true,
-                    };
-                    render_error(pe, line_trimmed, "repl", &config)
-                };
-                eprintln!("{}", err_str);
-                exit_code = Some(1);
-                let duration_ms = start_time.elapsed().as_millis() as i64;
-                if let Some(row_id) = history_row_id {
-                    let _ = update_history_entry(row_id, duration_ms, exit_code.unwrap_or(1));
-                }
-                {
-                    let mut dur = env.prompt.last_duration.write();
-                    *dur = start_time.elapsed();
-                }
-                env.set_exit_code(exit_code.unwrap_or(1));
-                return Ok(());
-            }
-        }
-    }
-
     let mut parser = Parser::new(line_trimmed);
     match parser.parse_statements() {
         Ok(stmts) => {
