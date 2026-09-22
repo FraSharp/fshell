@@ -24,6 +24,17 @@ pub fn eval_arithmetic_expr(expr: &str, env: &Env) -> Result<i64, String> {
     Ok(result)
 }
 
+pub(crate) fn to_engine_error(error: String) -> fshell_engine::EngineError {
+    if error.contains("Division by zero") || error.contains("Modulo by zero") {
+        fshell_engine::EngineError::DivisionByZero { span: None }
+    } else {
+        fshell_engine::EngineError::Generic {
+            message: format!("arithmetic error: {error}"),
+            span: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Number(i64),

@@ -268,7 +268,7 @@ fn expand_word_internal(
                             expanded.push_str(&out);
                         }
                         WordPiece::ArithmeticExpression(expr) => {
-                            let out = eval_arithmetic(&expr.value, env);
+                            let out = eval_arithmetic(&expr.value, env)?;
                             expanded.push_str(&out);
                         }
                         WordPiece::EscapeSequence(s) => expanded.push_str(s),
@@ -297,7 +297,7 @@ fn expand_word_internal(
                 expanded.push_str(&out);
             }
             WordPiece::ArithmeticExpression(expr) => {
-                let out = eval_arithmetic(&expr.value, env);
+                let out = eval_arithmetic(&expr.value, env)?;
                 expanded.push_str(&out);
             }
             WordPiece::AnsiCQuotedText(t) => {
@@ -784,14 +784,13 @@ fn run_command_subst(
     Ok(output)
 }
 
-fn eval_arithmetic(expr: &str, env: &fshell_engine::Env) -> String {
-    match crate::arithmetic::eval_arithmetic_expr(expr, env) {
-        Ok(n) => n.to_string(),
-        Err(e) => {
-            eprintln!("fsh: arithmetic error: {e}");
-            "0".to_string()
-        }
-    }
+fn eval_arithmetic(
+    expr: &str,
+    env: &fshell_engine::Env,
+) -> Result<String, fshell_engine::EngineError> {
+    crate::arithmetic::eval_arithmetic_expr(expr, env)
+        .map(|value| value.to_string())
+        .map_err(crate::arithmetic::to_engine_error)
 }
 
 fn unescape_ansi_c(s: &str) -> String {

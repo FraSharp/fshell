@@ -981,7 +981,7 @@ async fn eval_compound_command_stream(
         }
         CompoundCommand::Arithmetic(arith) => {
             let expr = arith.expr.value.clone();
-            let code = eval_arithmetic_command(&expr, env);
+            let code = eval_arithmetic_command(&expr, env)?;
             Ok((if code != 0 { 0 } else { 1 }, None))
         }
         CompoundCommand::ArithmeticForClause(_arith_for) => Ok((0, None)),
@@ -1008,8 +1008,10 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     }
 }
 
-fn eval_arithmetic_command(expr: &str, env: &Env) -> i64 {
-    crate::arithmetic::eval_arithmetic_expr(expr, env).unwrap_or(0)
+fn eval_arithmetic_command(expr: &str, env: &Env) -> Result<i64, PosixError> {
+    crate::arithmetic::eval_arithmetic_expr(expr, env)
+        .map_err(crate::arithmetic::to_engine_error)
+        .map_err(PosixError::Engine)
 }
 
 #[async_recursion]

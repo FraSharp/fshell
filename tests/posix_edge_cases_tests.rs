@@ -253,6 +253,34 @@ async fn test_posix_arithmetic_division_by_zero_does_not_panic() {
     assert!(res.is_err(), "Modulo by zero should return error Result");
 }
 
+#[tokio::test]
+async fn test_posix_arithmetic_expansion_errors_stop_script() {
+    let env = setup_posix_env();
+    let parsed = parse_posix_script(r#"printf '%s\n' "$((10 / 0))"; AFTER=ran"#)
+        .expect("failed to parse arithmetic-expansion script");
+    let result = eval_source(&parsed, &env, &EvalConfig::default()).await;
+
+    assert!(matches!(
+        result,
+        Err(fshell_engine::EngineError::DivisionByZero { .. })
+    ));
+    assert!(!env.vars.read().contains_key("AFTER"));
+}
+
+#[tokio::test]
+async fn test_posix_arithmetic_command_errors_stop_script() {
+    let env = setup_posix_env();
+    let parsed = parse_posix_script(r#"((10 / 0)); AFTER=ran"#)
+        .expect("failed to parse arithmetic-command script");
+    let result = eval_source(&parsed, &env, &EvalConfig::default()).await;
+
+    assert!(matches!(
+        result,
+        Err(fshell_engine::EngineError::DivisionByZero { .. })
+    ));
+    assert!(!env.vars.read().contains_key("AFTER"));
+}
+
 // ---------------------------------------------------------------------------
 // 3. POSIX IFS Field Splitting
 // ---------------------------------------------------------------------------
