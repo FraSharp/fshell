@@ -155,7 +155,18 @@ pub fn format_pipeline(pipeline: &fshell_core::Pipeline) -> String {
             }
         }
     }
-    parts.join(" | ")
+    let mut rendered = String::new();
+    for (index, part) in parts.into_iter().enumerate() {
+        if index > 0 {
+            if pipeline.boundaries.contains(&index) {
+                rendered.push_str(" | ");
+            } else {
+                rendered.push(' ');
+            }
+        }
+        rendered.push_str(&part);
+    }
+    rendered
 }
 
 pub fn format_expr(expr: &Expr) -> String {

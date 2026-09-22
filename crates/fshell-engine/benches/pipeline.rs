@@ -58,6 +58,7 @@ fn pipeline_filter(c: &mut Criterion) {
                 },
             },
         ],
+        boundaries: vec![1],
     };
 
     c.bench_function("pipeline/filter_10k", |b| {
@@ -96,6 +97,7 @@ fn pipeline_sort(c: &mut Criterion) {
                 descending: false,
             },
         ],
+        boundaries: vec![1],
     };
 
     c.bench_function("pipeline/sort_10k", |b| {
@@ -133,6 +135,7 @@ fn pipeline_map(c: &mut Criterion) {
                 projections: vec![Expr::Ident("name".to_string())],
             },
         ],
+        boundaries: vec![1],
     };
 
     c.bench_function("pipeline/map_10k", |b| {
@@ -182,6 +185,7 @@ fn pipeline_multi_stage(c: &mut Criterion) {
             },
             PipelineStage::Count,
         ],
+        boundaries: vec![1, 2],
     };
 
     c.bench_function("pipeline/multi_stage_10k", |b| {
@@ -219,6 +223,7 @@ fn pipeline_grep_10k(c: &mut Criterion) {
                 pattern: Expr::String(vec![StringPart::Lit("item_5".to_string())]),
             },
         ],
+        boundaries: vec![1],
     };
     c.bench_function("pipeline/grep_10k", |b| {
         b.to_async(&runtime).iter(|| {
@@ -253,6 +258,7 @@ fn pipeline_count_10k(c: &mut Criterion) {
             },
             PipelineStage::Count,
         ],
+        boundaries: vec![1],
     };
     c.bench_function("pipeline/count_10k", |b| {
         b.to_async(&runtime).iter(|| {
@@ -289,6 +295,7 @@ fn pipeline_limit_10k_100(c: &mut Criterion) {
                 amount: Expr::Int(100),
             },
         ],
+        boundaries: vec![1],
     };
     c.bench_function("pipeline/limit_10k_100", |b| {
         b.to_async(&runtime).iter(|| {
@@ -326,6 +333,7 @@ fn pipeline_sort_desc_10k(c: &mut Criterion) {
                 descending: true,
             },
         ],
+        boundaries: vec![1],
     };
     c.bench_function("pipeline/sort_desc_10k", |b| {
         b.to_async(&runtime).iter(|| {
@@ -366,6 +374,7 @@ fn pipeline_filter_string_10k(c: &mut Criterion) {
                 },
             },
         ],
+        boundaries: vec![1],
     };
     c.bench_function("pipeline/filter_string_10k", |b| {
         b.to_async(&runtime).iter(|| {
@@ -420,6 +429,7 @@ fn pipeline_multi_stage_all_10k(c: &mut Criterion) {
             },
             PipelineStage::Count,
         ],
+        boundaries: vec![1, 2],
     };
     c.bench_function("pipeline/multi_stage_all_10k", |b| {
         b.to_async(&runtime).iter(|| {

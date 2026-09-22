@@ -1201,6 +1201,7 @@ mod tests {
         let env = Env::new();
         let pipeline = Pipeline {
             stages: vec![PipelineStage::Count],
+            boundaries: Vec::new(),
         };
         let expr = Expr::Pipeline(pipeline);
         let res = eval_expr(&expr, &env).await.unwrap();
@@ -1222,6 +1223,7 @@ mod tests {
                 env: vec![],
                 span: SourceSpan::new(0.into(), 0),
             }],
+            boundaries: Vec::new(),
         };
         let expr = Expr::Pipeline(pipeline);
         let res = eval_expr(&expr, &env).await.unwrap();
@@ -1431,6 +1433,7 @@ mod tests {
                     env: vec![],
                     span: SourceSpan::new(0.into(), 0),
                 }],
+                boundaries: Vec::new(),
             },
         };
         let err = eval_stmt(&stmt, &env, false).await.unwrap_err();
@@ -1448,6 +1451,7 @@ mod tests {
             name: "live".into(),
             pipeline: Pipeline {
                 stages: vec![PipelineStage::Count],
+                boundaries: Vec::new(),
             },
         };
         let res = eval_stmt(&stmt, &env, false).await;
@@ -1473,6 +1477,7 @@ mod tests {
                         env: vec![],
                         span: SourceSpan::new(0.into(), 0),
                     }],
+                    boundaries: Vec::new(),
                 },
             }],
         };
@@ -1646,6 +1651,7 @@ mod tests {
                             env: vec![],
                             span: SourceSpan::new(0.into(), 0),
                         }],
+                        boundaries: Vec::new(),
                     },
                 }],
                 catch_var: "e".into(),

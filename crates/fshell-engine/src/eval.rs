@@ -209,9 +209,7 @@ fn setopt_stmt(cmd_name: &str, args: Vec<String>) -> Stmt {
         env: Vec::new(),
         span: SourceSpan::new(0.into(), 0),
     };
-    let pipeline = Pipeline {
-        stages: vec![stage],
-    };
+    let pipeline = Pipeline::new(vec![stage]);
     Stmt::Expr(Expr::Pipeline(pipeline))
 }
 
@@ -1046,7 +1044,7 @@ pub fn eval_expr<'a>(
                         )]),
                     });
                     stages.extend(pipeline.stages.iter().cloned());
-                    let consumer = fshell_core::Pipeline { stages };
+                    let consumer = fshell_core::Pipeline::new(stages);
 
                     let env_clone = env.clone();
                     tokio::task::spawn(async move {

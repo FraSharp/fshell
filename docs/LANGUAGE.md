@@ -759,6 +759,12 @@ cat records.json | hash --per-record -a 512
 | `<<EOF ... EOF` | heredoc input stream |
 | `<<< "text"` | here-string input stream |
 
+Redirections are applied left-to-right within their pipeline segment. Thus
+`cmd > file 2>&1` sends stdout and stderr to `file`, while `cmd 2>&1 > file`
+sends stdout to `file` and leaves stderr on the original stdout route. A
+redirection before a pipe belongs to the segment on its left; a redirection
+after a pipe belongs to the segment on its right.
+
 ### boundary serialization operators
 
 when passing structured `Val` streams to external unix tools or formatting output for users, append a boundary serialization operator:

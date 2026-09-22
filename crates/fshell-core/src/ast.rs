@@ -99,7 +99,50 @@ pub enum BinOp {
 /// A pipeline of sequential steps.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pipeline {
+    /// Pipeline stages in source order.
+    ///
+    /// Redirections remain in this sequence so their order is available to the
+    /// executor. `boundaries` identifies the positions at which a `|` was
+    /// parsed; a boundary at `n` separates `stages[..n]` from
+    /// `stages[n..]`. Keeping this metadata alongside the flat stage list
+    /// preserves the public AST shape while retaining the distinction between
+    /// `cmd > file | next` and `cmd | > file next`.
     pub stages: Vec<PipelineStage>,
+    #[serde(default)]
+    pub boundaries: Vec<usize>,
+}
+
+impl Pipeline {
+    pub fn new(stages: Vec<PipelineStage>) -> Self {
+        let mut saw_operation = stages.first().is_some_and(|stage| {
+            !matches!(
+                stage,
+                PipelineStage::Write { .. }
+                    | PipelineStage::Read { .. }
+                    | PipelineStage::FdRedirect { .. }
+                    | PipelineStage::Heredoc { .. }
+                    | PipelineStage::HereString { .. }
+            )
+        });
+        let mut boundaries = Vec::new();
+        for (index, stage) in stages.iter().enumerate().skip(1) {
+            let is_redirect = matches!(
+                stage,
+                PipelineStage::Write { .. }
+                    | PipelineStage::Read { .. }
+                    | PipelineStage::FdRedirect { .. }
+                    | PipelineStage::Heredoc { .. }
+                    | PipelineStage::HereString { .. }
+            );
+            if !is_redirect {
+                if saw_operation {
+                    boundaries.push(index);
+                }
+                saw_operation = true;
+            }
+        }
+        Self { stages, boundaries }
+    }
 }
 
 /// Individual stage inside a pipeline.

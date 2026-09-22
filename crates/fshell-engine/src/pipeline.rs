@@ -348,6 +348,339 @@ pub fn execute_pipeline_owned(
     Box::pin(async move { execute_pipeline(&pipeline, &env, tx).await })
 }
 
+#[derive(Clone)]
+enum OutputRoute {
+    Data,
+    Diagnostic,
+    File(Arc<tokio::sync::Mutex<tokio::fs::File>>),
+    Closed,
+}
+
+#[derive(Clone)]
+struct OutputRoutes {
+    stdout: OutputRoute,
+    stderr: OutputRoute,
+}
+
+enum PlannedStage {
+    Ast { stage: PipelineStage, is_last: bool },
+    OutputRoute { routes: OutputRoutes, is_last: bool },
+}
+
+fn is_input_redirect(stage: &PipelineStage) -> bool {
+    matches!(
+        stage,
+        PipelineStage::Read { .. }
+            | PipelineStage::Heredoc { .. }
+            | PipelineStage::HereString { .. }
+    )
+}
+
+fn is_output_redirect(stage: &PipelineStage) -> bool {
+    matches!(
+        stage,
+        PipelineStage::Write { .. } | PipelineStage::FdRedirect { .. }
+    )
+}
+
+async fn open_output_redirect(
+    path: &fshell_core::Expr,
+    append: bool,
+    env: &Env,
+) -> Result<Arc<tokio::sync::Mutex<tokio::fs::File>>, String> {
+    let path_val = match eval_expr(path, env).await {
+        Ok(Val::String(s)) => s,
+        Ok(other) => {
+            return Err(format!(
+                "redirect target must be a string path, got {:?}",
+                other
+            ));
+        }
+        Err(e) => return Err(format!("redirect path evaluation error: {e}")),
+    };
+    let path_buf = env.resolve_path(&path_val);
+    env.enforce_capability("write_redirect", CapAction::WriteFile(path_buf.clone()))
+        .map_err(|e| e.to_string())?;
+
+    let noclobber = env.options.read().noclobber;
+    let is_dev_null = path_val == "/dev/null"
+        || path_val.ends_with('/') && path_val.trim_end_matches('/') == "/dev/null";
+    let mut options = OpenOptions::new();
+    options.write(true).create(true);
+    if append {
+        options.append(true);
+    } else if noclobber && !is_dev_null {
+        options.create_new(true);
+    } else {
+        options.truncate(true);
+    }
+    let file = options.open(&path_buf).await.map_err(|e| {
+        if noclobber && !append && !is_dev_null && path_buf.exists() {
+            format!("noclobber: file '{}' already exists", path_val)
+        } else {
+            format!("failed to open redirect target '{}': {e}", path_val)
+        }
+    })?;
+    Ok(Arc::new(tokio::sync::Mutex::new(file)))
+}
+
+async fn build_pipeline_plan(pipeline: &Pipeline, env: &Env) -> Result<Vec<PlannedStage>, String> {
+    let mut boundaries = pipeline.boundaries.clone();
+    if boundaries.is_empty() && pipeline.stages.len() > 1 {
+        boundaries = pipeline
+            .stages
+            .iter()
+            .enumerate()
+            .skip(1)
+            .scan(
+                pipeline
+                    .stages
+                    .first()
+                    .is_some_and(|stage| !is_input_redirect(stage) && !is_output_redirect(stage)),
+                |saw_operation, (index, stage)| {
+                    if !is_input_redirect(stage) && !is_output_redirect(stage) {
+                        let boundary = (*saw_operation).then_some(index);
+                        *saw_operation = true;
+                        boundary
+                    } else {
+                        None
+                    }
+                },
+            )
+            .collect();
+    }
+    if boundaries
+        .iter()
+        .any(|&boundary| boundary > pipeline.stages.len())
+        || boundaries.windows(2).any(|window| window[0] >= window[1])
+    {
+        return Err("invalid pipeline boundary metadata".to_string());
+    }
+
+    let mut ranges = Vec::with_capacity(boundaries.len() + 1);
+    let mut start = 0;
+    for boundary in boundaries {
+        ranges.push((start, boundary));
+        start = boundary;
+    }
+    ranges.push((start, pipeline.stages.len()));
+
+    let mut planned = Vec::new();
+    for (segment_index, (start, end)) in ranges.iter().copied().enumerate() {
+        let segment = &pipeline.stages[start..end];
+        let inputs: Vec<_> = segment
+            .iter()
+            .filter(|stage| is_input_redirect(stage))
+            .cloned()
+            .collect();
+        let outputs: Vec<_> = segment
+            .iter()
+            .filter(|stage| is_output_redirect(stage))
+            .cloned()
+            .collect();
+        let operations: Vec<_> = segment
+            .iter()
+            .filter(|stage| !is_input_redirect(stage) && !is_output_redirect(stage))
+            .cloned()
+            .collect();
+
+        let mut operations = operations;
+        let mut inputs = inputs;
+        if operations.is_empty() && inputs.len() == 1 {
+            operations.push(inputs.pop().expect("checked above"));
+        }
+
+        if operations.is_empty() {
+            if inputs.is_empty() && outputs.is_empty() {
+                continue;
+            }
+            return Err("pipeline redirection has no command stage".to_string());
+        }
+        if operations.len() != 1 {
+            return Err("pipeline segment contains more than one command stage".to_string());
+        }
+
+        let is_last_segment = segment_index + 1 == ranges.len();
+        for input in inputs {
+            planned.push(PlannedStage::Ast {
+                stage: input,
+                is_last: false,
+            });
+        }
+
+        let mut routes = OutputRoutes {
+            stdout: OutputRoute::Data,
+            stderr: OutputRoute::Diagnostic,
+        };
+        let has_output_route = !outputs.is_empty();
+        for redirect in outputs {
+            match redirect {
+                PipelineStage::Write {
+                    path,
+                    append,
+                    redirect_stdout,
+                    redirect_stderr,
+                } => {
+                    let file = open_output_redirect(&path, append, env).await?;
+                    if redirect_stdout {
+                        routes.stdout = OutputRoute::File(file.clone());
+                    }
+                    if redirect_stderr {
+                        routes.stderr = OutputRoute::File(file);
+                    }
+                }
+                PipelineStage::FdRedirect { src_fd, dst_fd } => {
+                    if dst_fd == -1 {
+                        match src_fd {
+                            1 => routes.stdout = OutputRoute::Closed,
+                            2 => routes.stderr = OutputRoute::Closed,
+                            _ => {}
+                        }
+                    } else if matches!(dst_fd, 1 | 2) {
+                        let destination = match dst_fd {
+                            1 => routes.stdout.clone(),
+                            2 => routes.stderr.clone(),
+                            _ => unreachable!(),
+                        };
+                        match src_fd {
+                            1 => routes.stdout = destination,
+                            2 => routes.stderr = destination,
+                            _ => {}
+                        }
+                    }
+                }
+                _ => unreachable!("non-output redirect in output plan"),
+            }
+        }
+
+        planned.push(PlannedStage::Ast {
+            stage: operations.into_iter().next().expect("checked above"),
+            is_last: is_last_segment && !has_output_route,
+        });
+        if has_output_route {
+            planned.push(PlannedStage::OutputRoute {
+                routes,
+                is_last: is_last_segment,
+            });
+        }
+    }
+    Ok(planned)
+}
+
+async fn write_redirect_file(
+    file: &Arc<tokio::sync::Mutex<tokio::fs::File>>,
+    payload: &PipelinePayload,
+) -> Result<(), String> {
+    let mut file = file.lock().await;
+    match payload {
+        PipelinePayload::Data(value) => {
+            if let Val::Blob(bytes) = &**value {
+                file.write_all(bytes)
+                    .await
+                    .map_err(|e| format!("redirect write error: {e}"))?;
+                return Ok(());
+            }
+            let mut text = value.to_text();
+            let mut no_newline = false;
+            if let Val::String(value) = &**value
+                && value.ends_with('\0')
+            {
+                text = value[..value.len() - 1].to_string();
+                no_newline = true;
+            }
+            file.write_all(text.as_bytes())
+                .await
+                .map_err(|e| format!("redirect write error: {e}"))?;
+            if !no_newline && !text.ends_with('\n') {
+                file.write_all(b"\n")
+                    .await
+                    .map_err(|e| format!("redirect write error: {e}"))?;
+            }
+        }
+        PipelinePayload::Bytes(bytes) => file
+            .write_all(bytes)
+            .await
+            .map_err(|e| format!("redirect write error: {e}"))?,
+        PipelinePayload::Structured(diagnostic) => {
+            file.write_all(diagnostic.to_string().as_bytes())
+                .await
+                .map_err(|e| format!("redirect write error: {e}"))?;
+            file.write_all(b"\n")
+                .await
+                .map_err(|e| format!("redirect write error: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+async fn route_payload(
+    payload: PipelinePayload,
+    route: &OutputRoute,
+    out_tx: &PipeSender,
+) -> Result<(), String> {
+    match route {
+        OutputRoute::Data => {
+            let payload = match payload {
+                PipelinePayload::Structured(diagnostic) => {
+                    PipelinePayload::Data(Arc::new(Val::String(diagnostic.to_string())))
+                }
+                other => other,
+            };
+            out_tx
+                .send(payload)
+                .await
+                .map_err(|_| "pipeline output channel closed".to_string())?;
+        }
+        OutputRoute::Diagnostic => {
+            let payload = match payload {
+                PipelinePayload::Data(value) => PipelinePayload::Structured(value.to_text().into()),
+                PipelinePayload::Bytes(bytes) => {
+                    PipelinePayload::Structured(String::from_utf8_lossy(&bytes).into_owned().into())
+                }
+                other => other,
+            };
+            out_tx
+                .send(payload)
+                .await
+                .map_err(|_| "pipeline output channel closed".to_string())?;
+        }
+        OutputRoute::File(file) => write_redirect_file(file, &payload).await?,
+        OutputRoute::Closed => {}
+    }
+    Ok(())
+}
+
+async fn execute_output_route(
+    routes: OutputRoutes,
+    mut current_rx: Option<PipeStream>,
+    out_tx: PipeSender,
+    env: Env,
+) {
+    let Some(mut rx) = current_rx.take() else {
+        return;
+    };
+    while let Some(payload) = rx.recv().await {
+        if env.pipeline_cancelled() {
+            break;
+        }
+        let route = match payload {
+            PipelinePayload::Structured(_) => &routes.stderr,
+            _ => &routes.stdout,
+        };
+        if let Err(error) = route_payload(payload, route, &out_tx).await {
+            env.report_stage_error();
+            let _ = out_tx.send(PipelinePayload::Structured(error.into())).await;
+            break;
+        }
+    }
+    for route in [&routes.stdout, &routes.stderr] {
+        if let OutputRoute::File(file) = route {
+            let mut file = file.lock().await;
+            let _ = file.flush().await;
+        }
+    }
+}
+
 async fn join_stage_tasks(stage_tasks: Vec<tokio::task::JoinHandle<()>>) -> Result<(), String> {
     for task in stage_tasks {
         task.await
@@ -365,60 +698,7 @@ pub async fn execute_pipeline(
     if pipeline.stages.is_empty() {
         return Ok(());
     }
-
-    // Normalize input redirections: if a PipelineStage::Read/Heredoc/HereString occurs after a stage
-    // (from trailing `< file` / `<<EOF` / `<<< word` syntax, e.g. `cmd < file` or `grep pat < file`),
-    // place the input stage before the stage it feeds so the stream flows into it.
-    let mut stages = Vec::new();
-    let mut i = 0;
-    while i < pipeline.stages.len() {
-        if i + 1 < pipeline.stages.len()
-            && matches!(
-                pipeline.stages[i + 1],
-                PipelineStage::Read { .. }
-                    | PipelineStage::Heredoc { .. }
-                    | PipelineStage::HereString { .. }
-            )
-        {
-            stages.push(pipeline.stages[i + 1].clone());
-            stages.push(pipeline.stages[i].clone());
-            i += 2;
-        } else {
-            stages.push(pipeline.stages[i].clone());
-            i += 1;
-        }
-    }
-
-    // POSIX redirection ordering: `cmd > file 2>&1` duplicates stderr onto the
-    // already-redirected stdout, i.e. both go to the file. In the stage model
-    // that is a `Write` immediately followed by `FdRedirect { 2, 1 }`; merge the
-    // duplicate into the write.
-    let mut j = 0;
-    while j + 1 < stages.len() {
-        if matches!(
-            (&stages[j], &stages[j + 1]),
-            (
-                PipelineStage::Write {
-                    redirect_stdout: true,
-                    ..
-                },
-                PipelineStage::FdRedirect {
-                    src_fd: 2,
-                    dst_fd: 1
-                }
-            )
-        ) {
-            if let PipelineStage::Write {
-                redirect_stderr, ..
-            } = &mut stages[j]
-            {
-                *redirect_stderr = true;
-            }
-            stages.remove(j + 1);
-        } else {
-            j += 1;
-        }
-    }
+    let stages = build_pipeline_plan(pipeline, env).await?;
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let mut current_rx: Option<PipeStream> = None;
@@ -434,14 +714,26 @@ pub async fn execute_pipeline(
         }};
     }
 
-    for (idx, stage) in stages.iter().enumerate() {
+    for planned_stage in stages {
         if env.pipeline_cancelled() {
             break;
         }
         let (stage_tx, stage_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
         let mut env_clone = env.clone();
-        let stage_clone = stage.clone();
-        let is_last = idx == stages.len() - 1;
+        let (stage_clone, is_last) = match planned_stage {
+            PlannedStage::Ast { stage, is_last } => (Some(stage), is_last),
+            PlannedStage::OutputRoute { routes, is_last } => {
+                let out_tx = if is_last { tx.clone() } else { stage_tx };
+                let current_rx_for_route = current_rx.take();
+                let env_for_route = env_clone.clone();
+                spawn_stage!(async move {
+                    execute_output_route(routes, current_rx_for_route, out_tx, env_for_route).await;
+                });
+                current_rx = Some(stage_rx);
+                continue;
+            }
+        };
+        let stage_clone = stage_clone.expect("AST planned stage");
         env_clone.is_last_stage = is_last;
         let out_tx = if is_last { tx.clone() } else { stage_tx };
 

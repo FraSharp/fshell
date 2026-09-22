@@ -1579,21 +1579,49 @@ pub fn format_pipeline(p: &fshell_core::Pipeline) -> String {
                 };
                 f.to_string()
             }
-            fshell_core::PipelineStage::Write { path, append, .. } => {
-                let sign = if *append { ">>" } else { ">" };
+            fshell_core::PipelineStage::Write {
+                path,
+                append,
+                redirect_stdout,
+                redirect_stderr,
+            } => {
+                let sign = match (redirect_stdout, redirect_stderr, append) {
+                    (true, true, true) => "&>>",
+                    (true, true, false) => "&>",
+                    (true, false, true) => ">>",
+                    (true, false, false) => ">",
+                    (false, true, true) => "2>>",
+                    (false, true, false) => "2>",
+                    (false, false, _) => ">",
+                };
                 format!("{sign} {}", format_expr(path))
             }
             fshell_core::PipelineStage::Read { path } => {
                 format!("< {}", format_expr(path))
             }
             fshell_core::PipelineStage::FdRedirect { src_fd, dst_fd } => {
-                format!("{src_fd}>&{dst_fd}")
+                if *dst_fd < 0 {
+                    format!("{src_fd}>&-")
+                } else {
+                    format!("{src_fd}>&{dst_fd}")
+                }
             }
             _ => "[unsupported stage]".to_string(),
         };
         stages.push(s);
     }
-    stages.join(" | ")
+    let mut rendered = String::new();
+    for (index, stage) in stages.into_iter().enumerate() {
+        if index > 0 {
+            if p.boundaries.contains(&index) {
+                rendered.push_str(" | ");
+            } else {
+                rendered.push(' ');
+            }
+        }
+        rendered.push_str(&stage);
+    }
+    rendered
 }
 
 pub fn funced_builtin(

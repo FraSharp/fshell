@@ -272,6 +272,13 @@ if a keyword (`sort`, `grep`, `limit`) is followed by an argument starting with 
 
 redirections can be placed anywhere in a stage or pipeline.
 
+Redirections are retained in source order and applied within the pipeline
+segment they belong to. Descriptor duplication is therefore order-sensitive,
+just as it is in POSIX shells: `cmd > file 2>&1` sends both streams to the
+file, while `cmd 2>&1 > file` leaves stderr on the original stdout route.
+The parser also retains the `|` segment boundary, so `cmd > file | next`
+redirects `cmd` whereas `cmd | > file next` redirects `next`.
+
 ### file & descriptor redirections
 
 | operator | description | example |

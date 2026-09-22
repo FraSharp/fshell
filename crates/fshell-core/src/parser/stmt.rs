@@ -295,6 +295,7 @@ impl Parser {
                             self.skip_horizontal_whitespace();
                             let first_stage = self.parse_pipeline_stage_with_env(inline_env)?;
                             let mut stages = vec![first_stage];
+                            let mut boundaries = Vec::new();
                             self.skip_whitespace();
                             // Consume redirects before the next pipe
                             while let Some(write_stage) = self.parse_redirect()? {
@@ -308,6 +309,7 @@ impl Parser {
                                     break;
                                 }
                                 self.next_char();
+                                boundaries.push(stages.len());
                                 let saved_subsequent = self.is_subsequent_stage;
                                 self.is_subsequent_stage = true;
                                 let stage_res = self.parse_pipeline_stage();
@@ -324,7 +326,7 @@ impl Parser {
                             if let Some(write_stage) = self.parse_redirect()? {
                                 stages.push(write_stage);
                             }
-                            return Ok(Stmt::Expr(Expr::Pipeline(Pipeline { stages })));
+                            return Ok(Stmt::Expr(Expr::Pipeline(Pipeline { stages, boundaries })));
                         } else {
                             // Simple assignment
                             if self.peek() == Some('$') {
@@ -891,25 +893,16 @@ impl Parser {
         Ok(stmts)
     }
 
-    fn is_input_stage(stage: &PipelineStage) -> bool {
-        matches!(
-            stage,
-            PipelineStage::Read { .. }
-                | PipelineStage::Heredoc { .. }
-                | PipelineStage::HereString { .. }
-        )
-    }
-
     pub fn parse_pipeline(&mut self) -> Result<Pipeline, ParseError> {
         let mut stages = Vec::new();
-        let mut leading_inputs: Vec<PipelineStage> = Vec::new();
-        let mut leading_writes = Vec::new();
+        let mut boundaries = Vec::new();
+
+        // Keep redirections in source order. The execution planner associates
+        // them with the command in this segment; moving them while parsing
+        // loses the ordering required by fd duplication (for example,
+        // `2>&1 > file`).
         while let Some(redirect) = self.parse_redirect()? {
-            if Self::is_input_stage(&redirect) {
-                leading_inputs.push(redirect);
-            } else {
-                leading_writes.push(redirect);
-            }
+            stages.push(redirect);
             self.skip_whitespace();
         }
 
@@ -917,25 +910,12 @@ impl Parser {
             self.peek(),
             None | Some('|') | Some(';') | Some('}') | Some('\n')
         ) {
-            let stage = self.parse_pipeline_stage()?;
-            for r in leading_inputs.drain(..) {
-                stages.push(r);
-            }
-            stages.push(stage);
-            stages.extend(leading_writes);
+            stages.push(self.parse_pipeline_stage()?);
             self.skip_whitespace();
             while let Some(r) = self.parse_redirect()? {
-                if Self::is_input_stage(&r) {
-                    let last_idx = stages.len() - 1;
-                    stages.insert(last_idx, r);
-                } else {
-                    stages.push(r);
-                }
+                stages.push(r);
                 self.skip_whitespace();
             }
-        } else {
-            stages.extend(leading_inputs);
-            stages.extend(leading_writes);
         }
 
         while self.peek() == Some('|') {
@@ -943,33 +923,21 @@ impl Parser {
                 break;
             }
             self.next_char();
+            boundaries.push(stages.len());
             let saved_subsequent = self.is_subsequent_stage;
             self.is_subsequent_stage = true;
-            let mut seg_inputs: Vec<PipelineStage> = Vec::new();
             while let Some(redirect) = self.parse_redirect()? {
-                if Self::is_input_stage(&redirect) {
-                    seg_inputs.push(redirect);
-                } else {
-                    stages.push(redirect);
-                }
+                stages.push(redirect);
                 self.skip_whitespace();
             }
             let stage_res = self.parse_pipeline_stage();
             self.is_subsequent_stage = saved_subsequent;
             let stage = stage_res?;
-            for r in seg_inputs {
-                stages.push(r);
-            }
             stages.push(stage);
             self.skip_whitespace();
             // Consume redirects after this stage (before next pipe or end)
             while let Some(r) = self.parse_redirect()? {
-                if Self::is_input_stage(&r) {
-                    let last_idx = stages.len() - 1;
-                    stages.insert(last_idx, r);
-                } else {
-                    stages.push(r);
-                }
+                stages.push(r);
                 self.skip_whitespace();
             }
         }
@@ -1000,7 +968,7 @@ impl Parser {
                 }
             }
         }
-        Ok(Pipeline { stages })
+        Ok(Pipeline { stages, boundaries })
     }
 
     pub(crate) fn parse_redirect(&mut self) -> Result<Option<PipelineStage>, ParseError> {

@@ -3035,11 +3035,12 @@ mod tests {
         if let Stmt::Expr(expr) = stmts[0].unpack() {
             if let Expr::Pipeline(pipeline) = expr.unpack() {
                 assert_eq!(pipeline.stages.len(), 2);
-                assert!(matches!(&pipeline.stages[0], PipelineStage::Read { .. }));
                 assert!(matches!(
-                    &pipeline.stages[1],
+                    &pipeline.stages[0],
                     PipelineStage::CommandCall { .. }
                 ));
+                assert!(matches!(&pipeline.stages[1], PipelineStage::Read { .. }));
+                assert!(pipeline.boundaries.is_empty());
                 return;
             }
         }
@@ -3055,12 +3056,13 @@ mod tests {
         if let Stmt::Expr(expr) = stmts[0].unpack() {
             if let Expr::Pipeline(pipeline) = expr.unpack() {
                 assert_eq!(pipeline.stages.len(), 3);
-                assert!(matches!(&pipeline.stages[0], PipelineStage::Read { .. }));
                 assert!(matches!(
-                    &pipeline.stages[1],
+                    &pipeline.stages[0],
                     PipelineStage::CommandCall { .. }
                 ));
+                assert!(matches!(&pipeline.stages[1], PipelineStage::Read { .. }));
                 assert!(matches!(&pipeline.stages[2], PipelineStage::Write { .. }));
+                assert!(pipeline.boundaries.is_empty());
                 return;
             }
         }
@@ -3077,14 +3079,42 @@ mod tests {
         if let Stmt::Expr(expr) = stmts[0].unpack() {
             if let Expr::Pipeline(pipeline) = expr.unpack() {
                 assert_eq!(pipeline.stages.len(), 2);
-                assert!(matches!(&pipeline.stages[0], PipelineStage::Read { .. }));
                 assert!(matches!(
-                    &pipeline.stages[1],
+                    &pipeline.stages[0],
                     PipelineStage::CommandCall { .. }
                 ));
+                assert!(matches!(&pipeline.stages[1], PipelineStage::Read { .. }));
+                assert!(pipeline.boundaries.is_empty());
                 return;
             }
         }
         panic!("Expected pipeline with Read stage, got {:?}", stmts);
+    }
+
+    #[test]
+    fn test_parse_preserves_pipeline_boundaries_around_redirections() {
+        let left = Parser::new("echo x > left | echo y")
+            .parse_statements()
+            .unwrap();
+        let right = Parser::new("echo x | > right echo y")
+            .parse_statements()
+            .unwrap();
+
+        fn extract_pipeline(stmts: &[Stmt]) -> &Pipeline {
+            match stmts[0].unpack() {
+                Stmt::Expr(expr) => match expr.unpack() {
+                    Expr::Pipeline(pipeline) => pipeline,
+                    other => panic!("expected pipeline, got {other:?}"),
+                },
+                other => panic!("expected expression statement, got {other:?}"),
+            }
+        }
+
+        let left = extract_pipeline(&left);
+        let right = extract_pipeline(&right);
+        assert_eq!(left.boundaries, vec![2]);
+        assert_eq!(right.boundaries, vec![1]);
+        assert!(matches!(left.stages[1], PipelineStage::Write { .. }));
+        assert!(matches!(right.stages[1], PipelineStage::Write { .. }));
     }
 }

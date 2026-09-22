@@ -1477,7 +1477,7 @@ impl Parser {
             // Otherwise | is a stage separator — continue to next stage
         }
 
-        Ok(Expr::InlinePipeline(Pipeline { stages }))
+        Ok(Expr::InlinePipeline(Pipeline::new(stages)))
     }
 
     /// Parse `$(pipeline)` — command substitution, desugars to inline pipeline.
@@ -1516,7 +1516,7 @@ impl Parser {
             });
         }
 
-        Ok(Expr::InlinePipeline(Pipeline { stages }))
+        Ok(Expr::InlinePipeline(Pipeline::new(stages)))
     }
 
     /// Parse `<(pipeline)` or `>(pipeline)` process substitution.
@@ -1531,6 +1531,7 @@ impl Parser {
         self.skip_whitespace();
 
         let mut stages = Vec::new();
+        let mut boundaries = Vec::new();
 
         loop {
             if self.peek() == Some(')') {
@@ -1541,17 +1542,7 @@ impl Parser {
             self.skip_whitespace();
             // Trailing redirections for this stage, e.g. `>(gzip > out.gz)`.
             while let Some(r) = self.parse_redirect()? {
-                if matches!(
-                    r,
-                    PipelineStage::Read { .. }
-                        | PipelineStage::Heredoc { .. }
-                        | PipelineStage::HereString { .. }
-                ) {
-                    let last = stages.len() - 1;
-                    stages.insert(last, r);
-                } else {
-                    stages.push(r);
-                }
+                stages.push(r);
                 self.skip_whitespace();
             }
 
@@ -1561,6 +1552,7 @@ impl Parser {
             }
             if self.peek() == Some('|') {
                 self.next_char(); // consume | as stage separator
+                boundaries.push(stages.len());
                 self.skip_whitespace();
                 if self.peek() == Some(')') {
                     self.next_char(); // consume )
@@ -1576,7 +1568,7 @@ impl Parser {
 
         Ok(Expr::ProcessSubst {
             direction,
-            pipeline: Pipeline { stages },
+            pipeline: Pipeline { stages, boundaries },
         })
     }
 
@@ -1896,9 +1888,7 @@ impl Parser {
             env: Vec::new(),
             span: miette::SourceSpan::new(0.into(), 0),
         };
-        Ok(Expr::Pipeline(Pipeline {
-            stages: vec![echo_stage],
-        }))
+        Ok(Expr::Pipeline(Pipeline::new(vec![echo_stage])))
     }
 
     pub(crate) fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {

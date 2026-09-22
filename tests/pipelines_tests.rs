@@ -605,6 +605,70 @@ async fn test_write_then_2_to_1_merges_stderr_into_file() {
 }
 
 #[tokio::test]
+async fn test_2_to_1_then_write_keeps_stderr_on_original_route() {
+    // Redirections are applied left-to-right: stderr is first duplicated to
+    // the original stdout, then stdout is redirected to the file. Therefore
+    // only stdout belongs in the file.
+    let ctx = TestContext::new();
+    let out = ctx.temp_path().join("stdout-only.txt");
+    let script = format!(
+        "sh -c 'echo out; echo err 1>&2' 2>&1 > \"{}\"",
+        out.display()
+    );
+    let mut parser = Parser::new(&script);
+    let stmts = parser.parse_statements().unwrap();
+    let Stmt::Expr(expr) = stmts[0].unpack() else {
+        panic!("expected expression statement");
+    };
+    let fshell_core::Expr::Pipeline(pipeline) = expr.unpack() else {
+        panic!("expected pipeline expression");
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    execute_pipeline(pipeline, &ctx.env, tx).await.unwrap();
+
+    let mut original_stdout = String::new();
+    while let Some(payload) = rx.recv().await {
+        match payload {
+            PipelinePayload::Data(value) => original_stdout.push_str(&value.to_text()),
+            PipelinePayload::Structured(diag) => original_stdout.push_str(&diag.to_string()),
+            PipelinePayload::Bytes(bytes) => {
+                original_stdout.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+    }
+    let content = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        content.contains("out"),
+        "stdout missing from file: {content}"
+    );
+    assert!(
+        !content.contains("err"),
+        "stderr incorrectly reached file: {content}"
+    );
+    assert!(
+        original_stdout.contains("err"),
+        "stderr did not remain on the original stdout route: {original_stdout}"
+    );
+}
+
+#[tokio::test]
+async fn test_redirection_binds_to_the_correct_pipeline_segment() {
+    let ctx = TestContext::new();
+    let left = ctx.temp_path().join("left.txt");
+    let right = ctx.temp_path().join("right.txt");
+
+    ctx.eval_script(&format!("printf left > \"{}\" | cat", left.display()))
+        .await
+        .expect("redirect before pipe should belong to the left command");
+    ctx.eval_script(&format!("printf right | > \"{}\" cat", right.display()))
+        .await
+        .expect("redirect after pipe should belong to the right command");
+
+    assert_eq!(std::fs::read_to_string(left).unwrap(), "left\n");
+    assert_eq!(std::fs::read_to_string(right).unwrap(), "right\n");
+}
+
+#[tokio::test]
 async fn test_output_process_substitution_delivers_data() {
     // `cmd >(consumer)` gives the command a writable path whose writes the
     // consumer processes.
