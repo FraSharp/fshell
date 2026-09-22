@@ -586,23 +586,30 @@ fn eval_parameter_expr(
             };
             let offset_str =
                 expand_word_internal(&offset.value, env, &no_glob_cfg, positional, false)?.join("");
-            let off: i64 = offset_str.trim().parse().unwrap_or(0);
+            let off = crate::arithmetic::eval_arithmetic_expr(offset_str.trim(), env)
+                .map_err(crate::arithmetic::to_engine_error)?;
             let chars: Vec<char> = val.chars().collect();
             let len = chars.len() as i64;
             let start = if off < 0 {
                 (len + off).max(0) as usize
             } else {
-                (off as usize).min(chars.len())
+                usize::try_from(off).unwrap_or(usize::MAX).min(chars.len())
             };
             let end = if let Some(len_expr) = length {
                 let len_str =
                     expand_word_internal(&len_expr.value, env, &no_glob_cfg, positional, false)?
                         .join("");
-                let l: i64 = len_str.trim().parse().unwrap_or(0);
+                let l = crate::arithmetic::eval_arithmetic_expr(len_str.trim(), env)
+                    .map_err(crate::arithmetic::to_engine_error)?;
                 if l < 0 {
-                    chars.len()
+                    return Err(fshell_engine::EngineError::Generic {
+                        message: "substring expression < 0".to_string(),
+                        span: None,
+                    });
                 } else {
-                    (start as i64 + l).min(chars.len() as i64) as usize
+                    start
+                        .saturating_add(usize::try_from(l).unwrap_or(usize::MAX))
+                        .min(chars.len())
                 }
             } else {
                 chars.len()

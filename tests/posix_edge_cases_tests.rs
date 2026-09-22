@@ -116,6 +116,24 @@ async fn test_posix_param_expansion_substring_and_slicing() {
     // Slicing with UTF-8 multi-byte characters
     let (_, out) = run_posix_capture(r#"UTF="🦀🚀🌟🎉"; echo ${UTF:1:2}"#, &env).await;
     assert_eq!(out.trim(), "🚀🌟");
+
+    // Offsets and lengths are arithmetic expressions, not only decimal literals.
+    let (_, out) = run_posix_capture(r#"STR="abcdefghij"; echo ${STR:1+1:2}"#, &env).await;
+    assert_eq!(out.trim(), "cd");
+
+    let (_, out) = run_posix_capture(r#"STR="abcdefghij"; echo ${STR: -2}"#, &env).await;
+    assert_eq!(out.trim(), "ij");
+
+    // Negative lengths are invalid instead of silently becoming an unbounded slice.
+    let parsed = parse_posix_script(r#"STR="abcdefghij"; echo ${STR:2:-1}; AFTER=ran"#)
+        .expect("failed to parse negative substring length script");
+    let result = eval_source(&parsed, &env, &EvalConfig::default()).await;
+    assert!(matches!(
+        result,
+        Err(fshell_engine::EngineError::Generic { message, .. })
+            if message.contains("substring expression < 0")
+    ));
+    assert!(!env.vars.read().contains_key("AFTER"));
 }
 
 #[tokio::test]
