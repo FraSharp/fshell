@@ -971,6 +971,20 @@ impl Parser {
         Ok(Pipeline { stages, boundaries })
     }
 
+    /// Parse a file redirect target using command-word boundaries. A bare dotted
+    /// token such as `output.txt` is a path here, while quoted and variable
+    /// expressions remain available for computed targets.
+    fn parse_redirect_path(&mut self) -> Result<Expr, ParseError> {
+        let saved_redirect = self.redirect_mode;
+        let saved_arg = self.cmd_arg_mode;
+        self.redirect_mode = true;
+        self.cmd_arg_mode = true;
+        let path = self.parse_expr_with_pipeline(false);
+        self.redirect_mode = saved_redirect;
+        self.cmd_arg_mode = saved_arg;
+        path
+    }
+
     pub(crate) fn parse_redirect(&mut self) -> Result<Option<PipelineStage>, ParseError> {
         self.skip_whitespace();
 
@@ -1025,10 +1039,7 @@ impl Parser {
             self.next_char(); // consume '0'
             self.next_char(); // consume '<'
             self.skip_whitespace();
-            let saved_redirect = self.redirect_mode;
-            self.redirect_mode = true;
-            let path = self.parse_expr_with_pipeline(false)?;
-            self.redirect_mode = saved_redirect;
+            let path = self.parse_redirect_path()?;
             return Ok(Some(PipelineStage::Read { path }));
         }
 
@@ -1039,10 +1050,7 @@ impl Parser {
         {
             self.next_char(); // consume '<'
             self.skip_whitespace();
-            let saved_redirect = self.redirect_mode;
-            self.redirect_mode = true;
-            let path = self.parse_expr_with_pipeline(false)?;
-            self.redirect_mode = saved_redirect;
+            let path = self.parse_redirect_path()?;
             return Ok(Some(PipelineStage::Read { path }));
         }
 
@@ -1150,10 +1158,7 @@ impl Parser {
                 false
             };
             self.skip_whitespace();
-            let saved_redirect = self.redirect_mode;
-            self.redirect_mode = true;
-            let path = self.parse_expr_with_pipeline(false)?;
-            self.redirect_mode = saved_redirect;
+            let path = self.parse_redirect_path()?;
             Ok(Some(PipelineStage::Write {
                 path,
                 append,

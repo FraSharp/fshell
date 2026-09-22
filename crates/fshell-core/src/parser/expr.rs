@@ -1356,7 +1356,8 @@ impl Parser {
                 let ident = self.peek_identifier();
                 if let Some(name) = &ident {
                     let end = self.pos + name.len();
-                    if end + 1 < self.input.len()
+                    if !self.cmd_arg_mode
+                        && end + 1 < self.input.len()
                         && self.input[end] == '.'
                         && (self.input[end + 1].is_ascii_alphabetic() || self.input[end + 1] == '_')
                     {
