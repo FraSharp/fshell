@@ -1,0 +1,28 @@
+[package]
+name = "fshell-semantic"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Shell-independent semantic action layer for fshell"
+repository.workspace = true
+
+[features]
+default = ["schema"]
+schema = ["dep:schemars"]
+
+[dependencies]
+fshell-core = { path = "../fshell-core" }
+fshell-engine = { path = "../fshell-engine" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+miette = { workspace = true }
+schemars = { workspace = true, optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
