@@ -326,6 +326,27 @@ async fn test_pipeline_grep() {
 }
 
 #[tokio::test]
+async fn test_grep_splits_multiline_string_records_into_lines() {
+    let ctx = TestContext::new();
+
+    let matches = ctx
+        .eval_ok("printf 'alpha\\nbeta\\nbeta\\n' | grep beta")
+        .await;
+    assert_val_eq!(
+        matches,
+        Val::List(vec![
+            Val::String("beta".to_string()),
+            Val::String("beta".to_string()),
+        ])
+    );
+
+    let count = ctx
+        .eval_ok("printf 'alpha\\nbeta\\nbeta\\n' | grep beta | count")
+        .await;
+    assert_val_eq!(count, Val::List(vec![Val::Int(2)]));
+}
+
+#[tokio::test]
 async fn test_pipeline_mark_basic() {
     let env = setup_test_env();
     env.vars.write().insert(

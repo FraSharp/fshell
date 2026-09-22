@@ -182,7 +182,8 @@ ls | grep r"\.tmp$"
 
 **execution:**
 - the pattern is a regular expression; if it does not compile, a plain substring match is used.
-- for maps: serializes fields to text representation before matching.
+- multiline string values are filtered one line at a time, like byte-stream input.
+- for maps: serializes fields to text representation before matching and preserves matching records.
 
 ### `mark`
 

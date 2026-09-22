@@ -2018,7 +2018,22 @@ async fn execute_pipeline_with_input_and_cancellation(
                                         }
                                         other => other.to_text(),
                                     };
-                                    if matches(&val_str) {
+                                    // Text-producing builtins such as `printf` emit a
+                                    // structured String value, while external programs
+                                    // arrive as Bytes and are split into lines below.
+                                    // Give multiline text the same grep semantics at
+                                    // either pipeline boundary.
+                                    if matches!(&*val_arc, Val::String(s) if s.contains('\n')) {
+                                        for line in val_str.lines() {
+                                            if matches(line) {
+                                                let _ = out_tx
+                                                    .send(PipelinePayload::Data(Arc::new(
+                                                        Val::String(line.to_string()),
+                                                    )))
+                                                    .await;
+                                            }
+                                        }
+                                    } else if matches(&val_str) {
                                         let _ = out_tx.send(PipelinePayload::Data(val_arc)).await;
                                     }
                                 }
