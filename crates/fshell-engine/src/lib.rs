@@ -3358,7 +3358,7 @@ impl Env {
         }
     }
 }
-pub(crate) use pipeline::{collect_pipeline_silent, val_type_precedence};
+pub(crate) use pipeline::val_type_precedence;
 fn topological_sort(
     nodes: &std::collections::HashSet<String>,
     deps: &FxHashMap<String, std::collections::HashSet<String>>,
@@ -3422,8 +3422,17 @@ async fn trigger_eval(
         .tracking_active
         .store(true, Ordering::Release);
 
-    let vals = collect_pipeline_silent(pipeline, &env_clone).await;
-    let _ = tx.send(Arc::new(vals));
+    match collect_pipeline(pipeline, &env_clone).await {
+        Ok(vals) => {
+            let _ = tx.send(Arc::new(vals));
+        }
+        Err(error) => {
+            // Keep the last successful snapshot visible. A transient failure
+            // must be observable as a structured diagnostic, not as an empty
+            // value that looks like a legitimate query result.
+            env.set_last_error(FshDiag::new(error));
+        }
+    }
 
     env_clone
         .reactive

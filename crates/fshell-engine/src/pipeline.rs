@@ -121,35 +121,6 @@ pub fn spawn_pipeline_stream(pipeline: &Pipeline, env: &Env) -> PipeStream {
     rx
 }
 
-/// Spawn a pipeline and collect data payloads into a Vec, silently ignoring diagnostics.
-pub(crate) async fn collect_pipeline_silent(pipeline: &Pipeline, env: &Env) -> Vec<Val> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
-    let mut env_clone = env.clone();
-    env_clone.is_captured = true;
-    let pipeline_clone = pipeline.clone();
-    let tx_err = tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = execute_pipeline(&pipeline_clone, &env_clone, tx).await {
-            let _ = tx_err.send(PipelinePayload::Structured(e.into())).await;
-        }
-    });
-    let mut results = Vec::new();
-    while let Some(payload) = rx.recv().await {
-        if env.pipeline_cancelled() {
-            break;
-        }
-        match payload {
-            PipelinePayload::Data(v) => results.push(strip_capture_sentinel((*v).clone())),
-            PipelinePayload::Bytes(b) => {
-                let s = String::from_utf8_lossy(&b).into_owned();
-                results.push(strip_capture_sentinel(Val::String(s)));
-            }
-            PipelinePayload::Structured(_) => {}
-        }
-    }
-    results
-}
-
 /// Remove the trailing NUL that `echo -n`/`echo -e…\c` uses to signal "no
 /// trailing newline". It is meaningful only to terminal/refer writers; a
 /// captured value must not carry the sentinel (`let x = echo -n hi` ⇒ `$x` is

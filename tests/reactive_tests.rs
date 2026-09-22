@@ -114,6 +114,47 @@ async fn test_reactive_cell_variable_lookup() {
 }
 
 #[tokio::test]
+async fn test_reactive_cell_preserves_last_value_on_pipeline_error() {
+    let env = setup_test_env();
+    env.set_shell_var("value", Val::String("one".into()));
+
+    let mut parser = Parser::new("$= live = echo $value");
+    let stmts = parser.parse_statements().unwrap();
+    eval_stmt(&stmts[0], &env, false).await.unwrap();
+
+    let mut rx = {
+        let cells = env.reactive.cells.read();
+        cells.get("live").unwrap().clone()
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        rx.wait_for(|values| values.as_slice() == [Val::String("one".into())]),
+    )
+    .await
+    .expect("reactive cell did not produce its initial value");
+
+    env.unset_var("value");
+    env.reactive
+        .tx
+        .send(fshell_engine::ReactiveEvent::TriggerCell("live".into()))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if env.get_last_error().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("reactive pipeline error was not recorded");
+
+    assert_eq!(rx.borrow().as_slice(), [Val::String("one".into())]);
+}
+
+#[tokio::test]
 async fn test_reactive_cell_event_driven_fs() {
     let env = setup_test_env();
 
