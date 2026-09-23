@@ -33,6 +33,74 @@ fn terminate_process_group(pid: i32) {
     }
 }
 
+fn spawn_external_command(
+    cmd: &mut std::process::Command,
+    pipeline_job: Option<&fshell_engine::job_control::PipelineJobContext>,
+    has_controlling_terminal: bool,
+    debug_fg: bool,
+) -> std::io::Result<(std::process::Child, i32)> {
+    // Keep leader selection, spawn, and terminal handoff in one synchronous
+    // critical section. No non-Send lock guard escapes into the async future.
+    let mut launch = pipeline_job.map(|job| job.launch.lock());
+    let is_pipeline_leader = launch.as_ref().is_some_and(|state| state.is_none());
+    let should_transfer = has_controlling_terminal && (launch.is_none() || is_pipeline_leader);
+    let pgid = launch.as_ref().and_then(|state| **state).unwrap_or(0);
+    cmd.process_group(pgid);
+
+    // Reset the child signal mask and dispositions inherited from Tokio/Rust.
+    // The child must receive terminal-generated signals normally.
+    // SAFETY: pre_exec runs after fork and before exec; all operations here are
+    // async-signal-safe and use only stack data.
+    unsafe {
+        cmd.pre_exec(move || {
+            let mut set = std::mem::zeroed::<libc::sigset_t>();
+            libc::sigemptyset(&mut set);
+            libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            if should_transfer {
+                libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+                libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
+                libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+            }
+            if debug_fg {
+                let msg = "[FSH_DEBUG_FG] child: pre_exec complete\n";
+                let _ = libc::write(libc::STDERR_FILENO, msg.as_ptr().cast(), msg.len());
+            }
+            Ok(())
+        });
+    }
+
+    let child_result = cmd.spawn();
+    if let Some(job) = pipeline_job {
+        job.register_spawn_attempt();
+    }
+    let child = child_result?;
+    let pid = child.id() as i32;
+    if let Some(job) = pipeline_job {
+        job.pids.lock().push(pid);
+    }
+    let job_pgid = if let Some(state) = launch.as_mut() {
+        if state.is_none() {
+            **state = Some(pid);
+            pid
+        } else {
+            state.unwrap_or(pid)
+        }
+    } else {
+        pid
+    };
+    if should_transfer {
+        // SAFETY: SIGTTOU is ignored during the parent-side handoff.
+        unsafe {
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            libc::tcsetpgrp(libc::STDIN_FILENO, job_pgid);
+            libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+        }
+    }
+    Ok((child, job_pgid))
+}
+
 /// Coerces a stream of Val into raw byte stream for legacy standard input.
 pub fn coerce_val_to_bytes(val: &Val) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -472,18 +540,20 @@ pub async fn run_external(
     // 2a. Build command
     let mut cmd = std::process::Command::new(&resolved_name);
 
-    // 2a. Detect interactive mode: command running in an interactive shell session with a TTY terminal.
-    //     When true, we give the child terminal ownership via tcsetpgrp so that TUI programs
-    //     and interactive prompts (like reading /dev/tty) function without SIGTTIN background suspension.
+    // Detect a controlling terminal independently from the command's stdio routing.
+    // A pipeline stage may have piped stdin/stdout while still needing /dev/tty
+    // (for example sudo's password prompt). Such a stage still needs foreground
+    // terminal ownership.
     // SAFETY: isatty only queries fd state, no side effects.
     let is_piped = in_rx.is_some() || has_next;
-    let is_interactive = !fshell_engine::is_test_mode()
+    let has_controlling_terminal = !fshell_engine::is_test_mode()
         && unsafe {
             !env.is_captured
-                && !is_piped
                 && libc::isatty(libc::STDIN_FILENO) == 1
                 && fshell_engine::is_stdout_a_tty()
         };
+    let is_interactive = has_controlling_terminal && !is_piped;
+    let pipeline_job = env.pipeline_job.clone();
 
     // Set working directory to the environment's logical cwd. The recorded cwd
     // may no longer exist (removed since it was captured, or the directory the
@@ -583,9 +653,6 @@ pub async fn run_external(
         cmd.stderr(Stdio::piped());
     }
 
-    // Configure standard process group for UNIX job control
-    cmd.process_group(0);
-
     let debug_fg = std::env::var("FSH_DEBUG_FG").is_ok();
     if debug_fg {
         let isatty_in = unsafe { libc::isatty(libc::STDIN_FILENO) };
@@ -602,79 +669,19 @@ pub async fn run_external(
         );
     }
 
-    // Reset signal mask in child before exec.
-    // Tokio's signal handling (kqueue on macOS, signalfd on Linux) blocks
-    // SIGINT/SIGTSTP via pthread_sigmask so the runtime can catch them. Child
-    // processes inherit this blocked mask — SIGINT can never be delivered to
-    // `rm -i` or any other interactive command, making Ctrl+C a no-op and
-    // causing the shell to hang forever in waitpid. We unblock everything in
-    // the child before exec so terminal signals work normally.
-    //
-    // SAFETY: runs after fork() in the single-threaded child before exec().
-    // sigprocmask + signal are async-signal-safe per POSIX. No allocation.
-    unsafe {
-        cmd.pre_exec(move || {
-            let mut set = std::mem::zeroed::<libc::sigset_t>();
-            libc::sigemptyset(&mut set);
-            libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
-            // Reset SIGCHLD to SIG_DFL — Rust's stdlib sets it to SIG_IGN
-            // which breaks waitpid() (returns ECHILD).
-            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-            // Reset SIGPIPE to SIG_DFL (Rust defaults to SIG_IGN).
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-
-            if debug_fg {
-                let msg = "[FSH_DEBUG_FG] child: pre_exec start\n";
-                let _ = libc::write(
-                    libc::STDERR_FILENO,
-                    msg.as_ptr() as *const libc::c_void,
-                    msg.len(),
-                );
-            }
-
-            if is_interactive {
-                if debug_fg {
-                    let msg = "[FSH_DEBUG_FG] child: calling tcsetpgrp\n";
-                    let _ = libc::write(
-                        libc::STDERR_FILENO,
-                        msg.as_ptr() as *const libc::c_void,
-                        msg.len(),
-                    );
-                }
-                libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-                let res = libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
-                libc::signal(libc::SIGTTOU, libc::SIG_DFL);
-                if debug_fg {
-                    if res == 0 {
-                        let msg = "[FSH_DEBUG_FG] child: tcsetpgrp succeeded\n";
-                        let _ = libc::write(
-                            libc::STDERR_FILENO,
-                            msg.as_ptr() as *const libc::c_void,
-                            msg.len(),
-                        );
-                    } else {
-                        let msg = "[FSH_DEBUG_FG] child: tcsetpgrp failed\n";
-                        let _ = libc::write(
-                            libc::STDERR_FILENO,
-                            msg.as_ptr() as *const libc::c_void,
-                            msg.len(),
-                        );
-                    }
-                }
-            }
-
-            Ok(())
-        });
-    }
-
     if debug_fg {
         eprintln!("[FSH_DEBUG_FG] parent: about to spawn child");
     }
 
     // Create the terminal guard to handle raw mode disabling and restoration
-    let _guard = InteractiveTerminalGuard::new(is_interactive);
+    let _guard = InteractiveTerminalGuard::new(has_controlling_terminal && pipeline_job.is_none());
 
-    let mut child = match cmd.spawn() {
+    let (mut child, job_pgid) = match spawn_external_command(
+        &mut cmd,
+        pipeline_job.as_deref(),
+        has_controlling_terminal,
+        debug_fg,
+    ) {
         Ok(child) => child,
         Err(e) => {
             if cnf_debug {
@@ -764,44 +771,70 @@ pub async fn run_external(
         eprintln!("[FSH_DEBUG_FG] parent: child spawned pid={}", pid);
     }
 
-    // In interactive mode, give the child's process group ownership of the terminal.
-    // SIGTTOU is ignored during this call so the shell isn't stopped when it loses
-    // foreground status — the waiter task will restore SIG_DFL when the child exits.
-    if is_interactive {
-        if debug_fg {
-            eprintln!("[FSH_DEBUG_FG] parent: calling tcsetpgrp for pid={}", pid);
-        }
-        // SAFETY: signal and tcsetpgrp are async-signal-safe. SIGTTOU is ignored to
-        // prevent the shell from being stopped when it loses foreground status.
-        unsafe {
-            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-            let res = libc::tcsetpgrp(libc::STDIN_FILENO, pid);
-            libc::signal(libc::SIGTTOU, libc::SIG_DFL);
-            if debug_fg {
-                eprintln!("[FSH_DEBUG_FG] parent: tcsetpgrp returned res={}", res);
-            }
-        }
-    }
-
     // Register job in active list - collect once, reuse
     let cmd_str = format!("{} {}", name, arg_strs.join(" "));
 
     let job_id = {
         let mut jobs = env.job_control.jobs.write();
-        let next_id = jobs.values().map(|j| j.id).max().unwrap_or(0) + 1;
+        let existing = jobs.values().find(|job| job.pgid == job_pgid).cloned();
+        let next_id = if let Some(job) = &pipeline_job {
+            let current = job.job_id.load(Ordering::Acquire);
+            if current != 0 {
+                current
+            } else {
+                let proposed = existing
+                    .as_ref()
+                    .map(|job| job.id)
+                    .unwrap_or_else(|| jobs.values().map(|j| j.id).max().unwrap_or(0) + 1);
+                job.job_id
+                    .compare_exchange(0, proposed, Ordering::AcqRel, Ordering::Acquire)
+                    .unwrap_or_else(|actual| actual)
+            }
+        } else {
+            existing
+                .as_ref()
+                .map(|job| job.id)
+                .unwrap_or_else(|| jobs.values().map(|j| j.id).max().unwrap_or(0) + 1)
+        };
+        let mut pids = existing
+            .as_ref()
+            .map(|job| job.pids.clone())
+            .or_else(|| pipeline_job.as_ref().map(|job| job.pids.lock().clone()))
+            .unwrap_or_default();
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+        let full_cmd = existing
+            .as_ref()
+            .map(|job| format!("{} | {}", job.cmd, cmd_str))
+            .unwrap_or_else(|| cmd_str.clone());
+        let last_stage_pid = if env.is_last_stage {
+            Some(pid)
+        } else {
+            existing.as_ref().and_then(|job| job.last_stage_pid)
+        };
+        let last_stage_exit_code = existing.as_ref().and_then(|job| job.last_stage_exit_code);
+        for job in jobs.values_mut().filter(|job| job.pgid == job_pgid) {
+            job.pids = pids.clone();
+            job.cmd = full_cmd.clone();
+            job.last_stage_pid = last_stage_pid;
+            job.last_stage_exit_code = last_stage_exit_code;
+        }
         jobs.insert(
             pid,
             fshell_engine::Job {
                 id: next_id,
-                pgid: pid,
-                pids: vec![pid],
-                cmd: cmd_str.clone(),
+                pgid: job_pgid,
+                pids,
+                last_stage_pid,
+                last_stage_exit_code,
+                cmd: full_cmd,
                 status: fshell_engine::JobStatus::Running,
                 disowned: false,
                 started_at: Some(std::time::Instant::now()),
             },
         );
-        if is_interactive {
+        if has_controlling_terminal {
             let _ = env.set_foreground_job(Some(next_id));
         }
         next_id
@@ -1021,10 +1054,24 @@ pub async fn run_external(
     // boundary. The waitpid implementation owns job-control bookkeeping, so
     // keep it on the blocking pool while the async I/O tasks continue draining
     // stdout/stderr concurrently.
+    if let Some(job) = &pipeline_job {
+        job.wait_for_launch().await;
+    }
     let wait_env = env.clone();
     let wait_cmd = cmd_str.clone();
+    let pipeline_wait = pipeline_job.is_some();
     let wait_task = tokio::task::spawn_blocking(move || {
-        fshell_engine::wait_for_job_sync(&wait_env, pid, job_id, &wait_cmd, is_interactive)
+        if pipeline_wait {
+            fshell_engine::wait_for_pipeline_stage_sync(&wait_env, pid, job_id, &wait_cmd)
+        } else {
+            fshell_engine::wait_for_job_sync(
+                &wait_env,
+                pid,
+                job_id,
+                &wait_cmd,
+                has_controlling_terminal,
+            )
+        }
     });
     let _exit_code = wait_task.await.map_err(|error| {
         ShellError::new(
@@ -1032,6 +1079,25 @@ pub async fn run_external(
             format!("external command waiter failed: {error}"),
         )
     })?;
+
+    let child_suspended = env
+        .job_control
+        .jobs
+        .read()
+        .get(&pid)
+        .is_some_and(|job| job.status == fshell_engine::JobStatus::Suspended);
+    if child_suspended {
+        // A stopped child keeps its pipe descriptors open, so output readers
+        // and upstream writers cannot reach EOF until it resumes. Release the
+        // stage's pipe tasks now; the group is retained for `fg`/`bg`.
+        for task in &io_tasks {
+            task.abort();
+        }
+        for task in io_tasks {
+            let _ = task.await;
+        }
+        return Ok(());
+    }
 
     // Do not let a stage resolve while an output task still owns a sender. The
     // final sender drop is what closes the pipeline stream, so awaiting every

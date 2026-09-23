@@ -2683,6 +2683,8 @@ async fn eval_stmt_inner(
                         id: job_id,
                         pgid: vpid,
                         pids: vec![],
+                        last_stage_pid: None,
+                        last_stage_exit_code: None,
                         cmd: cmd_str.clone(),
                         status: crate::JobStatus::Running,
                         disowned: false,

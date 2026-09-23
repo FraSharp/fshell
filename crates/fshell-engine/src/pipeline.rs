@@ -68,6 +68,12 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
     let (tx, mut rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
     let mut env_clone = env.clone();
     env_clone.is_captured = true;
+    // A command substitution is a separate, captured execution tree. It must
+    // not join the surrounding foreground pipeline's process group or count
+    // toward that pipeline's launch barrier. Inheriting the context lets a
+    // short-lived command substitution become the group leader, so a later
+    // outer stage can fail to join its now-empty process group (EPERM).
+    env_clone.pipeline_job = None;
     let pipeline_clone = pipeline.clone();
     let tx_err = tx.clone();
     tokio::spawn(async move {
@@ -567,6 +573,41 @@ async fn build_pipeline_plan(pipeline: &Pipeline, env: &Env) -> Result<Vec<Plann
     Ok(planned)
 }
 
+fn count_direct_external_stages(stages: &[PlannedStage], env: &Env) -> usize {
+    let env_path = env.vars.read().get("env").and_then(|value| {
+        if let Val::Map(map) = value {
+            map.get(&ustr("PATH")).and_then(|path| {
+                if let Val::String(path) = path {
+                    Some(path.clone())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+    });
+
+    stages
+        .iter()
+        .filter(|planned| {
+            let PlannedStage::Ast {
+                stage: PipelineStage::CommandCall { name, .. },
+                ..
+            } = planned
+            else {
+                return false;
+            };
+            let is_custom_binary = env.options.read().command_binaries.contains_key(name);
+            env.get_builtin(name).is_none()
+                && !function_exists(env, name)
+                && env.get_alias(name).is_none()
+                && (is_custom_binary
+                    || is_external_command_at(name, env_path.as_deref(), &env.cwd()))
+        })
+        .count()
+}
+
 async fn write_redirect_file(
     file: &Arc<tokio::sync::Mutex<tokio::fs::File>>,
     payload: &PipelinePayload,
@@ -689,6 +730,18 @@ async fn join_stage_tasks(stage_tasks: Vec<tokio::task::JoinHandle<()>>) -> Resu
     Ok(())
 }
 
+async fn join_pipeline_stages(
+    stage_tasks: Vec<tokio::task::JoinHandle<()>>,
+    env: &Env,
+    pipeline_job: Option<&Arc<crate::job_control::PipelineJobContext>>,
+) -> Result<(), String> {
+    let result = join_stage_tasks(stage_tasks).await;
+    if let Some(job) = pipeline_job {
+        job.finish(env);
+    }
+    result
+}
+
 /// Set up tokio inter-stage channels and run pipeline steps.
 pub async fn execute_pipeline(
     pipeline: &Pipeline,
@@ -721,6 +774,28 @@ async fn execute_pipeline_with_input_and_cancellation(
         return Ok(());
     }
     let stages = build_pipeline_plan(pipeline, env).await?;
+    let expected_external_stages = count_direct_external_stages(&stages, env);
+    // A multi-stage foreground pipeline is one terminal job. Every external
+    // process launched by its stages shares this context, and its final owner
+    // returns the terminal after all stage tasks have joined.
+    let pipeline_job = if env.pipeline_job.is_none()
+        && expected_external_stages > 0
+        && stages.len() > 1
+        && !crate::is_test_mode()
+    {
+        let owns_terminal = !env.is_captured
+            && unsafe {
+                libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1
+            };
+        Some(Arc::new(crate::job_control::PipelineJobContext::new(
+            unsafe { libc::getpgrp() },
+            owns_terminal,
+            expected_external_stages,
+        )))
+    } else {
+        None
+    };
+    let stage_pipeline_job = pipeline_job.clone().or_else(|| env.pipeline_job.clone());
 
     let (cancel_tx, cancel_rx) = cancellation.unwrap_or_else(|| tokio::sync::watch::channel(false));
     let mut current_rx = initial_input;
@@ -742,6 +817,7 @@ async fn execute_pipeline_with_input_and_cancellation(
         }
         let (stage_tx, stage_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
         let mut env_clone = env.clone();
+        env_clone.pipeline_job = stage_pipeline_job.clone();
         let (stage_clone, is_last) = match planned_stage {
             PlannedStage::Ast { stage, is_last } => (Some(stage), is_last),
             PlannedStage::OutputRoute { routes, is_last } => {
@@ -1205,7 +1281,12 @@ async fn execute_pipeline_with_input_and_cancellation(
                                                     .sigint_pending
                                                     .store(false, Ordering::SeqCst);
                                                 env_clone.report_stage_error_code(127);
-                                                return join_stage_tasks(stage_tasks).await;
+                                                return join_pipeline_stages(
+                                                    stage_tasks,
+                                                    env,
+                                                    pipeline_job.as_ref(),
+                                                )
+                                                .await;
                                             }
                                             let mut pfd = libc::pollfd {
                                                 fd: 0,
@@ -1276,7 +1357,12 @@ async fn execute_pipeline_with_input_and_cancellation(
                                             .prompt
                                             .suggestion_deferred
                                             .store(true, Ordering::Release);
-                                        return join_stage_tasks(stage_tasks).await;
+                                        return join_pipeline_stages(
+                                            stage_tasks,
+                                            env,
+                                            pipeline_job.as_ref(),
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -1317,7 +1403,8 @@ async fn execute_pipeline_with_input_and_cancellation(
                                     }
                                 }
                             });
-                            return join_stage_tasks(stage_tasks).await;
+                            return join_pipeline_stages(stage_tasks, env, pipeline_job.as_ref())
+                                .await;
                         }
 
                         // Check native user-defined functions (single-lock
@@ -3140,7 +3227,7 @@ async fn execute_pipeline_with_input_and_cancellation(
         }
         current_rx = Some(stage_rx);
     }
-    join_stage_tasks(stage_tasks).await
+    join_pipeline_stages(stage_tasks, env, pipeline_job.as_ref()).await
 }
 
 fn get_path_helper_paths() -> Vec<String> {

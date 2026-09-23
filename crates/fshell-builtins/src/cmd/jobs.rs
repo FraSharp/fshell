@@ -6,6 +6,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use miette::SourceSpan;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub fn jobs_builtin(
@@ -17,8 +18,9 @@ pub fn jobs_builtin(
 ) -> Result<(), ShellError> {
     let jobs = env.job_control.jobs.read().clone();
     tokio::spawn(async move {
+        let mut listed = HashSet::new();
         for (_, job) in jobs {
-            if job.disowned {
+            if job.disowned || !listed.insert(job.id) {
                 continue;
             }
             let status_str = match job.status {
@@ -151,17 +153,27 @@ pub fn fg_builtin(
         libc::kill(-pgid, libc::SIGCONT);
     }
 
-    {
+    let is_pipeline_job = {
         let mut jobs = env.job_control.jobs.write();
-        if let Some(j) = jobs.get_mut(&pgid) {
-            j.status = fshell_engine::JobStatus::Running;
+        let pids = jobs
+            .values()
+            .find(|job| job.id == job_id)
+            .map(|job| job.pids.len())
+            .unwrap_or(1);
+        for job in jobs.values_mut().filter(|job| job.pgid == pgid) {
+            job.status = fshell_engine::JobStatus::Running;
         }
-    }
+        pids > 1
+    };
 
     env.set_foreground_job(Some(job_id))
         .map_err(|e| e.to_string())?;
 
-    fshell_engine::spawn_job_waiter(env.clone(), cmd, pgid, job_id, restore_terminal);
+    if is_pipeline_job {
+        fshell_engine::spawn_job_group_waiter(env.clone(), pgid, job_id, true);
+    } else {
+        fshell_engine::spawn_job_waiter(env.clone(), cmd, pgid, job_id, restore_terminal);
+    }
 
     env.wait_foreground(job_id)?;
 
@@ -182,14 +194,24 @@ pub fn bg_builtin(
         libc::kill(-pgid, libc::SIGCONT);
     }
 
-    {
+    let is_pipeline_job = {
         let mut jobs = env.job_control.jobs.write();
-        if let Some(j) = jobs.get_mut(&pgid) {
-            j.status = fshell_engine::JobStatus::Running;
+        let pids = jobs
+            .values()
+            .find(|job| job.id == job_id)
+            .map(|job| job.pids.len())
+            .unwrap_or(1);
+        for job in jobs.values_mut().filter(|job| job.pgid == pgid) {
+            job.status = fshell_engine::JobStatus::Running;
         }
-    }
+        pids > 1
+    };
 
-    fshell_engine::spawn_job_waiter(env.clone(), cmd, pgid, job_id, false);
+    if is_pipeline_job {
+        fshell_engine::spawn_job_group_waiter(env.clone(), pgid, job_id, false);
+    } else {
+        fshell_engine::spawn_job_waiter(env.clone(), cmd, pgid, job_id, false);
+    }
 
     Ok(())
 }
@@ -224,11 +246,17 @@ pub fn kill_builtin(
             let mut jobs = env.job_control.jobs.write();
             jobs.retain(|_, j| j.id != job_id);
         }
-        // Reap the process in the background to prevent zombies
+        // Reap every process in the pipeline group to prevent zombies.
         std::thread::spawn(move || {
-            let mut status = 0;
-            unsafe {
-                libc::waitpid(pgid, &mut status, 0);
+            loop {
+                let mut status = 0;
+                let result = unsafe { libc::waitpid(-pgid, &mut status, 0) };
+                if result <= 0 {
+                    if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    break;
+                }
             }
         });
         Ok(())

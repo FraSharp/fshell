@@ -20,6 +20,8 @@ async fn test_job_control_registration_and_jobs_builtin() {
                 id: 1,
                 pgid: 1001,
                 pids: vec![1001],
+                last_stage_pid: Some(1001),
+                last_stage_exit_code: None,
                 cmd: "sleep 100".to_string(),
                 status: JobStatus::Running,
                 disowned: false,
@@ -32,6 +34,8 @@ async fn test_job_control_registration_and_jobs_builtin() {
                 id: 2,
                 pgid: 1002,
                 pids: vec![1002],
+                last_stage_pid: Some(1002),
+                last_stage_exit_code: None,
                 cmd: "compute_task".to_string(),
                 status: JobStatus::Suspended,
                 disowned: false,
@@ -64,6 +68,40 @@ let jobs_output = (jobs)
 }
 
 #[tokio::test]
+async fn test_pipeline_processes_are_listed_as_one_job() {
+    let env = setup_test_env();
+    let pids = vec![3001, 3002];
+    {
+        let mut jobs = env.job_control.jobs.write();
+        for pid in &pids {
+            jobs.insert(
+                *pid,
+                Job {
+                    id: 7,
+                    pgid: 3001,
+                    pids: pids.clone(),
+                    last_stage_pid: Some(3002),
+                    last_stage_exit_code: None,
+                    cmd: "producer | consumer".to_string(),
+                    status: JobStatus::Running,
+                    disowned: false,
+                    started_at: None,
+                },
+            );
+        }
+    }
+
+    run_script("let jobs_output = (jobs)", &env).await.unwrap();
+
+    let vars = env.vars.read();
+    let Some(Val::List(items)) = vars.get("jobs_output") else {
+        panic!("Expected jobs output list");
+    };
+    assert_eq!(items.len(), 1, "pipeline stages should appear as one job");
+    assert!(items[0].to_text().contains("producer | consumer"));
+}
+
+#[tokio::test]
 async fn test_disowned_jobs_excluded_from_listing() {
     let env = setup_test_env();
 
@@ -75,6 +113,8 @@ async fn test_disowned_jobs_excluded_from_listing() {
                 id: 1,
                 pgid: 2001,
                 pids: vec![2001],
+                last_stage_pid: Some(2001),
+                last_stage_exit_code: None,
                 cmd: "daemon_proc".to_string(),
                 status: JobStatus::Running,
                 disowned: true, // Disowned!

@@ -714,6 +714,10 @@ pub struct Job {
     pub id: usize,
     pub pgid: i32,
     pub pids: Vec<i32>,
+    #[serde(default)]
+    pub last_stage_pid: Option<i32>,
+    #[serde(default)]
+    pub last_stage_exit_code: Option<i32>,
     pub cmd: String,
     pub status: JobStatus,
     #[serde(default)]
@@ -976,6 +980,8 @@ pub struct Env {
     /// invocation boundaries and shared only by clones of that invocation
     /// (pipeline stages, scoped evaluators, and their waiters).
     pub(crate) execution: Arc<execution::ExecutionState>,
+    /// Process group shared by external commands launched from one pipeline.
+    pub pipeline_job: Option<Arc<job_control::PipelineJobContext>>,
     /// True for an environment created for a command invocation.  Nested
     /// invocations merge into their parent execution state instead of
     /// publishing directly to the interactive prompt.
@@ -1830,6 +1836,7 @@ impl Env {
                 edit_suggestion: Arc::new(RwLock::new(None)),
             },
             execution: Arc::new(execution::ExecutionState::new(0)),
+            pipeline_job: None,
             is_invocation: false,
             options: Arc::new(RwLock::new(ShellOptions::default())),
             backpressure_count: Arc::new(AtomicU64::new(0)),
@@ -1991,6 +1998,7 @@ impl Env {
                 edit_suggestion: Arc::new(RwLock::new(None)),
             },
             execution: Arc::new(execution::ExecutionState::new(0)),
+            pipeline_job: None,
             is_invocation: false,
             options: Arc::new(RwLock::new(ShellOptions::default())),
             backpressure_count: Arc::new(AtomicU64::new(0)),
@@ -2091,6 +2099,7 @@ impl Env {
             hooks: self.hooks.clone(),
             prompt: self.prompt.clone(),
             execution: self.execution.clone(),
+            pipeline_job: self.pipeline_job.clone(),
             is_invocation: self.is_invocation,
             options: self.options.clone(),
             backpressure_count: self.backpressure_count.clone(),
@@ -2542,6 +2551,7 @@ fn wait_for_job_inner(
     job_id: usize,
     cmd_str: &str,
     restore_terminal: bool,
+    defer_foreground_clear: bool,
 ) -> i32 {
     let w_if_stopped = |status: i32| (status & 0xff) == 0x7f;
     let w_if_signaled = |status: i32| {
@@ -2588,7 +2598,9 @@ fn wait_for_job_inner(
             jobs.retain(|k, _| *k != pid);
             drop(jobs);
             let is_foreground = *env.job_control.fg_mutex.lock() == Some(job_id);
-            let _ = env.clear_foreground(job_id);
+            if !defer_foreground_clear {
+                let _ = env.clear_foreground(job_id);
+            }
             let exit_code = 1;
             if !env.is_invocation || is_foreground {
                 env.set_exit_code(exit_code as i64);
@@ -2608,14 +2620,20 @@ fn wait_for_job_inner(
             }
             restore_term();
             let mut jobs = lock_jobs!(env.job_control.jobs.write());
-            let disowned = jobs.get(&pid).is_some_and(|j| j.disowned);
-            if let Some(j) = jobs.get_mut(&pid) {
-                j.status = JobStatus::Suspended;
+            let (pgid, disowned) = jobs
+                .get(&pid)
+                .map(|job| (job.pgid, job.disowned))
+                .unwrap_or((pid, false));
+            let already_reported = jobs
+                .values()
+                .any(|job| job.pgid == pgid && job.status == JobStatus::Suspended);
+            for job in jobs.values_mut().filter(|job| job.pgid == pgid) {
+                job.status = JobStatus::Suspended;
             }
-            if !disowned {
+            if !disowned && !already_reported {
                 println!("\n[{}] + Suspended {}", job_id, cmd_str);
             }
-            if !disowned {
+            if !disowned && !defer_foreground_clear {
                 let _ = env.clear_foreground(job_id);
             }
             return 0;
@@ -2648,10 +2666,20 @@ fn wait_for_job_inner(
                     .unwrap_or((0, false))
             };
             let mut jobs = lock_jobs!(env.job_control.jobs.write());
+            let is_last_stage = jobs
+                .get(&pid)
+                .is_some_and(|job| job.last_stage_pid == Some(pid));
+            if is_last_stage && let Some(pgid) = jobs.get(&pid).map(|job| job.pgid) {
+                for job in jobs.values_mut().filter(|job| job.pgid == pgid) {
+                    job.last_stage_exit_code = Some(exit_code);
+                }
+            }
             jobs.retain(|k, _| *k != pid);
             drop(jobs);
             let is_foreground = *env.job_control.fg_mutex.lock() == Some(job_id);
-            let _ = env.clear_foreground(job_id);
+            if !defer_foreground_clear {
+                let _ = env.clear_foreground(job_id);
+            }
             if !is_foreground && !was_disowned {
                 let (do_notify, threshold) = {
                     let opts = env.options.read();
@@ -2692,7 +2720,84 @@ pub fn spawn_job_waiter(
     restore_terminal: bool,
 ) {
     tokio::task::spawn_blocking(move || {
-        wait_for_job_inner(&env, pid, job_id, &cmd_str, restore_terminal);
+        wait_for_job_inner(&env, pid, job_id, &cmd_str, restore_terminal, false);
+    });
+}
+
+/// Wait for a resumed multi-process pipeline as one job. A negative `waitpid`
+/// target selects every child in the process group, so the foreground job stays
+/// active until all stages exit or the whole job stops again.
+pub fn spawn_job_group_waiter(env: Env, pgid: i32, job_id: usize, foreground: bool) {
+    tokio::task::spawn_blocking(move || {
+        let last_stage_pid = env
+            .job_control
+            .jobs
+            .read()
+            .values()
+            .find(|job| job.id == job_id)
+            .and_then(|job| job.last_stage_pid);
+        let mut last_stage_code = env
+            .job_control
+            .jobs
+            .read()
+            .values()
+            .find(|job| job.id == job_id)
+            .and_then(|job| job.last_stage_exit_code);
+        loop {
+            let mut status = 0;
+            // SAFETY: waitpid is called for the shell's direct children in this
+            // process group and writes status to a valid stack slot.
+            let pid = unsafe { libc::waitpid(-pgid, &mut status, libc::WUNTRACED) };
+            if pid < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                let _ = env.clear_foreground(job_id);
+                return;
+            }
+
+            let stopped = (status & 0xff) == 0x7f;
+            let exited = (status & 0x7f) == 0;
+            let mut jobs = env.job_control.jobs.write();
+            if stopped {
+                if let Some(job) = jobs.get_mut(&pid) {
+                    job.status = JobStatus::Suspended;
+                }
+                let group_stopped = jobs
+                    .values()
+                    .filter(|job| job.pgid == pgid)
+                    .all(|job| job.status == JobStatus::Suspended);
+                drop(jobs);
+                if group_stopped {
+                    let _ = env.clear_foreground(job_id);
+                    return;
+                }
+                continue;
+            }
+
+            if exited || (status & 0x7f) != 0 {
+                let code = if exited {
+                    (status >> 8) & 0xff
+                } else {
+                    128 + (status & 0x7f)
+                };
+                if Some(pid) == last_stage_pid {
+                    last_stage_code = Some(code);
+                }
+                jobs.remove(&pid);
+                let group_finished = !jobs.values().any(|job| job.pgid == pgid);
+                drop(jobs);
+                if group_finished {
+                    if foreground {
+                        env.set_exit_code(last_stage_code.unwrap_or(code) as i64);
+                    }
+                    let _ = env.clear_foreground(job_id);
+                    return;
+                }
+                continue;
+            }
+            drop(jobs);
+        }
     });
 }
 
@@ -2705,7 +2810,14 @@ pub fn wait_for_job_sync(
     cmd_str: &str,
     restore_terminal: bool,
 ) -> i32 {
-    wait_for_job_inner(env, pid, job_id, cmd_str, restore_terminal)
+    wait_for_job_inner(env, pid, job_id, cmd_str, restore_terminal, false)
+}
+
+/// Wait for one child in a foreground pipeline without clearing the pipeline's
+/// shared foreground-job marker. The pipeline executor clears it after all
+/// stages have joined.
+pub fn wait_for_pipeline_stage_sync(env: &Env, pid: i32, job_id: usize, cmd_str: &str) -> i32 {
+    wait_for_job_inner(env, pid, job_id, cmd_str, false, true)
 }
 
 fn forward_signal(env: &Env, signal: libc::c_int) {

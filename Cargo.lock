@@ -1026,6 +1026,7 @@ dependencies = [
  "fshell-sandbox",
  "fshell-semantic",
  "indexmap",
+ "portable-pty",
  "proptest",
  "ratatui",
  "rmp-serde",
