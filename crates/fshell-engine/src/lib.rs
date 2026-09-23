@@ -2631,9 +2631,34 @@ fn wait_for_job_inner(
                 res, status
             );
         }
-        if res <= 0 {
+        if res < 0 {
+            let error = std::io::Error::last_os_error();
             if debug_fg {
-                eprintln!("[FSH_DEBUG_FG] waiter: waitpid returned <= 0, cleaning up");
+                eprintln!(
+                    "[FSH_DEBUG_FG] waiter: waitpid error errno={:?}, cleaning up",
+                    error.raw_os_error()
+                );
+            }
+            match error.raw_os_error() {
+                // A signal (SIGWINCH, another child's SIGCHLD, SIGTSTP, ...)
+                // interrupted the wait. The child's state is unchanged, so the
+                // wait must be retried rather than reported as an exit.
+                Some(libc::EINTR) => continue,
+                // The child was already reaped by another waiter (a `kill`
+                // reaper, `fg`/`bg`, or the process-group waiter). Its status is
+                // not observable here, so do not fabricate one: drop this
+                // stage's bookkeeping and leave the recorded exit code alone.
+                Some(libc::ECHILD) => {
+                    restore_term();
+                    let mut jobs = lock_jobs!(env.job_control.jobs.write());
+                    jobs.retain(|k, _| *k != pid);
+                    drop(jobs);
+                    if !defer_foreground_clear {
+                        let _ = env.clear_foreground(job_id);
+                    }
+                    return env.exit_code() as i32;
+                }
+                _ => {}
             }
             restore_term();
             let mut jobs = lock_jobs!(env.job_control.jobs.write());
