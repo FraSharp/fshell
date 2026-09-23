@@ -180,9 +180,16 @@ async fn read_line_silent(timeout_secs: Option<u64>) -> Result<String, String> {
         }
 
         let poll_duration = Duration::from_millis(100);
-        if let Ok(true) = event::poll(poll_duration)
-            && let Ok(Event::Key(KeyEvent { code, .. })) = event::read()
-        {
+        let has_event = match event::poll(poll_duration) {
+            Ok(has_event) => has_event,
+            Err(error) => break Err(format!("Terminal input closed: {error}")),
+        };
+        if has_event {
+            let code = match event::read() {
+                Ok(Event::Key(KeyEvent { code, .. })) => code,
+                Ok(_) => continue,
+                Err(error) => break Err(format!("Terminal input closed: {error}")),
+            };
             match code {
                 KeyCode::Enter => {
                     println!(); // Print newline to mimic enter press behavior

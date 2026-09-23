@@ -1710,10 +1710,10 @@ fn field_value(seg: &SegmentConfig, field: &InspectorField) -> String {
 }
 
 fn handle_studio_input(app: &mut App) -> Result<bool, io::Error> {
-    if !event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+    if !event::poll(std::time::Duration::from_millis(100))? {
         return Ok(true);
     }
-    let Ok(Event::Key(key)) = event::read() else {
+    let Event::Key(key) = event::read()? else {
         return Ok(true);
     };
     if key.kind != event::KeyEventKind::Press {

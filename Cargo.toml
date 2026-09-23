@@ -17,6 +17,11 @@ members = [
     "crates/fshell-posix",
     "fuzz",
 ]
+exclude = ["vendor/crossterm"]
+
+# Keep crossterm's Unix terminal reader EOF-safe until the upstream fix ships.
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }
 
 
 [workspace.package]
@@ -45,7 +50,14 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 autobins = false
-include = ["src/**/*", "build.rs", "LICENSE", "COPYING", "README.md"]
+include = [
+    "src/**/*",
+    "vendor/crossterm/**/*",
+    "build.rs",
+    "LICENSE",
+    "COPYING",
+    "README.md",
+]
 
 [features]
 default = ["full"]
@@ -181,6 +193,3 @@ fshell-hash = { workspace = true }
 fshell-panes = { path = "crates/fshell-panes" }
 ratatui = { workspace = true }
 proptest = { workspace = true }
-
-
-

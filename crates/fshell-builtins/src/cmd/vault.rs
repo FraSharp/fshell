@@ -273,28 +273,35 @@ pub fn read_password_prompt(prompt: &str) -> Result<String, ShellError> {
     let _raw_guard = RawModeGuard::new()?;
     let mut password = String::new();
     loop {
-        if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-            if let Ok(Event::Key(key_event)) = event::read() {
-                if key_event.kind == crossterm::event::KeyEventKind::Release {
-                    continue;
+        let has_event = event::poll(Duration::from_millis(100))
+            .map_err(|e| ShellError::from(format!("Terminal input closed: {e}")))?;
+        if has_event {
+            let key_event = match event::read() {
+                Ok(Event::Key(key_event)) => key_event,
+                Ok(_) => continue,
+                Err(e) => {
+                    return Err(ShellError::from(format!("Terminal input closed: {e}")));
                 }
-                match key_event.code {
-                    KeyCode::Enter => {
-                        println!();
-                        break;
-                    }
-                    KeyCode::Esc => {
-                        println!();
-                        return Err("Password input cancelled".to_string().into());
-                    }
-                    KeyCode::Backspace => {
-                        password.pop();
-                    }
-                    KeyCode::Char(c) => {
-                        password.push(c);
-                    }
-                    _ => {}
+            };
+            if key_event.kind == crossterm::event::KeyEventKind::Release {
+                continue;
+            }
+            match key_event.code {
+                KeyCode::Enter => {
+                    println!();
+                    break;
                 }
+                KeyCode::Esc => {
+                    println!();
+                    return Err("Password input cancelled".to_string().into());
+                }
+                KeyCode::Backspace => {
+                    password.pop();
+                }
+                KeyCode::Char(c) => {
+                    password.push(c);
+                }
+                _ => {}
             }
         }
     }
@@ -1002,12 +1009,19 @@ pub fn watch_totps(entries: &[VaultEntry]) -> Result<(), ShellError> {
         println!("\nPress 'q' or Esc to exit...");
         let _ = std::io::stdout().flush();
 
-        if event::poll(Duration::from_millis(500)).unwrap_or(false) {
-            if let Ok(Event::Key(key_event)) = event::read() {
-                if key_event.kind == crossterm::event::KeyEventKind::Press {
-                    if key_event.code == KeyCode::Char('q') || key_event.code == KeyCode::Esc {
-                        break;
-                    }
+        let has_event = event::poll(Duration::from_millis(500))
+            .map_err(|e| ShellError::from(format!("Terminal input closed: {e}")))?;
+        if has_event {
+            let key_event = match event::read() {
+                Ok(Event::Key(key_event)) => key_event,
+                Ok(_) => continue,
+                Err(e) => {
+                    return Err(ShellError::from(format!("Terminal input closed: {e}")));
+                }
+            };
+            if key_event.kind == crossterm::event::KeyEventKind::Press {
+                if key_event.code == KeyCode::Char('q') || key_event.code == KeyCode::Esc {
+                    break;
                 }
             }
         }
@@ -1175,111 +1189,116 @@ pub fn run_tui(path: &Path, env: &Env) -> Result<(), ShellError> {
                 f.render_widget(status_block, chunks[2]);
             }).map_err(|e| format!("Draw error: {}", e))?;
 
-            if event::poll(Duration::from_millis(200)).unwrap_or(false) {
-                if let Ok(Event::Key(key_event)) = event::read() {
-                    if key_event.kind == crossterm::event::KeyEventKind::Press {
-                        if search_mode {
-                            match key_event.code {
-                                KeyCode::Enter | KeyCode::Esc => {
-                                    search_mode = false;
-                                }
-                                KeyCode::Backspace => {
-                                    search_query.pop();
-                                }
-                                KeyCode::Char(c) => {
-                                    search_query.push(c);
-                                }
-                                _ => {}
+            let has_event = event::poll(Duration::from_millis(200))
+                .map_err(|e| ShellError::from(format!("Terminal input closed: {e}")))?;
+            if has_event {
+                let key_event = match event::read() {
+                    Ok(Event::Key(key_event)) => key_event,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        return Err(ShellError::from(format!("Terminal input closed: {e}")));
+                    }
+                };
+                if key_event.kind == crossterm::event::KeyEventKind::Press {
+                    if search_mode {
+                        match key_event.code {
+                            KeyCode::Enter | KeyCode::Esc => {
+                                search_mode = false;
                             }
-                        } else {
-                            match key_event.code {
-                                KeyCode::Char('q') | KeyCode::Esc => {
-                                    exit_requested = true;
+                            KeyCode::Backspace => {
+                                search_query.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                search_query.push(c);
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match key_event.code {
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                exit_requested = true;
+                            }
+                            KeyCode::Char('/') => {
+                                search_mode = true;
+                            }
+                            KeyCode::Up => {
+                                let curr = list_state.selected().unwrap_or(0);
+                                if curr > 0 {
+                                    list_state.select(Some(curr - 1));
+                                    reveal_password = false;
                                 }
-                                KeyCode::Char('/') => {
-                                    search_mode = true;
+                            }
+                            KeyCode::Down => {
+                                let curr = list_state.selected().unwrap_or(0);
+                                if !filtered.is_empty() && curr < filtered.len() - 1 {
+                                    list_state.select(Some(curr + 1));
+                                    reveal_password = false;
                                 }
-                                KeyCode::Up => {
-                                    let curr = list_state.selected().unwrap_or(0);
-                                    if curr > 0 {
-                                        list_state.select(Some(curr - 1));
-                                        reveal_password = false;
+                            }
+                            KeyCode::Char('v') => {
+                                reveal_password = !reveal_password;
+                            }
+                            KeyCode::Char('p') => {
+                                if let Some((_, entry)) =
+                                    list_state.selected().and_then(|idx| filtered.get(idx))
+                                {
+                                    if let Some(ref pwd) = entry.password {
+                                        copy_to_system_clipboard(pwd);
+                                        status_msg =
+                                            "Password copied to system clipboard!".to_string();
+                                        status_expiry = SystemTime::now() + Duration::from_secs(3);
                                     }
                                 }
-                                KeyCode::Down => {
-                                    let curr = list_state.selected().unwrap_or(0);
-                                    if !filtered.is_empty() && curr < filtered.len() - 1 {
-                                        list_state.select(Some(curr + 1));
-                                        reveal_password = false;
+                            }
+                            KeyCode::Char('u') => {
+                                if let Some((_, entry)) =
+                                    list_state.selected().and_then(|idx| filtered.get(idx))
+                                {
+                                    if let Some(ref u) = entry.username {
+                                        copy_to_system_clipboard(u);
+                                        status_msg =
+                                            "Username copied to system clipboard!".to_string();
+                                        status_expiry = SystemTime::now() + Duration::from_secs(3);
                                     }
                                 }
-                                KeyCode::Char('v') => {
-                                    reveal_password = !reveal_password;
-                                }
-                                KeyCode::Char('p') => {
-                                    if let Some((_, entry)) =
-                                        list_state.selected().and_then(|idx| filtered.get(idx))
-                                    {
-                                        if let Some(ref pwd) = entry.password {
-                                            copy_to_system_clipboard(pwd);
+                            }
+                            KeyCode::Char('t') => {
+                                if let Some((_, entry)) =
+                                    list_state.selected().and_then(|idx| filtered.get(idx))
+                                {
+                                    if let Some(ref sec) = entry.totp_secret {
+                                        let now = SystemTime::now()
+                                            .duration_since(SystemTime::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs();
+                                        if let Ok(code) = generate_totp(sec, now) {
+                                            copy_to_system_clipboard(&code);
                                             status_msg =
-                                                "Password copied to system clipboard!".to_string();
+                                                "TOTP copied to system clipboard!".to_string();
                                             status_expiry =
                                                 SystemTime::now() + Duration::from_secs(3);
                                         }
                                     }
                                 }
-                                KeyCode::Char('u') => {
-                                    if let Some((_, entry)) =
-                                        list_state.selected().and_then(|idx| filtered.get(idx))
-                                    {
-                                        if let Some(ref u) = entry.username {
-                                            copy_to_system_clipboard(u);
-                                            status_msg =
-                                                "Username copied to system clipboard!".to_string();
-                                            status_expiry =
-                                                SystemTime::now() + Duration::from_secs(3);
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('t') => {
-                                    if let Some((_, entry)) =
-                                        list_state.selected().and_then(|idx| filtered.get(idx))
-                                    {
-                                        if let Some(ref sec) = entry.totp_secret {
-                                            let now = SystemTime::now()
-                                                .duration_since(SystemTime::UNIX_EPOCH)
-                                                .unwrap_or_default()
-                                                .as_secs();
-                                            if let Ok(code) = generate_totp(sec, now) {
-                                                copy_to_system_clipboard(&code);
-                                                status_msg =
-                                                    "TOTP copied to system clipboard!".to_string();
-                                                status_expiry =
-                                                    SystemTime::now() + Duration::from_secs(3);
-                                            }
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('a') => {
-                                    add_requested = true;
-                                }
-                                KeyCode::Char('e') => {
-                                    if let Some((db_idx, _)) =
-                                        list_state.selected().and_then(|idx| filtered.get(idx))
-                                    {
-                                        edit_target = Some(*db_idx);
-                                    }
-                                }
-                                KeyCode::Char('d') => {
-                                    if let Some((db_idx, _)) =
-                                        list_state.selected().and_then(|idx| filtered.get(idx))
-                                    {
-                                        delete_target = Some(*db_idx);
-                                    }
-                                }
-                                _ => {}
                             }
+                            KeyCode::Char('a') => {
+                                add_requested = true;
+                            }
+                            KeyCode::Char('e') => {
+                                if let Some((db_idx, _)) =
+                                    list_state.selected().and_then(|idx| filtered.get(idx))
+                                {
+                                    edit_target = Some(*db_idx);
+                                }
+                            }
+                            KeyCode::Char('d') => {
+                                if let Some((db_idx, _)) =
+                                    list_state.selected().and_then(|idx| filtered.get(idx))
+                                {
+                                    delete_target = Some(*db_idx);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }

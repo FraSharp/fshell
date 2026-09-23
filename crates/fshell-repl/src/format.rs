@@ -142,9 +142,16 @@ fn show_text_pager(text: &str) {
         let _ = write!(stdout, "{}", buf);
         let _ = stdout.flush();
 
-        if let Ok(true) = event::poll(std::time::Duration::from_millis(100))
-            && let Ok(Event::Key(key)) = event::read()
-        {
+        let has_event = match event::poll(std::time::Duration::from_millis(100)) {
+            Ok(has_event) => has_event,
+            Err(_) => break,
+        };
+        if has_event {
+            let key = match event::read() {
+                Ok(Event::Key(key)) => key,
+                Ok(_) => continue,
+                Err(_) => break,
+            };
             if searching {
                 match key.code {
                     KeyCode::Char(c) => {

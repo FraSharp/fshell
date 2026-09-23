@@ -13,6 +13,7 @@
 !/crates/
 !/docs/
 !/tests/
+!/vendor/
 
 **/.DS_Store
 **/.fsh/

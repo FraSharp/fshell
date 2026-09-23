@@ -176,7 +176,12 @@ pub fn show_splash(
                 break;
             }
         }
-        if crossterm::event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+        let has_event = match crossterm::event::poll(std::time::Duration::from_millis(100)) {
+            Ok(has_event) => has_event,
+            // A closed terminal is a normal end to this interactive screen.
+            Err(_) => break,
+        };
+        if has_event {
             match event::read() {
                 Ok(Event::Key(key)) => {
                     if matches!(key.code, KeyCode::Char('d' | 'D')) {
@@ -185,7 +190,7 @@ pub fn show_splash(
                     break;
                 }
                 Ok(Event::Resize(_, _)) => {}
-                _ => break,
+                Err(_) | Ok(_) => break,
             }
         }
     }

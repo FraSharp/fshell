@@ -340,15 +340,6 @@ pub async fn run_ftui_repl(
         let mut aborted_command = None;
         let mut input_iter: u64 = 0;
 
-        // Spin detector
-        // If the input loop completes 500 iterations in under 50ms without blocking,
-        // the process is stuck in an unblocked tight loop (e.g. crossterm spinning on
-        // EOF after cmux pane / PTY disconnect). Break repl_loop to exit cleanly without 100% CPU.
-        let mut spin_window_start = std::time::Instant::now();
-        let mut spin_window_count: u64 = 0;
-        const SPIN_WINDOW_THRESHOLD: u64 = 500;
-        const SPIN_WINDOW_DURATION: Duration = Duration::from_millis(50);
-
         // ignoreeof handling: first Ctrl-D with empty buffer warns, second exits
         let mut eof_pending = false;
 
@@ -358,23 +349,6 @@ pub async fn run_ftui_repl(
             None;
         'input_loop: loop {
             input_iter += 1;
-
-            // Spin detection (PTY disconnect / EOF loop guard)
-            spin_window_count += 1;
-            if spin_window_count >= SPIN_WINDOW_THRESHOLD {
-                let elapsed = spin_window_start.elapsed();
-                if elapsed < SPIN_WINDOW_DURATION {
-                    cpu_dbg!(
-                        "SPIN DETECTED: {} iterations in {:?} — breaking repl_loop",
-                        spin_window_count,
-                        elapsed
-                    );
-                    break 'repl_loop;
-                }
-                // Window expired, reset
-                spin_window_start = std::time::Instant::now();
-                spin_window_count = 0;
-            }
 
             // TTY health / signal checks
             #[cfg(unix)]

@@ -349,8 +349,15 @@ pub fn run_history_tui(
             .map_err(|e| format!("Failed to draw UI: {}", e))?;
 
         // Handle keys
-        if event::poll(std::time::Duration::from_millis(100)).unwrap_or(false)
-            && let Ok(Event::Key(key)) = event::read()
+        let event = match event::poll(std::time::Duration::from_millis(100)) {
+            Ok(true) => match event::read() {
+                Ok(event) => Some(event),
+                Err(_) => return Ok(TuiResult::Cancel),
+            },
+            Ok(false) => None,
+            Err(_) => return Ok(TuiResult::Cancel),
+        };
+        if let Some(Event::Key(key)) = event
             && key.kind == event::KeyEventKind::Press
         {
             // Check Ctrl-C first
