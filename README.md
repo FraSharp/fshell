@@ -89,30 +89,30 @@ fsh -s
 
 ### use fshell as your login shell
 
-Install `fsh` at a stable absolute path first. The Cargo installation above normally places it at `~/.cargo/bin/fsh`; check the actual path and confirm it is executable:
+install `fsh` at a stable absolute path first. the cargo install above normally places it at `~/.cargo/bin/fsh`; check the actual path and confirm it is executable:
 
-```sh
-FshPath="$(command -v fsh)"
-test -x "$FshPath" && printf 'Using %s\n' "$FshPath"
+```bash
+fsh_path="$(command -v fsh)"
+test -x "$fsh_path" && printf 'using %s\n' "$fsh_path"
 ```
 
-`chsh` and system login tools commonly accept only shells listed in `/etc/shells`. Check whether the exact path is present:
+`chsh` and system login tools commonly accept only shells listed in `/etc/shells`. check whether the exact path is present:
 
-```sh
-grep -Fx "$FshPath" /etc/shells
+```bash
+grep -Fx "$fsh_path" /etc/shells
 ```
 
-If it is absent, add that exact absolute path to `/etc/shells` using your operating system's administrator procedure. On macOS and many Linux distributions this file is administrator-owned. Then set the account shell:
+if it isn't, add that exact absolute path to `/etc/shells` using your operating system's administrator procedure. on macOS and many Linux distributions this file is administrator-owned. then set the account shell:
 
-```sh
-chsh -s "$FshPath"
+```bash
+chsh -s "$fsh_path"
 ```
 
-Sign out and back in to exercise the account-login path. A direct terminal launch (`fsh`) or explicit login launch (`fsh --login`) is useful for checking startup, but does not by itself verify that your account's `chsh` setting works.
+sign out and back in to exercise the account-login path. a direct terminal launch (`fsh`) or explicit login launch (`fsh --login`) is useful for checking startup, but doesn't by itself verify that your account's `chsh` setting works.
 
-To revert, use `chsh -s /bin/zsh` if zsh is installed at that path, or substitute the known working shell path for your system. Do not remove that fallback shell from `/etc/shells`.
+to revert, use `chsh -s /bin/zsh` if zsh is installed at that path, or substitute the known working shell path for your system. don't remove that fallback shell from `/etc/shells`.
 
-fshell detects the Unix login-shell `argv[0]` convention and loads its supported login environment. Existing Bash/Zsh startup files are evaluated by fshell's POSIX compatibility layer; shell-specific startup syntax and behavior may differ from running Bash or Zsh directly.
+fshell detects the unix login-shell `argv[0]` convention and loads its supported login environment. existing bash/zsh startup files are evaluated by fshell's posix compatibility layer; shell-specific startup syntax and behavior may differ from running bash or zsh directly.
 
 ---
 
@@ -399,7 +399,7 @@ everything is built into the binary:
 ## systems architecture & performance
 
 - **zero-subprocess keyword stages**: core pipeline stages (`filter`, `map`, `sort`, `grep`, `count`, `limit`, `traverse`, `hash`) are engine-level language keywords evaluated in-process with zero subprocess fork overhead.
-- **interned identifiers (`Ustr`)**: map keys use string interning. looking up `.size` or `.name` across 100,000 files in a pipeline is an **$O(1)$ pointer comparison** rather than repeated string hashing or allocations.
+- **interned identifiers (`Ustr`)**: map keys use string interning. looking up `.size` or `.name` across 100,000 files in a pipeline is an **O(1) pointer comparison** rather than repeated string hashing or allocations.
 - **asynchronous dataflow**: pipeline items flow through bounded tokio channels wrapped in `Arc<Val>`, providing automatic backpressure.
 - **multi-call binary routing**: single binary `fsh` acts as shell, script runner, and utility suite (`ls`, etc.) depending on invocation context.
 
