@@ -5,6 +5,13 @@
 compile_error!("fshell requires a Unix-compatible operating system (Linux or macOS).");
 
 fn main() {
+    let trace = fshell_engine::trace::TraceSink::from_env();
+    let mut entry = trace.span(
+        trace.root_context(),
+        "process.rust_entry",
+        fshell_engine::trace::TraceMode::Startup,
+        serde_json::Map::new(),
+    );
     fshell::setup_panic_hook();
 
     let args: Vec<String> = std::env::args().collect();
@@ -20,7 +27,16 @@ fn main() {
         i += 1;
     }
     if is_empty_command {
-        std::process::exit(0);
+        if let Some(span) = entry.take() {
+            span.finish(fshell_engine::trace::SpanOutcome::Ok);
+        }
+        fshell_engine::trace::TraceSink::exit_process(
+            &trace,
+            trace.root_context(),
+            fshell_engine::trace::TraceMode::Startup,
+            0,
+            fshell_engine::trace::SpanOutcome::Exit,
+        );
     }
 
     let program_name = args
@@ -37,13 +53,31 @@ fn main() {
     // this multicall binary was invoked as a utility.
     let dispatch_name = program_name.strip_prefix('-').unwrap_or(&program_name);
     if dispatch_name != "fsh" && dispatch_name != "fshell" {
+        if let Some(mut span) = entry.take() {
+            span.add_attr("route", "utility");
+            span.finish(fshell_engine::trace::SpanOutcome::Ok);
+        }
         let utility_args: Vec<String> = args.into_iter().skip(1).collect();
-        fshell::run_utility(dispatch_name, &utility_args);
+        fshell::run_utility_with_trace(dispatch_name, &utility_args, trace.clone());
     }
 
+    let runtime_span = trace.span(
+        trace.root_context(),
+        "process.runtime_init",
+        fshell_engine::trace::TraceMode::Startup,
+        serde_json::Map::new(),
+    );
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap_or_else(|e| panic!("failed to build runtime: {e}"));
-    rt.block_on(fshell::run());
+    if let Some(mut span) = entry.take() {
+        span.add_attr("route", "shell");
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
+    }
+    if let Some(span) = runtime_span {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
+    }
+    rt.block_on(fshell::run_with_trace(trace.clone()));
+    trace.flush();
 }

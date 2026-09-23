@@ -401,6 +401,12 @@ pub fn emit_osc7(pwd: &str) {
 /// Batch-read all env data into a PromptSnapshot (single lock acquisition per field).
 pub fn refresh_prompt_snapshot(env: &Env, pwd: &str) -> PromptSnapshot {
     let _start = std::time::Instant::now();
+    let mut trace_span = env.trace.span(
+        env.trace_context,
+        "prompt.refresh",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     emit_osc7(pwd);
     let exit_code = *env.prompt.last_exit_code.read();
     let duration = *env.prompt.last_duration.read();
@@ -454,7 +460,7 @@ pub fn refresh_prompt_snapshot(env: &Env, pwd: &str) -> PromptSnapshot {
         ));
     }
 
-    PromptSnapshot {
+    let snapshot = PromptSnapshot {
         exit_code,
         duration,
         job_count,
@@ -464,7 +470,11 @@ pub fn refresh_prompt_snapshot(env: &Env, pwd: &str) -> PromptSnapshot {
         pwd: pwd.to_string(),
         git_status,
         duration_color,
+    };
+    if let Some(span) = trace_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
     }
+    snapshot
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -549,9 +559,24 @@ pub(crate) fn render_prompt_template(
 }
 
 pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
+    let mut logger_span = env.trace.span(
+        env.trace_context,
+        "startup.session_logger_init",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     init_session_logger();
+    if let Some(span) = logger_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
+    }
 
     // Synchronize prompt configuration and theme on boot
+    let mut prompt_config_span = env.trace.span(
+        env.trace_context,
+        "startup.prompt_config_load",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     let loaded_prompt = crate::prompt_config::load_config();
     {
         let mut w = env.prompt_config.write();
@@ -562,6 +587,9 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
         && let Ok(t) = fshell_core::theme::Theme::load(&theme_name, &cfg_dir)
     {
         env.set_theme(std::sync::Arc::new(t));
+    }
+    if let Some(span) = prompt_config_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
     }
 
     emit_osc7(&env.cwd().to_string_lossy());
@@ -586,6 +614,12 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
     let config_mode = env.options.read().session_restore.clone();
 
     // Determine restore target
+    let mut restore_span = env.trace.span(
+        env.trace_context,
+        "startup.session_restore_scan",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     let restore_target = if let Some(target) = resume_option {
         Some(target)
     } else if config_mode == "auto" {
@@ -705,6 +739,9 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
     }
 
     let is_resuming = restored_state.is_some();
+    if let Some(span) = restore_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
+    }
 
     if let Some(state) = restored_state {
         restore_session_state(&env, state);
@@ -724,6 +761,12 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
         None
     };
 
+    let mut session_log_span = env.trace.span(
+        env.trace_context,
+        "startup.session_log_replay",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     if let Some(ref path) = log_file_path
         && path.exists()
         && let Ok(content) = std::fs::read_to_string(path)
@@ -733,6 +776,9 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
     }
     if let Some(ref path) = log_file_path {
         fshell_engine::init_session_logger(path.clone());
+    }
+    if let Some(span) = session_log_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
     }
 
     // Setup active job control signal handlers
@@ -806,19 +852,44 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
         use std::io::Read;
         let mut input = String::new();
         if std::io::stdin().read_to_string(&mut input).is_ok() && !input.trim().is_empty() {
-            match fshell_engine::run_script(&input, &env).await {
-                Ok(Flow::Exit(code)) => std::process::exit(code),
+            let command_env = env.with_trace_mode(fshell_engine::trace::TraceMode::Script);
+            match fshell_engine::run_script(&input, &command_env).await {
+                Ok(Flow::Exit(code)) => fshell_engine::trace::TraceSink::exit_process(
+                    &env.trace,
+                    env.trace_context,
+                    command_env.trace_mode,
+                    code,
+                    fshell_engine::trace::SpanOutcome::Exit,
+                ),
                 Ok(_) => {
                     let code = *env.prompt.last_exit_code.read() as i32;
-                    std::process::exit(code);
+                    fshell_engine::trace::TraceSink::exit_process(
+                        &env.trace,
+                        env.trace_context,
+                        command_env.trace_mode,
+                        code,
+                        fshell_engine::trace::SpanOutcome::Exit,
+                    )
                 }
                 Err(e) => {
                     eprintln!("\x1b[1;31merror:\x1b[0m {}", e);
-                    std::process::exit(1);
+                    fshell_engine::trace::TraceSink::exit_process(
+                        &env.trace,
+                        env.trace_context,
+                        command_env.trace_mode,
+                        1,
+                        fshell_engine::trace::SpanOutcome::Error,
+                    )
                 }
             }
         } else {
-            std::process::exit(0);
+            fshell_engine::trace::TraceSink::exit_process(
+                &env.trace,
+                env.trace_context,
+                env.trace_mode,
+                0,
+                fshell_engine::trace::SpanOutcome::Exit,
+            );
         }
     }
 
@@ -832,11 +903,30 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
         // Run init synchronously so $PATH, aliases, prompt, and config are immediately
         // available without background task races or terminal conflicts with FTUI.
         fshell_core::debug_log!("interactive init: synchronous (is_login={is_login_shell})");
+        let mut login_span = env.trace.span(
+            env.trace_context,
+            "startup.login_environment",
+            env.trace_mode,
+            serde_json::Map::new(),
+        );
         let (shell_ok, shell_msg) =
             match fshell_engine::login::load_login_environment(&env, is_login_shell, true).await {
                 Ok(()) => (true, "environment loaded".to_string()),
                 Err(e) => (false, e.to_string()),
             };
+        if let Some(span) = login_span.take() {
+            span.finish(if shell_ok {
+                fshell_engine::trace::SpanOutcome::Ok
+            } else {
+                fshell_engine::trace::SpanOutcome::Error
+            });
+        }
+        let mut config_span = env.trace.span(
+            env.trace_context,
+            "startup.config_load",
+            env.trace_mode,
+            serde_json::Map::new(),
+        );
         let (config_ok, config_msg) = match fshell_engine::load_config_script(&env).await {
             Ok(()) => {
                 let has_file =
@@ -849,25 +939,78 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
             }
             Err(e) => (false, e),
         };
+        if let Some(span) = config_span.take() {
+            span.finish(if config_ok {
+                fshell_engine::trace::SpanOutcome::Ok
+            } else {
+                fshell_engine::trace::SpanOutcome::Error
+            });
+        }
+        let mut path_span = env.trace.span(
+            env.trace_context,
+            "startup.path_warmup",
+            env.trace_mode,
+            serde_json::Map::new(),
+        );
         fshell_engine::warmup_path_cache(Some(&env));
+        if let Some(span) = path_span.take() {
+            span.finish(fshell_engine::trace::SpanOutcome::Ok);
+        }
+        let mut completions_span = env.trace.span(
+            env.trace_context,
+            "startup.completion_prewarm",
+            env.trace_mode,
+            serde_json::Map::new(),
+        );
         autocomplete::prewarm_completions(&env);
+        if let Some(span) = completions_span.take() {
+            span.finish(fshell_engine::trace::SpanOutcome::Ok);
+        }
         let splash_dismissed = fshell_engine::config_dir()
             .map(|d| d.join(".splash_disabled").exists())
             .unwrap_or(false);
         if !splash_dismissed {
+            let mut splash_span = env.trace.span(
+                env.trace_context,
+                "startup.splash",
+                env.trace_mode,
+                serde_json::Map::new(),
+            );
             crate::ftui::splash::show_splash(&env, config_ok, &config_msg, shell_ok, &shell_msg);
+            if let Some(span) = splash_span.take() {
+                span.finish(fshell_engine::trace::SpanOutcome::Ok);
+            }
         }
         init_done.notify_one();
     }
 
     // FTUI is the interactive REPL path
-    ftui::run_ftui_repl(env.clone(), session_id.clone(), init_done, should_clear).await;
+    let first_prompt_span = env.trace.span(
+        env.trace_context,
+        "startup.first_prompt_ready",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
+    ftui::run_ftui_repl(
+        env.clone(),
+        session_id.clone(),
+        init_done,
+        should_clear,
+        first_prompt_span,
+    )
+    .await;
 
     // Save session on exit
     save_session_state(&env, &session_id);
 
     let exit_code = *env.prompt.last_exit_code.read() as i32;
-    std::process::exit(exit_code);
+    fshell_engine::trace::TraceSink::exit_process(
+        &env.trace,
+        env.trace_context,
+        env.trace_mode,
+        exit_code,
+        fshell_engine::trace::SpanOutcome::Exit,
+    );
 }
 
 fn restore_session_state(env: &Env, state: fshell_engine::handoff::HandoffState) {
@@ -1062,9 +1205,26 @@ pub(crate) async fn handle_line_generic(
     pwd: &str,
     session_id: &str,
 ) -> Result<(), ()> {
-    let invocation = env.begin_invocation();
+    let mut attrs = serde_json::Map::new();
+    attrs.insert("input_bytes".into(), serde_json::json!(line.len()));
+    let mut command_span =
+        env.trace
+            .command_span(env.trace_context, "command", env.trace_mode, attrs);
+    let command_env = if let Some(span) = &command_span {
+        env.with_trace_context(span.context())
+    } else {
+        env.clone()
+    };
+    let invocation = command_env.begin_invocation();
     let result = handle_line_generic_inner(&invocation, line, pwd, session_id).await;
     env.finish_invocation(&invocation);
+    if let Some(span) = command_span.take() {
+        span.finish(if result.is_err() {
+            fshell_engine::trace::SpanOutcome::Exit
+        } else {
+            fshell_engine::trace::SpanOutcome::Ok
+        });
+    }
     result
 }
 
@@ -1184,6 +1344,12 @@ async fn handle_line_generic_inner(
         return Ok(());
     }
 
+    let mut prep_span = env.trace.span(
+        env.trace_context,
+        "command.input_prepare",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     let line_trimmed = line.trim();
     let mut dym_substitution: Option<String> = None;
 
@@ -1223,6 +1389,9 @@ async fn handle_line_generic_inner(
                             .to_string();
                         // FTUI mode: store suggestion for the caller to pick up
                         *env.prompt.edit_suggestion.write() = Some(suggestion);
+                        if let Some(span) = prep_span.take() {
+                            span.finish(fshell_engine::trace::SpanOutcome::Ok);
+                        }
                         return Ok(());
                     } else {
                         let rest = line_trimmed.split_once(char::is_whitespace).map(|x| x.1);
@@ -1241,11 +1410,20 @@ async fn handle_line_generic_inner(
         }
     }
 
+    if let Some(span) = prep_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
+    }
     let line_trimmed: &str = dym_substitution.as_deref().unwrap_or(line_trimmed);
 
     // Fish-style alias expansion: pre-resolve aliases in command position so
     // the parser sees the full command and execute_pipeline takes the fast
     // builtin path — avoids re-parsing + tokio::spawn overhead for aliases.
+    let mut alias_span = env.trace.span(
+        env.trace_context,
+        "command.alias_expand",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     let expanded_line: Option<String> = {
         let first_word = line_trimmed.split_whitespace().next().unwrap_or("");
         if !first_word.is_empty()
@@ -1264,13 +1442,25 @@ async fn handle_line_generic_inner(
             None
         }
     };
+    if let Some(span) = alias_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
+    }
     let line_trimmed: &str = expanded_line.as_deref().unwrap_or(line_trimmed);
 
     if line_trimmed.is_empty() {
         return Ok(());
     }
 
+    let mut preexec_span = env.trace.span(
+        env.trace_context,
+        "command.preexec_hook",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     fshell_engine::run_hooks("preexec", env).await;
+    if let Some(span) = preexec_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
+    }
 
     let prev_pwd = env.cwd();
 
@@ -1335,6 +1525,12 @@ async fn handle_line_generic_inner(
     // Log command to history BEFORE execution.
     // This ensures commands like `reload -bd` (which calls execvp to replace the process)
     // are logged even though they replace the process before any async logging runs.
+    let mut history_span = env.trace.span(
+        env.trace_context,
+        "history.insert",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     let history_row_id = {
         let histignoredups = {
             let opts = env.options.read();
@@ -1365,9 +1561,26 @@ async fn handle_line_generic_inner(
             None
         }
     };
+    if let Some(span) = history_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
+    }
 
     let mut parser = Parser::new(line_trimmed);
-    match parser.parse_statements() {
+    let mut parse_span = env.trace.span(
+        env.trace_context,
+        "command.parse",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
+    let parsed = parser.parse_statements();
+    if let Some(span) = parse_span.take() {
+        span.finish(if parsed.is_ok() {
+            fshell_engine::trace::SpanOutcome::Ok
+        } else {
+            fshell_engine::trace::SpanOutcome::Error
+        });
+    }
+    match parsed {
         Ok(stmts) => {
             for stmt in stmts {
                 if let Stmt::Exit(_) = stmt.unpack() {
@@ -1432,9 +1645,18 @@ async fn handle_line_generic_inner(
                             let mut has_errors = false;
                             fshell_core::debug_log!("pipeline: waiting on rx.recv()");
                             let theme = env.active_theme();
+                            let mut output_span = env.trace.span(
+                                env.trace_context,
+                                "command.output_drain_and_format",
+                                env.trace_mode,
+                                serde_json::Map::new(),
+                            );
+                            let mut output_item_count = 0usize;
+                            let mut output_byte_count = 0usize;
                             while let Some(payload) = rx.recv().await {
                                 match payload {
                                     PipelinePayload::Data(v) => {
+                                        output_item_count = output_item_count.saturating_add(1);
                                         if !matches!(&*v, Val::Map(_))
                                             && let Err(error) = print_item_streaming_async(
                                                 (*v).clone(),
@@ -1447,11 +1669,14 @@ async fn handle_line_generic_inner(
                                         vals.push((*v).clone());
                                     }
                                     PipelinePayload::Bytes(b) => {
+                                        output_byte_count =
+                                            output_byte_count.saturating_add(b.len());
                                         let text = String::from_utf8_lossy(&b).into_owned();
                                         println!("{}", text);
                                         vals.push(Val::String(text));
                                     }
                                     PipelinePayload::Structured(diag) => {
+                                        has_errors = true;
                                         let config = {
                                             let opts = env.options.read();
                                             fshell_render::RenderConfig {
@@ -1471,7 +1696,6 @@ async fn handle_line_generic_inner(
                                             );
                                             eprintln!("{}", err_str);
                                         }
-                                        has_errors = true;
                                     }
                                 }
                             }
@@ -1518,6 +1742,15 @@ async fn handle_line_generic_inner(
                                     0
                                 },
                             );
+                            if let Some(mut span) = output_span.take() {
+                                span.add_attr("item_count", output_item_count);
+                                span.add_attr("byte_count", output_byte_count);
+                                span.finish(if has_errors {
+                                    fshell_engine::trace::SpanOutcome::Error
+                                } else {
+                                    fshell_engine::trace::SpanOutcome::Ok
+                                });
+                            }
                         }
                         other_expr => {
                             match fshell_engine::eval_expr(other_expr, env).await {
@@ -1689,8 +1922,17 @@ async fn handle_line_generic_inner(
     let duration_ms = start_time.elapsed().as_millis() as i64;
 
     // Update history entry with real duration and exit code
+    let mut history_update_span = env.trace.span(
+        env.trace_context,
+        "history.update",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     if let Some(row_id) = history_row_id {
         let _ = update_history_entry(row_id, duration_ms, exit_code.unwrap_or(0));
+    }
+    if let Some(span) = history_update_span.take() {
+        span.finish(fshell_engine::trace::SpanOutcome::Ok);
     }
 
     {
@@ -1709,7 +1951,16 @@ async fn handle_line_generic_inner(
     if prev_pwd != new_pwd {
         fshell_engine::invalidate_git_cache(env);
         prompt::clear_git_status_cache();
+        let mut hook_span = env.trace.span(
+            env.trace_context,
+            "command.chpwd_hook",
+            env.trace_mode,
+            serde_json::Map::new(),
+        );
         fshell_engine::run_hooks("chpwd", env).await;
+        if let Some(span) = hook_span.take() {
+            span.finish(fshell_engine::trace::SpanOutcome::Ok);
+        }
     }
 
     if env.is_customizer_active.load(Ordering::SeqCst) {

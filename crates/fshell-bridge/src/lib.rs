@@ -404,16 +404,37 @@ pub async fn run_external(
         );
     }
 
-    // 0. Pre-flight footgun protection for catastrophic commands
-    check_destructive_command(name, &args, env, span)?;
-
-    // 1. Verify Tier 2 process spawn capability
-    env.enforce_capability(name, fshell_engine::CapAction::ProcessSpawn)?;
+    // Pre-flight authorization is separated from lookup and launch so traces
+    // show whether command policy checks contribute meaningful startup cost.
+    let mut capability_span = env.trace.span(
+        env.trace_context,
+        "external.process_capability_check",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
+    let preflight = check_destructive_command(name, &args, env, span).and_then(|()| {
+        env.enforce_capability(name, fshell_engine::CapAction::ProcessSpawn)
+            .map_err(ShellError::from)
+    });
+    if let Some(trace_span) = capability_span.take() {
+        trace_span.finish(if preflight.is_ok() {
+            fshell_engine::trace::SpanOutcome::Ok
+        } else {
+            fshell_engine::trace::SpanOutcome::Error
+        });
+    }
+    preflight?;
 
     fshell_core::debug_log!("run_external: name={:?} args={:?}", name, args);
 
     // 2. Resolve command path using PATH cache (avoids per-execution stat syscalls)
     //    This must happen before sandbox check so sandboxed scripts can be found via custom PATH
+    let mut resolve_span = env.trace.span(
+        env.trace_context,
+        "external.resolve",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     let resolved_name = if let Some(custom_bin) = {
         let opts = Some(env.options.read());
         opts.and_then(|o| o.command_binaries.get(name).cloned())
@@ -463,6 +484,9 @@ pub async fn run_external(
     } else {
         name.to_string()
     };
+    if let Some(trace_span) = resolve_span.take() {
+        trace_span.finish(fshell_engine::trace::SpanOutcome::Ok);
+    }
 
     fshell_core::debug_log!("run_external resolved: resolved_name={:?}", resolved_name);
     if cnf_debug {
@@ -524,18 +548,37 @@ pub async fn run_external(
                 false
             }
         });
-    let mut checked_net = false;
-    for arg in &args {
-        if let Val::String(s) = arg
-            && let Some(host) = extract_host_from_arg(s)
-        {
-            env.enforce_capability(name, fshell_engine::CapAction::Network(host))?;
-            checked_net = true;
+    let mut network_span = env.trace.span(
+        env.trace_context,
+        "external.network_capability_checks",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
+    let network_result = (|| -> Result<(), ShellError> {
+        let mut checked_net = false;
+        for arg in &args {
+            if let Val::String(s) = arg
+                && let Some(host) = extract_host_from_arg(s)
+            {
+                env.enforce_capability(name, fshell_engine::CapAction::Network(host))
+                    .map_err(ShellError::from)?;
+                checked_net = true;
+            }
         }
+        if (is_net_cmd || is_git_remote) && !checked_net {
+            env.enforce_capability(name, fshell_engine::CapAction::Network("any".to_string()))
+                .map_err(ShellError::from)?;
+        }
+        Ok(())
+    })();
+    if let Some(trace_span) = network_span.take() {
+        trace_span.finish(if network_result.is_ok() {
+            fshell_engine::trace::SpanOutcome::Ok
+        } else {
+            fshell_engine::trace::SpanOutcome::Error
+        });
     }
-    if (is_net_cmd || is_git_remote) && !checked_net {
-        env.enforce_capability(name, fshell_engine::CapAction::Network("any".to_string()))?;
-    }
+    network_result?;
 
     // 2a. Build command
     let mut cmd = std::process::Command::new(&resolved_name);
@@ -676,12 +719,26 @@ pub async fn run_external(
     // Create the terminal guard to handle raw mode disabling and restoration
     let _guard = InteractiveTerminalGuard::new(has_controlling_terminal && pipeline_job.is_none());
 
-    let (mut child, job_pgid) = match spawn_external_command(
+    let mut spawn_span = env.trace.span(
+        env.trace_context,
+        "external.spawn",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
+    let spawn_result = spawn_external_command(
         &mut cmd,
         pipeline_job.as_deref(),
         has_controlling_terminal,
         debug_fg,
-    ) {
+    );
+    if let Some(trace_span) = spawn_span.take() {
+        trace_span.finish(if spawn_result.is_ok() {
+            fshell_engine::trace::SpanOutcome::Ok
+        } else {
+            fshell_engine::trace::SpanOutcome::Error
+        });
+    }
+    let (mut child, job_pgid) = match spawn_result {
         Ok(child) => child,
         Err(e) => {
             if cnf_debug {
@@ -765,6 +822,12 @@ pub async fn run_external(
     };
 
     let pid = child.id() as i32;
+    let mut io_span = env.trace.span(
+        env.trace_context,
+        "external.io",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     let output_cancelled = Arc::new(AtomicBool::new(false));
     let mut io_tasks = Vec::new();
     if debug_fg {
@@ -1060,6 +1123,12 @@ pub async fn run_external(
     let wait_env = env.clone();
     let wait_cmd = cmd_str.clone();
     let pipeline_wait = pipeline_job.is_some();
+    let mut wait_span = env.trace.span(
+        env.trace_context,
+        "external.wait",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
     let wait_task = tokio::task::spawn_blocking(move || {
         if pipeline_wait {
             fshell_engine::wait_for_pipeline_stage_sync(&wait_env, pid, job_id, &wait_cmd)
@@ -1073,12 +1142,23 @@ pub async fn run_external(
             )
         }
     });
-    let _exit_code = wait_task.await.map_err(|error| {
+    let wait_result = wait_task.await.map_err(|error| {
         ShellError::new(
             ErrorCode::CommandFailed,
             format!("external command waiter failed: {error}"),
         )
-    })?;
+    });
+    if let Some(mut trace_span) = wait_span.take() {
+        if let Ok(exit_code) = &wait_result {
+            trace_span.add_attr("exit_code", *exit_code);
+        }
+        trace_span.finish(if wait_result.is_ok() {
+            fshell_engine::trace::SpanOutcome::Ok
+        } else {
+            fshell_engine::trace::SpanOutcome::Error
+        });
+    }
+    let _exit_code = wait_result?;
 
     let child_suspended = env
         .job_control
@@ -1095,6 +1175,9 @@ pub async fn run_external(
         }
         for task in io_tasks {
             let _ = task.await;
+        }
+        if let Some(trace_span) = io_span.take() {
+            trace_span.finish(fshell_engine::trace::SpanOutcome::Cancelled);
         }
         return Ok(());
     }
@@ -1114,7 +1197,13 @@ pub async fn run_external(
         }
     }
     if let Some(error) = io_error {
+        if let Some(trace_span) = io_span.take() {
+            trace_span.finish(fshell_engine::trace::SpanOutcome::Error);
+        }
         return Err(error);
+    }
+    if let Some(trace_span) = io_span.take() {
+        trace_span.finish(fshell_engine::trace::SpanOutcome::Ok);
     }
 
     if cnf_debug {

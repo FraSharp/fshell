@@ -184,6 +184,7 @@ pub async fn run_ftui_repl(
     session_id: String,
     init_done: Arc<Notify>,
     clear_screen: bool,
+    mut first_prompt_span: Option<fshell_engine::trace::TraceSpan>,
 ) {
     // These guards own process-global state for exactly the lifetime of the
     // interactive session. Their Drop implementations restore the previous
@@ -1582,6 +1583,9 @@ pub async fn run_ftui_repl(
                         .is_err()
                     {
                         break 'repl_loop;
+                    }
+                    if let Some(span) = first_prompt_span.take() {
+                        span.finish(fshell_engine::trace::SpanOutcome::Ok);
                     }
                     _last_relative_cursor_y = relative_cursor_y;
                 }

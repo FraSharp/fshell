@@ -260,6 +260,15 @@ pub fn reload_builtin(
     // above, so background thread tasks are free to progress during this sleep.
     std::thread::sleep(std::time::Duration::from_secs(2));
 
+    if let Some(trace_span) = env.trace.span(
+        env.trace_context,
+        "process.exec_replace",
+        env.trace_mode,
+        serde_json::Map::new(),
+    ) {
+        trace_span.finish(fshell_engine::trace::SpanOutcome::ExecReplaced);
+    }
+    env.trace.flush();
     fshell_engine::suspend_session_logging();
     // SAFETY: execvp replaces the current process image. It is safe because we have
     // stopped the session logger and cleaned up active child processes. If it fails,

@@ -235,3 +235,4 @@ on exit {
 | `FSH_STATUS_BAR` | enables/disables the bottom status bar (`1` or `0`) |
 | `FSH_PIPELINE_CHANNEL_SIZE` | default channel capacity for pipeline stages |
 | `FSH_CNF_DEBUG` | enables verbose debug logging for "did you mean" resolution |
+| `FSH_TRACE_FILE` | appends opt-in startup and command timing spans as versioned JSONL; see [Timing traces](TRACE.md) |

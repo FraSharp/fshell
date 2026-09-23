@@ -770,6 +770,54 @@ async fn execute_pipeline_with_input_and_cancellation(
         tokio::sync::watch::Receiver<bool>,
     )>,
 ) -> Result<(), String> {
+    let pipeline_id = env.trace.next_pipeline_id();
+    let mut attrs = serde_json::Map::new();
+    attrs.insert(
+        "stage_count".into(),
+        serde_json::json!(pipeline.stages.len()),
+    );
+    if let Some(id) = pipeline_id {
+        attrs.insert("pipeline_id".into(), serde_json::json!(id.0));
+    }
+    let mut span = env
+        .trace
+        .span(env.trace_context, "pipeline.execute", env.trace_mode, attrs);
+    let pipeline_env = if let Some(span) = &span {
+        env.with_trace_context(span.context())
+    } else {
+        env.clone()
+    };
+    let result = execute_pipeline_inner(
+        pipeline,
+        &pipeline_env,
+        tx,
+        initial_input,
+        cancellation,
+        pipeline_id,
+    )
+    .await;
+    if let Some(mut span) = span.take() {
+        span.add_attr("exit_code", pipeline_env.exit_code());
+        span.finish(if result.is_ok() {
+            crate::trace::SpanOutcome::Ok
+        } else {
+            crate::trace::SpanOutcome::Error
+        });
+    }
+    result
+}
+
+async fn execute_pipeline_inner(
+    pipeline: &Pipeline,
+    env: &Env,
+    tx: PipeSender,
+    initial_input: Option<PipeStream>,
+    cancellation: Option<(
+        tokio::sync::watch::Sender<bool>,
+        tokio::sync::watch::Receiver<bool>,
+    )>,
+    pipeline_id: Option<crate::trace::PipelineId>,
+) -> Result<(), String> {
     if pipeline.stages.is_empty() {
         return Ok(());
     }
@@ -800,21 +848,55 @@ async fn execute_pipeline_with_input_and_cancellation(
     let (cancel_tx, cancel_rx) = cancellation.unwrap_or_else(|| tokio::sync::watch::channel(false));
     let mut current_rx = initial_input;
     let mut stage_tasks = Vec::new();
+    let mut stage_span: Option<crate::trace::TraceSpan> = None;
     macro_rules! spawn_stage {
         ($future:expr) => {{
-            stage_tasks.push(tokio::spawn($future));
+            let span = stage_span.take();
+            let future = $future;
+            stage_tasks.push(tokio::spawn(async move {
+                future.await;
+                if let Some(span) = span {
+                    span.finish(crate::trace::SpanOutcome::Ok);
+                }
+            }));
         }};
     }
     macro_rules! spawn_blocking_stage {
         ($closure:expr) => {{
-            stage_tasks.push(tokio::task::spawn_blocking($closure));
+            let span = stage_span.take();
+            let closure = $closure;
+            stage_tasks.push(tokio::task::spawn_blocking(move || {
+                closure();
+                if let Some(span) = span {
+                    span.finish(crate::trace::SpanOutcome::Ok);
+                }
+            }));
         }};
     }
 
-    for planned_stage in stages {
+    for (stage_index, planned_stage) in stages.into_iter().enumerate() {
+        if let Some(span) = stage_span.take() {
+            span.finish(crate::trace::SpanOutcome::Cancelled);
+        }
         if env.pipeline_cancelled() {
             break;
         }
+        let stage_id = crate::trace::StageId(stage_index.min(u32::MAX as usize) as u32);
+        let stage_kind = if matches!(&planned_stage, PlannedStage::OutputRoute { .. }) {
+            "output_route"
+        } else {
+            "ast"
+        };
+        let mut attrs = serde_json::Map::new();
+        attrs.insert("stage_id".into(), serde_json::json!(stage_id.0));
+        attrs.insert("stage_index".into(), serde_json::json!(stage_index));
+        attrs.insert("stage_kind".into(), serde_json::json!(stage_kind));
+        if let Some(id) = pipeline_id {
+            attrs.insert("pipeline_id".into(), serde_json::json!(id.0));
+        }
+        stage_span = env
+            .trace
+            .span(env.trace_context, "pipeline.stage", env.trace_mode, attrs);
         let (stage_tx, stage_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
         let mut env_clone = env.clone();
         env_clone.pipeline_job = stage_pipeline_job.clone();

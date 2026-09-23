@@ -67,7 +67,7 @@ pub fn self_builtin(
         } else {
             exec_args
         };
-        return do_exec(exec_args, span);
+        return do_exec(exec_args, env, span);
     }
 
     let mut flag_exe = false;
@@ -133,7 +133,7 @@ pub fn self_builtin(
         if exec_args.first().is_some_and(|s| s == "--") {
             exec_args.remove(0);
         }
-        return do_exec(exec_args, span);
+        return do_exec(exec_args, env, span);
     }
 
     if flag_help {
@@ -211,9 +211,18 @@ pub fn self_builtin(
     Ok(())
 }
 
-fn do_exec(args: Vec<String>, span: Option<SourceSpan>) -> Result<(), ShellError> {
+fn do_exec(args: Vec<String>, env: &Env, span: Option<SourceSpan>) -> Result<(), ShellError> {
     // This replaces the current process. On success it never returns.
     // On failure we surface the OS error as a builtin error.
+    if let Some(trace_span) = env.trace.span(
+        env.trace_context,
+        "process.exec_replace",
+        env.trace_mode,
+        serde_json::Map::new(),
+    ) {
+        trace_span.finish(fshell_engine::trace::SpanOutcome::ExecReplaced);
+    }
+    env.trace.flush();
     match fshell_engine::exe::exec_self(&args) {
         Ok(()) => unreachable!("exec_self should not return on success"),
         Err(e) => Err(

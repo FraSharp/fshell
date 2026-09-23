@@ -49,7 +49,13 @@ pub fn show_splash(
     let version = fshell_engine::exe::full_version();
     let version = format!("v{version}");
 
-    let _ = terminal.draw(|f| {
+    let mut render_span = env.trace.span(
+        env.trace_context,
+        "startup.splash_render",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
+    let draw_result = terminal.draw(|f| {
         let area = f.area();
         let w = area.width.min(64);
         let h = 14u16;
@@ -166,15 +172,28 @@ pub fn show_splash(
             .alignment(Alignment::Center);
         f.render_widget(key_p, chunks[5]);
     });
+    if let Some(span) = render_span.take() {
+        span.finish(if draw_result.is_ok() {
+            fshell_engine::trace::SpanOutcome::Ok
+        } else {
+            fshell_engine::trace::SpanOutcome::Error
+        });
+    }
 
     let mut input = CrosstermEventSource::new();
-    loop {
+    let mut wait_span = env.trace.span(
+        env.trace_context,
+        "startup.splash_wait",
+        env.trace_mode,
+        serde_json::Map::new(),
+    );
+    let outcome = loop {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
             let stdin_fd = std::io::stdin().as_raw_fd();
             if unsafe { libc::isatty(stdin_fd) } == 0 {
-                break;
+                break fshell_engine::trace::SpanOutcome::Ok;
             }
         }
         match input.poll(std::time::Duration::from_millis(100)) {
@@ -182,12 +201,17 @@ pub fn show_splash(
                 if matches!(key.key, Key::Character('d' | 'D')) {
                     persist_disable_splash();
                 }
-                break;
+                break fshell_engine::trace::SpanOutcome::Ok;
             }
             Ok(InputPoll::Event(InputEvent::Resize { .. } | InputEvent::Paste(_)))
             | Ok(InputPoll::Timeout) => {}
-            Ok(InputPoll::Event(InputEvent::Mouse(_))) | Ok(InputPoll::Closed) | Err(_) => break,
+            Ok(InputPoll::Event(InputEvent::Mouse(_))) | Ok(InputPoll::Closed) | Err(_) => {
+                break fshell_engine::trace::SpanOutcome::Cancelled;
+            }
         }
+    };
+    if let Some(span) = wait_span.take() {
+        span.finish(outcome);
     }
 }
 

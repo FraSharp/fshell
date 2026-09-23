@@ -64,6 +64,7 @@ pub mod profiler;
 pub mod prompt;
 pub mod reactive;
 pub mod scope;
+pub mod trace;
 pub use scope::{ConfigTuiHandler, LocalScope};
 pub mod special_vars;
 
@@ -1015,6 +1016,12 @@ pub struct Env {
     pub theme: Arc<RwLock<Arc<fshell_core::theme::Theme>>>,
     pub preview_theme: Arc<RwLock<Option<Arc<fshell_core::theme::Theme>>>>,
     pub profiler: Arc<RwLock<crate::profiler::ProfilerState>>,
+    /// Best-effort per-process timing sink. Disabled unless FSH_TRACE_FILE is set.
+    pub trace: Arc<crate::trace::TraceSink>,
+    /// Explicit trace ancestry for work launched from this environment clone.
+    pub trace_context: crate::trace::SpanContext,
+    /// Execution mode attached to spans created through this environment.
+    pub trace_mode: crate::trace::TraceMode,
     pub temp_files: Arc<Mutex<Vec<tempfile::TempPath>>>,
     pub keybindings: Arc<RwLock<keybindings::KeybindingRegistry>>,
     pub exe_path: Arc<PathBuf>,
@@ -1367,6 +1374,22 @@ impl Env {
         invocation.execution = Arc::new(execution::ExecutionState::new(self.exit_code()));
         invocation.is_invocation = true;
         invocation
+    }
+
+    /// Clone the environment while assigning explicit ancestry to work started
+    /// from that clone. Shared shell state remains shared, but trace context is
+    /// a value and is therefore safe to specialize per asynchronous task.
+    pub fn with_trace_context(&self, context: crate::trace::SpanContext) -> Self {
+        let mut child = self.clone();
+        child.trace_context = context;
+        child
+    }
+
+    /// Set trace mode on a private environment clone without changing shell state.
+    pub fn with_trace_mode(&self, mode: crate::trace::TraceMode) -> Self {
+        let mut child = self.clone();
+        child.trace_mode = mode;
+        child
     }
 
     /// Finish a child invocation and publish its status to the caller.
@@ -1774,6 +1797,11 @@ impl Env {
     }
 
     pub fn new() -> Self {
+        Self::new_with_trace(crate::trace::TraceSink::disabled())
+    }
+
+    /// Construct an interactive/full environment with a caller-owned trace sink.
+    pub fn new_with_trace(trace: Arc<crate::trace::TraceSink>) -> Self {
         let (reactive_tx, reactive_rx) = tokio::sync::mpsc::channel(1000);
         let (cap_prompt_tx, cap_prompt_rx) = tokio::sync::mpsc::channel(PIPELINE_CHANNEL_SIZE);
         let exe_path = Arc::new(crate::exe::resolve_exe());
@@ -1863,6 +1891,9 @@ impl Env {
             profiler: Arc::new(RwLock::new(crate::profiler::ProfilerState::new(
                 std::env::var("FSH_PROFILE").is_ok(),
             ))),
+            trace_context: trace.root_context(),
+            trace_mode: crate::trace::TraceMode::Interactive,
+            trace,
             temp_files: Arc::new(Mutex::new(Vec::new())),
             keybindings: Arc::new(RwLock::new(keybindings::KeybindingRegistry::new())),
             exe_path,
@@ -1940,6 +1971,11 @@ impl Env {
     /// Uses an empty CapsRegistry — no disk I/O; grants come from the
     /// engine's non-strict bypass rather than held capabilities.
     pub fn for_command() -> Self {
+        Self::for_command_with_trace(crate::trace::TraceSink::disabled())
+    }
+
+    /// Construct a one-shot command environment with a caller-owned trace sink.
+    pub fn for_command_with_trace(trace: Arc<crate::trace::TraceSink>) -> Self {
         let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let env = Env {
             scope: scope::Scope {
@@ -2023,6 +2059,9 @@ impl Env {
             ))),
             preview_theme: Arc::new(RwLock::new(None)),
             profiler: Arc::new(RwLock::new(crate::profiler::ProfilerState::new(true))),
+            trace_context: trace.root_context(),
+            trace_mode: crate::trace::TraceMode::Command,
+            trace,
             temp_files: Arc::new(Mutex::new(Vec::new())),
             keybindings: Arc::new(RwLock::new(keybindings::KeybindingRegistry::new())),
             exe_path: Arc::new(crate::exe::resolve_exe()),
@@ -2122,6 +2161,9 @@ impl Env {
             theme: self.theme.clone(),
             preview_theme: self.preview_theme.clone(),
             profiler: self.profiler.clone(),
+            trace: self.trace.clone(),
+            trace_context: self.trace_context,
+            trace_mode: self.trace_mode,
             temp_files: self.temp_files.clone(),
             keybindings: self.keybindings.clone(),
             exe_path: self.exe_path.clone(),
