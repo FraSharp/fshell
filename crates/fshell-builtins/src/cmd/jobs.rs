@@ -216,20 +216,135 @@ pub fn bg_builtin(
     Ok(())
 }
 
+/// Maps a POSIX signal specification (a name such as `TERM`/`SIGKILL` or a
+/// number such as `9`) to a signal number. Leading `SIG` is optional and the
+/// name is case-insensitive.
+fn parse_signal_spec(spec: &str) -> Option<libc::c_int> {
+    if let Ok(number) = spec.parse::<libc::c_int>() {
+        return Some(number.abs());
+    }
+    let upper = spec.to_ascii_uppercase();
+    let name = upper.strip_prefix("SIG").unwrap_or(&upper);
+    let signal = match name {
+        "HUP" => libc::SIGHUP,
+        "INT" => libc::SIGINT,
+        "QUIT" => libc::SIGQUIT,
+        "ILL" => libc::SIGILL,
+        "TRAP" => libc::SIGTRAP,
+        "ABRT" | "IOT" => libc::SIGABRT,
+        "BUS" => libc::SIGBUS,
+        "FPE" => libc::SIGFPE,
+        "KILL" => libc::SIGKILL,
+        "USR1" => libc::SIGUSR1,
+        "SEGV" => libc::SIGSEGV,
+        "USR2" => libc::SIGUSR2,
+        "PIPE" => libc::SIGPIPE,
+        "ALRM" => libc::SIGALRM,
+        "TERM" => libc::SIGTERM,
+        "CHLD" | "CLD" => libc::SIGCHLD,
+        "CONT" => libc::SIGCONT,
+        "STOP" => libc::SIGSTOP,
+        "TSTP" => libc::SIGTSTP,
+        "TTIN" => libc::SIGTTIN,
+        "TTOU" => libc::SIGTTOU,
+        "URG" => libc::SIGURG,
+        "XCPU" => libc::SIGXCPU,
+        "XFSZ" => libc::SIGXFSZ,
+        "VTALRM" => libc::SIGVTALRM,
+        "PROF" => libc::SIGPROF,
+        "WINCH" => libc::SIGWINCH,
+        "IO" | "POLL" => libc::SIGIO,
+        "SYS" => libc::SIGSYS,
+        _ => return None,
+    };
+    Some(signal)
+}
+
+/// Names printed by `kill -l`, in the conventional order.
+const SIGNAL_NAMES: &[&str] = &[
+    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+    "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU", "XFSZ",
+    "VTALRM", "PROF", "WINCH", "IO", "SYS",
+];
+
+fn invalid_signal(spec: &str, span: Option<SourceSpan>) -> ShellError {
+    BuiltinError::InvalidArgument {
+        cmd: "kill".into(),
+        arg: format!("invalid signal '{spec}'"),
+        span,
+    }
+    .into()
+}
+
 pub fn kill_builtin(
     _in_rx: Option<PipeStream>,
     args: Vec<Val>,
     env: &Env,
-    _tx: PipeSender,
+    tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
-    if args.is_empty() {
+    // POSIX: `kill [-s signal | -n number | -signal] pid...`. A signal option
+    // is only recognised before the first operand, so `kill -9 -1234` treats
+    // `-1234` as a (process-group) target, not another signal.
+    let mut signal = libc::SIGTERM;
+    let mut list = false;
+    let mut targets: Vec<Val> = Vec::new();
+    let mut index = 0;
+    let mut saw_operand = false;
+
+    while index < args.len() {
+        if !saw_operand {
+            match &args[index] {
+                Val::String(flag) if flag == "-l" => {
+                    list = true;
+                    index += 1;
+                    continue;
+                }
+                Val::String(flag) if flag == "-s" || flag == "-n" => {
+                    let spec = args.get(index + 1).ok_or_else(|| {
+                        ShellError::from(format!("kill: {flag} requires a signal argument"))
+                    })?;
+                    let spec = spec.to_text();
+                    signal = parse_signal_spec(&spec)
+                        .ok_or_else(|| invalid_signal(&spec, span.clone()))?;
+                    index += 2;
+                    continue;
+                }
+                Val::String(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                    let spec = &flag[1..];
+                    signal = parse_signal_spec(spec)
+                        .ok_or_else(|| invalid_signal(spec, span.clone()))?;
+                    index += 1;
+                    continue;
+                }
+                Val::Int(number) if *number < 0 => {
+                    signal = (-*number).clamp(0, libc::c_int::MAX as i64) as libc::c_int;
+                    index += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        targets.push(args[index].clone());
+        saw_operand = true;
+        index += 1;
+    }
+
+    if list {
+        let line = SIGNAL_NAMES.join(" ");
+        tokio::spawn(async move {
+            let _ = tx
+                .send(PipelinePayload::Data(Arc::new(Val::String(line))))
+                .await;
+        });
+        return Ok(());
+    }
+
+    if targets.is_empty() {
         return Err("kill: expected at least one PID or job ID"
             .to_string()
             .into());
     }
-
-    let signal = libc::SIGTERM;
 
     fn send_and_cleanup(
         env: &Env,
@@ -262,31 +377,29 @@ pub fn kill_builtin(
         Ok(())
     }
 
-    for arg in &args {
-        match arg {
-            Val::Int(job_id) => {
-                let jobs = env.job_control.jobs.read();
-                let job = jobs
-                    .values()
-                    .find(|j| j.id == *job_id as usize && !j.disowned && j.pgid > 0)
-                    .ok_or_else(|| format!("kill: job {} not found", job_id))?;
-                let pgid = job.pgid;
-                let jid = job.id;
-                drop(jobs);
-                send_and_cleanup(env, pgid, jid, signal)?;
-            }
+    for target in &targets {
+        match target {
+            // A bare (or negative, for a process group) number is a PID.
+            Val::Int(pid) => unsafe {
+                libc::kill(*pid as libc::pid_t, signal);
+            },
             Val::String(s) => {
-                let s = s.trim_start_matches('%');
-                if let Ok(job_id) = s.parse::<usize>() {
-                    let jobs = env.job_control.jobs.read();
-                    let job = jobs
+                if let Some(job_ref) = s.strip_prefix('%') {
+                    let job_id: usize =
+                        job_ref.parse().map_err(|_| BuiltinError::InvalidArgument {
+                            cmd: "kill".into(),
+                            arg: format!("invalid job ID: {s}"),
+                            span: span.clone(),
+                        })?;
+                    let pgid = env
+                        .job_control
+                        .jobs
+                        .read()
                         .values()
                         .find(|j| j.id == job_id && !j.disowned && j.pgid > 0)
-                        .ok_or_else(|| format!("kill: job {} not found", job_id))?;
-                    let pgid = job.pgid;
-                    let jid = job.id;
-                    drop(jobs);
-                    send_and_cleanup(env, pgid, jid, signal)?;
+                        .map(|j| j.pgid)
+                        .ok_or_else(|| format!("kill: job {job_id} not found"))?;
+                    send_and_cleanup(env, pgid, job_id, signal)?;
                 } else if let Ok(pid) = s.parse::<libc::pid_t>() {
                     unsafe {
                         libc::kill(pid, signal);
@@ -294,18 +407,16 @@ pub fn kill_builtin(
                 } else {
                     return Err(BuiltinError::InvalidArgument {
                         cmd: "kill".into(),
-                        arg: format!("invalid PID or job ID: {}", s),
+                        arg: format!("invalid PID or job ID: {s}"),
                         span,
                     }
                     .into());
                 }
             }
             _ => {
-                return Err(
-                    "kill: argument must be an Int (job ID) or String (PID or %job_id)"
-                        .to_string()
-                        .into(),
-                );
+                return Err("kill: argument must be a PID or a %job ID"
+                    .to_string()
+                    .into());
             }
         }
     }
@@ -352,4 +463,21 @@ pub fn disown_builtin(
     }
     println!("[{}]  disowned  {}", job_id, cmd);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_signal_spec;
+
+    #[test]
+    fn signal_spec_accepts_names_and_numbers() {
+        assert_eq!(parse_signal_spec("9"), Some(9));
+        assert_eq!(parse_signal_spec("KILL"), Some(libc::SIGKILL));
+        assert_eq!(parse_signal_spec("SIGKILL"), Some(libc::SIGKILL));
+        assert_eq!(parse_signal_spec("sigterm"), Some(libc::SIGTERM));
+        assert_eq!(parse_signal_spec("TERM"), Some(libc::SIGTERM));
+        assert_eq!(parse_signal_spec("15"), Some(15));
+        assert_eq!(parse_signal_spec("BOGUS"), None);
+        assert_eq!(parse_signal_spec(""), None);
+    }
 }
