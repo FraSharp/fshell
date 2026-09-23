@@ -913,7 +913,7 @@ match env_target {
 }"#;
         assert_eq!(validate_input(match_block), ValidationResult::Complete);
 
-        let posix_block = r#"posix {
+        let posix_block = r#"sh {
     for i in 1 2 3 4 5; do
         if [ $((i % 2)) -eq 0 ]; then
             echo "Even: $i"

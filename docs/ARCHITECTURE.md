@@ -57,7 +57,7 @@ instead of treating all data as untyped byte streams, fshell routes structured `
 
 key architecture traits:
 - **single binary**: the root package builds one binary (`fsh`). symlinked utility invocations (e.g. `ls`) trigger multicall dispatch without launching the full REPL.
-- **in-process polyglot engine**: `.fsh` scripts, inline POSIX blocks (`sh { ... }`, `bash { ... }`), and POSIX shell scripts run against the same live `Env` state without spawning intermediate subprocesses.
+- **in-process polyglot engine**: `.fsh` scripts, inline POSIX blocks (`sh { ... }`), and POSIX shell scripts run against the same live `Env` state without spawning intermediate subprocesses.
 - **fast data structures**: `Ustr` interned string keys eliminate string hashing and allocation on field lookups; `FxIndexMap` maintains record insertion order.
 
 ---
@@ -335,7 +335,7 @@ instead, the POSIX abstract syntax tree executes against the same `fshell_engine
 
 the shell seamlessly switches execution modes:
 1. **shebang detection**: `source script.sh` automatically routes to `fshell-posix` if the file begins with `#!/bin/sh` or `#!/bin/bash`.
-2. **inline blocks**: `sh { ... }`, `posix { ... }`, and `bash { ... }` blocks parse the inner string as POSIX source and evaluate it in-process.
+2. **inline blocks**: `sh { ... }` blocks parse the inner string as POSIX source and evaluate it in-process.
 3. **CLI flag**: `fsh --posix script.sh` evaluates the entire file in POSIX mode.
 
 ---

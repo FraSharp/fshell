@@ -301,7 +301,7 @@ pub enum Stmt {
         path: Expr,
         bash: bool,
     },
-    /// Inline POSIX shell block — `sh { ... }` / `posix { ... }` / `bash { ... }`
+    /// Inline POSIX shell block — `sh { ... }`
     /// The body is raw POSIX source executed via the fshell-posix engine against the same Env.
     PosixBlock {
         body: String,

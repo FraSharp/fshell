@@ -532,11 +532,16 @@ impl Parser {
             self.expect('{')?;
             let body = self.parse_block_statements()?;
             Ok(Stmt::Unsafe { body })
+        } else if let Some(keyword) = self.removed_posix_block_keyword() {
+            return Err(ParseError::SyntaxError {
+                message: format!(
+                    "`{keyword} {{ ... }}` is no longer a block keyword; use `sh {{ ... }}`"
+                ),
+                span: self.current_span(),
+            });
         } else if self.peek_posix_block() {
             // Consume the keyword and opening brace, then capture body
-            let _ = self.match_keyword("sh")
-                || self.match_keyword("posix")
-                || self.match_keyword("bash");
+            self.match_keyword("sh");
             self.skip_whitespace();
             if self.peek() != Some('{') {
                 return Err(ParseError::SyntaxError {
@@ -752,50 +757,52 @@ impl Parser {
         }
     }
 
-    /// Peek if next tokens are a POSIX block keyword `sh`/`posix`/`bash` followed by `{`.
+    /// Peek if the next tokens are the POSIX block keyword `sh` followed by `{`.
     /// Pure lookahead — does not consume input.
     pub(crate) fn peek_posix_block(&self) -> bool {
         let mut p = self.pos;
         while p < self.input.len() && self.input[p].is_whitespace() {
             p += 1;
         }
-        let kw = if p + 2 <= self.input.len() && self.input[p..p + 2] == ['s', 'h'] {
-            let end = p + 2;
-            if end < self.input.len()
-                && (self.input[end].is_alphanumeric() || self.input[end] == '_')
-            {
-                return false;
-            }
-            p = end;
-            true
-        } else if p + 5 <= self.input.len() && self.input[p..p + 5] == ['p', 'o', 's', 'i', 'x'] {
-            let end = p + 5;
-            if end < self.input.len()
-                && (self.input[end].is_alphanumeric() || self.input[end] == '_')
-            {
-                return false;
-            }
-            p = end;
-            true
-        } else if p + 4 <= self.input.len() && self.input[p..p + 4] == ['b', 'a', 's', 'h'] {
-            let end = p + 4;
-            if end < self.input.len()
-                && (self.input[end].is_alphanumeric() || self.input[end] == '_')
-            {
-                return false;
-            }
-            p = end;
-            true
-        } else {
-            return false;
-        };
-        if !kw {
+        if p + 2 > self.input.len() || self.input[p] != 's' || self.input[p + 1] != 'h' {
             return false;
         }
+        let end = p + 2;
+        if end < self.input.len() && (self.input[end].is_alphanumeric() || self.input[end] == '_') {
+            return false;
+        }
+        let mut q = end;
+        while q < self.input.len() && self.input[q].is_whitespace() {
+            q += 1;
+        }
+        q < self.input.len() && self.input[q] == '{'
+    }
+
+    /// If the removed block keywords (`posix`, `bash`) are followed by `{`,
+    /// returns which one, so the parser can point users at `sh { ... }`.
+    pub(crate) fn removed_posix_block_keyword(&self) -> Option<&'static str> {
+        let mut p = self.pos;
         while p < self.input.len() && self.input[p].is_whitespace() {
             p += 1;
         }
-        p < self.input.len() && self.input[p] == '{'
+        for &kw in &["posix", "bash"] {
+            let end = p + kw.len();
+            if end > self.input.len()
+                || !self.input[p..end].iter().copied().eq(kw.chars())
+                || (end < self.input.len()
+                    && (self.input[end].is_alphanumeric() || self.input[end] == '_'))
+            {
+                continue;
+            }
+            let mut q = end;
+            while q < self.input.len() && self.input[q].is_whitespace() {
+                q += 1;
+            }
+            if q < self.input.len() && self.input[q] == '{' {
+                return Some(kw);
+            }
+        }
+        None
     }
 
     /// Parse raw POSIX block body: balanced-brace capture until matching `}`.

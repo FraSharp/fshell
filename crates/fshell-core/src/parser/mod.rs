@@ -1998,6 +1998,22 @@ mod tests {
     }
 
     #[test]
+    fn test_posix_block_keyword_is_sh_only() {
+        // `sh { ... }` is the single inline POSIX block keyword.
+        assert!(Parser::new("sh { echo hi }").parse_statements().is_ok());
+        for keyword in ["posix", "bash"] {
+            let src = format!("{keyword} {{ echo hi }}");
+            match Parser::new(&src).parse_statements() {
+                Err(ParseError::SyntaxError { message, .. }) => assert!(
+                    message.contains("sh { ... }"),
+                    "expected a hint to use `sh {{ ... }}` for `{keyword}`, got: {message}"
+                ),
+                other => panic!("expected a syntax error for `{keyword}` block, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_exit_code_parsing() {
         // Test $? variable parsing
         let stmts = Parser::new("echo $?").parse_statements().unwrap();

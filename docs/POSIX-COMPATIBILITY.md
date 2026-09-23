@@ -120,7 +120,7 @@ sh {
 }
 ```
 
-`sh { ... }`, `posix { ... }`, and `bash { ... }` are exact keyword aliases. all three execute in-process against the current `Env`.
+`sh { ... }` executes in-process against the current `Env`.
 
 ### `source` and `source --bash`
 

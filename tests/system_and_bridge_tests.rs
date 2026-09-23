@@ -1038,7 +1038,7 @@ async fn test_integration_inline_posix_control_flow() {
     let env = setup_test_env();
 
     let script = r#"
-posix {
+sh {
     val=0
     for i in 1 2 3 4; do
         val=$((val + i))

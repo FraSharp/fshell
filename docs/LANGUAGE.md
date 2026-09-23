@@ -51,7 +51,7 @@ The executable native-language smoke baseline is documented in [FSH-LANGUAGE-BAS
 - [pattern matching (`match`)](#pattern-matching-match)
 - [error handling (`try` / `catch`)](#error-handling-try--catch)
 - [posix blocks & interop](#posix-blocks--interop)
-  - [inline blocks (`sh { ... }`, `posix { ... }`, `bash { ... }`)](#inline-blocks-sh----posix----bash---)
+  - [inline blocks (`sh { ... }`)](#inline-blocks-sh---)
   - [`source` and `source --bash`](#source-and-source---bash)
 - [pipelines & stream processing](#pipelines--stream-processing)
   - [pipeline keywords vs external commands](#pipeline-keywords-vs-external-commands)
@@ -630,35 +630,26 @@ the catch variable contains `code`, `name`, `category`, `message`, `help`, `fix`
 
 fshell integrates a polyglot posix engine (`fshell-posix`). scripts can mix fsh constructs with raw posix code seamlessly.
 
-### inline blocks (`sh { ... }`, `posix { ... }`, `bash { ... }`)
+### inline blocks (`sh { ... }`)
 
-embed posix syntax directly inside `.fsh` scripts without spawning external shell processes. `sh`, `posix`, and `bash` are interchangeable keywords for the exact same block construct:
+embed posix syntax directly inside `.fsh` scripts without spawning external shell processes:
 
 ```fsh
 let target = "build"
 
-# using `sh` keyword
 sh {
     if [ -d "$target" ]; then
         echo "target exists"
     fi
-}
 
-# using `posix` keyword
-posix {
     export BUILD_DIR="$target"
     for item in "$BUILD_DIR"/*; do
         [ -f "$item" ] && echo "file: $item"
     done
 }
-
-# using `bash` keyword
-bash {
-    echo "current target: $target"
-}
 ```
 
-all three keywords execute in-process via `fshell-posix` against the live `Env`. variables defined in the enclosing fshell environment are shared directly with the block, and changes to variables inside the block update the shell environment.
+the block executes in-process via `fshell-posix` against the live `Env`. variables defined in the enclosing fshell environment are shared directly with the block, and changes to variables inside the block update the shell environment.
 
 ### `source` and `source --bash`
 

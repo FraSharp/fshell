@@ -30,7 +30,7 @@ traditional shells treat all command I/O as flat, untyped byte streams. getting 
 in fshell:
 - **commands yield structured records**: `ps` and `ls` return streams of typed `Val::Map` objects (`pid: Int`, `size: Int`, `modified: DateTime`).
 - **pipeline stages are language keywords**: `filter`, `map`, `sort`, `count`, and `limit` execute in-process without spawning external subprocesses.
-- **polyglot posix engine**: you do not need to rewrite existing Bash scripts or virtualenv hooks — run them unchanged via `sh { ... }`, `bash { ... }`, or `source --bash`.
+- **polyglot posix engine**: you do not need to rewrite existing Bash scripts or virtualenv hooks — run them unchanged via `sh { ... }` or `source --bash`.
 
 ---
 
