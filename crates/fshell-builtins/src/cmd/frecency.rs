@@ -32,6 +32,41 @@ struct FrecencyCache {
 
 static FRECENCY_CACHE: Mutex<Option<FrecencyCache>> = Mutex::new(None);
 
+/// Loads the frecency database from disk.
+///
+/// A corrupt file is quarantined (renamed aside) rather than treated as an
+/// empty database: silently defaulting and then overwriting would destroy the
+/// user's entire `z` history on a single bad parse.
+fn load_frecency_db(db_path: &PathBuf) -> Result<FrecencyDb, String> {
+    if !db_path.exists() {
+        return Ok(FrecencyDb::default());
+    }
+    let content =
+        std::fs::read_to_string(db_path).map_err(|e| format!("Failed to read frecency DB: {e}"))?;
+    match serde_json::from_str::<FrecencyDb>(&content) {
+        Ok(db) => Ok(db),
+        Err(e) => {
+            let backup = db_path.with_extension("db.corrupt");
+            let _ = std::fs::rename(db_path, &backup);
+            fshell_core::debug_log!(
+                "frecency DB was corrupt ({e}); moved to {}",
+                backup.display()
+            );
+            Ok(FrecencyDb::default())
+        }
+    }
+}
+
+/// Persists the database atomically so a crash or SIGKILL cannot leave a
+/// truncated (unparseable) file behind.
+fn write_frecency_db_atomic(db_path: &PathBuf, db: &FrecencyDb) -> std::io::Result<()> {
+    let content = serde_json::to_string_pretty(db)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = db_path.with_extension("db.tmp");
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, db_path)
+}
+
 fn get_frecency_db(db_path: &PathBuf) -> Result<FrecencyDb, String> {
     let mut cache = FRECENCY_CACHE.lock();
     if let Some(ref cached) = *cache
@@ -40,13 +75,7 @@ fn get_frecency_db(db_path: &PathBuf) -> Result<FrecencyDb, String> {
         return Ok(cached.db.clone());
     }
     // Cache miss: load from disk
-    let db = if db_path.exists() {
-        let content = std::fs::read_to_string(db_path)
-            .map_err(|e| format!("Failed to read frecency DB: {}", e))?;
-        serde_json::from_str::<FrecencyDb>(&content).unwrap_or_default()
-    } else {
-        FrecencyDb::default()
-    };
+    let db = load_frecency_db(db_path)?;
     *cache = Some(FrecencyCache {
         db: db.clone(),
         db_path: db_path.clone(),
@@ -62,13 +91,7 @@ fn with_frecency_db<T>(db_path: &PathBuf, f: impl FnOnce(&FrecencyDb) -> T) -> R
     {
         return Ok(f(&cached.db));
     }
-    let db = if db_path.exists() {
-        let content = std::fs::read_to_string(db_path)
-            .map_err(|e| format!("Failed to read frecency DB: {}", e))?;
-        serde_json::from_str::<FrecencyDb>(&content).unwrap_or_default()
-    } else {
-        FrecencyDb::default()
-    };
+    let db = load_frecency_db(db_path)?;
     let result = f(&db);
     *cache = Some(FrecencyCache {
         db,
@@ -98,8 +121,15 @@ pub fn log_frecency_visit(path: &std::path::Path) -> Result<(), ShellError> {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Use in-memory cache to avoid disk read on every visit
-    let mut db = get_frecency_db(&db_path).unwrap_or_default();
+    // Use in-memory cache to avoid disk read on every visit. If the existing
+    // database cannot be read, skip logging rather than overwrite it.
+    let mut db = match get_frecency_db(&db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            fshell_core::debug_log!("frecency visit not recorded: {e}");
+            return Ok(());
+        }
+    };
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -127,8 +157,8 @@ pub fn log_frecency_visit(path: &std::path::Path) -> Result<(), ShellError> {
     // the JSON write happens on a background thread. `cd` is user-paced, so
     // a per-visit writer thread (writing a monotonic snapshot) is cheap.
     std::thread::spawn(move || {
-        if let Ok(content) = serde_json::to_string_pretty(&write_db) {
-            let _ = std::fs::write(&write_path, content);
+        if let Err(e) = write_frecency_db_atomic(&write_path, &write_db) {
+            fshell_core::debug_log!("failed to persist frecency DB: {e}");
         }
     });
 
@@ -382,9 +412,7 @@ pub fn zi_builtin(
             .into());
     }
 
-    let content = std::fs::read_to_string(&db_path)
-        .map_err(|e| format!("Failed to read frecency DB: {}", e))?;
-    let db = serde_json::from_str::<FrecencyDb>(&content).unwrap_or_default();
+    let db = load_frecency_db(&db_path)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -541,4 +569,61 @@ pub fn zi_builtin(
 
     drop(tx);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("fsh-frecency-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("frecency.db")
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn corrupt_db_is_quarantined_not_destroyed() {
+        let path = temp_db_path("corrupt");
+        std::fs::write(&path, b"{ not valid json").unwrap();
+
+        let db = load_frecency_db(&path).unwrap();
+
+        assert!(db.paths.is_empty());
+        assert!(!path.exists(), "corrupt file should be moved aside");
+        assert!(
+            path.with_extension("db.corrupt").exists(),
+            "the original data must be preserved for recovery"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn atomic_write_round_trips() {
+        let path = temp_db_path("round");
+        let mut db = FrecencyDb::default();
+        db.paths.insert(
+            "/tmp/example".to_string(),
+            FrecencyEntry {
+                frequency: 2.0,
+                last_visited: 42,
+            },
+        );
+
+        write_frecency_db_atomic(&path, &db).unwrap();
+        let loaded = load_frecency_db(&path).unwrap();
+
+        assert_eq!(
+            loaded.paths.get("/tmp/example").map(|e| e.frequency),
+            Some(2.0)
+        );
+        cleanup(&path);
+    }
 }
