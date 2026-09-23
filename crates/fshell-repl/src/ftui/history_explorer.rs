@@ -6,7 +6,9 @@
 use crate::history::query_history;
 use crate::terminal_mode::FullscreenTerminalGuard;
 use chrono::TimeZone;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use fshell_terminal::input::{
+    CrosstermEventSource, InputEvent, InputPoll, Key, KeyAction, Modifiers,
+};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -83,6 +85,7 @@ pub fn run_history_tui(
 
     let mut should_requery = true;
     let mut entries = Vec::new();
+    let mut input = CrosstermEventSource::new();
 
     loop {
         if should_requery {
@@ -348,36 +351,34 @@ pub fn run_history_tui(
             })
             .map_err(|e| format!("Failed to draw UI: {}", e))?;
 
-        // Handle keys
-        let event = match event::poll(std::time::Duration::from_millis(100)) {
-            Ok(true) => match event::read() {
-                Ok(event) => Some(event),
-                Err(_) => return Ok(TuiResult::Cancel),
-            },
-            Ok(false) => None,
-            Err(_) => return Ok(TuiResult::Cancel),
-        };
-        if let Some(Event::Key(key)) = event
-            && key.kind == event::KeyEventKind::Press
+        // Handle keys. Closing the input terminal cancels this screen cleanly.
+        let key = match input
+            .poll(std::time::Duration::from_millis(100))
+            .map_err(|error| error.to_string())?
         {
+            InputPoll::Event(InputEvent::Key(key)) => key,
+            InputPoll::Event(_) | InputPoll::Timeout => continue,
+            InputPoll::Closed => return Ok(TuiResult::Cancel),
+        };
+        if key.action == KeyAction::Press {
             // Check Ctrl-C first
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if key.modifiers.contains(Modifiers::CONTROL) && key.key == Key::Character('c') {
                 return Ok(TuiResult::Cancel);
             }
 
             // Check Ctrl-R for cycling filters
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            if key.modifiers.contains(Modifiers::CONTROL) && key.key == Key::Character('r') {
                 filter_mode = filter_mode.next();
                 list_state.select(Some(0));
                 should_requery = true;
                 continue;
             }
 
-            match key.code {
-                KeyCode::Esc => {
+            match key.key {
+                Key::Escape => {
                     return Ok(TuiResult::Cancel);
                 }
-                KeyCode::Enter => {
+                Key::Enter => {
                     if let Some(idx) = list_state.selected()
                         && let Some(entry) = entries.get(idx)
                     {
@@ -385,7 +386,7 @@ pub fn run_history_tui(
                     }
                     return Ok(TuiResult::Cancel);
                 }
-                KeyCode::Tab => {
+                Key::Tab => {
                     if let Some(idx) = list_state.selected()
                         && let Some(entry) = entries.get(idx)
                     {
@@ -393,7 +394,7 @@ pub fn run_history_tui(
                     }
                     return Ok(TuiResult::Cancel);
                 }
-                KeyCode::Up if len > 0 => {
+                Key::Up if len > 0 => {
                     let current = list_state.selected().unwrap_or(0);
                     if current > 0 {
                         list_state.select(Some(current - 1));
@@ -401,7 +402,7 @@ pub fn run_history_tui(
                         list_state.select(Some(len - 1));
                     }
                 }
-                KeyCode::Down if len > 0 => {
+                Key::Down if len > 0 => {
                     let current = list_state.selected().unwrap_or(0);
                     if current < len - 1 {
                         list_state.select(Some(current + 1));
@@ -409,12 +410,12 @@ pub fn run_history_tui(
                         list_state.select(Some(0));
                     }
                 }
-                KeyCode::Backspace => {
+                Key::Backspace => {
                     search_query.pop();
                     list_state.select(Some(0));
                     should_requery = true;
                 }
-                KeyCode::Char(c) => {
+                Key::Character(c) => {
                     search_query.push(c);
                     list_state.select(Some(0));
                     should_requery = true;

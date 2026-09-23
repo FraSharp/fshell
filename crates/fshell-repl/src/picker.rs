@@ -5,12 +5,12 @@ use crate::fuzzy::{FuzzyKind, PreparedQuery, fuzzy_score_prepared};
 use crate::terminal_mode::FullscreenTerminalGuard;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
 };
 use fshell_core::lock::Mutex;
+use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers};
 use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -64,6 +64,7 @@ impl Picker {
         let mut query = String::new();
         let mut selected_idx = 0;
         let mut scroll_offset = 0;
+        let mut input = CrosstermEventSource::new();
 
         let result = loop {
             // Filter items based on subsequence matching and rank by score
@@ -142,33 +143,37 @@ impl Picker {
                     break None;
                 }
             }
-            if event::poll(std::time::Duration::from_millis(200)).map_err(|e| e.to_string())?
-                && let Event::Key(KeyEvent {
-                    code, modifiers, ..
-                }) = event::read().map_err(|e| e.to_string())?
+            let key = match input
+                .poll(std::time::Duration::from_millis(200))
+                .map_err(|e| e.to_string())?
             {
-                match code {
-                    KeyCode::Esc => break None,
-                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                InputPoll::Event(InputEvent::Key(key)) => key,
+                InputPoll::Event(_) | InputPoll::Timeout => continue,
+                InputPoll::Closed => break None,
+            };
+            {
+                match key.key {
+                    Key::Escape => break None,
+                    Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
                         break None;
                     }
-                    KeyCode::Char('g') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    Key::Character('g') if key.modifiers.contains(Modifiers::CONTROL) => {
                         break None;
                     }
-                    KeyCode::Enter => {
+                    Key::Enter => {
                         if !filtered.is_empty() {
                             break Some(filtered[selected_idx].value.clone());
                         } else {
                             break None;
                         }
                     }
-                    KeyCode::Up => {
+                    Key::Up => {
                         selected_idx = selected_idx.saturating_sub(1);
                     }
-                    KeyCode::Down if !filtered.is_empty() && selected_idx < filtered.len() - 1 => {
+                    Key::Down if !filtered.is_empty() && selected_idx < filtered.len() - 1 => {
                         selected_idx += 1;
                     }
-                    KeyCode::Char('d') | KeyCode::Char('D')
+                    Key::Character('d') | Key::Character('D')
                         if self.prompt == "sessions:" && !filtered.is_empty() =>
                     {
                         let item_value = filtered[selected_idx].value.clone();
@@ -181,7 +186,7 @@ impl Picker {
                                 .unwrap_or("unknown");
 
                             let confirm_msg = format!("! Delete session {}? (y/N): ", filename);
-                            if let Ok(ans) = draw_prompt(&mut stdout, &confirm_msg) {
+                            if let Ok(ans) = draw_prompt(&mut stdout, &confirm_msg, &mut input) {
                                 let trimmed = ans.trim().to_lowercase();
                                 if trimmed == "y" || trimmed == "yes" {
                                     let json_path = path.clone();
@@ -201,7 +206,7 @@ impl Picker {
                             }
                         }
                     }
-                    KeyCode::Char('r') | KeyCode::Char('R')
+                    Key::Character('r') | Key::Character('R')
                         if self.prompt == "sessions:" && !filtered.is_empty() =>
                     {
                         let item_value = filtered[selected_idx].value.clone();
@@ -214,7 +219,8 @@ impl Picker {
                                 .unwrap_or("unknown");
 
                             let rename_msg = format!("Enter new name for session {}: ", filename);
-                            if let Ok(new_name) = draw_prompt(&mut stdout, &rename_msg) {
+                            if let Ok(new_name) = draw_prompt(&mut stdout, &rename_msg, &mut input)
+                            {
                                 let new_name = new_name.trim();
                                 if !new_name.is_empty()
                                     && let Ok(content) = std::fs::read_to_string(&path)
@@ -262,10 +268,10 @@ impl Picker {
                             }
                         }
                     }
-                    KeyCode::Char(c) => {
+                    Key::Character(c) => {
                         query.push(c);
                     }
-                    KeyCode::Backspace => {
+                    Key::Backspace => {
                         query.pop();
                     }
                     _ => {}
@@ -277,7 +283,11 @@ impl Picker {
     }
 }
 
-fn draw_prompt(stdout: &mut std::io::Stdout, message: &str) -> Result<String, String> {
+fn draw_prompt(
+    stdout: &mut std::io::Stdout,
+    message: &str,
+    input_source: &mut impl fshell_terminal::input::EventSource,
+) -> Result<String, String> {
     let (_cols, rows) = terminal::size().unwrap_or((80, 24));
     execute!(
         stdout,
@@ -305,21 +315,27 @@ fn draw_prompt(stdout: &mut std::io::Stdout, message: &str) -> Result<String, St
                 break;
             }
         }
-        if event::poll(std::time::Duration::from_millis(200)).map_err(|e| e.to_string())?
-            && let Event::Key(KeyEvent { code, .. }) = event::read().map_err(|e| e.to_string())?
+        let key = match input_source
+            .poll(std::time::Duration::from_millis(200))
+            .map_err(|e| e.to_string())?
         {
-            match code {
-                KeyCode::Enter => break,
-                KeyCode::Esc => {
+            InputPoll::Event(InputEvent::Key(key)) => key,
+            InputPoll::Event(_) | InputPoll::Timeout => continue,
+            InputPoll::Closed => return Err("terminal input closed".into()),
+        };
+        {
+            match key.key {
+                Key::Enter => break,
+                Key::Escape => {
                     input.clear();
                     break;
                 }
-                KeyCode::Char(c) => {
+                Key::Character(c) => {
                     input.push(c);
                     execute!(stdout, Print(c)).map_err(|e| e.to_string())?;
                     let _ = stdout.flush();
                 }
-                KeyCode::Backspace if !input.is_empty() => {
+                Key::Backspace if !input.is_empty() => {
                     input.pop();
                     execute!(stdout, Print("\u{0008} \u{0008}")).map_err(|e| e.to_string())?;
                     let _ = stdout.flush();

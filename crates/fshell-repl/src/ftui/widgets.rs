@@ -22,39 +22,38 @@ pub enum WidgetAction {
     InsertMacro(String),
 }
 
-/// Convert a crossterm KeyEvent into a fshell KeyChord.
-pub fn crossterm_key_to_chord(
-    key: &crossterm::event::KeyEvent,
+/// Convert a fshell input event into a shell key chord.
+pub fn input_key_to_chord(
+    key: &fshell_terminal::input::KeyEvent,
 ) -> fshell_engine::keybindings::KeyChord {
-    use crossterm::event::{KeyCode, KeyModifiers};
     use fshell_engine::keybindings::{KeyChord, KeyCodeDef, KeyModifiersDef};
+    use fshell_terminal::input::{Key, Modifiers};
 
     let modifiers = KeyModifiersDef {
-        control: key.modifiers.contains(KeyModifiers::CONTROL),
-        alt: key.modifiers.contains(KeyModifiers::ALT),
-        shift: key.modifiers.contains(KeyModifiers::SHIFT),
+        control: key.modifiers.contains(Modifiers::CONTROL),
+        alt: key.modifiers.contains(Modifiers::ALT),
+        shift: key.modifiers.contains(Modifiers::SHIFT),
     };
 
-    let code = match key.code {
-        KeyCode::Char(c) => KeyCodeDef::Char(c.to_ascii_lowercase()),
-        KeyCode::Enter => KeyCodeDef::Enter,
-        KeyCode::Backspace => KeyCodeDef::Backspace,
-        KeyCode::Tab => KeyCodeDef::Tab,
-        KeyCode::BackTab => KeyCodeDef::BackTab,
-        KeyCode::Esc => KeyCodeDef::Esc,
-        KeyCode::Up => KeyCodeDef::Up,
-        KeyCode::Down => KeyCodeDef::Down,
-        KeyCode::Left => KeyCodeDef::Left,
-        KeyCode::Right => KeyCodeDef::Right,
-        KeyCode::Home => KeyCodeDef::Home,
-        KeyCode::End => KeyCodeDef::End,
-        KeyCode::PageUp => KeyCodeDef::PageUp,
-        KeyCode::PageDown => KeyCodeDef::PageDown,
-        KeyCode::Delete => KeyCodeDef::Delete,
-        KeyCode::Insert => KeyCodeDef::Insert,
-        KeyCode::F(n) => KeyCodeDef::F(n),
-        KeyCode::Null => KeyCodeDef::Null,
-        _ => KeyCodeDef::Null,
+    let code = match key.key {
+        Key::Character(c) => KeyCodeDef::Char(c.to_ascii_lowercase()),
+        Key::Enter => KeyCodeDef::Enter,
+        Key::Backspace => KeyCodeDef::Backspace,
+        Key::Tab => KeyCodeDef::Tab,
+        Key::BackTab => KeyCodeDef::BackTab,
+        Key::Escape => KeyCodeDef::Esc,
+        Key::Up => KeyCodeDef::Up,
+        Key::Down => KeyCodeDef::Down,
+        Key::Left => KeyCodeDef::Left,
+        Key::Right => KeyCodeDef::Right,
+        Key::Home => KeyCodeDef::Home,
+        Key::End => KeyCodeDef::End,
+        Key::PageUp => KeyCodeDef::PageUp,
+        Key::PageDown => KeyCodeDef::PageDown,
+        Key::Delete => KeyCodeDef::Delete,
+        Key::Insert => KeyCodeDef::Insert,
+        Key::Function(n) => KeyCodeDef::F(n),
+        Key::Null | Key::Other => KeyCodeDef::Null,
     };
 
     KeyChord { code, modifiers }

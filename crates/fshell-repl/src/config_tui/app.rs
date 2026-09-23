@@ -7,10 +7,10 @@ use super::schema::{OptionItem, OptionKind};
 use super::widgets;
 use crate::terminal_mode::FullscreenTerminalGuard;
 use crate::theme_ext::ThemeColorRatatui;
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use fshell_core::Val;
 use fshell_core::theme::Theme;
 use fshell_engine::Env;
+use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, KeyEvent};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -253,8 +253,8 @@ impl<'a> App<'a> {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
+        match key.key {
+            Key::Character('q') | Key::Escape => {
                 if self.dirty {
                     self.modal = ModalType::ConfirmDiscard {
                         title: "Unsaved Changes".into(),
@@ -264,33 +264,33 @@ impl<'a> App<'a> {
                     self.running = false;
                 }
             }
-            KeyCode::Char('?') => {
+            Key::Character('?') => {
                 self.modal = ModalType::Help;
             }
-            KeyCode::Char('/') => {
+            Key::Character('/') => {
                 self.focus = Focus::Search;
                 self.search_query.clear();
             }
-            KeyCode::Char('s') => {
+            Key::Character('s') => {
                 self.save_and_persist();
             }
-            KeyCode::Tab => {
+            Key::Tab => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Content,
                     _ => Focus::Sidebar,
                 };
                 self.content_selected = 0;
             }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h')
+            Key::BackTab | Key::Left | Key::Character('h')
                 if matches!(self.focus, Focus::Content) =>
             {
                 self.focus = Focus::Sidebar;
             }
-            KeyCode::Right | KeyCode::Char('l') if matches!(self.focus, Focus::Sidebar) => {
+            Key::Right | Key::Character('l') if matches!(self.focus, Focus::Sidebar) => {
                 self.focus = Focus::Content;
                 self.content_selected = 0;
             }
-            KeyCode::Down | KeyCode::Char('j') => match self.focus {
+            Key::Down | Key::Character('j') => match self.focus {
                 Focus::Sidebar => {
                     if self.sidebar_selected < self.categories.len() - 1 {
                         self.sidebar_selected += 1;
@@ -307,7 +307,7 @@ impl<'a> App<'a> {
                 }
                 _ => {}
             },
-            KeyCode::Up | KeyCode::Char('k') => match self.focus {
+            Key::Up | Key::Character('k') => match self.focus {
                 Focus::Sidebar => {
                     if self.sidebar_selected > 0 {
                         self.sidebar_selected -= 1;
@@ -321,22 +321,22 @@ impl<'a> App<'a> {
                 }
                 _ => {}
             },
-            KeyCode::Home => {
+            Key::Home => {
                 if matches!(self.focus, Focus::Content) {
                     self.content_selected = 0;
                     self.scroll_offset = 0;
                 }
             }
-            KeyCode::End => {
+            Key::End => {
                 if matches!(self.focus, Focus::Content) {
                     let max_idx = self.current_category_item_count().saturating_sub(1);
                     self.content_selected = max_idx;
                 }
             }
-            KeyCode::Char(' ') => {
+            Key::Character(' ') => {
                 self.handle_space();
             }
-            KeyCode::Enter => {
+            Key::Enter => {
                 if matches!(self.focus, Focus::Sidebar) {
                     self.focus = Focus::Content;
                     self.content_selected = 0;
@@ -344,16 +344,16 @@ impl<'a> App<'a> {
                     self.handle_enter();
                 }
             }
-            KeyCode::Char('e') if matches!(self.focus, Focus::Content) => {
+            Key::Character('e') if matches!(self.focus, Focus::Content) => {
                 self.handle_edit();
             }
-            KeyCode::Char('a') if matches!(self.focus, Focus::Content) => {
+            Key::Character('a') if matches!(self.focus, Focus::Content) => {
                 self.handle_add();
             }
-            KeyCode::Char('d') if matches!(self.focus, Focus::Content) => {
+            Key::Character('d') if matches!(self.focus, Focus::Content) => {
                 self.handle_delete();
             }
-            KeyCode::Char('p') => {
+            Key::Character('p') => {
                 if matches!(self.current_category(), Category::Prompt) {
                     self.launch_prompt_studio = true;
                     self.running = false;
@@ -586,21 +586,21 @@ impl<'a> App<'a> {
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
+        match key.key {
+            Key::Escape => {
                 self.focus = Focus::Content;
                 self.search_query.clear();
                 self.content_selected = 0;
             }
-            KeyCode::Enter => {
+            Key::Enter => {
                 self.focus = Focus::Content;
                 self.content_selected = 0;
             }
-            KeyCode::Backspace => {
+            Key::Backspace => {
                 self.search_query.pop();
                 self.content_selected = 0;
             }
-            KeyCode::Char(c) => {
+            Key::Character(c) => {
                 self.search_query.push(c);
                 self.content_selected = 0;
             }
@@ -614,12 +614,12 @@ impl<'a> App<'a> {
                 self.modal = ModalType::None;
             }
             ModalType::ConfirmDiscard { .. } => {
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                match key.key {
+                    Key::Character('y') | Key::Character('Y') | Key::Enter => {
                         self.save_and_persist();
                         self.running = false;
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
+                    Key::Character('n') | Key::Character('N') => {
                         // Revert theme if changed
                         let config_dir = fshell_engine::config_dir()
                             .unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -628,7 +628,7 @@ impl<'a> App<'a> {
                         }
                         self.running = false;
                     }
-                    KeyCode::Esc => {
+                    Key::Escape => {
                         self.modal = ModalType::None;
                     }
                     _ => {}
@@ -641,11 +641,11 @@ impl<'a> App<'a> {
                 error,
                 ..
             } => {
-                match key.code {
-                    KeyCode::Esc => {
+                match key.key {
+                    Key::Escape => {
                         self.modal = ModalType::None;
                     }
-                    KeyCode::Enter => {
+                    Key::Enter => {
                         if let Some(key_name) = target_opt_key.take() {
                             let val_str = value.clone();
                             // Validate & apply
@@ -667,24 +667,24 @@ impl<'a> App<'a> {
                             }
                         }
                     }
-                    KeyCode::Char(c) => {
+                    Key::Character(c) => {
                         value.insert(*cursor, c);
                         *cursor += 1;
                         *error = None;
                     }
-                    KeyCode::Backspace if *cursor > 0 => {
+                    Key::Backspace if *cursor > 0 => {
                         *cursor -= 1;
                         value.remove(*cursor);
                         *error = None;
                     }
-                    KeyCode::Delete if *cursor < value.len() => {
+                    Key::Delete if *cursor < value.len() => {
                         value.remove(*cursor);
                         *error = None;
                     }
-                    KeyCode::Left => {
+                    Key::Left => {
                         *cursor = cursor.saturating_sub(1);
                     }
-                    KeyCode::Right if *cursor < value.len() => {
+                    Key::Right if *cursor < value.len() => {
                         *cursor += 1;
                     }
                     _ => {}
@@ -698,11 +698,11 @@ impl<'a> App<'a> {
                 old_name,
                 error,
                 ..
-            } => match key.code {
-                KeyCode::Esc => {
+            } => match key.key {
+                Key::Escape => {
                     self.modal = ModalType::None;
                 }
-                KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
+                Key::Tab | Key::Down | Key::Up => {
                     *active_field = if *active_field == 0 { 1 } else { 0 };
                     *cursor = if *active_field == 0 {
                         name.len()
@@ -710,7 +710,7 @@ impl<'a> App<'a> {
                         expansion.len()
                     };
                 }
-                KeyCode::Enter => {
+                Key::Enter => {
                     if name.trim().is_empty() {
                         *error = Some("Alias name cannot be empty".into());
                         return;
@@ -741,29 +741,29 @@ impl<'a> App<'a> {
                     self.status_message = Some((format!("Saved alias: {clean_name}"), false));
                     self.modal = ModalType::None;
                 }
-                KeyCode::Char(c) => {
+                Key::Character(c) => {
                     let target_str = if *active_field == 0 { name } else { expansion };
                     target_str.insert(*cursor, c);
                     *cursor += 1;
                     *error = None;
                 }
-                KeyCode::Backspace if *cursor > 0 => {
+                Key::Backspace if *cursor > 0 => {
                     let target_str = if *active_field == 0 { name } else { expansion };
                     *cursor -= 1;
                     target_str.remove(*cursor);
                     *error = None;
                 }
-                KeyCode::Delete => {
+                Key::Delete => {
                     let target_str = if *active_field == 0 { name } else { expansion };
                     if *cursor < target_str.len() {
                         target_str.remove(*cursor);
                         *error = None;
                     }
                 }
-                KeyCode::Left => {
+                Key::Left => {
                     *cursor = cursor.saturating_sub(1);
                 }
-                KeyCode::Right => {
+                Key::Right => {
                     let len = if *active_field == 0 {
                         name.len()
                     } else {
@@ -783,11 +783,11 @@ impl<'a> App<'a> {
                 error,
                 ..
             } => {
-                match key.code {
-                    KeyCode::Esc => {
+                match key.key {
+                    Key::Escape => {
                         self.modal = ModalType::None;
                     }
-                    KeyCode::Tab => {
+                    Key::Tab => {
                         if *active_field == 0 {
                             // Cycle event
                             *event = match event.as_str() {
@@ -799,7 +799,7 @@ impl<'a> App<'a> {
                             *active_field = 0;
                         }
                     }
-                    KeyCode::Enter => {
+                    Key::Enter => {
                         if fn_name.trim().is_empty() {
                             *error = Some("Function name cannot be empty".into());
                             return;
@@ -818,14 +818,14 @@ impl<'a> App<'a> {
                         self.status_message = Some((format!("Added hook: {ev} -> {func}"), false));
                         self.modal = ModalType::None;
                     }
-                    KeyCode::Char(c) => {
+                    Key::Character(c) => {
                         if *active_field == 1 {
                             fn_name.insert(*cursor, c);
                             *cursor += 1;
                             *error = None;
                         }
                     }
-                    KeyCode::Backspace if *active_field == 1 && *cursor > 0 => {
+                    Key::Backspace if *active_field == 1 && *cursor > 0 => {
                         *cursor -= 1;
                         fn_name.remove(*cursor);
                         *error = None;
@@ -965,6 +965,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> Result<(), String> {
+    let mut input = CrosstermEventSource::new();
     while app.running {
         terminal
             .draw(|f| {
@@ -1151,18 +1152,16 @@ fn run_loop<B: ratatui::backend::Backend>(
             })
             .map_err(|e| format!("Failed to draw frame: {e}"))?;
 
-        if event::poll(std::time::Duration::from_millis(50))
-            .map_err(|e| format!("Poll failed: {e}"))?
+        match input
+            .poll(std::time::Duration::from_millis(50))
+            .map_err(|e| format!("Terminal input failed: {e}"))?
         {
-            match event::read().map_err(|e| format!("Read failed: {e}"))? {
-                Event::Key(key) => {
-                    app.handle_key(key);
-                }
-                Event::Resize(_, _) => {
-                    // Handled automatically on next draw loop iteration
-                }
-                _ => {}
+            InputPoll::Event(InputEvent::Key(key)) => app.handle_key(key),
+            InputPoll::Event(InputEvent::Resize { .. }) | InputPoll::Timeout => {
+                // Resize is reflected by the next draw iteration.
             }
+            InputPoll::Closed => break,
+            InputPoll::Event(_) => {}
         }
     }
 

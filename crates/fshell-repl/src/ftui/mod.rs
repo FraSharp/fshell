@@ -21,8 +21,9 @@ pub mod widget_explorer;
 pub mod widgets;
 
 use chrono::TimeZone;
-use crossterm::event::{
-    self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+use fshell_terminal::input::{
+    CrosstermEventSource, EventSource, InputError, InputEvent, InputPoll, Key, KeyAction,
+    Modifiers, MouseAction, MouseButton,
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
@@ -135,16 +136,18 @@ impl Drop for CaptureStateGuard<'_> {
     }
 }
 
-async fn poll_terminal_event(timeout: Duration) -> std::io::Result<Option<Event>> {
+async fn poll_terminal_event(
+    source: Arc<std::sync::Mutex<dyn EventSource>>,
+    timeout: Duration,
+) -> Result<InputPoll, InputError> {
     tokio::task::spawn_blocking(move || {
-        if event::poll(timeout)? {
-            event::read().map(Some)
-        } else {
-            Ok(None)
-        }
+        let mut source = source
+            .lock()
+            .map_err(|error| InputError::Worker(format!("event source lock poisoned: {error}")))?;
+        source.poll(timeout)
     })
     .await
-    .map_err(|error| std::io::Error::other(format!("terminal input task failed: {error}")))?
+    .map_err(|error| InputError::Worker(error.to_string()))?
 }
 
 use crate::alias_expansion::AliasExpansionState;
@@ -202,6 +205,8 @@ pub async fn run_ftui_repl(
             return;
         }
     };
+    let event_source: Arc<std::sync::Mutex<dyn EventSource>> =
+        Arc::new(std::sync::Mutex::new(CrosstermEventSource::new()));
 
     // Wait for deferred initialization (login shell env, PATH cache warmup) to finish
     init_done.notified().await;
@@ -1613,41 +1618,20 @@ pub async fn run_ftui_repl(
                 );
             }
 
-            // Read keystroke/mouse input
-            // Handle EINTR gracefully (SIGTSTP, SIGCONT, etc.) — just retry
-
-            // TTY health / signal checks
-
+            // Read keystroke/mouse input through the shared fshell input
+            // contract. Crossterm reports an interrupted source read as a
+            // poll timeout; the surrounding signal checks remain authoritative.
             let poll_start = std::time::Instant::now();
-            let polled = loop {
-                match poll_terminal_event(poll_timeout).await {
-                    Ok(event) => break event,
-                    Err(e) => {
-                        // EINTR on signal reception: retry or exit on SIGHUP/cancellation
-                        use std::io::ErrorKind;
-                        if e.kind() == ErrorKind::Interrupted {
-                            #[cfg(unix)]
-                            if raw::SignalGuard::hup_received() {
-                                cpu_dbg!("GOT_SIGHUP inside terminal input — breaking repl_loop");
-                                break 'repl_loop;
-                            }
-                            if env.job_control.cancellation.load(Ordering::Relaxed) {
-                                cpu_dbg!("cancellation inside terminal input — breaking repl_loop");
-                                break 'repl_loop;
-                            }
-                            // Check if we need to re-init terminal (Bug 5.2)
-                            #[cfg(unix)]
-                            if raw::SignalGuard::suspended() {
-                                if let Some(s) = _raw_session.as_deref() {
-                                    s.reenter_raw();
-                                }
-                                redraw = true;
-                            }
-                            continue;
-                        }
-                        cpu_dbg!("terminal input returned error: {:?}", e);
-                        break 'repl_loop;
-                    }
+            let polled = match poll_terminal_event(event_source.clone(), poll_timeout).await {
+                Ok(InputPoll::Event(event)) => Some(event),
+                Ok(InputPoll::Timeout) => None,
+                Ok(InputPoll::Closed) => {
+                    cpu_dbg!("terminal input closed — breaking repl_loop");
+                    break 'repl_loop;
+                }
+                Err(error) => {
+                    cpu_dbg!("terminal input returned error: {:?}", error);
+                    break 'repl_loop;
                 }
             };
 
@@ -1682,7 +1666,7 @@ pub async fn run_ftui_repl(
                     break 'repl_loop;
                 }
 
-                if let Event::Resize(_, _) = event {
+                if let InputEvent::Resize { .. } = event {
                     let now = std::time::Instant::now();
                     if now.duration_since(last_resize) > Duration::from_millis(80) {
                         redraw = true;
@@ -1698,14 +1682,11 @@ pub async fn run_ftui_repl(
                     continue;
                 }
 
-                if let Event::Mouse(MouseEvent {
-                    kind,
-                    column,
-                    row,
-                    modifiers: _,
-                }) = event
-                {
-                    cpu_dbg!("Mouse event: {:?} col={} row={}", kind, column, row);
+                if let InputEvent::Mouse(mouse) = event {
+                    let action = mouse.action;
+                    let column = mouse.column;
+                    let row = mouse.row;
+                    cpu_dbg!("Mouse event: {:?} col={} row={}", action, column, row);
                     let size = terminal
                         .as_ref()
                         .and_then(|t| t.size().ok())
@@ -1714,8 +1695,8 @@ pub async fn run_ftui_repl(
                     mouse_mgr.handle_click(row, prompt_y);
 
                     if mouse_mgr.is_captured {
-                        match kind {
-                            MouseEventKind::Drag(MouseButton::Left) => {
+                        match action {
+                            MouseAction::Drag(MouseButton::Left) => {
                                 // History scroll via drag? No — only completions use drag-
                                 // like scroll. When history is active, scroll wheel is
                                 // handled below; drag stays for text selection only.
@@ -1740,7 +1721,7 @@ pub async fn run_ftui_repl(
                                     }
                                 }
                             }
-                            MouseEventKind::ScrollDown => {
+                            MouseAction::ScrollDown => {
                                 if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
                                     comp_mgr.select_next();
                                     if let Some(ref _grp) = comp_mgr.grouped {
@@ -1764,7 +1745,7 @@ pub async fn run_ftui_repl(
                                     redraw = true;
                                 }
                             }
-                            MouseEventKind::ScrollUp => {
+                            MouseAction::ScrollUp => {
                                 if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
                                     comp_mgr.select_prev();
                                     if let Some(ref _grp) = comp_mgr.grouped {
@@ -1785,7 +1766,7 @@ pub async fn run_ftui_repl(
                                     redraw = true;
                                 }
                             }
-                            MouseEventKind::Down(MouseButton::Left) => {
+                            MouseAction::Down(MouseButton::Left) => {
                                 if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
                                     if let Some((popup_area, layout)) = completion_popup
                                         && let Some(index) = comp_mgr.suggestion_index_at(
@@ -1821,7 +1802,7 @@ pub async fn run_ftui_repl(
                                     }
                                 }
                             }
-                            MouseEventKind::Up(MouseButton::Left) => {
+                            MouseAction::Up(MouseButton::Left) => {
                                 // Bug 2.3: End of drag selection — clear anchor
                                 drag_anchor = None;
                             }
@@ -1831,7 +1812,7 @@ pub async fn run_ftui_repl(
                     continue;
                 }
 
-                if let Event::Paste(pasted_text) = event {
+                if let InputEvent::Paste(pasted_text) = event {
                     history_index = None;
                     // Bug 8.1: Delete active selection before inserting paste
                     if text_buf.has_selection() {
@@ -1843,32 +1824,32 @@ pub async fn run_ftui_repl(
                     continue;
                 }
 
-                if let Event::Key(key) = event {
-                    if key.kind == event::KeyEventKind::Release {
+                if let InputEvent::Key(key) = event {
+                    if key.action == KeyAction::Release {
                         continue;
                     }
                     mouse_mgr.handle_keypress();
 
                     if history_mgr.active {
-                        match key.code {
-                            KeyCode::Esc => {
+                        match key.key {
+                            Key::Escape => {
                                 history_mgr.active = false;
                                 history_mgr.aborted_active = false;
                                 redraw = true;
                             }
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
                                 // Bug 1.2: Ctrl+C in history overlays = exit
                                 history_mgr.active = false;
                                 history_mgr.aborted_active = false;
                                 redraw = true;
                             }
-                            KeyCode::F(1) => {
+                            Key::Function(1) => {
                                 history_mgr.active = false;
                                 history_mgr.aborted_active = false;
                                 help_visible = !help_visible;
                                 redraw = true;
                             }
-                            KeyCode::Enter => {
+                            Key::Enter => {
                                 if let Some(cmd) = history_mgr.get_selected() {
                                     text_buf.replace_content(&cmd);
                                 }
@@ -1876,19 +1857,19 @@ pub async fn run_ftui_repl(
                                 history_mgr.aborted_active = false;
                                 redraw = true;
                             }
-                            KeyCode::Up => {
+                            Key::Up => {
                                 history_mgr.select_prev();
                                 let max_h = current_viewport_height.saturating_sub(3) as usize;
                                 history_mgr.adjust_scroll(max_h);
                                 redraw = true;
                             }
-                            KeyCode::Down => {
+                            Key::Down => {
                                 history_mgr.select_next();
                                 let max_h = current_viewport_height.saturating_sub(3) as usize;
                                 history_mgr.adjust_scroll(max_h);
                                 redraw = true;
                             }
-                            KeyCode::PageUp => {
+                            Key::PageUp => {
                                 let max_h = current_viewport_height.saturating_sub(3) as usize;
                                 for _ in 0..max_h {
                                     history_mgr.select_prev();
@@ -1896,7 +1877,7 @@ pub async fn run_ftui_repl(
                                 history_mgr.adjust_scroll(max_h);
                                 redraw = true;
                             }
-                            KeyCode::PageDown => {
+                            Key::PageDown => {
                                 let max_h = current_viewport_height.saturating_sub(3) as usize;
                                 for _ in 0..max_h {
                                     history_mgr.select_next();
@@ -1904,7 +1885,7 @@ pub async fn run_ftui_repl(
                                 history_mgr.adjust_scroll(max_h);
                                 redraw = true;
                             }
-                            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Key::Character('r') if key.modifiers.contains(Modifiers::CONTROL) => {
                                 // Bug 1.5: Ctrl+R cycles to next result (pressing same key that
                                 // opened the overlay should navigate, not change filter scope).
                                 history_mgr.select_next();
@@ -1912,24 +1893,24 @@ pub async fn run_ftui_repl(
                                 history_mgr.adjust_scroll(max_h);
                                 redraw = true;
                             }
-                            KeyCode::F(2) => {
+                            Key::Function(2) => {
                                 // F2 toggles filter mode (was Ctrl+R, Bug 1.5)
                                 history_mgr.filter_mode = history_mgr.filter_mode.next();
                                 history_mgr.update_results(&current_dir, &hostname, &session_id);
                                 redraw = true;
                             }
-                            KeyCode::Backspace => {
+                            Key::Backspace => {
                                 history_mgr.query.pop();
                                 history_mgr.selected_idx = 0;
                                 history_mgr.update_results(&current_dir, &hostname, &session_id);
                                 redraw = true;
                             }
-                            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Key::Character('d') if key.modifiers.contains(Modifiers::CONTROL) => {
                                 history_mgr.delete_selected();
                                 history_mgr.update_results(&current_dir, &hostname, &session_id);
                                 redraw = true;
                             }
-                            KeyCode::Char(c) => {
+                            Key::Character(c) => {
                                 history_mgr.query.push(c);
                                 history_mgr.selected_idx = 0;
                                 history_mgr.update_results(&current_dir, &hostname, &session_id);
@@ -1941,17 +1922,17 @@ pub async fn run_ftui_repl(
                     }
 
                     if agent_state.active {
-                        match key.code {
-                            KeyCode::Esc => {
+                        match key.key {
+                            Key::Escape => {
                                 agent_state.reset();
                                 redraw = true;
                             }
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
                                 // Bug 1.2: Ctrl+C in agent overlay = exit
                                 agent_state.reset();
                                 redraw = true;
                             }
-                            KeyCode::Enter => {
+                            Key::Enter => {
                                 if agent_state.is_loading {
                                     // Bug 8.11: Ignore Enter while loading
                                 } else if agent_state.result_command.is_some() {
@@ -1968,23 +1949,23 @@ pub async fn run_ftui_repl(
                     }
 
                     if widget_explorer.active {
-                        match key.code {
-                            KeyCode::Esc | KeyCode::F(1) => {
+                        match key.key {
+                            Key::Escape | Key::Function(1) => {
                                 widget_explorer.close();
                                 redraw = true;
                             }
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
                                 widget_explorer.close();
                                 redraw = true;
                             }
-                            KeyCode::Up => {
+                            Key::Up => {
                                 widget_explorer.select_prev();
                                 if widget_explorer.selected_idx < widget_explorer.scroll_offset {
                                     widget_explorer.scroll_offset = widget_explorer.selected_idx;
                                 }
                                 redraw = true;
                             }
-                            KeyCode::Down => {
+                            Key::Down => {
                                 widget_explorer.select_next();
                                 let max_h =
                                     current_viewport_height.saturating_sub(5).max(1) as usize;
@@ -1996,7 +1977,7 @@ pub async fn run_ftui_repl(
                                 }
                                 redraw = true;
                             }
-                            KeyCode::PageUp => {
+                            Key::PageUp => {
                                 let page_size =
                                     current_viewport_height.saturating_sub(5).max(1) as usize;
                                 widget_explorer.page_up(page_size);
@@ -2004,7 +1985,7 @@ pub async fn run_ftui_repl(
                                     widget_explorer.scroll_offset.saturating_sub(page_size);
                                 redraw = true;
                             }
-                            KeyCode::PageDown => {
+                            Key::PageDown => {
                                 let page_size =
                                     current_viewport_height.saturating_sub(5).max(1) as usize;
                                 widget_explorer.page_down(page_size);
@@ -2016,7 +1997,7 @@ pub async fn run_ftui_repl(
                                 }
                                 redraw = true;
                             }
-                            KeyCode::Enter => {
+                            Key::Enter => {
                                 if let Some(target_widget) = widget_explorer.get_selected_widget() {
                                     let target = target_widget.to_string();
                                     widget_explorer.close();
@@ -2055,14 +2036,14 @@ pub async fn run_ftui_repl(
                                 }
                                 redraw = true;
                             }
-                            KeyCode::Backspace => {
+                            Key::Backspace => {
                                 widget_explorer.query.pop();
                                 widget_explorer.update_filter(&env);
                                 redraw = true;
                             }
-                            KeyCode::Char(c)
-                                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            Key::Character(c)
+                                if !key.modifiers.contains(Modifiers::CONTROL)
+                                    && !key.modifiers.contains(Modifiers::ALT) =>
                             {
                                 widget_explorer.query.push(c);
                                 widget_explorer.update_filter(&env);
@@ -2074,31 +2055,31 @@ pub async fn run_ftui_repl(
                     }
 
                     if comp_mgr.visible {
-                        match key.code {
-                            KeyCode::Esc => {
+                        match key.key {
+                            Key::Escape => {
                                 comp_mgr.clear();
                                 help_visible = false;
                                 history_index = None;
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::F(1) => {
+                            Key::Function(1) => {
                                 comp_mgr.clear();
                                 help_visible = !help_visible;
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Tab => {
+                            Key::Tab => {
                                 comp_mgr.select_next();
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::BackTab => {
+                            Key::BackTab => {
                                 comp_mgr.select_prev();
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Down => {
+                            Key::Down => {
                                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
                                 let layout = comp_mgr.compute_layout_mode(term_w);
                                 match layout {
@@ -2115,7 +2096,7 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Up => {
+                            Key::Up => {
                                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
                                 let layout = comp_mgr.compute_layout_mode(term_w);
                                 match layout {
@@ -2132,21 +2113,21 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::PageDown => {
+                            Key::PageDown => {
                                 let page_size =
                                     (current_viewport_height.saturating_sub(2)).max(1) as usize;
                                 comp_mgr.page_down(page_size);
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::PageUp => {
+                            Key::PageUp => {
                                 let page_size =
                                     (current_viewport_height.saturating_sub(2)).max(1) as usize;
                                 comp_mgr.page_up(page_size);
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Right => {
+                            Key::Right => {
                                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
                                 let layout = comp_mgr.compute_layout_mode(term_w);
                                 match layout {
@@ -2170,7 +2151,7 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Left => {
+                            Key::Left => {
                                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
                                 let layout = comp_mgr.compute_layout_mode(term_w);
                                 if matches!(
@@ -2182,7 +2163,7 @@ pub async fn run_ftui_repl(
                                     continue;
                                 }
                             }
-                            KeyCode::Enter => {
+                            Key::Enter => {
                                 if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
                                     let line = text_buf.text().clone();
                                     apply_completion(&mut text_buf, &line, &s);
@@ -2192,7 +2173,7 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                                 continue;
                             }
-                            KeyCode::Char(' ') => {
+                            Key::Character(' ') => {
                                 if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
                                     let line = text_buf.text().clone();
                                     apply_completion(&mut text_buf, &line, &s);
@@ -2214,7 +2195,7 @@ pub async fn run_ftui_repl(
                     }
 
                     // --- First-Class Keybinding & Widget Architecture Dispatch ---
-                    let chord = widgets::crossterm_key_to_chord(&key);
+                    let chord = widgets::input_key_to_chord(&key);
                     let bound_action = {
                         let reg = env.keybindings.read();
                         reg.get_action(reg.active_mode, &chord).cloned()
@@ -2421,21 +2402,21 @@ pub async fn run_ftui_repl(
 
                     // ignoreeof: any non-EOF key clears the pending flag
                     {
-                        let is_eof_key = key.code == KeyCode::Char('d')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        let is_eof_key = key.key == Key::Character('d')
+                            && key.modifiers.contains(Modifiers::CONTROL)
                             && text_buf.is_empty()
                             && !in_continuation;
                         if !is_eof_key {
                             eof_pending = false;
                         }
                     }
-                    match key.code {
-                        KeyCode::Left => {
+                    match key.key {
+                        Key::Left => {
                             history_index = None;
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                || key.modifiers.contains(KeyModifiers::ALT)
+                            if key.modifiers.contains(Modifiers::CONTROL)
+                                || key.modifiers.contains(Modifiers::ALT)
                             {
-                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                if key.modifiers.contains(Modifiers::SHIFT) {
                                     if !text_buf.has_selection() {
                                         text_buf.start_selection();
                                     }
@@ -2445,7 +2426,7 @@ pub async fn run_ftui_repl(
                                     text_buf.clear_selection();
                                     text_buf.move_word_left();
                                 }
-                            } else if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            } else if key.modifiers.contains(Modifiers::SHIFT) {
                                 if !text_buf.has_selection() {
                                     text_buf.start_selection();
                                 }
@@ -2458,12 +2439,12 @@ pub async fn run_ftui_repl(
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Right => {
+                        Key::Right => {
                             history_index = None;
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                || key.modifiers.contains(KeyModifiers::ALT)
+                            if key.modifiers.contains(Modifiers::CONTROL)
+                                || key.modifiers.contains(Modifiers::ALT)
                             {
-                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                if key.modifiers.contains(Modifiers::SHIFT) {
                                     if !text_buf.has_selection() {
                                         text_buf.start_selection();
                                     }
@@ -2479,7 +2460,7 @@ pub async fn run_ftui_repl(
                                 // Accept full hint at end of line (fish/VS Code behavior)
                                 text_buf.clear_selection();
                                 text_buf.insert_str(&current_hint);
-                            } else if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            } else if key.modifiers.contains(Modifiers::SHIFT) {
                                 if !text_buf.has_selection() {
                                     text_buf.start_selection();
                                 }
@@ -2492,7 +2473,7 @@ pub async fn run_ftui_repl(
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Up => {
+                        Key::Up => {
                             text_buf.clear_selection();
                             if text_buf.move_up() {
                                 redraw = true;
@@ -2552,7 +2533,7 @@ pub async fn run_ftui_repl(
                                 }
                             }
                         }
-                        KeyCode::Down => {
+                        Key::Down => {
                             text_buf.clear_selection();
                             if text_buf.move_down() {
                                 redraw = true;
@@ -2576,11 +2557,11 @@ pub async fn run_ftui_repl(
                                 redraw = true;
                             }
                         }
-                        KeyCode::Home => {
+                        Key::Home => {
                             history_index = None;
-                            if key.modifiers.contains(KeyModifiers::ALT) {
+                            if key.modifiers.contains(Modifiers::ALT) {
                                 // Alt+Home = absolute buffer start (Bug 1.6)
-                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                if key.modifiers.contains(Modifiers::SHIFT) {
                                     if !text_buf.has_selection() {
                                         text_buf.start_selection();
                                     }
@@ -2592,7 +2573,7 @@ pub async fn run_ftui_repl(
                                 }
                             } else {
                                 // Home = current line start (Bug 1.6 fix)
-                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                if key.modifiers.contains(Modifiers::SHIFT) {
                                     if !text_buf.has_selection() {
                                         text_buf.start_selection();
                                     }
@@ -2606,11 +2587,11 @@ pub async fn run_ftui_repl(
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::End => {
+                        Key::End => {
                             history_index = None;
-                            if key.modifiers.contains(KeyModifiers::ALT) {
+                            if key.modifiers.contains(Modifiers::ALT) {
                                 // Alt+End = absolute buffer end (Bug 1.6)
-                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                if key.modifiers.contains(Modifiers::SHIFT) {
                                     if !text_buf.has_selection() {
                                         text_buf.start_selection();
                                     }
@@ -2622,7 +2603,7 @@ pub async fn run_ftui_repl(
                                 }
                             } else {
                                 // End = current line end (Bug 1.6 fix)
-                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                if key.modifiers.contains(Modifiers::SHIFT) {
                                     if !text_buf.has_selection() {
                                         text_buf.start_selection();
                                     }
@@ -2636,10 +2617,10 @@ pub async fn run_ftui_repl(
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Backspace => {
+                        Key::Backspace => {
                             history_index = None;
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                || key.modifiers.contains(KeyModifiers::ALT)
+                            if key.modifiers.contains(Modifiers::CONTROL)
+                                || key.modifiers.contains(Modifiers::ALT)
                             {
                                 text_buf.delete_word_left();
                             } else {
@@ -2670,13 +2651,13 @@ pub async fn run_ftui_repl(
                             comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                             redraw = true;
                         }
-                        KeyCode::Delete => {
+                        Key::Delete => {
                             history_index = None;
                             text_buf.delete_right();
                             comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                             redraw = true;
                         }
-                        KeyCode::Esc => {
+                        Key::Escape => {
                             history_index = None;
                             if mouse_mgr.mode == MouseMode::Simple {
                                 if mouse_mgr.is_captured {
@@ -2689,41 +2670,41 @@ pub async fn run_ftui_repl(
                             help_visible = false;
                             redraw = true;
                         }
-                        KeyCode::F(1) => {
+                        Key::Function(1) => {
                             help_visible = !help_visible;
                             redraw = true;
                         }
-                        KeyCode::BackTab => {
+                        Key::BackTab => {
                             // Bug 1.8: Shift+Tab outside of completion popup — add indentation or
                             // trigger reverse completion. For now: do nothing (explicit no-op).
                             // This prevents silent fallthrough to the wildcard arm.
                             redraw = true;
                         }
-                        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('z') if key.modifiers.contains(Modifiers::CONTROL) => {
                             history_index = None;
                             text_buf.undo();
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('y') if key.modifiers.contains(Modifiers::CONTROL) => {
                             history_index = None;
                             text_buf.redo();
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('a') if key.modifiers.contains(Modifiers::CONTROL) => {
                             history_index = None;
                             text_buf.move_to_line_start();
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('e') if key.modifiers.contains(Modifiers::CONTROL) => {
                             history_index = None;
                             text_buf.move_to_line_end();
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('l') if key.modifiers.contains(Modifiers::CONTROL) => {
                             // Bug 1.4: Ctrl+L clear screen
                             history_index = None;
                             let _ = crossterm::execute!(
@@ -2741,20 +2722,20 @@ pub async fn run_ftui_repl(
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('w') if key.modifiers.contains(Modifiers::CONTROL) => {
                             history_index = None;
                             text_buf.delete_word_left();
                             comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                             redraw = true;
                         }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        Key::Character('c') if key.modifiers.contains(Modifiers::ALT) => {
                             if text_buf.has_selection() {
                                 let sel = text_buf.selected_text();
                                 clipboard::copy_to_clipboard(&sel);
                             }
                             redraw = true;
                         }
-                        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        Key::Character('x') if key.modifiers.contains(Modifiers::ALT) => {
                             if text_buf.has_selection() {
                                 let sel = text_buf.selected_text();
                                 clipboard::copy_to_clipboard(&sel);
@@ -2762,27 +2743,27 @@ pub async fn run_ftui_repl(
                             }
                             redraw = true;
                         }
-                        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        Key::Character('v') if key.modifiers.contains(Modifiers::ALT) => {
                             if let Some(text) = clipboard::paste_from_clipboard() {
                                 text_buf.insert_str(&text);
                             }
                             redraw = true;
                         }
-                        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        Key::Character('b') if key.modifiers.contains(Modifiers::ALT) => {
                             history_index = None;
                             text_buf.clear_selection();
                             text_buf.move_word_left();
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        Key::Character('f') if key.modifiers.contains(Modifiers::ALT) => {
                             history_index = None;
                             text_buf.clear_selection();
                             text_buf.move_word_right();
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('r') if key.modifiers.contains(Modifiers::CONTROL) => {
                             history_index = None;
                             history_mgr.active = true;
                             history_mgr.query.clear();
@@ -2790,7 +2771,7 @@ pub async fn run_ftui_repl(
                             history_mgr.update_results(&current_dir, &hostname, &session_id);
                             redraw = true;
                         }
-                        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('h') if key.modifiers.contains(Modifiers::CONTROL) => {
                             history_index = None;
                             history_mgr.active = true;
                             history_mgr.explorer_active = true;
@@ -2800,23 +2781,23 @@ pub async fn run_ftui_repl(
                             redraw = true;
                         }
 
-                        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        Key::Character('r') if key.modifiers.contains(Modifiers::ALT) => {
                             history_index = None;
                             history_mgr.active = true;
                             history_mgr.aborted_active = true;
                             history_mgr.selected_idx = 0;
                             redraw = true;
                         }
-                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        Key::Character('a') if key.modifiers.contains(Modifiers::ALT) => {
                             history_index = None;
                             let prompt = text_buf.text();
                             agent_state.trigger_query(&prompt, &env);
                             redraw = true;
                         }
-                        KeyCode::Enter
-                            if key.modifiers.contains(KeyModifiers::ALT)
-                                || key.modifiers.contains(KeyModifiers::SHIFT)
-                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        Key::Enter
+                            if key.modifiers.contains(Modifiers::ALT)
+                                || key.modifiers.contains(Modifiers::SHIFT)
+                                || key.modifiers.contains(Modifiers::CONTROL) =>
                         {
                             // Soft newline: insert newline directly into buffer with auto-indentation at cursor
                             history_index = None;
@@ -2831,7 +2812,7 @@ pub async fn run_ftui_repl(
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('j') if key.modifiers.contains(Modifiers::CONTROL) => {
                             // Ctrl+J is standard LineFeed (soft newline) in terminal emulators
                             history_index = None;
                             let indent = fshell_core::compute_indent_depth_at(
@@ -2845,7 +2826,7 @@ pub async fn run_ftui_repl(
                             comp_mgr.clear();
                             redraw = true;
                         }
-                        KeyCode::Enter => {
+                        Key::Enter => {
                             help_visible = false;
                             text_buf.commit_transaction();
                             let command_line = text_buf.text();
@@ -2920,8 +2901,8 @@ pub async fn run_ftui_repl(
                             }
                             break 'input_loop;
                         }
-                        KeyCode::Char('d')
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                        Key::Character('d')
+                            if key.modifiers.contains(Modifiers::CONTROL)
                                 && text_buf.is_empty() =>
                         {
                             if !in_continuation {
@@ -2952,8 +2933,8 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                         }
-                        KeyCode::Char('d')
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                        Key::Character('d')
+                            if key.modifiers.contains(Modifiers::CONTROL)
                                 && !text_buf.is_empty() =>
                         {
                             // Bug 1.3: Ctrl+D on non-empty buffer = delete_right (forward delete)
@@ -2962,7 +2943,7 @@ pub async fn run_ftui_repl(
                             comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                             redraw = true;
                         }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
                             history_index = None;
                             if in_continuation {
                                 // Cancel multi-line input on Ctrl+C
@@ -2976,7 +2957,7 @@ pub async fn run_ftui_repl(
                             aborted_command = Some(cmd);
                             break 'input_loop;
                         }
-                        KeyCode::Tab => {
+                        Key::Tab => {
                             history_index = None;
                             if !comp_mgr.visible {
                                 // I2: First Tab — fetch suggestions
@@ -3039,8 +3020,8 @@ pub async fn run_ftui_repl(
                             redraw = true;
                             continue;
                         }
-                        KeyCode::Char(c)
-                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                        Key::Character(c)
+                            if key.modifiers.is_empty() || key.modifiers == Modifiers::SHIFT =>
                         {
                             history_index = None;
                             fshell_core::debug_log!("prefix_search cleared on char input");

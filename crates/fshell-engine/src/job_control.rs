@@ -54,10 +54,10 @@ impl PipelineJobContext {
     }
 
     pub fn finish(&self, env: &crate::Env) {
-        if self.owns_terminal {
-            if let Some(job_id) = env.foreground_job() {
-                let _ = env.clear_foreground(job_id);
-            }
+        if self.owns_terminal
+            && let Some(job_id) = env.foreground_job()
+        {
+            let _ = env.clear_foreground(job_id);
         }
         self.restore_terminal();
     }

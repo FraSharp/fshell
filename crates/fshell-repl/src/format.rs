@@ -4,6 +4,7 @@
 use crate::terminal_mode::FullscreenTerminalGuard;
 use chrono::{Local, Utc};
 use fshell_core::Val;
+use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key};
 use std::fmt::Write;
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -11,7 +12,6 @@ use unicode_width::UnicodeWidthStr;
 use ustr::ustr;
 
 fn show_text_pager(text: &str) {
-    use crossterm::event::{self, Event, KeyCode};
     use std::io::Write;
 
     let lines: Vec<&str> = text.lines().collect();
@@ -34,6 +34,7 @@ fn show_text_pager(text: &str) {
             return;
         }
     };
+    let mut input = CrosstermEventSource::new();
 
     let mut stdout = std::io::stdout();
 
@@ -142,109 +143,102 @@ fn show_text_pager(text: &str) {
         let _ = write!(stdout, "{}", buf);
         let _ = stdout.flush();
 
-        let has_event = match event::poll(std::time::Duration::from_millis(100)) {
-            Ok(has_event) => has_event,
-            Err(_) => break,
+        let key = match input.poll(std::time::Duration::from_millis(100)) {
+            Ok(InputPoll::Event(InputEvent::Key(key))) => key,
+            Ok(InputPoll::Event(_) | InputPoll::Timeout) => continue,
+            Ok(InputPoll::Closed) | Err(_) => break,
         };
-        if has_event {
-            let key = match event::read() {
-                Ok(Event::Key(key)) => key,
-                Ok(_) => continue,
-                Err(_) => break,
-            };
-            if searching {
-                match key.code {
-                    KeyCode::Char(c) => {
-                        search_term.push(c);
-                        let q = search_term.to_lowercase();
-                        matches = lines
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, l)| {
-                                crate::ftui::ansi::strip_ansi_codes(l)
-                                    .to_lowercase()
-                                    .contains(&q)
-                            })
-                            .map(|(i, _)| i)
-                            .collect();
-                        if !matches.is_empty() {
-                            match_idx = 0;
-                            offset = matches[0].saturating_sub(visible / 3);
-                        }
+        if searching {
+            match key.key {
+                Key::Character(c) => {
+                    search_term.push(c);
+                    let q = search_term.to_lowercase();
+                    matches = lines
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| {
+                            crate::ftui::ansi::strip_ansi_codes(l)
+                                .to_lowercase()
+                                .contains(&q)
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !matches.is_empty() {
+                        match_idx = 0;
+                        offset = matches[0].saturating_sub(visible / 3);
                     }
-                    KeyCode::Backspace => {
-                        search_term.pop();
-                        let q = search_term.to_lowercase();
-                        matches = lines
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, l)| {
-                                crate::ftui::ansi::strip_ansi_codes(l)
-                                    .to_lowercase()
-                                    .contains(&q)
-                            })
-                            .map(|(i, _)| i)
-                            .collect();
-                        if !matches.is_empty() {
-                            match_idx = 0;
-                            offset = matches[0].saturating_sub(visible / 3);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        searching = false;
-                        if !matches.is_empty() {
-                            offset = matches[0].saturating_sub(visible / 3);
-                            match_idx = 0;
-                        }
-                    }
-                    KeyCode::Esc => {
-                        searching = false;
-                        search_term.clear();
-                        matches.clear();
-                    }
-                    _ => {}
                 }
-            } else {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Up | KeyCode::Char('k') if offset > 0 => {
-                        offset = offset.saturating_sub(1);
+                Key::Backspace => {
+                    search_term.pop();
+                    let q = search_term.to_lowercase();
+                    matches = lines
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| {
+                            crate::ftui::ansi::strip_ansi_codes(l)
+                                .to_lowercase()
+                                .contains(&q)
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !matches.is_empty() {
+                        match_idx = 0;
+                        offset = matches[0].saturating_sub(visible / 3);
                     }
-                    KeyCode::Down | KeyCode::Char('j') if offset + visible < lines.len() => {
-                        offset += 1;
-                    }
-                    KeyCode::PageUp => {
-                        offset = offset.saturating_sub(visible);
-                    }
-                    KeyCode::PageDown => {
-                        offset =
-                            std::cmp::min(offset + visible, lines.len().saturating_sub(visible));
-                    }
-                    KeyCode::Home | KeyCode::Char('g') => {
-                        offset = 0;
-                    }
-                    KeyCode::End | KeyCode::Char('G') => {
-                        offset = lines.len().saturating_sub(visible);
-                    }
-                    KeyCode::Char('/') => {
-                        searching = true;
-                        search_term.clear();
-                        matches.clear();
-                    }
-                    KeyCode::Char('n') if !matches.is_empty() => {
-                        match_idx = (match_idx + 1) % matches.len();
-                        offset = matches[match_idx].saturating_sub(visible / 3);
-                    }
-                    KeyCode::Char('N') if !matches.is_empty() => {
-                        match_idx = if match_idx == 0 {
-                            matches.len() - 1
-                        } else {
-                            match_idx - 1
-                        };
-                        offset = matches[match_idx].saturating_sub(visible / 3);
-                    }
-                    _ => {}
                 }
+                Key::Enter => {
+                    searching = false;
+                    if !matches.is_empty() {
+                        offset = matches[0].saturating_sub(visible / 3);
+                        match_idx = 0;
+                    }
+                }
+                Key::Escape => {
+                    searching = false;
+                    search_term.clear();
+                    matches.clear();
+                }
+                _ => {}
+            }
+        } else {
+            match key.key {
+                Key::Character('q') | Key::Escape => break,
+                Key::Up | Key::Character('k') if offset > 0 => {
+                    offset = offset.saturating_sub(1);
+                }
+                Key::Down | Key::Character('j') if offset + visible < lines.len() => {
+                    offset += 1;
+                }
+                Key::PageUp => {
+                    offset = offset.saturating_sub(visible);
+                }
+                Key::PageDown => {
+                    offset = std::cmp::min(offset + visible, lines.len().saturating_sub(visible));
+                }
+                Key::Home | Key::Character('g') => {
+                    offset = 0;
+                }
+                Key::End | Key::Character('G') => {
+                    offset = lines.len().saturating_sub(visible);
+                }
+                Key::Character('/') => {
+                    searching = true;
+                    search_term.clear();
+                    matches.clear();
+                }
+                Key::Character('n') if !matches.is_empty() => {
+                    match_idx = (match_idx + 1) % matches.len();
+                    offset = matches[match_idx].saturating_sub(visible / 3);
+                }
+                Key::Character('N') if !matches.is_empty() => {
+                    match_idx = if match_idx == 0 {
+                        matches.len() - 1
+                    } else {
+                        match_idx - 1
+                    };
+                    offset = matches[match_idx].saturating_sub(visible / 3);
+                }
+                _ => {}
             }
         }
     }

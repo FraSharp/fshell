@@ -4,12 +4,14 @@
 use crate::prompt::{get_rich_git_status, render_segment_list_to_ratatui_lines};
 use crate::prompt_config;
 use crate::terminal_mode::FullscreenTerminalGuard;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use fshell_core::prompt_config::{
     ColorSpec, PromptConfig, SegmentConfig, SegmentType, SeparatorStyle,
 };
 use fshell_core::theme::Theme;
 use fshell_engine::Env;
+use fshell_terminal::input::{
+    CrosstermEventSource, InputError, InputEvent, InputPoll, Key, KeyAction, KeyEvent, Modifiers,
+};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -485,6 +487,7 @@ pub fn run_prompt_customizer(env: &Env) -> Result<(), String> {
     let mut terminal = Terminal::new(backend).map_err(|e| format!("terminal: {}", e))?;
 
     let mut app = App::new(env.clone());
+    let mut input = CrosstermEventSource::new();
 
     loop {
         let ok = terminal.draw(|f| draw_studio(f, &app)).is_ok();
@@ -492,9 +495,10 @@ pub fn run_prompt_customizer(env: &Env) -> Result<(), String> {
             break;
         }
 
-        match handle_studio_input(&mut app) {
+        match handle_studio_input(&mut app, &mut input) {
             Ok(true) => {}
-            _ => break,
+            Ok(false) => break,
+            Err(error) => return Err(format!("terminal input: {error}")),
         }
     }
 
@@ -1709,28 +1713,30 @@ fn field_value(seg: &SegmentConfig, field: &InspectorField) -> String {
     }
 }
 
-fn handle_studio_input(app: &mut App) -> Result<bool, io::Error> {
-    if !event::poll(std::time::Duration::from_millis(100))? {
-        return Ok(true);
-    }
-    let Event::Key(key) = event::read()? else {
-        return Ok(true);
+fn handle_studio_input(
+    app: &mut App,
+    input: &mut impl fshell_terminal::input::EventSource,
+) -> Result<bool, InputError> {
+    let key = match input.poll(std::time::Duration::from_millis(100))? {
+        InputPoll::Event(InputEvent::Key(key)) => key,
+        InputPoll::Event(_) | InputPoll::Timeout => return Ok(true),
+        InputPoll::Closed => return Ok(false),
     };
-    if key.kind != event::KeyEventKind::Press {
+    if key.action != KeyAction::Press {
         return Ok(true);
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    if key.modifiers.contains(Modifiers::CONTROL) && key.key == Key::Character('c') {
         return Ok(false);
     }
 
     // Global Undo / Redo
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('z') => {
+    if key.modifiers.contains(Modifiers::CONTROL) {
+        match key.key {
+            Key::Character('z') => {
                 app.undo();
                 return Ok(true);
             }
-            KeyCode::Char('y') => {
+            Key::Character('y') => {
                 app.redo();
                 return Ok(true);
             }
@@ -1773,15 +1779,15 @@ fn handle_studio_input(app: &mut App) -> Result<bool, io::Error> {
             a.mode = StudioMode::Studio;
             a.status_toast = Some(("Prompt reset to standard defaults".into(), false));
         }),
-        StudioMode::ConfirmQuit => match key.code {
-            KeyCode::Char('y' | 'Y') => return Ok(false),
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+        StudioMode::ConfirmQuit => match key.key {
+            Key::Character('y' | 'Y') => return Ok(false),
+            Key::Character('n' | 'N') | Key::Escape => {
                 app.mode = StudioMode::Studio;
             }
             _ => {}
         },
-        StudioMode::ConfirmPresetMerge => match key.code {
-            KeyCode::Char('r' | 'R') => {
+        StudioMode::ConfirmPresetMerge => match key.key {
+            Key::Character('r' | 'R') => {
                 if let Some(name) = app.pending_preset.take()
                     && let Some(preset_cfg) = fshell_core::presets::by_name(&name)
                 {
@@ -1797,7 +1803,7 @@ fn handle_studio_input(app: &mut App) -> Result<bool, io::Error> {
                 }
                 app.mode = StudioMode::Studio;
             }
-            KeyCode::Char('m' | 'M') => {
+            Key::Character('m' | 'M') => {
                 if let Some(name) = app.pending_preset.take()
                     && let Some(preset_cfg) = fshell_core::presets::by_name(&name)
                 {
@@ -1809,7 +1815,7 @@ fn handle_studio_input(app: &mut App) -> Result<bool, io::Error> {
                 }
                 app.mode = StudioMode::Studio;
             }
-            KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+            Key::Escape | Key::Character('n' | 'N') => {
                 app.pending_preset = None;
                 app.mode = StudioMode::Studio;
             }
@@ -1820,45 +1826,45 @@ fn handle_studio_input(app: &mut App) -> Result<bool, io::Error> {
     Ok(true)
 }
 
-fn handle_segment_list_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
+fn handle_segment_list_input(app: &mut App, key: KeyEvent) -> bool {
     let len = app.cur_len();
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
+    match key.key {
+        Key::Up | Key::Character('k') => {
             if app.selected_segment > 0 {
                 app.selected_segment -= 1;
             }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        Key::Down | Key::Character('j') => {
             if app.selected_segment + 1 < len {
                 app.selected_segment += 1;
             }
         }
-        KeyCode::Char('K') => {
+        Key::Character('K') => {
             app.move_selected_up();
         }
-        KeyCode::Char('J') => {
+        Key::Character('J') => {
             app.move_selected_down();
         }
-        KeyCode::Tab => {
+        Key::Tab => {
             app.side = match app.side {
                 PromptSide::Left => PromptSide::Right,
                 PromptSide::Right => PromptSide::Left,
             };
             app.clamp_selection();
         }
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter if len > 0 => {
+        Key::Right | Key::Character('l') | Key::Enter if len > 0 => {
             app.pane = FocusPane::Inspector;
             app.inspector_field_idx = 0;
         }
-        KeyCode::Char('a') | KeyCode::Char('+') => {
+        Key::Character('a') | Key::Character('+') => {
             app.mode = StudioMode::AddSegment;
             app.modal_index = 0;
             app.modal_filter.clear();
         }
-        KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete if len > 0 => {
+        Key::Character('d') | Key::Character('x') | Key::Delete if len > 0 => {
             app.mode = StudioMode::ConfirmDelete;
         }
-        KeyCode::Char('s') => {
+        Key::Character('s') => {
             let new_config = PromptConfig {
                 left: app.left_segments.clone(),
                 right: app.right_segments.clone(),
@@ -1879,21 +1885,21 @@ fn handle_segment_list_input(app: &mut App, key: crossterm::event::KeyEvent) -> 
                 }
             }
         }
-        KeyCode::Char('p') => {
+        Key::Character('p') => {
             app.mode = StudioMode::PresetPicker;
             app.modal_index = 0;
         }
-        KeyCode::Char('t') => {
+        Key::Character('t') => {
             app.mode = StudioMode::ThemePicker;
             app.modal_index = 0;
         }
-        KeyCode::Char('r') => {
+        Key::Character('r') => {
             app.mode = StudioMode::ConfirmReset;
         }
-        KeyCode::Char('u') => {
+        Key::Character('u') => {
             app.undo();
         }
-        KeyCode::Esc | KeyCode::Char('q') => {
+        Key::Escape | Key::Character('q') => {
             if app.dirty {
                 app.mode = StudioMode::ConfirmQuit;
             } else {
@@ -1905,7 +1911,7 @@ fn handle_segment_list_input(app: &mut App, key: crossterm::event::KeyEvent) -> 
     true
 }
 
-fn handle_inspector_input(app: &mut App, key: crossterm::event::KeyEvent) {
+fn handle_inspector_input(app: &mut App, key: KeyEvent) {
     let sel = app.selected_segment;
     let fields: Vec<InspectorField> = app
         .cur_segments()
@@ -1920,21 +1926,21 @@ fn handle_inspector_input(app: &mut App, key: crossterm::event::KeyEvent) {
 
     let cur_field = fields[app.inspector_field_idx.min(fields.len().saturating_sub(1))];
 
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
+    match key.key {
+        Key::Up | Key::Character('k') => {
             if app.inspector_field_idx > 0 {
                 app.inspector_field_idx -= 1;
             }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        Key::Down | Key::Character('j') => {
             if app.inspector_field_idx + 1 < fields.len() {
                 app.inspector_field_idx += 1;
             }
         }
-        KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
+        Key::Left | Key::Character('h') | Key::Escape => {
             app.pane = FocusPane::SegmentList;
         }
-        KeyCode::Char('e') => {
+        Key::Character('e') => {
             app.show_advanced = !app.show_advanced;
             let new_fields = app
                 .cur_segments()
@@ -1945,7 +1951,7 @@ fn handle_inspector_input(app: &mut App, key: crossterm::event::KeyEvent) {
                 app.inspector_field_idx = new_fields.len().saturating_sub(1);
             }
         }
-        KeyCode::Enter | KeyCode::Char(' ') => match cur_field {
+        Key::Enter | Key::Character(' ') => match cur_field {
             InspectorField::Type => {
                 app.mode = StudioMode::ChangeType;
                 app.modal_index = 0;
@@ -1976,7 +1982,7 @@ fn handle_inspector_input(app: &mut App, key: crossterm::event::KeyEvent) {
             }
             InspectorField::Prefix | InspectorField::Suffix | InspectorField::Text => {}
         },
-        KeyCode::Backspace => {
+        Key::Backspace => {
             app.push_undo();
             if let Some(seg) = app.cur_segments_mut().get_mut(sel) {
                 match cur_field {
@@ -2001,7 +2007,7 @@ fn handle_inspector_input(app: &mut App, key: crossterm::event::KeyEvent) {
                 }
             }
         }
-        KeyCode::Char(c)
+        Key::Character(c)
             if c != 'q' && c != 's' && c != 'e' && c != 'j' && c != 'k' && c != 'h' && c != 'l' =>
         {
             app.push_undo();
@@ -2037,7 +2043,7 @@ fn toggle_segment_bool(app: &mut App, accessor: fn(&mut SegmentConfig) -> &mut b
     }
 }
 
-fn handle_catalog_input(app: &mut App, key: crossterm::event::KeyEvent) {
+fn handle_catalog_input(app: &mut App, key: KeyEvent) {
     let all_types = SegmentType::all();
     let filtered: Vec<_> = all_types
         .iter()
@@ -2047,10 +2053,10 @@ fn handle_catalog_input(app: &mut App, key: crossterm::event::KeyEvent) {
         })
         .collect();
 
-    match key.code {
-        KeyCode::Up if app.modal_index > 0 => app.modal_index -= 1,
-        KeyCode::Down if app.modal_index + 1 < filtered.len() => app.modal_index += 1,
-        KeyCode::Enter => {
+    match key.key {
+        Key::Up if app.modal_index > 0 => app.modal_index -= 1,
+        Key::Down if app.modal_index + 1 < filtered.len() => app.modal_index += 1,
+        Key::Enter => {
             if let Some((name, _, _)) = filtered.get(app.modal_index)
                 && let Some(st) = segment_type_from_name(name)
             {
@@ -2080,15 +2086,15 @@ fn handle_catalog_input(app: &mut App, key: crossterm::event::KeyEvent) {
             app.modal_filter.clear();
             app.modal_index = 0;
         }
-        KeyCode::Char(c) if c.is_ascii_graphic() || c == ' ' => {
+        Key::Character(c) if c.is_ascii_graphic() || c == ' ' => {
             app.modal_filter.push(c);
             app.modal_index = 0;
         }
-        KeyCode::Backspace => {
+        Key::Backspace => {
             app.modal_filter.pop();
             app.modal_index = 0;
         }
-        KeyCode::Esc => {
+        Key::Escape => {
             app.mode = StudioMode::Studio;
             app.modal_filter.clear();
             app.modal_index = 0;
@@ -2097,14 +2103,14 @@ fn handle_catalog_input(app: &mut App, key: crossterm::event::KeyEvent) {
     }
 }
 
-fn handle_color_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
+fn handle_color_picker_input(app: &mut App, key: KeyEvent) {
     let sel = app.selected_segment;
-    match key.code {
-        KeyCode::Tab => {
+    match key.key {
+        Key::Tab => {
             app.color_category = (app.color_category + 1) % 3;
             app.modal_index = 0;
         }
-        KeyCode::Char('c') => {
+        Key::Character('c') => {
             let target_bg = app.color_target_bg;
             app.push_undo();
             if let Some(seg) = app.cur_segments_mut().get_mut(sel) {
@@ -2119,12 +2125,12 @@ fn handle_color_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
             app.mode = StudioMode::Studio;
             app.hex_buffer.clear();
         }
-        KeyCode::Left => {
+        Key::Left => {
             if app.modal_index > 0 {
                 app.modal_index -= 1;
             }
         }
-        KeyCode::Right => {
+        Key::Right => {
             let max_len = if app.color_category == 0 {
                 SEMANTIC_PALETTE.len()
             } else if app.color_category == 1 {
@@ -2136,13 +2142,13 @@ fn handle_color_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
                 app.modal_index += 1;
             }
         }
-        KeyCode::Up => {
+        Key::Up => {
             let step = if app.color_category == 0 { 2 } else { 4 };
             if app.modal_index >= step {
                 app.modal_index -= step;
             }
         }
-        KeyCode::Down => {
+        Key::Down => {
             let step = if app.color_category == 0 { 2 } else { 4 };
             let max_len = if app.color_category == 0 {
                 SEMANTIC_PALETTE.len()
@@ -2155,7 +2161,7 @@ fn handle_color_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
                 app.modal_index += step;
             }
         }
-        KeyCode::Enter => {
+        Key::Enter => {
             let spec = if app.color_category == 0 {
                 if let Some((role, _, _)) = SEMANTIC_PALETTE.get(app.modal_index) {
                     Some(ColorSpec::Named((*role).to_string()))
@@ -2189,17 +2195,17 @@ fn handle_color_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
             app.mode = StudioMode::Studio;
             app.hex_buffer.clear();
         }
-        KeyCode::Backspace => {
+        Key::Backspace => {
             if app.color_category == 2 {
                 app.hex_buffer.pop();
             }
         }
-        KeyCode::Char(c) => {
+        Key::Character(c) => {
             if app.color_category == 2 && c.is_ascii_hexdigit() && app.hex_buffer.len() < 6 {
                 app.hex_buffer.push(c);
             }
         }
-        KeyCode::Esc => {
+        Key::Escape => {
             app.mode = StudioMode::Studio;
             app.hex_buffer.clear();
         }
@@ -2207,28 +2213,28 @@ fn handle_color_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
     }
 }
 
-fn handle_preset_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
+fn handle_preset_picker_input(app: &mut App, key: KeyEvent) {
     let presets = fshell_core::presets::available();
-    match key.code {
-        KeyCode::Up if app.modal_index > 0 => app.modal_index -= 1,
-        KeyCode::Down if app.modal_index + 1 < presets.len() => app.modal_index += 1,
-        KeyCode::Enter => {
+    match key.key {
+        Key::Up if app.modal_index > 0 => app.modal_index -= 1,
+        Key::Down if app.modal_index + 1 < presets.len() => app.modal_index += 1,
+        Key::Enter => {
             if let Some(name) = presets.get(app.modal_index) {
                 app.pending_preset = Some(name.to_string());
                 app.mode = StudioMode::ConfirmPresetMerge;
             }
         }
-        KeyCode::Esc => app.mode = StudioMode::Studio,
+        Key::Escape => app.mode = StudioMode::Studio,
         _ => {}
     }
 }
 
-fn handle_theme_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
+fn handle_theme_picker_input(app: &mut App, key: KeyEvent) {
     let config_dir = fshell_engine::resolve_config_dir().unwrap_or_default();
     let themes = Theme::available(&config_dir);
 
-    match key.code {
-        KeyCode::Up if app.modal_index > 0 => {
+    match key.key {
+        Key::Up if app.modal_index > 0 => {
             app.modal_index -= 1;
             if let Some(theme_name) = themes.get(app.modal_index)
                 && let Ok(t) = Theme::load(theme_name, &config_dir)
@@ -2236,7 +2242,7 @@ fn handle_theme_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
                 app.env.set_theme(Arc::new(t));
             }
         }
-        KeyCode::Down if app.modal_index + 1 < themes.len() => {
+        Key::Down if app.modal_index + 1 < themes.len() => {
             app.modal_index += 1;
             if let Some(theme_name) = themes.get(app.modal_index)
                 && let Ok(t) = Theme::load(theme_name, &config_dir)
@@ -2244,7 +2250,7 @@ fn handle_theme_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
                 app.env.set_theme(Arc::new(t));
             }
         }
-        KeyCode::Enter => {
+        Key::Enter => {
             if let Some(theme_name) = themes.get(app.modal_index)
                 && let Ok(t) = Theme::load(theme_name, &config_dir)
             {
@@ -2253,21 +2259,17 @@ fn handle_theme_picker_input(app: &mut App, key: crossterm::event::KeyEvent) {
             }
             app.mode = StudioMode::Studio;
         }
-        KeyCode::Esc => {
+        Key::Escape => {
             app.mode = StudioMode::Studio;
         }
         _ => {}
     }
 }
 
-fn handle_confirm_action(
-    app: &mut App,
-    key: crossterm::event::KeyEvent,
-    on_yes: impl FnOnce(&mut App),
-) {
-    match key.code {
-        KeyCode::Char('y' | 'Y') => on_yes(app),
-        KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+fn handle_confirm_action(app: &mut App, key: KeyEvent, on_yes: impl FnOnce(&mut App)) {
+    match key.key {
+        Key::Character('y' | 'Y') => on_yes(app),
+        Key::Character('n' | 'N') | Key::Escape => {
             app.mode = StudioMode::Studio;
         }
         _ => {}

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key};
 use miette::SourceSpan;
 use std::io::Write;
 use std::sync::Arc;
@@ -162,6 +162,7 @@ async fn read_line_silent(timeout_secs: Option<u64>) -> Result<String, String> {
 
     let mut line = String::new();
     let start = std::time::Instant::now();
+    let mut input = CrosstermEventSource::new();
 
     let result = loop {
         if let Some(t) = timeout_secs
@@ -179,29 +180,25 @@ async fn read_line_silent(timeout_secs: Option<u64>) -> Result<String, String> {
             }
         }
 
-        let poll_duration = Duration::from_millis(100);
-        let has_event = match event::poll(poll_duration) {
-            Ok(has_event) => has_event,
-            Err(error) => break Err(format!("Terminal input closed: {error}")),
+        let key = match input.poll(Duration::from_millis(100)) {
+            Ok(InputPoll::Event(InputEvent::Key(key))) => key,
+            Ok(InputPoll::Event(_) | InputPoll::Timeout) => continue,
+            Ok(InputPoll::Closed) => break Err("Terminal input closed".into()),
+            Err(error) => break Err(format!("Terminal input failed: {error}")),
         };
-        if has_event {
-            let code = match event::read() {
-                Ok(Event::Key(KeyEvent { code, .. })) => code,
-                Ok(_) => continue,
-                Err(error) => break Err(format!("Terminal input closed: {error}")),
-            };
-            match code {
-                KeyCode::Enter => {
+        {
+            match key.key {
+                Key::Enter => {
                     println!(); // Print newline to mimic enter press behavior
                     break Ok(line);
                 }
-                KeyCode::Esc => {
+                Key::Escape => {
                     break Ok(String::new());
                 }
-                KeyCode::Backspace => {
+                Key::Backspace => {
                     line.pop();
                 }
-                KeyCode::Char(c) => {
+                Key::Character(c) => {
                     line.push(c);
                 }
                 _ => {}

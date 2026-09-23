@@ -1076,6 +1076,7 @@ dependencies = [
  "fshell-render",
  "fshell-sandbox",
  "fshell-semantic",
+ "fshell-terminal",
  "futures",
  "getrandom 0.3.4",
  "indexmap",
@@ -1242,6 +1243,7 @@ dependencies = [
  "bytes",
  "clap",
  "crossterm",
+ "fshell-terminal",
  "futures",
  "libc",
  "portable-pty",
@@ -1299,6 +1301,7 @@ dependencies = [
  "fshell-git",
  "fshell-hash",
  "fshell-render",
+ "fshell-terminal",
  "futures",
  "hex",
  "libc",
@@ -1345,6 +1348,17 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "fshell-terminal"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "futures",
+ "libc",
+ "portable-pty",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

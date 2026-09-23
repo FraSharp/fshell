@@ -36,6 +36,7 @@ libc = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 crossterm = { workspace = true }
+fshell-terminal = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 fshell-ls = { path = "../fshell-ls" }
@@ -64,4 +65,3 @@ fshell-render = { path = "../fshell-render" }
 [[bench]]
 name = "builtins"
 harness = false
-

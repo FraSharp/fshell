@@ -10,6 +10,7 @@ members = [
     "crates/fshell-repl",
     "crates/fshell-ls",
     "crates/fshell-render",
+    "crates/fshell-terminal",
     "crates/fshell-sandbox",
     "crates/fshell-hash",
     "crates/fshell-git",
@@ -121,6 +122,7 @@ ustr = { version = "1.1.0", features = ["serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 crossterm = "0.29.0"
+fshell-terminal = { path = "crates/fshell-terminal" }
 notify = "8.2.0"
 clap = { version = "4.6.1", features = ["derive"] }
 miette = { version = "7.6.0", features = ["fancy"] }

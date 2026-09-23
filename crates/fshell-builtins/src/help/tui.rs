@@ -3,12 +3,12 @@
 
 use crate::help::{HelpTopic, TOPICS, render_full};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use fshell_core::ShellError;
 use fshell_engine::Env;
+use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers};
 use nucleo_matcher::{Config, Matcher, Utf32String};
 use ratatui::{
     Terminal,
@@ -84,6 +84,7 @@ pub fn run_tui(_env: &Env) -> Result<(), ShellError> {
     let mut selected_index = 0;
     let mut detail_scroll = 0;
     let mut matches = get_matching_topics(&query);
+    let mut input = CrosstermEventSource::new();
 
     loop {
         // Draw the interface
@@ -224,20 +225,23 @@ pub fn run_tui(_env: &Env) -> Result<(), ShellError> {
                 break;
             }
         }
-        if !event::poll(std::time::Duration::from_millis(100))
+        let key = match input
+            .poll(std::time::Duration::from_millis(100))
             .map_err(|e| ShellError::from(e.to_string()))?
         {
-            continue;
-        }
-        if let Event::Key(key) = event::read().map_err(|e| ShellError::from(e.to_string()))? {
+            InputPoll::Event(InputEvent::Key(key)) => key,
+            InputPoll::Event(_) | InputPoll::Timeout => continue,
+            InputPoll::Closed => break,
+        };
+        {
             // Global shortcuts — work in both modes
-            if key.code == KeyCode::PageUp {
+            if key.key == Key::PageUp {
                 let height = guard.terminal.size().map(|s| s.height).unwrap_or(24);
                 let scroll_amount = height.saturating_sub(6).max(1);
                 detail_scroll = detail_scroll.saturating_sub(scroll_amount);
                 continue;
             }
-            if key.code == KeyCode::PageDown {
+            if key.key == Key::PageDown {
                 let height = guard.terminal.size().map(|s| s.height).unwrap_or(24);
                 let scroll_amount = height.saturating_sub(6).max(1);
 
@@ -252,9 +256,9 @@ pub fn run_tui(_env: &Env) -> Result<(), ShellError> {
             }
 
             if search_focused {
-                match key.code {
-                    KeyCode::Char(c)
-                        if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+                match key.key {
+                    Key::Character(c)
+                        if (key.modifiers.is_empty() || key.modifiers == Modifiers::SHIFT) =>
                     {
                         query.push(c);
                         detail_scroll = 0;
@@ -265,7 +269,7 @@ pub fn run_tui(_env: &Env) -> Result<(), ShellError> {
                             selected_index = matches.len() - 1;
                         }
                     }
-                    KeyCode::Backspace => {
+                    Key::Backspace => {
                         query.pop();
                         detail_scroll = 0;
                         matches = get_matching_topics(&query);
@@ -275,35 +279,35 @@ pub fn run_tui(_env: &Env) -> Result<(), ShellError> {
                             selected_index = matches.len() - 1;
                         }
                     }
-                    KeyCode::Esc | KeyCode::Enter => {
+                    Key::Escape | Key::Enter => {
                         search_focused = false;
                     }
-                    KeyCode::Up if selected_index > 0 => {
+                    Key::Up if selected_index > 0 => {
                         selected_index -= 1;
                         detail_scroll = 0;
                     }
-                    KeyCode::Down if !matches.is_empty() && selected_index < matches.len() - 1 => {
+                    Key::Down if !matches.is_empty() && selected_index < matches.len() - 1 => {
                         selected_index += 1;
                         detail_scroll = 0;
                     }
                     _ => {}
                 }
             } else {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
+                match key.key {
+                    Key::Character('q') | Key::Escape => {
                         break;
                     }
-                    KeyCode::Char('/') => {
+                    Key::Character('/') => {
                         search_focused = true;
                     }
-                    KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Key::Character('f') if key.modifiers.contains(Modifiers::CONTROL) => {
                         search_focused = true;
                     }
-                    KeyCode::Up | KeyCode::Char('k') if selected_index > 0 => {
+                    Key::Up | Key::Character('k') if selected_index > 0 => {
                         selected_index -= 1;
                         detail_scroll = 0;
                     }
-                    KeyCode::Down | KeyCode::Char('j')
+                    Key::Down | Key::Character('j')
                         if !matches.is_empty() && selected_index < matches.len() - 1 =>
                     {
                         selected_index += 1;

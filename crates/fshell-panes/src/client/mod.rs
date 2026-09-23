@@ -21,6 +21,9 @@ use tokio_util::codec::Framed;
 use crate::proto::codec::FshCodec;
 use crate::proto::message::{ClientMessage, ServerMessage};
 use crate::proto::{Frame, get_socket_path};
+use fshell_terminal::input::{
+    CrosstermEventStream, InputEvent, InputPoll, Key, Modifiers, MouseAction, MouseButton,
+};
 
 /// Guard that restores the terminal on drop (including panic).
 struct TerminalGuard;
@@ -172,25 +175,22 @@ pub async fn run_client(
 
     // Spawn stdin reader task.
     tokio::spawn(async move {
-        use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
-        use futures::StreamExt;
-
-        let mut event_stream = EventStream::new();
+        let mut event_stream = CrosstermEventStream::new();
         let mut prefix_active = false;
         let mut help_active = false;
         let mut rename_active = false;
         let mut rename_target_window = false;
         let mut rename_buffer = String::new();
 
-        while let Some(event_result) = event_stream.next().await {
-            match event_result {
-                Ok(Event::Key(KeyEvent {
-                    code, modifiers, ..
-                })) => {
+        loop {
+            match event_stream.next().await {
+                Ok(InputPoll::Event(InputEvent::Key(key))) => {
+                    let code = key.key;
+                    let modifiers = key.modifiers;
                     // When help overlay is open, only Esc/q/?/j/k work.
                     if help_active {
                         match code {
-                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                            Key::Escape | Key::Character('q') | Key::Character('?') => {
                                 help_active = false;
                                 let _ = cmd_tx_clone2.send(ClientMessage::HelpKey(0)).await;
                                 continue;
@@ -202,7 +202,7 @@ pub async fn run_client(
                     // Rename mode: capture characters as the new label.
                     if rename_active {
                         match code {
-                            KeyCode::Enter => {
+                            Key::Enter => {
                                 rename_active = false;
                                 let label = rename_buffer.clone();
                                 rename_buffer.clear();
@@ -217,18 +217,18 @@ pub async fn run_client(
                                 }
                                 continue;
                             }
-                            KeyCode::Esc => {
+                            Key::Escape => {
                                 rename_active = false;
                                 rename_buffer.clear();
                                 let _ = cmd_tx_clone2.send(ClientMessage::RenameCancel).await;
                                 continue;
                             }
-                            KeyCode::Backspace => {
+                            Key::Backspace => {
                                 rename_buffer.pop();
                                 let _ = cmd_tx_clone2.send(ClientMessage::RenameBackspace).await;
                                 continue;
                             }
-                            KeyCode::Char(c) => {
+                            Key::Character(c) => {
                                 rename_buffer.push(c);
                                 let _ = cmd_tx_clone2.send(ClientMessage::RenameChar(c)).await;
                                 continue;
@@ -237,7 +237,7 @@ pub async fn run_client(
                         }
                     }
                     // Ctrl+A: toggle prefix mode.
-                    if code == KeyCode::Char('a') && modifiers.contains(KeyModifiers::CONTROL) {
+                    if code == Key::Character('a') && modifiers.contains(Modifiers::CONTROL) {
                         prefix_active = !prefix_active;
                         let _ = cmd_tx_clone2
                             .send(ClientMessage::PrefixToggle {
@@ -255,36 +255,36 @@ pub async fn run_client(
                             .send(ClientMessage::PrefixToggle { active: false })
                             .await;
                         let cmd = match code {
-                            KeyCode::Char('%') | KeyCode::Char('|') => {
+                            Key::Character('%') | Key::Character('|') => {
                                 Some(crate::proto::message::PrefixCommand::SplitVertical)
                             }
-                            KeyCode::Char('"') | KeyCode::Char('-') => {
+                            Key::Character('"') | Key::Character('-') => {
                                 Some(crate::proto::message::PrefixCommand::SplitHorizontal)
                             }
-                            KeyCode::Char('c') => {
+                            Key::Character('c') => {
                                 Some(crate::proto::message::PrefixCommand::WindowNew)
                             }
-                            KeyCode::Char('x') => {
+                            Key::Character('x') => {
                                 Some(crate::proto::message::PrefixCommand::KillPane)
                             }
-                            KeyCode::Up | KeyCode::Char('k') => {
+                            Key::Up | Key::Character('k') => {
                                 Some(crate::proto::message::PrefixCommand::FocusUp)
                             }
-                            KeyCode::Down | KeyCode::Char('j') => {
+                            Key::Down | Key::Character('j') => {
                                 Some(crate::proto::message::PrefixCommand::FocusDown)
                             }
-                            KeyCode::Left | KeyCode::Char('h') => {
+                            Key::Left | Key::Character('h') => {
                                 Some(crate::proto::message::PrefixCommand::FocusLeft)
                             }
-                            KeyCode::Right | KeyCode::Char('l') => {
+                            Key::Right | Key::Character('l') => {
                                 Some(crate::proto::message::PrefixCommand::FocusRight)
                             }
-                            KeyCode::Char('?') => {
+                            Key::Character('?') => {
                                 help_active = true;
                                 Some(crate::proto::message::PrefixCommand::ShowHelp)
                             }
-                            KeyCode::Char('q') => Some(crate::proto::message::PrefixCommand::Quit),
-                            KeyCode::Char(',') => {
+                            Key::Character('q') => Some(crate::proto::message::PrefixCommand::Quit),
+                            Key::Character(',') => {
                                 // Enter pane rename mode — send RenameStart to daemon
                                 rename_active = true;
                                 rename_target_window = false;
@@ -299,33 +299,33 @@ pub async fn run_client(
                                     .await;
                                 continue;
                             }
-                            KeyCode::Char('n') => {
+                            Key::Character('n') => {
                                 Some(crate::proto::message::PrefixCommand::WindowNext)
                             }
-                            KeyCode::Char('p') => {
+                            Key::Character('p') => {
                                 Some(crate::proto::message::PrefixCommand::WindowPrevious)
                             }
-                            KeyCode::Char('0')
-                            | KeyCode::Char('1')
-                            | KeyCode::Char('2')
-                            | KeyCode::Char('3')
-                            | KeyCode::Char('4')
-                            | KeyCode::Char('5')
-                            | KeyCode::Char('6')
-                            | KeyCode::Char('7')
-                            | KeyCode::Char('8')
-                            | KeyCode::Char('9') => {
-                                if let KeyCode::Char(c) = code {
+                            Key::Character('0')
+                            | Key::Character('1')
+                            | Key::Character('2')
+                            | Key::Character('3')
+                            | Key::Character('4')
+                            | Key::Character('5')
+                            | Key::Character('6')
+                            | Key::Character('7')
+                            | Key::Character('8')
+                            | Key::Character('9') => {
+                                if let Key::Character(c) = code {
                                     let n = (c as u32) - ('0' as u32);
                                     Some(crate::proto::message::PrefixCommand::WindowSwitch(n))
                                 } else {
                                     None
                                 }
                             }
-                            KeyCode::Char('&') => {
+                            Key::Character('&') => {
                                 Some(crate::proto::message::PrefixCommand::WindowClose)
                             }
-                            KeyCode::Char('W') => {
+                            Key::Character('W') => {
                                 // Enter window rename mode
                                 rename_active = true;
                                 rename_target_window = true;
@@ -351,11 +351,11 @@ pub async fn run_client(
 
                     // PageUp/PageDown: send as scroll command (daemon-side scrolling).
                     match code {
-                        KeyCode::PageUp => {
+                        Key::PageUp => {
                             let _ = cmd_tx_clone.send(ClientMessage::Scroll { lines: -1 }).await;
                             continue;
                         }
-                        KeyCode::PageDown => {
+                        Key::PageDown => {
                             let _ = cmd_tx_clone.send(ClientMessage::Scroll { lines: 1 }).await;
                             continue;
                         }
@@ -363,14 +363,14 @@ pub async fn run_client(
                     }
 
                     // Shift+Up/Down: also scroll.
-                    if modifiers.contains(KeyModifiers::SHIFT) {
+                    if modifiers.contains(Modifiers::SHIFT) {
                         match code {
-                            KeyCode::Up => {
+                            Key::Up => {
                                 let _ =
                                     cmd_tx_clone.send(ClientMessage::Scroll { lines: -3 }).await;
                                 continue;
                             }
-                            KeyCode::Down => {
+                            Key::Down => {
                                 let _ = cmd_tx_clone.send(ClientMessage::Scroll { lines: 3 }).await;
                                 continue;
                             }
@@ -382,13 +382,13 @@ pub async fn run_client(
                     let mut bytes = Vec::new();
 
                     // Prepend ESC for Alt modifier if set
-                    if modifiers.contains(KeyModifiers::ALT) && code != KeyCode::Esc {
+                    if modifiers.contains(Modifiers::ALT) && code != Key::Escape {
                         bytes.push(0x1b);
                     }
 
                     match code {
-                        KeyCode::Char(c) => {
-                            if modifiers.contains(KeyModifiers::CONTROL) {
+                        Key::Character(c) => {
+                            if modifiers.contains(Modifiers::CONTROL) {
                                 // Ctrl+char: send the control character.
                                 bytes.push((c as u8) & 0x1f);
                             } else {
@@ -396,20 +396,20 @@ pub async fn run_client(
                                 bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                             }
                         }
-                        KeyCode::Enter => bytes.push(b'\r'),
-                        KeyCode::Tab => bytes.push(b'\t'),
-                        KeyCode::BackTab => bytes.extend_from_slice(b"\x1b[Z"),
-                        KeyCode::Backspace => bytes.push(0x08),
-                        KeyCode::Esc => bytes.push(0x1b),
-                        KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),
-                        KeyCode::Down => bytes.extend_from_slice(b"\x1b[B"),
-                        KeyCode::Right => bytes.extend_from_slice(b"\x1b[C"),
-                        KeyCode::Left => bytes.extend_from_slice(b"\x1b[D"),
-                        KeyCode::Home => bytes.extend_from_slice(b"\x1b[H"),
-                        KeyCode::End => bytes.extend_from_slice(b"\x1b[F"),
-                        KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
-                        KeyCode::Insert => bytes.extend_from_slice(b"\x1b[2~"),
-                        KeyCode::F(n) => {
+                        Key::Enter => bytes.push(b'\r'),
+                        Key::Tab => bytes.push(b'\t'),
+                        Key::BackTab => bytes.extend_from_slice(b"\x1b[Z"),
+                        Key::Backspace => bytes.push(0x08),
+                        Key::Escape => bytes.push(0x1b),
+                        Key::Up => bytes.extend_from_slice(b"\x1b[A"),
+                        Key::Down => bytes.extend_from_slice(b"\x1b[B"),
+                        Key::Right => bytes.extend_from_slice(b"\x1b[C"),
+                        Key::Left => bytes.extend_from_slice(b"\x1b[D"),
+                        Key::Home => bytes.extend_from_slice(b"\x1b[H"),
+                        Key::End => bytes.extend_from_slice(b"\x1b[F"),
+                        Key::Delete => bytes.extend_from_slice(b"\x1b[3~"),
+                        Key::Insert => bytes.extend_from_slice(b"\x1b[2~"),
+                        Key::Function(n) => {
                             // F1-F12: send correct xterm escape sequences.
                             match n {
                                 1 => bytes.extend_from_slice(b"\x1bOP"),
@@ -434,35 +434,37 @@ pub async fn run_client(
                         let _ = stdin_tx.send(bytes).await;
                     }
                 }
-                Ok(Event::Mouse(mouse)) => {
-                    use crossterm::event::{MouseButton, MouseEventKind};
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            let _ = cmd_tx_clone.send(ClientMessage::Scroll { lines: -1 }).await;
-                        }
-                        MouseEventKind::ScrollDown => {
-                            let _ = cmd_tx_clone.send(ClientMessage::Scroll { lines: 1 }).await;
-                        }
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            let _ = cmd_tx_clone
-                                .send(ClientMessage::MouseClick {
-                                    col: mouse.column,
-                                    row: mouse.row,
-                                })
-                                .await;
-                        }
-                        _ => {}
+                Ok(InputPoll::Event(InputEvent::Mouse(mouse))) => match mouse.action {
+                    MouseAction::ScrollUp => {
+                        let _ = cmd_tx_clone.send(ClientMessage::Scroll { lines: -1 }).await;
                     }
-                }
-                Ok(Event::Resize(new_cols, new_rows)) => {
+                    MouseAction::ScrollDown => {
+                        let _ = cmd_tx_clone.send(ClientMessage::Scroll { lines: 1 }).await;
+                    }
+                    MouseAction::Down(MouseButton::Left) => {
+                        let _ = cmd_tx_clone
+                            .send(ClientMessage::MouseClick {
+                                col: mouse.column,
+                                row: mouse.row,
+                            })
+                            .await;
+                    }
+                    _ => {}
+                },
+                Ok(InputPoll::Event(InputEvent::Resize {
+                    columns: new_cols,
+                    rows: new_rows,
+                })) => {
                     // Send resize through the channel to the main loop.
                     let _ = resize_tx_clone.send((new_cols, new_rows)).await;
                 }
+                Ok(InputPoll::Closed) => break,
+                Ok(InputPoll::Timeout) => {}
+                Ok(InputPoll::Event(InputEvent::Paste(_))) => {}
                 Err(e) => {
                     eprintln!("fshell-panes: event stream error: {}", e);
                     break;
                 }
-                _ => {}
             }
         }
     });

@@ -18,8 +18,8 @@ mod tests {
     use super::*;
     use crate::config_tui::app::{App, Category, Focus, ModalType};
     use crate::config_tui::schema::OptionItem;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use fshell_core::theme::Theme;
+    use fshell_terminal::input::{Key, KeyEvent, Modifiers};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -55,16 +55,16 @@ mod tests {
         let mut app = App::new(&env);
 
         // Move down in sidebar
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Down, Modifiers::empty()));
         assert_eq!(app.sidebar_selected, 1);
         assert_eq!(app.current_category(), Category::Themes);
 
         // Tab switches focus to content
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Tab, Modifiers::empty()));
         assert_eq!(app.focus, Focus::Content);
 
         // Left switches focus back to sidebar
-        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Left, Modifiers::empty()));
         assert_eq!(app.focus, Focus::Sidebar);
     }
 
@@ -79,13 +79,13 @@ mod tests {
         // Focus content and press Space on first option (autocd)
         app.focus = Focus::Content;
         app.content_selected = 0;
-        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character(' '), Modifiers::empty()));
 
         assert!(!env.options.read().autocd);
         assert!(app.dirty);
 
         // Cycle back
-        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character(' '), Modifiers::empty()));
         assert!(env.options.read().autocd);
     }
 
@@ -106,14 +106,14 @@ mod tests {
         let mut app = App::new(&env);
 
         // Start search
-        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character('/'), Modifiers::empty()));
         assert_eq!(app.focus, Focus::Search);
 
         // Type "pipe"
-        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()));
-        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
-        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()));
-        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character('p'), Modifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character('i'), Modifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character('p'), Modifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character('e'), Modifiers::empty()));
         assert_eq!(app.search_query, "pipe");
 
         let filtered = app.filtered_option_indices();
@@ -136,7 +136,7 @@ mod tests {
 
         // Add alias via modal
         app.focus = Focus::Content;
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character('a'), Modifiers::empty()));
         assert!(matches!(app.modal, ModalType::TwoFieldAlias { .. }));
 
         // Fill modal fields
@@ -148,7 +148,7 @@ mod tests {
             *expansion = "ls -la".into();
         }
 
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Enter, Modifiers::empty()));
         assert_eq!(app.modal, ModalType::None);
         assert!(app.dirty);
 
@@ -158,7 +158,7 @@ mod tests {
 
         // Delete alias
         app.content_selected = 0;
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character('d'), Modifiers::empty()));
         let aliases = env.scope.aliases.read();
         assert!(!aliases.contains_key("ll"));
     }
@@ -171,7 +171,7 @@ mod tests {
 
         // Add hook
         app.focus = Focus::Content;
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character('a'), Modifiers::empty()));
         assert!(matches!(app.modal, ModalType::TwoFieldHook { .. }));
 
         if let ModalType::TwoFieldHook { event, fn_name, .. } = &mut app.modal {
@@ -179,7 +179,7 @@ mod tests {
             *fn_name = "my_precmd_fn".into();
         }
 
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Enter, Modifiers::empty()));
         assert_eq!(app.modal, ModalType::None);
 
         let reg = env.hooks.registry.read();
@@ -192,7 +192,7 @@ mod tests {
 
         // Delete hook
         app.content_selected = 0;
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(Key::Character('d'), Modifiers::empty()));
         let reg = env.hooks.registry.read();
         assert!(
             !reg.get("precmd")

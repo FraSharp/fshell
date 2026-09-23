@@ -4,7 +4,7 @@
 //! Interactive first-run startup splash screen and environment status overview.
 
 use crate::terminal_mode::FullscreenTerminalGuard;
-use crossterm::event::{self, Event, KeyCode};
+use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -167,6 +167,7 @@ pub fn show_splash(
         f.render_widget(key_p, chunks[5]);
     });
 
+    let mut input = CrosstermEventSource::new();
     loop {
         #[cfg(unix)]
         {
@@ -176,22 +177,16 @@ pub fn show_splash(
                 break;
             }
         }
-        let has_event = match crossterm::event::poll(std::time::Duration::from_millis(100)) {
-            Ok(has_event) => has_event,
-            // A closed terminal is a normal end to this interactive screen.
-            Err(_) => break,
-        };
-        if has_event {
-            match event::read() {
-                Ok(Event::Key(key)) => {
-                    if matches!(key.code, KeyCode::Char('d' | 'D')) {
-                        persist_disable_splash();
-                    }
-                    break;
+        match input.poll(std::time::Duration::from_millis(100)) {
+            Ok(InputPoll::Event(InputEvent::Key(key))) => {
+                if matches!(key.key, Key::Character('d' | 'D')) {
+                    persist_disable_splash();
                 }
-                Ok(Event::Resize(_, _)) => {}
-                Err(_) | Ok(_) => break,
+                break;
             }
+            Ok(InputPoll::Event(InputEvent::Resize { .. } | InputEvent::Paste(_)))
+            | Ok(InputPoll::Timeout) => {}
+            Ok(InputPoll::Event(InputEvent::Mouse(_))) | Ok(InputPoll::Closed) | Err(_) => break,
         }
     }
 }

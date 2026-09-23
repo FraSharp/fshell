@@ -1,0 +1,20 @@
+[package]
+name = "fshell-terminal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Terminal input boundary for fshell interactive interfaces"
+repository.workspace = true
+
+[dependencies]
+crossterm = { workspace = true, features = ["event-stream"] }
+futures = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+libc = { workspace = true }
+portable-pty = { workspace = true }
+
+[lints]
+workspace = true
