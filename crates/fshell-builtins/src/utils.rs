@@ -1,11 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use bytes::Bytes;
 use fshell_core::ShellError;
 use fshell_core::{ResourceHandle, Val};
 use fshell_engine::{CapAction, Env};
 use std::ffi::CString;
 use std::path::PathBuf;
+
+/// Splits a raw byte stream into newline-delimited lines. Each line retains
+/// its terminator so that emitting the items reproduces the stream exactly; a
+/// payload with no newline is returned as a single line. Used by the
+/// line-oriented builtins (`head`, `tail`, `uniq`, `sort`) so a byte stream is
+/// processed line-by-line instead of as one opaque item.
+pub fn split_byte_lines(b: &Bytes) -> Vec<Bytes> {
+    if !b.contains(&b'\n') {
+        return vec![b.clone()];
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (i, &byte) in b.iter().enumerate() {
+        if byte == b'\n' {
+            out.push(b.slice(start..=i));
+            start = i + 1;
+        }
+    }
+    if start < b.len() {
+        out.push(b.slice(start..b.len()));
+    }
+    out
+}
 
 pub fn check_read_file(env: &Env, cmd: &str, path: PathBuf) -> Result<(), ShellError> {
     env.enforce_capability(cmd, CapAction::ReadFile(path.clone()))?;
@@ -303,4 +327,36 @@ pub fn expand_tilde_for_env(path: &str, env: &Env) -> PathBuf {
 /// Expand a user path and resolve relative paths against the shell cwd.
 pub fn resolve_user_path(path: &str, env: &Env) -> PathBuf {
     env.resolve_path(expand_tilde_for_env(path, env))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn as_lines(b: &Bytes) -> Vec<Vec<u8>> {
+        split_byte_lines(b).iter().map(|l| l.to_vec()).collect()
+    }
+
+    #[test]
+    fn split_byte_lines_keeps_terminators() {
+        assert_eq!(
+            as_lines(&Bytes::from_static(b"a\nbb\ncc\n")),
+            vec![b"a\n".to_vec(), b"bb\n".to_vec(), b"cc\n".to_vec()]
+        );
+        // Terminators are preserved verbatim, including CRLF.
+        assert_eq!(
+            as_lines(&Bytes::from_static(b"x\r\ny\r\n")),
+            vec![b"x\r\n".to_vec(), b"y\r\n".to_vec()]
+        );
+        // No newline: the whole payload is a single line.
+        assert_eq!(
+            as_lines(&Bytes::from_static(b"no newline")),
+            vec![b"no newline".to_vec()]
+        );
+        // A trailing fragment without a terminator is preserved.
+        assert_eq!(
+            as_lines(&Bytes::from_static(b"a\nb")),
+            vec![b"a\n".to_vec(), b"b".to_vec()]
+        );
+    }
 }

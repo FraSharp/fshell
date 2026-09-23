@@ -104,6 +104,7 @@ pub fn sort_builtin(
     let env_clone = env.clone();
     tokio::spawn(async move {
         let mut items = Vec::new();
+        let mut byte_items: Vec<bytes::Bytes> = Vec::new();
 
         if let Some(mut rx) = in_rx {
             while let Some(payload) = rx.recv().await {
@@ -112,7 +113,7 @@ pub fn sort_builtin(
                 }
                 match payload {
                     PipelinePayload::Data(val_arc) => {
-                        if items.len() >= sort_max_items {
+                        if items.len() + byte_items.len() >= sort_max_items {
                             env_clone.report_stage_error();
                             let _ = tx
                                 .send(PipelinePayload::Structured(
@@ -126,9 +127,10 @@ pub fn sort_builtin(
                         }
                         items.push(val_arc);
                     }
-                    PipelinePayload::Bytes(_) => {
-                        // Bytes payloads are dropped by this stage.
-                        continue;
+                    PipelinePayload::Bytes(b) => {
+                        // Sort raw byte streams line-by-line rather than
+                        // silently dropping them.
+                        byte_items.extend(crate::utils::split_byte_lines(&b));
                     }
                     PipelinePayload::Structured(d) => {
                         if tx.send(PipelinePayload::Structured(d)).await.is_err() {
@@ -183,6 +185,20 @@ pub fn sort_builtin(
                 break;
             }
             if tx.send(PipelinePayload::Data(item)).await.is_err() {
+                break;
+            }
+        }
+
+        // Raw byte lines sort lexicographically among themselves.
+        byte_items.sort();
+        if reverse {
+            byte_items.reverse();
+        }
+        for line in byte_items {
+            if env_clone.job_control.cancellation.load(Ordering::Relaxed) {
+                break;
+            }
+            if tx.send(PipelinePayload::Bytes(line)).await.is_err() {
                 break;
             }
         }

@@ -1166,7 +1166,33 @@ fn split_multiline_payload(payload: &PipelinePayload) -> Vec<PipelinePayload> {
             .map(|line| PipelinePayload::Data(Arc::new(Val::String(line.to_string()))))
             .collect();
     }
+    if matches!(payload, PipelinePayload::Bytes(_)) {
+        return split_bytes_lines(payload);
+    }
     vec![payload.clone()]
+}
+
+/// Splits a raw byte payload into newline-delimited payloads. The terminator is
+/// dropped (along with a preceding `\r`), so `head`/`tail`/`uniq` treat a byte
+/// stream line-by-line instead of as one opaque item. Payloads without a
+/// newline are returned unchanged.
+fn split_bytes_lines(payload: &PipelinePayload) -> Vec<PipelinePayload> {
+    let PipelinePayload::Bytes(b) = payload else {
+        return vec![payload.clone()];
+    };
+    crate::utils::split_byte_lines(b)
+        .into_iter()
+        .map(PipelinePayload::Bytes)
+        .collect()
+}
+
+/// Equality between two stream items for consecutive-duplicate detection.
+fn previous_payload_eq(a: &PipelinePayload, b: &PipelinePayload) -> bool {
+    match (a, b) {
+        (PipelinePayload::Data(x), PipelinePayload::Data(y)) => x == y,
+        (PipelinePayload::Bytes(x), PipelinePayload::Bytes(y)) => x == y,
+        _ => false,
+    }
 }
 
 fn parse_head_tail_args(args: &[Val]) -> Result<(usize, Vec<String>), ShellError> {
@@ -1445,21 +1471,26 @@ pub fn uniq_builtin(
     if paths.is_empty() {
         if let Some(mut rx) = in_rx {
             tokio::spawn(async move {
-                let mut last_val: Option<Val> = None;
+                let mut last: Option<PipelinePayload> = None;
                 while let Some(payload) = rx.recv().await {
-                    match payload {
-                        PipelinePayload::Data(ref v) => {
-                            if last_val.as_ref() != Some(v) {
-                                last_val = Some((**v).clone());
-                                if tx.send(payload).await.is_err() {
-                                    break;
-                                }
-                            }
+                    if let PipelinePayload::Structured(_) = payload {
+                        if tx.send(payload).await.is_err() {
+                            break;
                         }
-                        other => {
-                            if tx.send(other).await.is_err() {
-                                break;
+                        continue;
+                    }
+                    // Split multi-line strings and raw byte streams into lines
+                    // so consecutive duplicates are collapsed on line
+                    // boundaries (matching POSIX uniq).
+                    for item in split_multiline_payload(&payload) {
+                        let duplicate = last
+                            .as_ref()
+                            .is_some_and(|prev| previous_payload_eq(prev, &item));
+                        if !duplicate {
+                            if tx.send(item.clone()).await.is_err() {
+                                return;
                             }
+                            last = Some(item);
                         }
                     }
                 }

@@ -42,6 +42,7 @@ tokio-util = { workspace = true }
 fshell-ls = { path = "../fshell-ls" }
 fshell-panes = { path = "../fshell-panes" }
 fshell-hash = { workspace = true }
+bytes = { workspace = true }
 toml_edit = { workspace = true }
 walkdir = { workspace = true }
 nu-ansi-term = { workspace = true }
