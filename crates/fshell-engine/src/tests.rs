@@ -2219,4 +2219,20 @@ mod proptests {
             crate::pipeline_finalize(vec![crate::PipelineFailure::ConditionFalse], 0, false);
         assert_eq!(outcome.exit_code, 1);
     }
+
+    #[test]
+    fn non_last_stage_error_does_not_clobber_status() {
+        // Only the last stage owns the invocation status; an earlier stage's
+        // failure must not race the last stage for it (`false | true`).
+        let mut env = Env::new();
+        env.set_exit_code(5);
+        env.is_last_stage = false;
+        env.report_stage_error();
+        env.report_stage_error_code(127);
+        assert_eq!(env.exit_code(), 5, "non-last stage must not write status");
+
+        env.is_last_stage = true;
+        env.report_stage_error();
+        assert_eq!(env.exit_code(), 1, "last stage owns the status");
+    }
 }

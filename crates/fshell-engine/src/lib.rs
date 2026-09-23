@@ -1453,13 +1453,23 @@ impl Env {
         self.execution.clear_last_error();
     }
 
-    /// Back-compat shim: report a generic stage failure (exit 1).
+    /// Mark the command being evaluated as failed and record its status.
+    ///
+    /// Within a pipeline only the last stage owns the invocation status:
+    /// earlier stages signal their failure through diagnostics (and `pipefail`
+    /// is resolved by the pipeline finalizer). Letting a non-last stage write
+    /// the shared status raced the last stage and produced a
+    /// scheduling-dependent `$?` (for example `false | true`).
     pub fn report_stage_error(&self) {
-        self.set_exit_code(1);
+        if self.is_last_stage {
+            self.set_exit_code(1);
+        }
     }
 
     pub fn report_stage_error_code(&self, code: i64) {
-        self.set_exit_code(code);
+        if self.is_last_stage {
+            self.set_exit_code(code);
+        }
     }
 
     pub fn enforce_capability(&self, cmd_name: &str, action: CapAction) -> Result<(), EngineError> {
