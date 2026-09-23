@@ -3,11 +3,45 @@
 
 use fshell_core::Val;
 use fshell_engine::Env;
+use std::cell::Cell;
+
+/// Bounds re-entrant arithmetic evaluation. A variable whose value names
+/// another variable (or itself) makes `resolve_var` recurse through
+/// `eval_arithmetic_expr`; without a limit `x=x; echo $((x))` recurses until
+/// the stack overflows. Shells report an error at this depth instead.
+const MAX_ARITHMETIC_RECURSION: u32 = 100;
+
+thread_local! {
+    static ARITHMETIC_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+struct ArithmeticRecursionGuard;
+
+impl ArithmeticRecursionGuard {
+    fn enter() -> Result<Self, String> {
+        ARITHMETIC_DEPTH.with(|depth| {
+            let next = depth.get().saturating_add(1);
+            if next > MAX_ARITHMETIC_RECURSION {
+                Err("arithmetic expression recursion level exceeded".to_string())
+            } else {
+                depth.set(next);
+                Ok(ArithmeticRecursionGuard)
+            }
+        })
+    }
+}
+
+impl Drop for ArithmeticRecursionGuard {
+    fn drop(&mut self) {
+        ARITHMETIC_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
 
 /// Evaluate a POSIX shell arithmetic expression against an Env.
 /// Supports integers, variables from `env.vars`, standard C operators with correct
 /// precedence, ternary `? :`, comma operator, and assignment operators.
 pub fn eval_arithmetic_expr(expr: &str, env: &Env) -> Result<i64, String> {
+    let _guard = ArithmeticRecursionGuard::enter()?;
     let tokens = tokenize(expr)?;
     let mut parser = ArithParser {
         tokens,
@@ -736,5 +770,30 @@ mod tests {
         assert_eq!(eval_arithmetic_expr("0x10", &env).unwrap(), 16);
         assert_eq!(eval_arithmetic_expr("010", &env).unwrap(), 8);
         assert_eq!(eval_arithmetic_expr("2#1010", &env).unwrap(), 10);
+    }
+
+    #[test]
+    fn test_self_referential_variable_errors_instead_of_overflowing() {
+        let env = Env::for_command();
+        env.vars
+            .write()
+            .insert("x".to_string(), Val::String("x".to_string()));
+        let error = eval_arithmetic_expr("x", &env).unwrap_err();
+        assert!(
+            error.contains("recursion"),
+            "expected a recursion error, got {error:?}"
+        );
+
+        // Mutual recursion is caught the same way.
+        env.vars
+            .write()
+            .insert("a".to_string(), Val::String("b".to_string()));
+        env.vars
+            .write()
+            .insert("b".to_string(), Val::String("a".to_string()));
+        assert!(eval_arithmetic_expr("a", &env).is_err());
+
+        // The depth counter must unwind, so later evaluation still works.
+        assert_eq!(eval_arithmetic_expr("1 + 1", &env).unwrap(), 2);
     }
 }
