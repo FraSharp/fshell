@@ -574,20 +574,16 @@ async fn build_pipeline_plan(pipeline: &Pipeline, env: &Env) -> Result<Vec<Plann
 }
 
 fn count_direct_external_stages(stages: &[PlannedStage], env: &Env) -> usize {
-    let env_path = env.vars.read().get("env").and_then(|value| {
-        if let Val::Map(map) = value {
-            map.get(&ustr("PATH")).and_then(|path| {
-                if let Val::String(path) = path {
-                    Some(path.clone())
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        }
-    });
-
+    // Mirror the stage dispatch order (variable -> alias -> user function ->
+    // async builtin -> builtin -> external fallback) so `expected_spawns` is
+    // the number of stages that will reach the external fallback and register a
+    // spawn attempt. Counting a stage that is actually handled earlier (for
+    // example an async builtin that also exists on PATH) makes the barrier
+    // unsatisfiable; the executor's `close` releases such a barrier, but the
+    // count should still be exact.
+    if env.get_async_fallback_handler().is_none() && env.get_fallback_handler().is_none() {
+        return 0;
+    }
     stages
         .iter()
         .filter(|planned| {
@@ -598,12 +594,10 @@ fn count_direct_external_stages(stages: &[PlannedStage], env: &Env) -> usize {
             else {
                 return false;
             };
-            let is_custom_binary = env.options.read().command_binaries.contains_key(name);
             env.get_builtin(name).is_none()
+                && env.get_async_builtin(name).is_none()
                 && !function_exists(env, name)
                 && env.get_alias(name).is_none()
-                && (is_custom_binary
-                    || is_external_command_at(name, env_path.as_deref(), &env.cwd()))
         })
         .count()
 }
@@ -735,6 +729,11 @@ async fn join_pipeline_stages(
     env: &Env,
     pipeline_job: Option<&Arc<crate::job_control::PipelineJobContext>>,
 ) -> Result<(), String> {
+    // Dispatch is over: release stages still waiting on the launch barrier
+    // before awaiting them, so the join can always make progress.
+    if let Some(job) = pipeline_job {
+        job.close();
+    }
     let result = join_stage_tasks(stage_tasks).await;
     if let Some(job) = pipeline_job {
         job.finish(env);
@@ -844,6 +843,10 @@ async fn execute_pipeline_inner(
         None
     };
     let stage_pipeline_job = pipeline_job.clone().or_else(|| env.pipeline_job.clone());
+    // Release any stage blocked in `wait_for_launch` when this pipeline stops
+    // dispatching, including on an early error return that never reaches the
+    // join below.
+    let _launch_barrier = crate::job_control::PipelineJobBarrierGuard::new(pipeline_job.clone());
 
     let (cancel_tx, cancel_rx) = cancellation.unwrap_or_else(|| tokio::sync::watch::channel(false));
     let mut current_rx = initial_input;

@@ -72,9 +72,6 @@ fn spawn_external_command(
     }
 
     let child_result = cmd.spawn();
-    if let Some(job) = pipeline_job {
-        job.register_spawn_attempt();
-    }
     let child = child_result?;
     let pid = child.id() as i32;
     if let Some(job) = pipeline_job {
@@ -393,6 +390,13 @@ pub async fn run_external(
     has_next: bool,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
+    // Register on the pipeline's launch barrier immediately. Every branch below
+    // (destructive guard, capability denial, sandbox hand-off, spawn failure,
+    // command-not-found) is terminal for this stage, so registering here keeps
+    // sibling stages from waiting forever in `wait_for_launch`.
+    if let Some(job) = env.pipeline_job.as_ref() {
+        job.register_spawn_attempt();
+    }
     let cnf_debug = std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1");
     let ext_start = std::time::Instant::now();
     if cnf_debug {
