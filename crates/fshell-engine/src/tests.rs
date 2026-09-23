@@ -2180,4 +2180,43 @@ mod proptests {
             let _result = eval_binop(BinOp::Sub, Val::Float(a), Val::Float(b));
         }
     }
+
+    fn hard_failure(message: &str) -> crate::PipelineFailure {
+        crate::PipelineFailure::Hard(fshell_core::diagnostic::FshDiag::from(
+            fshell_core::ShellError::new(
+                fshell_core::diagnostic::ErrorCode::CommandFailed,
+                message.to_string(),
+            ),
+        ))
+    }
+
+    #[test]
+    fn pipeline_finalize_hard_failure_is_never_zero() {
+        // Regression: a hard failure produced through a channel diagnostic (not
+        // the shared status slot) left `last_ec` at 0 and finalized the whole
+        // pipeline to exit 0.
+        let outcome = crate::pipeline_finalize(vec![hard_failure("boom")], 0, false);
+        assert_ne!(outcome.exit_code, 0);
+        assert!(outcome.failure.is_some());
+    }
+
+    #[test]
+    fn pipeline_finalize_hard_failure_preserves_nonzero_status() {
+        let outcome = crate::pipeline_finalize(vec![hard_failure("boom")], 3, false);
+        assert_eq!(outcome.exit_code, 3);
+    }
+
+    #[test]
+    fn pipeline_finalize_success_uses_last_status() {
+        let outcome = crate::pipeline_finalize(Vec::new(), 7, false);
+        assert_eq!(outcome.exit_code, 7);
+        assert!(outcome.failure.is_none());
+    }
+
+    #[test]
+    fn pipeline_finalize_condition_false_without_pipefail_is_one() {
+        let outcome =
+            crate::pipeline_finalize(vec![crate::PipelineFailure::ConditionFalse], 0, false);
+        assert_eq!(outcome.exit_code, 1);
+    }
 }

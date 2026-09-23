@@ -3152,7 +3152,10 @@ pub(crate) fn pipeline_finalize(
         if pipefail {
             if last_ec != 0 { last_ec } else { 1 }
         } else if last_hard.is_some() {
-            last_ec
+            // A hard failure must never finalize to 0, even when no stage wrote
+            // a nonzero status (a stage that errors via a channel diagnostic
+            // rather than the shared status slot leaves last_ec at 0).
+            if last_ec != 0 { last_ec } else { 1 }
         } else {
             1
         }
