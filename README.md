@@ -25,6 +25,7 @@ structured like nushell, familiar like zsh, clean like rust.
   - [3. json api query & extraction](#3-json-api-query--extraction)
   - [4. multi-archive extraction](#4-multi-archive-extraction)
   - [5. safe destructive commands](#5-safe-destructive-commands)
+- [quirks](#quirks)
 - [interactive line editor & developer features](#interactive-line-editor--developer-features)
   - [instant startup](#instant-startup)
   - [categorized tab completion & parameter hints](#categorized-tab-completion--parameter-hints)
@@ -41,6 +42,7 @@ structured like nushell, familiar like zsh, clean like rust.
 - [security, guardrails & sandboxing](#security-guardrails--sandboxing)
 - [systems architecture & performance](#systems-architecture--performance)
 - [documentation index](#documentation-index)
+- [what's rough today](#whats-rough-today)
 - [contributing & test suite](#contributing--test-suite)
 - [license](#license)
 
@@ -226,6 +228,37 @@ normal everyday commands run with zero friction.
 
 ---
 
+## quirks
+
+things worth knowing that aren't obvious from the rest of this:
+
+- `sh { ... }` runs posix code in-process, against the same environment. it doesn't spawn `/bin/sh`.
+
+  ```fsh
+  let release = "v1.2.0"
+  sh {
+      if [ -z "$release" ]; then
+          echo "missing release" >&2
+          exit 1
+      fi
+  }
+  ```
+
+- `@json`, `@yaml`, `@msgpack`, `@csv`, `@table`, `@bar` and `@text` change formats part-way through a pipeline.
+- `unsafe <cmd>` skips the destructive-command confirmation. meant for scripts.
+- `10KB` is 1000 bytes, `10KiB` is 1024. the literal can't contain a space.
+- aliases expand as you type; one backspace puts the alias name back.
+- the prompt reads git's index instead of running `git status`, and the previous prompt collapses to one line.
+- `explain` prints what a pipeline does:
+
+  ```fsh
+  explain 'ps | filter cpu > 50 | map pid command'
+  ```
+
+- `reload --full` restarts the shell and keeps the variables, functions, cwd and options.
+
+---
+
 ## interactive line editor & developer features
 
 ### instant startup
@@ -299,21 +332,22 @@ sh {
 source --bash .venv/bin/activate
 ```
 
-both `sh { ... }`, `posix { ... }`, and `bash { ... }` blocks execute in-process against the shared environment without spawning `/bin/sh` or `/bin/bash` subprocesses.
+`sh { ... }` blocks execute in-process against the shared environment without spawning `/bin/sh` or `/bin/bash` subprocesses.
 
 ---
 
 ## scripting in `.fsh`
 
-`.fsh` is a clean scripting language with Rust-like syntax:
+`.fsh` is a small language with rust-ish syntax. you can pin types down or leave them inferred, whichever you feel like at the time.
 
 ```fsh
-# variables with gradual typing
+# types are optional
 let target: String = "./dist"
 let port: Int = 8080
 let is_prod: Bool = true
+let loose = 42                # still an Int, just inferred
 
-# typed functions with parameter validation
+# functions take typed params and an optional return type
 fn deploy(service: String, port: Int) -> Bool {
     echo "deploying {service} on port {port}"
     return true
@@ -326,23 +360,25 @@ match env["STAGE"] {
     _ => echo "development environment",
 }
 
-# reactive streams (re-evaluates automatically when dependencies update)
+# reactive streams — these re-run whenever something they read changes
 let dirty_files $= ls | filter git_status == "modified"
 
-# error handling
+# errors are values you can catch
 try {
     cat /nonexistent/file.txt
 } catch err {
     echo "caught error: {err}"
 }
 
-# heredocs with interpolation
+# heredocs interpolate
 cat <<EOF > config.toml
 [server]
 port = {port}
 host = "127.0.0.1"
 EOF
 ```
+
+the same language runs at the prompt and in scripts, so anything you type interactively works in a `.fsh` file and the other way round.
 
 ---
 
@@ -420,6 +456,22 @@ detailed documentation for every subsystem is in [`docs/`](docs/):
 - **[migration guide](docs/MIGRATION.md)**: side-by-side migration reference from Bash, Zsh, and Fish.
 - **[lock ordering](docs/LOCK-ORDERING.md)**: authoritative lock hierarchy and runtime deadlock prevention.
 - **[line editor & widgets](docs/WIDGETS.md)**: editor widgets, Vi modes, SQLite history explorer (<kbd>Ctrl+H</kbd>), and status bar.
+
+---
+
+## what's rough today
+
+fshell is a work in progress, and i'd rather list what isn't done than pretend otherwise:
+
+- **posix is a compatibility layer, not a drop-in bash.** sourcing existing scripts mostly works, but `set -e`, `set -u`/`-x` and `trap` aren't implemented yet, and `command`, `readonly` and `local` aren't real builtins.
+- **the sandbox and the capability system are early.** external-process sandboxing falls back to doing nothing where Landlock isn't available, and capabilities stay off unless you start with `-s`.
+- **`vault` isn't security-audited.** the crypto is hand-rolled; i wouldn't keep anything you'd be sad to lose in it yet.
+- **`json` and `csv` are not `jq`.** `json` ignores a query argument for now, and `csv` doesn't understand quoted fields.
+- **`mux` is new.** panes can outlive their process and the fd cleanup isn't perfect yet.
+- **`select` and `exec` do less than the docs imply.** `select` is an interactive picker, not a column projector, and `exec` runs the command as a normal job instead of replacing the shell process.
+- **`$?` in native scripts is unreliable right now** — it can get reset before a command's arguments are expanded, so don't lean on it in `.fsh` yet. the posix layer's `$?` is separate.
+
+if something on this list matters to you, open an issue — contributions are more than accepted.
 
 ---
 
