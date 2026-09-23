@@ -522,9 +522,13 @@ fn apply_pure_modifier(s: &str, modifier: &ParamModifier) -> Option<Result<Val, 
             };
             let start = start.min(chars.len());
             match length {
-                Some(len) => chars[start..(start + *len as usize).min(chars.len())]
-                    .iter()
-                    .collect(),
+                Some(len) => {
+                    // `start + len` can overflow for an absurd length (e.g.
+                    // u64::MAX); saturate before clamping so the slice range
+                    // stays valid instead of panicking.
+                    let end = start.saturating_add(*len as usize).min(chars.len());
+                    chars[start..end].iter().collect()
+                }
                 None => chars[start..].iter().collect(),
             }
         }
@@ -661,12 +665,17 @@ async fn apply_modifier_async(
 
 fn trim_shortest_prefix(s: &str, pattern: &str) -> String {
     if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-        for i in 0..=s.len() {
-            if globset::Glob::new(pattern)
-                .map(|g| g.compile_matcher().is_match(&s[..i]))
-                .unwrap_or(false)
-            {
-                return s[i..].to_string();
+        // Iterate over char boundaries, never byte offsets, so multi-byte
+        // characters can't be split into an invalid slice.
+        if let Ok(glob) = globset::Glob::new(pattern) {
+            let matcher = glob.compile_matcher();
+            for (i, _) in s.char_indices() {
+                if matcher.is_match(&s[..i]) {
+                    return s[i..].to_string();
+                }
+            }
+            if matcher.is_match(s) {
+                return String::new();
             }
         }
         s.to_string()
@@ -677,17 +686,18 @@ fn trim_shortest_prefix(s: &str, pattern: &str) -> String {
 
 fn trim_longest_prefix(s: &str, pattern: &str) -> String {
     if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-        let mut result = s.to_string();
-        for i in (0..=s.len()).rev() {
-            if globset::Glob::new(pattern)
-                .map(|g| g.compile_matcher().is_match(&s[..i]))
-                .unwrap_or(false)
-            {
-                result = s[i..].to_string();
-                break;
+        if let Ok(glob) = globset::Glob::new(pattern) {
+            let matcher = glob.compile_matcher();
+            if matcher.is_match(s) {
+                return String::new();
+            }
+            for (i, _) in s.char_indices().rev() {
+                if matcher.is_match(&s[..i]) {
+                    return s[i..].to_string();
+                }
             }
         }
-        result
+        s.to_string()
     } else {
         s.strip_prefix(pattern).unwrap_or(s).to_string()
     }
@@ -695,12 +705,15 @@ fn trim_longest_prefix(s: &str, pattern: &str) -> String {
 
 fn trim_shortest_suffix(s: &str, pattern: &str) -> String {
     if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-        for i in (0..=s.len()).rev() {
-            if globset::Glob::new(pattern)
-                .map(|g| g.compile_matcher().is_match(&s[i..]))
-                .unwrap_or(false)
-            {
-                return s[..i].to_string();
+        if let Ok(glob) = globset::Glob::new(pattern) {
+            let matcher = glob.compile_matcher();
+            for (i, _) in s.char_indices().rev() {
+                if matcher.is_match(&s[i..]) {
+                    return s[..i].to_string();
+                }
+            }
+            if matcher.is_match(s) {
+                return String::new();
             }
         }
         s.to_string()
@@ -711,17 +724,18 @@ fn trim_shortest_suffix(s: &str, pattern: &str) -> String {
 
 fn trim_longest_suffix(s: &str, pattern: &str) -> String {
     if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-        let mut result = s.to_string();
-        for i in 0..=s.len() {
-            if globset::Glob::new(pattern)
-                .map(|g| g.compile_matcher().is_match(&s[i..]))
-                .unwrap_or(false)
-            {
-                result = s[..i].to_string();
-                break;
+        if let Ok(glob) = globset::Glob::new(pattern) {
+            let matcher = glob.compile_matcher();
+            if matcher.is_match(s) {
+                return String::new();
+            }
+            for (i, _) in s.char_indices() {
+                if matcher.is_match(&s[i..]) {
+                    return s[..i].to_string();
+                }
             }
         }
-        result
+        s.to_string()
     } else {
         s.strip_suffix(pattern).unwrap_or(s).to_string()
     }
@@ -3573,4 +3587,45 @@ pub(crate) fn expand_alias_with_args(expansion: &str, args: &[Val]) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fshell_core::ParamModifier;
+
+    #[test]
+    fn prefix_suffix_trims_never_split_multibyte() {
+        // These inputs previously sliced at a byte index inside the multi-byte
+        // character and panicked; now they must return without panicking.
+        assert_eq!(trim_shortest_prefix("é", "?"), "é");
+        assert_eq!(trim_longest_prefix("é", "*"), "");
+        assert_eq!(trim_shortest_suffix("é", "*"), "");
+        assert_eq!(trim_longest_suffix("é", "*"), "");
+        // Multi-byte characters are matched and preserved correctly.
+        assert_eq!(trim_shortest_prefix("héllo", "h*"), "éllo");
+        assert_eq!(trim_longest_prefix("héllo", "h*"), "");
+        assert_eq!(trim_shortest_suffix("héllo", "*o"), "héll");
+        assert_eq!(trim_longest_suffix("héllo", "*o"), "");
+    }
+
+    #[test]
+    fn substring_saturates_instead_of_overflowing() {
+        let long = ParamModifier::Substring {
+            offset: 1,
+            length: Some(u64::MAX),
+        };
+        assert_eq!(
+            apply_pure_modifier("hello", &long).unwrap().unwrap(),
+            Val::String("ello".to_string())
+        );
+        let two = ParamModifier::Substring {
+            offset: 1,
+            length: Some(2),
+        };
+        assert_eq!(
+            apply_pure_modifier("hello", &two).unwrap().unwrap(),
+            Val::String("el".to_string())
+        );
+    }
 }
