@@ -973,6 +973,33 @@ async fn test_path_completion_only_on_first_word() {
 }
 
 #[tokio::test]
+async fn test_command_completion_after_statement_separator() {
+    // Regression: after a preceding command the completion must still treat a
+    // new statement's first word as a command position, so `echo hi && arbo`
+    // suggests `arborist` rather than completing arguments of `echo`.
+    let _guard = TEST_PATH_MUTEX.lock();
+    let dir = create_temp_bins("arbo_new_stmt", &["arborist"]);
+    let mut c = make_completer_with_path(&dir);
+
+    for line in [
+        "echo hi && arbo",
+        "echo hi; arbo",
+        "echo hi || arbo",
+        "x=1 && arbo",
+    ] {
+        let results = c.complete(line, line.len());
+        assert!(
+            results.iter().any(|s| s.value == "arborist"),
+            "{line:?} should suggest arborist, got: {:?}",
+            results.iter().map(|s| &s.value).collect::<Vec<_>>()
+        );
+    }
+
+    invalidate_path_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn test_get_path_executables_direct_happy_and_missing() {
     let _guard = TEST_PATH_MUTEX.lock();
     let dir = create_temp_bins("arbo_engine", &["arborist", "mytool"]);

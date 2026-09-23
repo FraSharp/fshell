@@ -189,9 +189,13 @@ impl Completer for FshellCompleter {
         let words: Vec<&str> = prefix.split_whitespace().collect();
         let last_word = crate::ftui::completions::extract_quote_aware_token(prefix);
         let starting_new_arg = prefix.ends_with(' ');
+        // Completion must reason about the current statement, not the whole
+        // line: after `echo hi && arbo<Tab>` the command position is `arbo`,
+        // not `echo`.
+        let stmt = current_statement(&words);
 
-        let is_external = if !words.is_empty() {
-            let cmd = words[0];
+        let is_external = if !stmt.is_empty() {
+            let cmd = stmt[0];
             let is_builtin = self.env.get_all_builtins().iter().any(|b| b == cmd);
             let is_alias = self
                 .env
@@ -220,17 +224,17 @@ impl Completer for FshellCompleter {
         };
 
         if is_external {
-            if let Some(cached) = complete_with_carapace_cached(&words, last_word, pos)
+            if let Some(cached) = complete_with_carapace_cached(&stmt, last_word, pos)
                 && !cached.is_empty()
             {
                 return cached;
             }
-            let words_owned: Vec<String> = words.iter().map(|s| s.to_string()).collect();
+            let words_owned: Vec<String> = stmt.iter().map(|s| s.to_string()).collect();
             spawn_carapace_refresh(words_owned, last_word.to_string());
         }
 
-        let is_cd = words.len() >= 2 && words[words.len() - 2] == "cd" || prefix.trim_end() == "cd";
-        let is_z = words.len() >= 2 && words[words.len() - 2] == "z" || prefix.trim_end() == "z";
+        let is_cd = stmt.len() >= 2 && stmt[stmt.len() - 2] == "cd" || prefix.trim_end() == "cd";
+        let is_z = stmt.len() >= 2 && stmt[stmt.len() - 2] == "z" || prefix.trim_end() == "z";
         let is_path =
             last_word.contains('/') || last_word.starts_with('.') || last_word.starts_with('~');
 
@@ -309,7 +313,7 @@ impl Completer for FshellCompleter {
         }
 
         // Job ID completion for fg/bg
-        let is_fg_bg = words.len() >= 2 && matches!(words[words.len() - 2], "fg" | "bg")
+        let is_fg_bg = stmt.len() >= 2 && matches!(stmt[stmt.len() - 2], "fg" | "bg")
             || prefix.trim_end() == "fg"
             || prefix.trim_end() == "bg";
         if is_fg_bg || last_word.starts_with('%') {
@@ -433,8 +437,8 @@ impl Completer for FshellCompleter {
         let builtins = self.env.get_all_builtins();
 
         // Flag completions for builtins
-        if last_word.starts_with('-') && words.len() >= 2 {
-            let cmd = words[0];
+        if last_word.starts_with('-') && stmt.len() >= 2 {
+            let cmd = stmt[0];
             let flags = builtin_flags(cmd);
             if !flags.is_empty() {
                 suggestions.extend(
@@ -454,8 +458,8 @@ impl Completer for FshellCompleter {
         }
 
         // Auto-generated completions for external commands via --help parsing
-        if suggestions.is_empty() && last_word.starts_with('-') && words.len() >= 2 {
-            let cmd = words[0];
+        if suggestions.is_empty() && last_word.starts_with('-') && stmt.len() >= 2 {
+            let cmd = stmt[0];
             let is_builtin = self.env.get_all_builtins().iter().any(|b| b == cmd);
             if !is_builtin {
                 if let Some(flags) = get_completions(cmd) {
@@ -491,7 +495,7 @@ impl Completer for FshellCompleter {
         }
 
         // Help argument: suggest topics AND categories
-        if words.len() >= 2 && words[words.len() - 2] == "help" && !last_word.starts_with('-') {
+        if stmt.len() >= 2 && stmt[stmt.len() - 2] == "help" && !last_word.starts_with('-') {
             let topics = fshell_builtins::help::help_topics();
             for topic in topics {
                 if topic.name.starts_with(&last_word_lower) {
@@ -528,7 +532,7 @@ impl Completer for FshellCompleter {
         }
 
         // Git branch/tag completions
-        if git_branch_context(&words) {
+        if git_branch_context(&stmt) {
             let branches = git_branches_cached(&self.env);
             let tags = git_tags_cached();
             for branch in branches.iter().chain(tags.iter()) {
@@ -548,15 +552,15 @@ impl Completer for FshellCompleter {
             }
         }
 
-        // Past word 1 of a recognized command -> default to files
-        let on_arg = words.len() >= 2 || (words.len() == 1 && starting_new_arg);
+        // Past word 1 of the current statement's command -> default to files
+        let on_arg = stmt.len() >= 2 || (stmt.len() == 1 && starting_new_arg);
         if on_arg
             && !last_word.starts_with('-')
             && !last_word.starts_with('$')
             && !last_word.starts_with('%')
             && !prefix.contains('|')
         {
-            let cmd = words[0];
+            let cmd = stmt[0];
             let env_path = Some(self.env.vars.read()).and_then(|vars| {
                 if let Some(fshell_core::Val::String(s)) = vars.get("PATH") {
                     Some(s.clone())
@@ -581,8 +585,8 @@ impl Completer for FshellCompleter {
             }
         }
 
-        // Alias completions (first word)
-        if words.len() <= 1 {
+        // Alias completions (first word of the statement)
+        if stmt.len() <= 1 {
             let aliases = self.env.get_all_aliases();
             for (name, expansion) in &aliases {
                 if name.starts_with(&last_word_lower) {
@@ -613,8 +617,8 @@ impl Completer for FshellCompleter {
             }
         }
 
-        // Common external commands
-        if words.len() <= 1 {
+        // Common external commands (first word of the statement)
+        if stmt.len() <= 1 {
             for (cmd, desc) in COMMON_EXTERNAL_COMMANDS {
                 if cmd.starts_with(&last_word_lower) {
                     if suggestions.iter().any(|s| s.value == *cmd) {
@@ -632,8 +636,8 @@ impl Completer for FshellCompleter {
             }
         }
 
-        // PATH executables
-        if words.len() <= 1 && !last_word_lower.is_empty() {
+        // PATH executables (first word of the statement)
+        if stmt.len() <= 1 && !last_word_lower.is_empty() {
             let env_path = {
                 let vars = self.env.vars.read();
                 vars.get("PATH").and_then(|v| match v {
@@ -865,4 +869,31 @@ fn rank_suggestions(
             s
         })
         .collect();
+}
+
+/// True when a word ends a statement/command such that the next word begins a
+/// new command position. Handles both standalone operators (`&&`) and ones
+/// glued to the previous token (`hi;`).
+fn is_statement_separator(word: &str) -> bool {
+    word.ends_with(';')
+        || word.ends_with('&')
+        || word.ends_with('|')
+        || matches!(
+            word,
+            ";" | "&&" | "||" | "|" | "&" | "(" | "{" | "!" | "then" | "do" | "else" | "elif"
+        )
+}
+
+/// Returns the words of the statement the cursor sits in: the slice after the
+/// last statement/command separator. Command-name completion must key off this
+/// rather than `words[0]`, otherwise `echo hi && arbo<Tab>` completes the
+/// arguments of `echo` (files) instead of command names.
+fn current_statement<'a>(words: &'a [&'a str]) -> &'a [&'a str] {
+    let mut start = 0;
+    for i in 1..words.len() {
+        if is_statement_separator(words[i - 1]) {
+            start = i;
+        }
+    }
+    &words[start..]
 }
