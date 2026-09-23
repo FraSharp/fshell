@@ -9,25 +9,17 @@ use miette::SourceSpan;
 use std::sync::Arc;
 use ustr::ustr;
 
-pub fn replace_builtin(
+pub async fn replace_builtin(
     in_rx: Option<PipeStream>,
     args: Vec<Val>,
-    env: &Env,
+    env: Env,
     tx: PipeSender,
     _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let (old_text, new_text, globs, dry_run) = parse_args(&args)?;
-
-    let tx = tx.clone();
-    let env = env.clone();
-
-    tokio::spawn(async move {
-        if let Err(e) = run_replace(in_rx, &old_text, &new_text, &globs, dry_run, &env, tx).await {
-            eprintln!("replace error: {}", e);
-        }
-    });
-
-    Ok(())
+    // Run in the caller's task so errors become the stage's exit status rather
+    // than being printed while the stage reports success.
+    run_replace(in_rx, &old_text, &new_text, &globs, dry_run, &env, tx).await
 }
 
 fn parse_args(args: &[Val]) -> Result<(String, String, Vec<String>, bool), String> {

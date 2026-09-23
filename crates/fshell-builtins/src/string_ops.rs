@@ -8,10 +8,10 @@ use fshell_engine::{PipeSender, PipeStream, PipelinePayload};
 use miette::SourceSpan;
 use std::sync::Arc;
 
-pub fn string_builtin(
+pub async fn string_builtin(
     in_rx: Option<PipeStream>,
     args: Vec<Val>,
-    _env: &fshell_engine::Env,
+    _env: fshell_engine::Env,
     tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
@@ -27,18 +27,10 @@ pub fn string_builtin(
         ).maybe_with_span(span));
     }
 
-    let subcommand = raw_args[0].clone();
-    let sub_args_owned = raw_args[1..].to_vec();
-
-    let tx_clone = tx.clone();
-
-    tokio::spawn(async move {
-        if let Err(e) = run_string_op(&subcommand, &sub_args_owned, in_rx, &tx_clone).await {
-            eprintln!("string error: {}", e);
-        }
-    });
-
-    Ok(())
+    let subcommand = raw_args.remove(0);
+    // Run in the caller's task so validation and runtime errors propagate as the
+    // stage's exit status instead of being printed while the stage reports success.
+    run_string_op(&subcommand, &raw_args, in_rx, &tx).await
 }
 
 async fn run_string_op(

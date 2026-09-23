@@ -113,7 +113,6 @@ pub fn init(env: &Env) {
         ("mkdir".to_string(), Arc::new(mkdir_builtin)),
         ("touch".to_string(), Arc::new(touch_builtin)),
         ("cat".to_string(), Arc::new(cat_builtin)),
-        ("string".to_string(), Arc::new(string_ops::string_builtin)),
         ("watch".to_string(), Arc::new(watch_builtin)),
         ("cd".to_string(), Arc::new(cd_builtin)),
         ("z".to_string(), Arc::new(z_builtin)),
@@ -187,9 +186,6 @@ pub fn init(env: &Env) {
     #[cfg(feature = "ff")]
     entries.push(("ff".to_string(), Arc::new(ff::ff_builtin)));
 
-    #[cfg(feature = "replace")]
-    entries.push(("replace".to_string(), Arc::new(replace::replace_builtin)));
-
     #[cfg(feature = "sandbox")]
     {
         entries.push(("caps-profile".to_string(), Arc::new(caps_profile_builtin)));
@@ -245,6 +241,11 @@ pub fn init(env: &Env) {
     env.register_async_builtin("exec", exec_builtin);
     #[cfg(feature = "sandbox")]
     env.register_async_builtin("strict", strict_builtin);
+    // `string` and `replace` are async so their validation and runtime errors
+    // propagate as the stage exit status instead of being swallowed.
+    env.register_async_builtin("string", string_ops::string_builtin);
+    #[cfg(feature = "replace")]
+    env.register_async_builtin("replace", replace::replace_builtin);
     env.register_alias("cksum", "hash");
 }
 
