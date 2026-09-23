@@ -890,6 +890,7 @@ impl<'a> App<'a> {
             ignoreeof: opts.ignoreeof,
             histignoredups: opts.histignoredups,
             did_you_mean: opts.did_you_mean,
+            expand_aliases: opts.expand_aliases,
             notify: opts.notify,
             json_auto_parse: opts.json_auto_parse,
             sandbox_mode: opts.sandbox_mode.clone(),

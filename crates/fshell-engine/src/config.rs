@@ -312,6 +312,7 @@ pub struct SettingsSnapshot {
     pub notify: bool,
     pub json_auto_parse: bool,
     pub did_you_mean: bool,
+    pub expand_aliases: bool,
     pub sandbox_mode: String,
     pub pipeline_channel_size: usize,
     pub prompt: String,
@@ -357,6 +358,9 @@ pub fn collect_settings_lines(s: &SettingsSnapshot) -> Vec<String> {
     }
     if !s.did_you_mean {
         lines.push("unsetopt did_you_mean".into());
+    }
+    if !s.expand_aliases {
+        lines.push("unsetopt expand_aliases".into());
     }
     if !s.confirm_destructive {
         lines.push("unsetopt confirm_destructive".into());
@@ -518,6 +522,7 @@ mod tests {
             notify: false,
             json_auto_parse: true,
             did_you_mean: true,
+            expand_aliases: true,
             sandbox_mode: "prompt".into(),
             pipeline_channel_size: 100,
             prompt: String::new(),
@@ -559,6 +564,7 @@ mod tests {
             notify: true,
             json_auto_parse: false,
             did_you_mean: false,
+            expand_aliases: false,
             sandbox_mode: "deny-all".into(),
             pipeline_channel_size: 200,
             prompt: "> ".into(),
@@ -591,6 +597,7 @@ mod tests {
         assert!(lines.contains(&"setopt notify".into()));
         assert!(lines.contains(&"unsetopt json_auto_parse".into()));
         assert!(lines.contains(&"unsetopt did_you_mean".into()));
+        assert!(lines.contains(&"unsetopt expand_aliases".into()));
         assert!(lines.contains(&"setopt errexit".into()));
         assert!(lines.contains(&"unsetopt nounset".into()));
         assert!(lines.contains(&"setopt nullglob".into()));

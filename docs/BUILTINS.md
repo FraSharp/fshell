@@ -272,6 +272,8 @@ alias g="git"
 alias ll="ls -l"
 ```
 
+a command-position alias also expands in the line editor when you type the space after it, so you can see the real command before running it (see `expand_aliases` to turn it off).
+
 ### `hook`
 manages event hooks (`precmd`, `preexec`, `chpwd`):
 

@@ -211,6 +211,13 @@ impl OptionItem {
                 kind: OptionKind::Bool(opts.did_you_mean),
             },
             OptionItem {
+                key: "expand_aliases",
+                label: "Expand Aliases While Typing",
+                description: "Expand a command-position alias in the buffer when you type the space after it",
+                section: "REPL & Editing",
+                kind: OptionKind::Bool(opts.expand_aliases),
+            },
+            OptionItem {
                 key: "suggestion_mode",
                 label: "Suggestion Mode",
                 description: "Interactive suggestion timing in REPL (blocking vs background deferred)",

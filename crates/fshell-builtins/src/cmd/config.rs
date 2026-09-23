@@ -647,6 +647,7 @@ pub(crate) fn persist_settings(env: &Env) -> Result<(), ShellError> {
         notify: opts.notify,
         json_auto_parse: opts.json_auto_parse,
         did_you_mean: opts.did_you_mean,
+        expand_aliases: opts.expand_aliases,
         sandbox_mode: opts.sandbox_mode.clone(),
         pipeline_channel_size: opts.pipeline_channel_size,
         prompt,

@@ -777,6 +777,9 @@ pub struct ShellOptions {
     pub error_format: fshell_render::RenderFormat,
     pub error_color: bool,
     pub did_you_mean: bool,
+    /// Expand command-position aliases in the line editor as the word
+    /// terminator is typed (`gco ` -> `git checkout `).
+    pub expand_aliases: bool,
     pub suggestion_mode: SuggestionMode,
     pub stderr_max_bytes: usize,
     pub sort_max_items: usize,
@@ -821,6 +824,7 @@ impl Default for ShellOptions {
             error_format: fshell_render::RenderFormat::Auto,
             error_color: true,
             did_you_mean: true,
+            expand_aliases: true,
             suggestion_mode: SuggestionMode::default(),
             stderr_max_bytes: 1_048_576,
             sort_max_items: 100_000,
@@ -889,6 +893,7 @@ shell_bool_options! {
     json_auto_parse,
     error_color,
     did_you_mean,
+    expand_aliases,
     errexit,
     nounset,
     nullglob,

@@ -356,6 +356,14 @@ pub async fn run_ftui_repl(
         'input_loop: loop {
             input_iter += 1;
 
+            // Refresh cached alias names; they can change at runtime via `alias`.
+            {
+                let current_aliases = env.get_all_aliases();
+                if alias_state.aliases_changed(&current_aliases) {
+                    alias_state.update_registered(current_aliases.into_iter().collect());
+                }
+            }
+
             // TTY health / signal checks
             #[cfg(unix)]
             if raw::SignalGuard::hup_received() {
@@ -2198,6 +2206,25 @@ pub async fn run_ftui_repl(
                         }
                     }
 
+                    // Inline alias expansion: a plain backspace right after an
+                    // expansion collapses it back to the alias name. This runs
+                    // before the keybinding dispatch, because `backspace` is
+                    // otherwise handled by the `backward-delete-char` widget.
+                    if key.key == Key::Backspace
+                        && key.modifiers.is_empty()
+                        && !text_buf.has_selection()
+                        && let Some(collapse) =
+                            alias_state.try_collapse(text_buf.chars(), text_buf.cursor())
+                    {
+                        text_buf.set_selection(collapse.start, collapse.end);
+                        text_buf.delete_selection();
+                        text_buf.insert_str(&collapse.replacement);
+                        alias_state.clear_expansion();
+                        comp_mgr.clear();
+                        redraw = true;
+                        continue;
+                    }
+
                     // --- First-Class Keybinding & Widget Architecture Dispatch ---
                     let chord = widgets::input_key_to_chord(&key);
                     let bound_action = {
@@ -3029,6 +3056,11 @@ pub async fn run_ftui_repl(
                         {
                             history_index = None;
                             fshell_core::debug_log!("prefix_search cleared on char input");
+                            // A command-position alias expands when its word
+                            // terminator is typed, before the terminator lands.
+                            if crate::alias_expansion::is_word_terminator(c) {
+                                try_inline_alias_expansion(&mut text_buf, &env, &alias_state);
+                            }
                             text_buf.insert_char(c);
                             comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                             redraw = true;
@@ -3644,6 +3676,58 @@ fn append_completion_tail(text_buf: &mut buffer::TextBuffer, value: &str, append
     }
 }
 
+/// Expand a command-position alias in the buffer when its word terminator is
+/// typed. Returns true when the buffer changed. See [`crate::alias_expansion`].
+fn try_inline_alias_expansion(
+    text_buf: &mut TextBuffer,
+    env: &fshell_engine::Env,
+    alias_state: &crate::alias_expansion::AliasExpansionState,
+) -> bool {
+    use crate::alias_expansion::{is_in_command_position, should_expand, word_range_before};
+
+    if !env.options.read().expand_aliases {
+        return false;
+    }
+    let chars = text_buf.chars().to_vec();
+    let cursor = text_buf.cursor();
+    if cursor > chars.len() {
+        return false;
+    }
+    let line: String = chars.iter().collect();
+    let cursor_byte = chars[..cursor].iter().map(|c| c.len_utf8()).sum();
+    let Some((word_start, word_end)) = word_range_before(&line, cursor_byte) else {
+        return false;
+    };
+    if !is_in_command_position(&line, word_start) {
+        return false;
+    }
+    let word = &line[word_start..word_end];
+    let Some(expansion) = should_expand(word, env) else {
+        return false;
+    };
+
+    let char_start = line[..word_start].chars().count();
+    let char_end = char_start + word.chars().count();
+    let expansion_chars = expansion.chars().count();
+
+    // Replace the word with the expansion through the buffer's edit path so the
+    // change lands in its undo history.
+    text_buf.set_selection(char_start, char_end);
+    text_buf.delete_selection();
+    text_buf.insert_str(&expansion);
+    text_buf.set_cursor(char_start + expansion_chars);
+
+    alias_state.record_expansion(
+        word,
+        &expansion,
+        char_start,
+        char_start + expansion_chars,
+        word_start,
+        word_start + expansion.len(),
+    );
+    true
+}
+
 fn is_dir_expanded(path: &str) -> bool {
     let expanded = if let Some(rest) = path.strip_prefix('~') {
         if let Some(home) = std::env::var("HOME")
@@ -3838,5 +3922,58 @@ mod tests {
                 .collect::<String>(),
             ""
         );
+    }
+
+    #[test]
+    fn inline_alias_expansion_edits_and_collapses() {
+        let env = fshell_engine::Env::new();
+        env.register_alias("gco", "git checkout");
+        let state = crate::alias_expansion::AliasExpansionState::new();
+
+        let mut buf = TextBuffer::new();
+        buf.insert_str("gco");
+
+        // Typing the word terminator expands the word before it lands.
+        assert!(try_inline_alias_expansion(&mut buf, &env, &state));
+        assert_eq!(buf.text(), "git checkout");
+        assert_eq!(buf.cursor(), "git checkout".chars().count());
+
+        // The terminator the user typed still gets inserted.
+        buf.insert_char(' ');
+        assert_eq!(buf.text(), "git checkout ");
+
+        // One backspace collapses back to the alias name, keeping the space.
+        let collapse = state
+            .try_collapse(buf.chars(), buf.cursor())
+            .expect("collapse");
+        buf.set_selection(collapse.start, collapse.end);
+        buf.delete_selection();
+        buf.insert_str(&collapse.replacement);
+        assert_eq!(buf.text(), "gco ");
+    }
+
+    #[test]
+    fn inline_alias_expansion_respects_disabled_option() {
+        let env = fshell_engine::Env::new();
+        env.register_alias("gco", "git checkout");
+        env.options.write().expand_aliases = false;
+        let state = crate::alias_expansion::AliasExpansionState::new();
+
+        let mut buf = TextBuffer::new();
+        buf.insert_str("gco");
+        assert!(!try_inline_alias_expansion(&mut buf, &env, &state));
+        assert_eq!(buf.text(), "gco");
+    }
+
+    #[test]
+    fn inline_alias_expansion_skips_argument_position() {
+        let env = fshell_engine::Env::new();
+        env.register_alias("gco", "git checkout");
+        let state = crate::alias_expansion::AliasExpansionState::new();
+
+        let mut buf = TextBuffer::new();
+        buf.insert_str("echo gco");
+        assert!(!try_inline_alias_expansion(&mut buf, &env, &state));
+        assert_eq!(buf.text(), "echo gco");
     }
 }

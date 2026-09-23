@@ -31,7 +31,7 @@ structured like nushell, familiar like zsh, clean like rust.
   - [categorized tab completion & parameter hints](#categorized-tab-completion--parameter-hints)
   - [3-tier predictive autosuggestions](#3-tier-predictive-autosuggestions)
   - [sqlite history explorer (`Ctrl+H`) & recall (`Ctrl+R`)](#sqlite-history-explorer-ctrlh--recall-ctrlr)
-  - [aliases with instant backspace undo](#aliases-with-instant-backspace-undo)
+  - [aliases expand as you type](#aliases-expand-as-you-type)
   - [sub-millisecond git prompt & transient mode](#sub-millisecond-git-prompt--transient-mode)
   - [terminal multiplexer (`mux`)](#terminal-multiplexer-mux)
   - [visual theme engine & config tui (`config edit`)](#visual-theme-engine--config-tui-config-edit)
@@ -247,7 +247,7 @@ things worth knowing that aren't obvious from the rest of this:
 - `@json`, `@yaml`, `@msgpack`, `@csv`, `@table`, `@bar` and `@text` change formats part-way through a pipeline.
 - `unsafe <cmd>` skips the destructive-command confirmation. meant for scripts.
 - `10KB` is 1000 bytes, `10KiB` is 1024. the literal can't contain a space.
-- aliases expand as you type; one backspace puts the alias name back.
+- aliases expand in command position when you type the space after them; one backspace puts the alias name back (`unsetopt expand_aliases` turns it off).
 - the prompt reads git's index instead of running `git status`, and the previous prompt collapses to one line.
 - `explain` prints what a pipeline does:
 
@@ -287,9 +287,18 @@ all executed commands are stored in an embedded SQLite database (`~/.config/fsh/
 - **inline fuzzy search (<kbd>Ctrl+R</kbd>)**: real-time substring search through past commands.
 - **aborted command recall (<kbd>Alt+R</kbd>)**: restores commands that were cancelled with <kbd>Ctrl+C</kbd>.
 
-### aliases with instant backspace undo
+### aliases expand as you type
 
-aliases expand inline when typed so you can verify what is about to run. if you want to collapse the expansion back into the alias name, simply press <kbd>Backspace</kbd> once.
+a command-position alias expands in the buffer the moment you type the space after it, so you see the real command before you run it:
+
+```fsh
+alias gco='git checkout'
+
+# you type:   gco <space>
+# the line:   git checkout
+```
+
+one <kbd>Backspace</kbd> right afterwards puts the alias name back. it's on by default; `unsetopt expand_aliases` turns it off.
 
 ### sub-millisecond git prompt & transient mode
 

@@ -75,6 +75,7 @@ unsetopt pipefail   # disable option
 | `errexit` | `false` | exit immediately when a command or pipeline returns non-zero (`set -e`) |
 | `nounset` | `true` | treat unset variable references as errors (`set -u`) |
 | `did_you_mean` | `true` | suggest corrections when commands are not found |
+| `expand_aliases` | `true` | expand a command-position alias in the editor when you type the space after it |
 | `error_color` | `true` | colorize error diagnostics |
 | `json_auto_parse`| `true` | automatically parse external JSON stdout into `Val` objects |
 | `status_bar` | `false` | display interactive bottom status bar in FTUI |
