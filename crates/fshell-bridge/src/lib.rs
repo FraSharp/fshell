@@ -617,7 +617,22 @@ pub async fn run_external(
     // inherits the correct environment from the parent via fork().
     if env.is_env_modified.load(Ordering::Acquire) {
         env.ensure_env_populated();
-        if let Some(Val::Map(env_map)) = env.vars.read().get("env") {
+        // Snapshot the environment map and release the `vars` lock before any
+        // capability check. The documented lock order is caps -> vars, so
+        // holding `vars` while acquiring `caps` (via enforce_capability) can
+        // deadlock against a concurrent caps -> vars path.
+        let env_vars: Option<Vec<(ustr::Ustr, String)>> = {
+            let vars = env.vars.read();
+            match vars.get("env") {
+                Some(Val::Map(map)) => Some(
+                    map.iter()
+                        .map(|(k, v)| (*k, val_to_cmd_string(v)))
+                        .collect(),
+                ),
+                _ => None,
+            }
+        };
+        if let Some(env_vars) = env_vars {
             cmd.env_clear();
             // Batch-grant ReadEnv("*") once to avoid O(n) per-var capability checks.
             // In non-strict mode every var auto-grants anyway — a single wildcard
@@ -637,7 +652,7 @@ pub async fn run_external(
                 }
             };
 
-            for (k, v) in env_map {
+            for (k, value) in &env_vars {
                 if !skip_checks {
                     // Strict mode: verify each variable individually
                     env.enforce_capability(
@@ -646,7 +661,7 @@ pub async fn run_external(
                     )?;
                 }
 
-                cmd.env(k.as_str(), val_to_cmd_string(v));
+                cmd.env(k.as_str(), value);
             }
         }
     }
