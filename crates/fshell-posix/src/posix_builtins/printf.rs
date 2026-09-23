@@ -173,7 +173,7 @@ fn render_format_pass(
                         if let Some(prec) = spec.precision
                             && s.len() > prec
                         {
-                            s.truncate(prec);
+                            truncate_on_char_boundary(&mut s, prec);
                         }
                         out.push_str(&apply_formatting(&s, spec, false));
                     } else {
@@ -450,6 +450,20 @@ fn parse_spec(spec_str: &str) -> Option<FormatSpec> {
     })
 }
 
+/// Shrinks `s` to at most `max_bytes` bytes without splitting a UTF-8
+/// character. The precision in `%.Ns` bounds the bytes emitted, but a partial
+/// multi-byte character is never produced; back off to the previous boundary.
+fn truncate_on_char_boundary(s: &mut String, max_bytes: usize) {
+    if max_bytes >= s.len() {
+        return;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 fn apply_formatting(val_str: &str, spec: &FormatSpec, is_number: bool) -> String {
     let mut s = val_str.to_string();
     if let Some(w) = spec.width
@@ -496,5 +510,26 @@ fn parse_printf_int(s: &str) -> Result<i64, String> {
     } else {
         t.parse::<i64>()
             .map_err(|error| format!("printf: {:?}: invalid number ({})", t, error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fmt(format: &str, args: &[&str]) -> String {
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        format_printf(format, &owned).expect("format_printf")
+    }
+
+    #[test]
+    fn string_precision_cuts_on_char_boundary() {
+        // A byte precision inside a multi-byte character must not panic; it
+        // backs off to the previous boundary rather than truncating blindly.
+        assert_eq!(fmt("%.1s", &["é"]), "");
+        assert_eq!(fmt("%.2s", &["é"]), "é");
+        assert_eq!(fmt("%.3s", &["日本語"]), "日");
+        assert_eq!(fmt("%.99s", &["é"]), "é");
+        assert_eq!(fmt("%.2s", &["hello"]), "he");
     }
 }
