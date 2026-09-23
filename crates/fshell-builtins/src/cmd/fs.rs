@@ -548,6 +548,9 @@ pub fn ls_builtin(
                 let mut paths = vec![t_config.path.clone()];
                 let mut is_first = true;
                 while let Some(current_path) = paths.pop() {
+                    if env.pipeline_cancelled() {
+                        break;
+                    }
                     let allowed = env.caps.caps.read().check_read_dir(&current_path)
                         || current_path
                             .canonicalize()
@@ -575,13 +578,18 @@ pub fn ls_builtin(
                         fshell_ls::utils::escape_name(current_path.as_os_str().as_bytes())
                     );
 
-                    fshell_ls::render(&sub_result, &sub_config, |p| {
-                        env.caps.caps.read().check_read_dir(p)
-                            || p.canonicalize()
-                                .ok()
-                                .as_ref()
-                                .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
-                    })
+                    fshell_ls::render(
+                        &sub_result,
+                        &sub_config,
+                        |p| {
+                            env.caps.caps.read().check_read_dir(p)
+                                || p.canonicalize()
+                                    .ok()
+                                    .as_ref()
+                                    .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
+                        },
+                        || env.pipeline_cancelled(),
+                    )
                     .map_err(|e| format!("{}: {e}", sub_config.path.display()))?;
 
                     let mut subdirs = Vec::new();
@@ -602,13 +610,18 @@ pub fn ls_builtin(
             } else {
                 let all_entries = fshell_ls::list_dir(&t_config)
                     .map_err(|e| format!("{}: {}", t_config.path.display(), e))?;
-                fshell_ls::render(&all_entries, &t_config, |p| {
-                    env.caps.caps.read().check_read_dir(p)
-                        || p.canonicalize()
-                            .ok()
-                            .as_ref()
-                            .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
-                })
+                fshell_ls::render(
+                    &all_entries,
+                    &t_config,
+                    |p| {
+                        env.caps.caps.read().check_read_dir(p)
+                            || p.canonicalize()
+                                .ok()
+                                .as_ref()
+                                .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
+                    },
+                    || env.pipeline_cancelled(),
+                )
                 .map_err(|e| format!("{}: {}", t_config.path.display(), e))?;
             }
         }
@@ -636,14 +649,19 @@ pub fn ls_builtin(
                 );
             }
 
-            fshell_ls::tree::render_tree(&t_config, &mut buf, |p| {
-                !env.is_strict_mode()
-                    || env.caps.caps.read().check_read_dir(p)
-                    || p.canonicalize()
-                        .ok()
-                        .as_ref()
-                        .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
-            })
+            fshell_ls::tree::render_tree(
+                &t_config,
+                &mut buf,
+                |p| {
+                    !env.is_strict_mode()
+                        || env.caps.caps.read().check_read_dir(p)
+                        || p.canonicalize()
+                            .ok()
+                            .as_ref()
+                            .is_some_and(|cp| env.caps.caps.read().check_read_dir(cp))
+                },
+                || env.pipeline_cancelled(),
+            )
             .map_err(|e| format!("{}: {}", t_config.path.display(), e))?;
         }
 

@@ -31,12 +31,18 @@ pub use scan::{
 /// NOTE: In tree mode (`config.tree`), the tree renderer opens directories
 /// itself via libc calls. Capability checks for both the root path and
 /// all subdirectories are enforced via the `check_read_dir` closure.
-pub fn render<F>(result: &ListResult, config: &Config, check_read_dir: F) -> io::Result<()>
+pub fn render<F, C>(
+    result: &ListResult,
+    config: &Config,
+    check_read_dir: F,
+    cancel: C,
+) -> io::Result<()>
 where
     F: Fn(&std::path::Path) -> bool,
+    C: Fn() -> bool,
 {
     if config.tree {
-        return tree::print_tree_with_result(config, result, check_read_dir);
+        return tree::print_tree_with_result(config, result, check_read_dir, cancel);
     }
 
     let capacity = if config.long_listing {
@@ -97,7 +103,7 @@ where
     let arena = &result.arena;
 
     if config.tree {
-        tree::render_tree_with_result(config, result, out, check_read_dir)
+        tree::render_tree_with_result(config, result, out, check_read_dir, || false)
     } else if config.long_listing {
         render::render_long_listing_to(
             entries,

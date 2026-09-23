@@ -201,3 +201,27 @@ fn test_show_all_includes_hidden() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn tree_render_can_be_cancelled() {
+    // Regression: the recursive tree walk must observe a cancellation request
+    // (Ctrl-C on `ls --tree | ...`) instead of running to completion.
+    let dir = temp_dir();
+    let nested = create_dir(&dir, "a");
+    create_file(&nested, "deep.txt");
+    create_file(&dir, "top.txt");
+
+    let mut config = base_config(dir.clone());
+    config.tree = true;
+    config.recursive = true;
+
+    let mut out = Vec::new();
+    fshell_ls::tree::render_tree(&config, &mut out, |_| true, || true).unwrap();
+    assert!(out.is_empty(), "a cancelled render must emit nothing");
+
+    let mut out = Vec::new();
+    fshell_ls::tree::render_tree(&config, &mut out, |_| true, || false).unwrap();
+    assert!(!out.is_empty(), "an uncancelled render must emit the tree");
+
+    let _ = fs::remove_dir_all(&dir);
+}

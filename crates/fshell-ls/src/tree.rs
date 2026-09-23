@@ -73,7 +73,7 @@ where
 {
     let stdout = io::stdout();
     let mut out = BufWriter::with_capacity(64 * 1024, stdout.lock());
-    let result = render_tree(config, &mut out, check_read_dir);
+    let result = render_tree(config, &mut out, check_read_dir, || false);
     match result {
         Ok(()) => out.flush(),
         Err(err) => Err(err),
@@ -81,11 +81,24 @@ where
 }
 
 /// Renders the tree to a generic writer.
-pub fn render_tree<W, F>(config: &Config, mut out: W, check_read_dir: F) -> io::Result<()>
+///
+/// `cancel` is polled between entries; when it returns true rendering stops and
+/// returns `Ok(())` so an interrupted (Ctrl-C) walk does not surface as an
+/// error. This is what makes `ls --tree | ...` interruptible.
+pub fn render_tree<W, F, C>(
+    config: &Config,
+    mut out: W,
+    check_read_dir: F,
+    cancel: C,
+) -> io::Result<()>
 where
     W: Write,
     F: Fn(&std::path::Path) -> bool,
+    C: Fn() -> bool,
 {
+    if cancel() {
+        return Ok(());
+    }
     if !check_read_dir(&config.path) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -93,37 +106,44 @@ where
         ));
     }
     let result = crate::scan::list_dir(config)?;
-    render_tree_with_result(config, &result, &mut out, check_read_dir)
+    render_tree_with_result(config, &result, &mut out, check_read_dir, cancel)
 }
 
 /// Print a previously scanned root listing as a tree, scanning only descendants.
-pub fn print_tree_with_result<F>(
+pub fn print_tree_with_result<F, C>(
     config: &Config,
     result: &crate::scan::ListResult,
     check_read_dir: F,
+    cancel: C,
 ) -> io::Result<()>
 where
     F: Fn(&std::path::Path) -> bool,
+    C: Fn() -> bool,
 {
     let stdout = io::stdout();
     let mut out = BufWriter::with_capacity(64 * 1024, stdout.lock());
-    let result = render_tree_with_result(config, result, &mut out, check_read_dir);
+    let result = render_tree_with_result(config, result, &mut out, check_read_dir, cancel);
     match result {
         Ok(()) => out.flush(),
         Err(err) => Err(err),
     }
 }
 
-pub fn render_tree_with_result<W, F>(
+pub fn render_tree_with_result<W, F, C>(
     config: &Config,
     result: &crate::scan::ListResult,
     mut out: W,
     check_read_dir: F,
+    cancel: C,
 ) -> io::Result<()>
 where
     W: Write,
     F: Fn(&std::path::Path) -> bool,
+    C: Fn() -> bool,
 {
+    if cancel() {
+        return Ok(());
+    }
     if !check_read_dir(&config.path) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -234,11 +254,12 @@ where
         Some(result),
         &check_read_dir,
         &exclude,
+        &cancel,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn visit_dir_iterative<F>(
+fn visit_dir_iterative<F, C>(
     dir_fd: FdGuard,
     current_path: &std::path::Path,
     prefix: &mut String,
@@ -248,10 +269,15 @@ fn visit_dir_iterative<F>(
     root_result: Option<&crate::scan::ListResult>,
     check_read_dir: &F,
     exclude: &GlobSet,
+    cancel: &C,
 ) -> io::Result<()>
 where
     F: Fn(&std::path::Path) -> bool,
+    C: Fn() -> bool,
 {
+    if cancel() {
+        return Ok(());
+    }
     // SAFETY: dir_fd.0 is a valid file descriptor from open/openat
     let dir = unsafe { fdopendir(dir_fd.0) };
 
@@ -381,6 +407,9 @@ where
 
     let count = entries.len();
     for (i, &(start, len, d_type)) in entries.iter().enumerate() {
+        if cancel() {
+            return Ok(());
+        }
         let name_bytes = &arena[start..start + len];
         let display_name = escape_name_cow(name_bytes);
         // SAFETY: start + len is within the arena, and arena[start + len] is null
@@ -518,6 +547,7 @@ where
                             None,
                             check_read_dir,
                             exclude,
+                            cancel,
                         )?;
                         prefix.truncate(original_len);
                     } else {
