@@ -119,25 +119,25 @@ pub fn get_recent_commands_cached() -> std::collections::HashSet<String> {
     set
 }
 
-fn get_pool() -> r2d2::Pool<SqliteConnManager> {
+fn get_pool() -> Result<r2d2::Pool<SqliteConnManager>, String> {
     let mut guard = DB_POOL.lock();
     if let Some(ref pool) = *guard {
-        pool.clone()
-    } else {
-        let path = get_db_path();
-        let manager = SqliteConnManager { path };
-        let pool = r2d2::Pool::builder()
-            .max_size(4)
-            .connection_timeout(Duration::from_secs(5))
-            .build(manager)
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to create SQLite connection pool: {e}");
-                std::process::abort();
-            });
-        let cloned = pool.clone();
-        *guard = Some(pool);
-        cloned
+        return Ok(pool.clone());
     }
+    let path = get_db_path();
+    let manager = SqliteConnManager { path };
+    // Never abort the process because history storage is unavailable (a
+    // read-only or full config directory, or a directory in place of the
+    // file). Building the pool eagerly connects, so surface the failure and
+    // let callers degrade to "history disabled" instead of killing the shell.
+    let pool = r2d2::Pool::builder()
+        .max_size(4)
+        .connection_timeout(Duration::from_secs(5))
+        .build(manager)
+        .map_err(|e| format!("failed to create SQLite connection pool: {e}"))?;
+    let cloned = pool.clone();
+    *guard = Some(pool);
+    Ok(cloned)
 }
 
 pub fn clear_connection_cache() {
@@ -149,13 +149,13 @@ pub fn with_db_conn<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce(&Connection) -> Result<R, String>,
 {
-    let pool = get_pool();
+    let pool = get_pool()?;
     let conn = pool.get().map_err(|e| e.to_string())?;
     f(&conn)
 }
 
 pub fn init_db() -> Result<(), String> {
-    let pool = get_pool();
+    let pool = get_pool()?;
     let conn = pool.get().map_err(|e| e.to_string())?;
     let _ = conn.execute("PRAGMA journal_mode=WAL", []);
     let _ = conn.execute("PRAGMA synchronous=NORMAL", []);

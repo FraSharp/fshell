@@ -2182,7 +2182,9 @@ fn check_first_run_onboarding(env: &Env) {
 }
 
 pub fn init(env: &Env) {
-    let _ = init_db();
+    if let Err(e) = init_db() {
+        eprintln!("warning: command history disabled: {e}");
+    }
     env.register_builtin("history", std::sync::Arc::new(history_builtin));
     env.register_async_builtin("history", history_async_builtin);
     env.set_config_tui_handler(std::sync::Arc::new(|env| {
