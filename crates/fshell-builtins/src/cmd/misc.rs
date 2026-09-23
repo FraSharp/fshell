@@ -759,6 +759,20 @@ pub fn bracket_builtin(
     test_builtin(input, inner_args, env, tx, span)
 }
 
+/// Truncates `s` to at most `max_bytes` bytes without splitting a UTF-8
+/// character. Mirrors C `printf` `%.Ns` precision, which bounds the number of
+/// bytes emitted, but never emits a partial multi-byte character.
+fn truncate_utf8_boundary(s: &str, max_bytes: usize) -> &str {
+    if max_bytes >= s.len() {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 fn format_printf(format: &str, args: &[Val]) -> Result<String, String> {
     let mut result = String::new();
     let mut arg_idx = 0;
@@ -860,10 +874,9 @@ fn format_printf(format: &str, args: &[Val]) -> Result<String, String> {
                         Val::Null => String::new(),
                         other => val_to_display_string(other),
                     };
-                    let s_prec = if let Some(p) = precision {
-                        if p < s.len() { s[..p].to_string() } else { s }
-                    } else {
-                        s
+                    let s_prec = match precision {
+                        Some(p) => truncate_utf8_boundary(&s, p).to_string(),
+                        None => s,
                     };
                     if let Some(w) = width {
                         if s_prec.len() < w {
@@ -1580,5 +1593,43 @@ mod tests {
             root_path.join("crates").exists(),
             "Workspace root should contain crates directory"
         );
+    }
+
+    #[test]
+    fn printf_precision_cuts_on_char_boundary() {
+        // A byte precision that lands inside a multi-byte character must not
+        // panic; it backs off to the previous boundary.
+        assert_eq!(
+            format_printf("%.1s", &[Val::String("é".into())]),
+            Ok(String::new())
+        );
+        assert_eq!(
+            format_printf("%.2s", &[Val::String("é".into())]),
+            Ok("é".to_string())
+        );
+        assert_eq!(
+            format_printf("%.3s", &[Val::String("日本語".into())]),
+            Ok("日".to_string())
+        );
+        // Plain ASCII precision is unchanged.
+        assert_eq!(
+            format_printf("%.2s", &[Val::String("hello".into())]),
+            Ok("he".to_string())
+        );
+        // Precision larger than the string returns it whole.
+        assert_eq!(
+            format_printf("%.99s", &[Val::String("é".into())]),
+            Ok("é".to_string())
+        );
+    }
+
+    #[test]
+    fn truncate_utf8_boundary_backs_off_to_boundary() {
+        assert_eq!(truncate_utf8_boundary("é", 1), "");
+        assert_eq!(truncate_utf8_boundary("é", 2), "é");
+        assert_eq!(truncate_utf8_boundary("日本語", 4), "日");
+        assert_eq!(truncate_utf8_boundary("abc", 2), "ab");
+        assert_eq!(truncate_utf8_boundary("abc", 0), "");
+        assert_eq!(truncate_utf8_boundary("abc", 10), "abc");
     }
 }
