@@ -457,17 +457,28 @@ pub fn disown_builtin(
     _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let (job_id, pgid, cmd) = resolve_job(&args, env, "disown")?;
+    // The job table is keyed by pid and a pipeline contributes one entry per
+    // stage pid, so mark every entry that belongs to this job rather than a
+    // single lookup by the (pgid-named) id.
     let mut jobs = env.job_control.jobs.write();
-    if let Some(job) = jobs.get_mut(&pgid) {
-        job.disowned = true;
+    let mut marked = false;
+    for job in jobs.values_mut() {
+        if job.id == job_id || job.pgid == pgid {
+            job.disowned = true;
+            marked = true;
+        }
     }
-    println!("[{}]  disowned  {}", job_id, cmd);
+    drop(jobs);
+    if marked {
+        println!("[{}]  disowned  {}", job_id, cmd);
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::parse_signal_spec;
+    use super::*;
 
     #[test]
     fn signal_spec_accepts_names_and_numbers() {
@@ -479,5 +490,39 @@ mod tests {
         assert_eq!(parse_signal_spec("15"), Some(15));
         assert_eq!(parse_signal_spec("BOGUS"), None);
         assert_eq!(parse_signal_spec(""), None);
+    }
+
+    #[tokio::test]
+    async fn disown_marks_every_stage_entry() {
+        // The job table is keyed by pid; a two-stage pipeline has one entry per
+        // stage pid, so disown must mark both (the old code looked up by pgid).
+        let env = fshell_engine::Env::new();
+        {
+            let mut jobs = env.job_control.jobs.write();
+            for pid in [10, 11] {
+                jobs.insert(
+                    pid,
+                    fshell_engine::Job {
+                        id: 7,
+                        pgid: 10,
+                        pids: vec![10, 11],
+                        last_stage_pid: Some(11),
+                        last_stage_exit_code: None,
+                        cmd: "sleep 1 | cat".to_string(),
+                        status: fshell_engine::JobStatus::Running,
+                        disowned: false,
+                        started_at: None,
+                    },
+                );
+            }
+        }
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        disown_builtin(None, vec![Val::String("%7".to_string())], &env, tx, None).unwrap();
+        let jobs = env.job_control.jobs.read();
+        assert_eq!(jobs.len(), 2);
+        assert!(
+            jobs.values().all(|job| job.disowned),
+            "every stage entry must be disowned"
+        );
     }
 }
