@@ -533,12 +533,12 @@ impl Parser {
             let body = self.parse_block_statements()?;
             Ok(Stmt::Unsafe { body })
         } else if let Some(keyword) = self.removed_posix_block_keyword() {
-            return Err(ParseError::SyntaxError {
+            Err(ParseError::SyntaxError {
                 message: format!(
                     "`{keyword} {{ ... }}` is no longer a block keyword; use `sh {{ ... }}`"
                 ),
                 span: self.current_span(),
-            });
+            })
         } else if self.peek_posix_block() {
             // Consume the keyword and opening brace, then capture body
             self.match_keyword("sh");

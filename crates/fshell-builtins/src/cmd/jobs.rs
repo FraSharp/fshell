@@ -305,15 +305,13 @@ pub fn kill_builtin(
                         ShellError::from(format!("kill: {flag} requires a signal argument"))
                     })?;
                     let spec = spec.to_text();
-                    signal = parse_signal_spec(&spec)
-                        .ok_or_else(|| invalid_signal(&spec, span.clone()))?;
+                    signal = parse_signal_spec(&spec).ok_or_else(|| invalid_signal(&spec, span))?;
                     index += 2;
                     continue;
                 }
                 Val::String(flag) if flag.starts_with('-') && flag.len() > 1 => {
                     let spec = &flag[1..];
-                    signal = parse_signal_spec(spec)
-                        .ok_or_else(|| invalid_signal(spec, span.clone()))?;
+                    signal = parse_signal_spec(spec).ok_or_else(|| invalid_signal(spec, span))?;
                     index += 1;
                     continue;
                 }
@@ -389,7 +387,7 @@ pub fn kill_builtin(
                         job_ref.parse().map_err(|_| BuiltinError::InvalidArgument {
                             cmd: "kill".into(),
                             arg: format!("invalid job ID: {s}"),
-                            span: span.clone(),
+                            span,
                         })?;
                     let pgid = env
                         .job_control

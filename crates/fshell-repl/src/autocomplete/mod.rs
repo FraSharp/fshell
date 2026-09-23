@@ -224,7 +224,7 @@ impl Completer for FshellCompleter {
         };
 
         if is_external {
-            if let Some(cached) = complete_with_carapace_cached(&stmt, last_word, pos)
+            if let Some(cached) = complete_with_carapace_cached(stmt, last_word, pos)
                 && !cached.is_empty()
             {
                 return cached;
@@ -532,7 +532,7 @@ impl Completer for FshellCompleter {
         }
 
         // Git branch/tag completions
-        if git_branch_context(&stmt) {
+        if git_branch_context(stmt) {
             let branches = git_branches_cached(&self.env);
             let tags = git_tags_cached();
             for branch in branches.iter().chain(tags.iter()) {
