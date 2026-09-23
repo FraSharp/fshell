@@ -1,8 +1,9 @@
 #![allow(
     clippy::await_holding_lock,
+    clippy::needless_borrow,
+    clippy::result_large_err,
     unused_must_use,
-    unused_imports,
-    clippy::needless_borrow
+    unused_imports
 )]
 
 mod common;
