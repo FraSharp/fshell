@@ -58,6 +58,29 @@ fn generic(message: String) -> EngineError {
     }
 }
 
+/// Best-effort removal of background job files left behind when a shell exited
+/// while its jobs were still running. Scoped to the files this module writes.
+fn sweep_stale(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let Some(cutoff) =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(3600))
+    else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("bg-") {
+            continue;
+        }
+        if let Ok(modified) = entry.metadata().and_then(|m| m.modified())
+            && modified < cutoff
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Spawn `source` as a background job (POSIX mode) and return its PID.
 ///
 /// Registers the job in the shared job table and records it as `$!`.
@@ -66,6 +89,7 @@ pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
     let dir = crate::cache_dir()
         .ok_or_else(|| generic("cannot resolve cache dir for background job".to_string()))?;
     let _ = std::fs::create_dir_all(&dir);
+    sweep_stale(&dir);
 
     let stamp = format!(
         "{}-{}",

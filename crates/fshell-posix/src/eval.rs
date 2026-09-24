@@ -1785,7 +1785,7 @@ async fn eval_simple_command_inner(
             .await?;
             return Ok((0, out));
         }
-        "times" | "jobs" => {
+        "times" => {
             return Ok((0, None));
         }
         "hash" => {
@@ -1796,7 +1796,6 @@ async fn eval_simple_command_inner(
             }
             return Ok((0, None));
         }
-        "fg" | "bg" => return Ok((1, None)),
         "dot" | "." | "source" => {
             if let Some(path) = args.first() {
                 let source_path = env.resolve_path(path);
@@ -1832,6 +1831,42 @@ async fn eval_simple_command_inner(
         let (code, out) = eval_compound_command_stream(&func_body, env, &fn_cfg, io_cfg).await?;
         restore_positional(env, saved);
         return Ok((code, out));
+    }
+
+    // Job control is shared with the native engine: run `jobs`, `kill`, `fg`,
+    // `bg` and `disown` through the registered builtin so both engines report
+    // and signal the same job table.
+    if matches!(cmd_name, "jobs" | "kill" | "fg" | "bg" | "disown")
+        && let Some(handler) = env.get_builtin(cmd_name)
+    {
+        let argv: Vec<Val> = args.iter().map(|a| Val::String(a.clone())).collect();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<fshell_engine::PipelinePayload>(64);
+        handler(None, argv, env, tx, None).map_err(|e| {
+            PosixError::Engine(EngineError::Generic {
+                message: e.to_string(),
+                span: None,
+            })
+        })?;
+        let mut captured = if io_cfg.capture_stdout {
+            Some(Vec::new())
+        } else {
+            None
+        };
+        while let Some(payload) = rx.recv().await {
+            if let fshell_engine::PipelinePayload::Data(val) = payload {
+                let mut text = val.to_text();
+                text.push('\n');
+                if let Some(acc) = &mut captured {
+                    acc.extend_from_slice(text.as_bytes());
+                }
+                if let Some(tx_out) = io_cfg.stdout_stream.as_ref() {
+                    let _ = tx_out.send(bytes::Bytes::from(text)).await;
+                } else if captured.is_none() {
+                    print!("{text}");
+                }
+            }
+        }
+        return Ok((0, captured));
     }
 
     // Fallback: subprocess execution with full I/O piping and redirections

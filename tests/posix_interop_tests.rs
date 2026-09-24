@@ -83,6 +83,40 @@ fn background_runs_asynchronously() {
 }
 
 #[test]
+fn posix_jobs_lists_a_background_job() {
+    let out = FshCmd::new()
+        .arg("--posix")
+        .cmd("sleep 1 & jobs; wait")
+        .run()
+        .unwrap();
+    out.assert_success();
+    out.assert_stdout_contains("Running");
+    out.assert_stdout_contains("sleep 1");
+}
+
+#[test]
+fn posix_kill_signals_the_background_job() {
+    let out = FshCmd::new()
+        .cmd("for f in a; do sleep 5 & P=$!; kill -9 $P 2>/dev/null; echo \"rc=$?\"; done")
+        .run()
+        .unwrap();
+    out.assert_success();
+    out.assert_stdout_contains("rc=0");
+}
+
+#[test]
+fn posix_disown_removes_the_job_from_jobs() {
+    let out = FshCmd::new()
+        .arg("--posix")
+        .cmd("sleep 1 & disown; jobs; echo done")
+        .run()
+        .unwrap();
+    out.assert_success();
+    out.assert_stdout_contains("disowned");
+    out.assert_stdout_contains("done");
+}
+
+#[test]
 fn native_flag_disables_the_posix_fallback() {
     let out = FshCmd::new()
         .arg("--native")
