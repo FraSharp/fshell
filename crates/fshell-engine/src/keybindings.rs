@@ -447,12 +447,9 @@ impl KeybindingRegistry {
             KeyAction::Widget("accept-line".to_string()),
         )
         .ok();
-        self.bind(
-            KeyMapMode::Emacs,
-            "ctrl-j",
-            KeyAction::Widget("newline-and-indent".to_string()),
-        )
-        .ok();
+        // `ctrl-j` is intentionally NOT bound here: a bare LF (`\n`) is decoded
+        // as Ctrl+J in raw mode and normalized to Enter by the input layer, so
+        // that agent/tool input terminates a line exactly like bash/zsh.
         self.bind(
             KeyMapMode::Emacs,
             "shift-enter",
@@ -956,7 +953,7 @@ pub fn all_widgets() -> &'static [WidgetInfo] {
             name: "newline-and-indent",
             category: "Execution & Control",
             description: "Insert newline with automatic block indentation",
-            default_chord_emacs: Some("ctrl-j, shift-enter"),
+            default_chord_emacs: Some("shift-enter, ctrl-enter"),
             default_chord_vi: None,
         },
         WidgetInfo {

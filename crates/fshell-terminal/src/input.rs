@@ -351,15 +351,18 @@ impl CrosstermEventStream {
 
 fn map_event(event: CrosstermEvent) -> Option<InputEvent> {
     match event {
-        CrosstermEvent::Key(key) => Some(InputEvent::Key(KeyEvent {
-            key: map_key(key.code),
-            modifiers: Modifiers::from_crossterm(key.modifiers),
-            action: match key.kind {
-                event::KeyEventKind::Press => KeyAction::Press,
-                event::KeyEventKind::Repeat => KeyAction::Repeat,
-                event::KeyEventKind::Release => KeyAction::Release,
-            },
-        })),
+        CrosstermEvent::Key(key) => {
+            let (code, modifiers) = normalize_line_terminator(key.code, key.modifiers);
+            Some(InputEvent::Key(KeyEvent {
+                key: map_key(code),
+                modifiers: Modifiers::from_crossterm(modifiers),
+                action: match key.kind {
+                    event::KeyEventKind::Press => KeyAction::Press,
+                    event::KeyEventKind::Repeat => KeyAction::Repeat,
+                    event::KeyEventKind::Release => KeyAction::Release,
+                },
+            }))
+        }
         CrosstermEvent::Mouse(mouse) => Some(InputEvent::Mouse(MouseEvent {
             action: match mouse.kind {
                 event::MouseEventKind::Down(button) => MouseAction::Down(map_button(button)),
@@ -379,6 +382,26 @@ fn map_event(event: CrosstermEvent) -> Option<InputEvent> {
         // No current fshell screen consumes focus changes. They are enabled
         // only as part of the current terminal mode and are ignored here.
         CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => None,
+    }
+}
+
+/// Treat a bare line feed as Enter.
+///
+/// In raw mode the Enter key arrives as CR and Crossterm reports it as
+/// [`event::KeyCode::Enter`]. A bare LF (`\n`) — how coding agents,
+/// `tmux send-keys`, `expect`, and piped scripts terminate a line — is instead
+/// decoded as `Ctrl+J`. A shell must treat that byte as "run this line": bash
+/// and zsh both bind `\C-j` to accept-line, and the two are indistinguishable
+/// at the byte level in a raw terminal. Without this normalization such input
+/// can never be submitted from the editor — it just keeps adding newlines.
+fn normalize_line_terminator(
+    code: event::KeyCode,
+    modifiers: event::KeyModifiers,
+) -> (event::KeyCode, event::KeyModifiers) {
+    if code == event::KeyCode::Char('j') && modifiers == event::KeyModifiers::CONTROL {
+        (event::KeyCode::Enter, event::KeyModifiers::NONE)
+    } else {
+        (code, modifiers)
     }
 }
 
@@ -541,6 +564,36 @@ mod tests {
             InputPoll::Event(InputEvent::Key(KeyEvent::new(
                 Key::Enter,
                 Modifiers::empty(),
+            )))
+        );
+    }
+
+    #[test]
+    fn bare_line_feed_maps_to_enter() {
+        // A raw `\n` reaches Crossterm as Ctrl+J; a shell must treat it as
+        // Enter so agent/tool input can submit a line (bash and zsh bind
+        // `\C-j` to accept-line).
+        assert_eq!(
+            map_event(CrosstermEvent::Key(event::KeyEvent::new(
+                event::KeyCode::Char('j'),
+                event::KeyModifiers::CONTROL,
+            ))),
+            Some(InputEvent::Key(KeyEvent::new(
+                Key::Enter,
+                Modifiers::empty(),
+            )))
+        );
+
+        // A genuine Ctrl+J is the same byte and therefore also submits.
+        // Modified variants (e.g. Ctrl+Alt+J) are left alone.
+        assert_eq!(
+            map_event(CrosstermEvent::Key(event::KeyEvent::new(
+                event::KeyCode::Char('j'),
+                event::KeyModifiers::CONTROL | event::KeyModifiers::ALT,
+            ))),
+            Some(InputEvent::Key(KeyEvent::new(
+                Key::Character('j'),
+                Modifiers::CONTROL | Modifiers::ALT,
             )))
         );
     }

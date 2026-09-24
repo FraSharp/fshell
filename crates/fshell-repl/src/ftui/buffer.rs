@@ -693,6 +693,17 @@ impl TextBuffer {
         self.maybe_auto_commit();
     }
 
+    /// Insert `s` at the cursor verbatim, without auto-closing brackets or
+    /// quotes.
+    ///
+    /// This path is used for pasted text and programmatic insertion (clipboard,
+    /// completion, history recall) — content that is already complete. Auto
+    /// pairing is a *typing* affordance; applying it here corrupts shell input,
+    /// which is full of `[`, `(`, `'` and `"` characters inside strings and
+    /// patterns that a bare bracket counter cannot understand. The old
+    /// "close the net-unclosed delimiters" heuristic was not quote-aware, so
+    /// pasting `sed 's/\x1b\[[0-9;]*m//g'` (two `[`, one `]` inside a quoted
+    /// string) appended a stray `]` to the command and silently broke it.
     pub fn insert_str(&mut self, s: &str) {
         if s.is_empty() {
             return;
@@ -701,149 +712,12 @@ impl TextBuffer {
         if self.has_selection() {
             self.delete_selection();
         }
-        let cursor_before = self.cursor;
-
-        // Scan pasted string for unbalanced open brackets and only auto-close
-        // the net-unclosed ones. Balanced strings ("foo") get no extra closers.
-        let mut unbalanced: std::collections::HashMap<char, i64> = std::collections::HashMap::new();
-        for c in s.chars() {
-            match c {
-                '(' => *unbalanced.entry('(').or_insert(0) += 1,
-                ')' => {
-                    if let Some(d) = unbalanced.get_mut(&'(')
-                        && *d > 0
-                    {
-                        *d -= 1;
-                    }
-                }
-                '[' => *unbalanced.entry('[').or_insert(0) += 1,
-                ']' => {
-                    if let Some(d) = unbalanced.get_mut(&'[')
-                        && *d > 0
-                    {
-                        *d -= 1;
-                    }
-                }
-                '{' => *unbalanced.entry('{').or_insert(0) += 1,
-                '}' => {
-                    if let Some(d) = unbalanced.get_mut(&'{')
-                        && *d > 0
-                    {
-                        *d -= 1;
-                    }
-                }
-                '"' => {
-                    let d = unbalanced.entry('"').or_insert(0);
-                    if *d > 0 {
-                        *d -= 1;
-                    } else {
-                        *d += 1;
-                    }
-                }
-                '\'' => {
-                    let d = unbalanced.entry('\'').or_insert(0);
-                    if *d > 0 {
-                        *d -= 1;
-                    } else {
-                        *d += 1;
-                    }
-                }
-                '`' => {
-                    let d = unbalanced.entry('`').or_insert(0);
-                    if *d > 0 {
-                        *d -= 1;
-                    } else {
-                        *d += 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut closers_to_insert = String::new();
-        for _ in 0..*unbalanced.get(&'(').unwrap_or(&0) {
-            closers_to_insert.push(')');
-        }
-        for _ in 0..*unbalanced.get(&'[').unwrap_or(&0) {
-            closers_to_insert.push(']');
-        }
-        for _ in 0..*unbalanced.get(&'{').unwrap_or(&0) {
-            closers_to_insert.push('}');
-        }
-        for _ in 0..*unbalanced.get(&'"').unwrap_or(&0) {
-            closers_to_insert.push('"');
-        }
-        for _ in 0..*unbalanced.get(&'\'').unwrap_or(&0) {
-            closers_to_insert.push('\'');
-        }
-        for _ in 0..*unbalanced.get(&'`').unwrap_or(&0) {
-            closers_to_insert.push('`');
-        }
-
-        let full_insert = format!("{}{}", s, closers_to_insert);
         let op = EditOp::Insert {
-            pos: cursor_before,
-            text: full_insert,
+            pos: self.cursor,
+            text: s.to_string(),
         };
         self.apply_op(op.clone());
         self.current_transaction.push(op);
-
-        // Track auto-inserted closers for skip-over. Pair each closer with
-        // its actual unmatched opener (LIFO) so paste "(((" -> "((()))"
-        // maps closers to distinct openers, not all to the last one (R11).
-        let s_chars: Vec<char> = s.chars().collect();
-        let s_len = s_chars.len();
-        let mut open_stacks: std::collections::HashMap<char, Vec<usize>> =
-            std::collections::HashMap::new();
-        let mut quote_open: std::collections::HashMap<char, Option<usize>> =
-            std::collections::HashMap::new();
-        for (idx, &c) in s_chars.iter().enumerate() {
-            match c {
-                '(' => open_stacks.entry('(').or_default().push(idx),
-                ')' => {
-                    if let Some(st) = open_stacks.get_mut(&'(') {
-                        st.pop();
-                    }
-                }
-                '[' => open_stacks.entry('[').or_default().push(idx),
-                ']' => {
-                    if let Some(st) = open_stacks.get_mut(&'[') {
-                        st.pop();
-                    }
-                }
-                '{' => open_stacks.entry('{').or_default().push(idx),
-                '}' => {
-                    if let Some(st) = open_stacks.get_mut(&'{') {
-                        st.pop();
-                    }
-                }
-                '"' | '\'' | '`' => {
-                    let entry = quote_open.entry(c).or_insert(None);
-                    if entry.is_some() {
-                        *entry = None;
-                    } else {
-                        *entry = Some(idx);
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (q, opt) in quote_open {
-            if let Some(idx) = opt {
-                open_stacks.entry(q).or_default().push(idx);
-            }
-        }
-        let mut closer_offset = 0usize;
-        for &open_char in &['(', '[', '{', '"', '\'', '`'] {
-            if let Some(stack) = open_stacks.get(&open_char) {
-                for &opener_rel in stack.iter().rev() {
-                    let opener_idx = cursor_before + opener_rel;
-                    let closer_idx = cursor_before + s_len + closer_offset;
-                    self.auto_inserted_closers.push(closer_idx);
-                    self.auto_inserted_pairs.push((opener_idx, closer_idx));
-                    closer_offset += 1;
-                }
-            }
-        }
 
         self.maybe_auto_commit();
     }
@@ -1139,6 +1013,20 @@ impl std::str::FromStr for TextBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_paste_inserts_verbatim_without_synthetic_closers() {
+        let mut buf = TextBuffer::new();
+        // Two `[` and one `]` inside a quoted sed program used to make the
+        // old bracket counter append a stray `]` to the pasted command.
+        buf.insert_str("sed 's/\\x1b\\[[0-9;]*m//g' file");
+        assert_eq!(buf.text(), "sed 's/\\x1b\\[[0-9;]*m//g' file");
+        assert!(buf.auto_inserted_closers.is_empty());
+
+        let mut buf = TextBuffer::new();
+        buf.insert_str("for f in a b; do echo $f; done\n");
+        assert_eq!(buf.text(), "for f in a b; do echo $f; done\n");
+    }
 
     #[test]
     fn test_autoclose_and_skipover() {
