@@ -748,3 +748,28 @@ $= live_stream = echo "event_ok"
     let reactive = env.reactive.pipelines.read();
     assert!(reactive.contains_key("live_stream"));
 }
+
+// =========================================================================
+// Command arguments — a standalone `-` after a command word
+// =========================================================================
+
+#[tokio::test]
+async fn test_happy_standalone_dash_is_argument_not_subtraction() {
+    // A `-` following a command word is an argument (the POSIX stdin/stdout
+    // marker), never subtraction. Regression for `cmd - ...` being parsed as
+    // `cmd - <operand>` and failing with FSH-TYPE-001.
+    let out = FshCmd::new().cmd("echo - x").run().unwrap();
+    out.assert_success().assert_stdout_trimmed_eq("- x");
+}
+
+#[tokio::test]
+async fn test_happy_standalone_dash_with_heredoc() {
+    // `cmd - <<EOF` must feed the heredoc to the command, not parse as
+    // `cmd - <heredoc body>`.
+    let out = FshCmd::new()
+        .cmd("cat - <<'EOF'\ndash-heredoc-ok\nEOF\n")
+        .run()
+        .unwrap();
+    out.assert_success()
+        .assert_stdout_trimmed_eq("dash-heredoc-ok");
+}

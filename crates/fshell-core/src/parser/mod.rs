@@ -1168,6 +1168,73 @@ mod tests {
     }
 
     #[test]
+    fn test_standalone_dash_is_command_argument() {
+        // A lone `-` after a command word is a command argument (a flag or the
+        // POSIX stdin/stdout marker), never the subtraction operator. Regression
+        // for `python3 - <<'PY'` / `cat - file` being parsed as `python3 - <body>`.
+        for (src, expected_name, expected_args) in [
+            ("echo - x", "echo", vec!["-", "x"]),
+            ("git diff -", "git", vec!["diff", "-"]),
+            ("cmd - file", "cmd", vec!["-", "file"]),
+            ("echo -x", "echo", vec!["-x"]),
+        ] {
+            let mut p = Parser::new(src);
+            let stmts = p.parse_statements().unwrap();
+            let Stmt::Expr(expr) = stmts[0].unpack() else {
+                panic!("expected Stmt::Expr for {src}");
+            };
+            let Expr::Pipeline(pipeline) = expr.unpack() else {
+                panic!("expected Expr::Pipeline for {src}");
+            };
+            let PipelineStage::CommandCall { name, args, .. } = &pipeline.stages[0] else {
+                panic!("expected CommandCall stage for {src}");
+            };
+            assert_eq!(name, expected_name, "command name for {src}");
+            let got: Vec<&str> = args
+                .iter()
+                .map(|arg| match arg.unpack() {
+                    Expr::String(parts) => match parts.as_slice() {
+                        [StringPart::Lit(s)] => s.as_str(),
+                        other => panic!("unexpected arg parts for {src}: {other:?}"),
+                    },
+                    other => panic!("unexpected arg for {src}: {other:?}"),
+                })
+                .collect();
+            assert_eq!(got, expected_args, "args for {src}");
+        }
+    }
+
+    #[test]
+    fn test_standalone_dash_heredoc_is_command_redirect() {
+        // `cmd - <<EOF` is command `cmd` with a `-` argument and a heredoc stdin
+        // redirect, not a subtraction with the heredoc body as right operand.
+        let mut p = Parser::new("python3 - <<'PY'\nprint(1)\nPY\n");
+        let stmts = p.parse_statements().unwrap();
+        let Stmt::Expr(expr) = stmts[0].unpack() else {
+            panic!("expected Stmt::Expr");
+        };
+        let Expr::Pipeline(pipeline) = expr.unpack() else {
+            panic!("expected Expr::Pipeline");
+        };
+        let PipelineStage::CommandCall { name, args, .. } = &pipeline.stages[0] else {
+            panic!("expected CommandCall stage");
+        };
+        assert_eq!(name, "python3");
+        assert_eq!(args.len(), 1);
+        assert_eq!(
+            args[0].unpack(),
+            &Expr::String(vec![StringPart::Lit("-".into())])
+        );
+        assert!(
+            pipeline
+                .stages
+                .iter()
+                .any(|stage| matches!(stage, PipelineStage::Heredoc { .. })),
+            "expected a Heredoc stage"
+        );
+    }
+
+    #[test]
     fn test_parse_absolute_path_command() {
         let mut p = Parser::new("/bin/ls");
         let stmts = p.parse_statements().unwrap();

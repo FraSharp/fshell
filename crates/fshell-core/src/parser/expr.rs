@@ -451,6 +451,16 @@ impl Parser {
                 // command with an argument).
                 let is_raw_string = ident == "r" && next_char == Some('"') && next_pos == ident_end;
 
+                // Decide whether the leading word is a command name or the first
+                // operand of a value expression, by looking at the token that
+                // follows it. If the token is an infix operator the word is an
+                // operand (expression); otherwise it is a command name and the rest
+                // of the line is command words, redirections and pipes.
+                //
+                // `a + 1` / `sum + x` are expressions here, while `echo 1 + 2` is a
+                // command because `1` follows `echo`. A `-` is deliberately *not* an
+                // operator: after a command word it is a flag or the stdin/stdout
+                // marker (`cmd - <<EOF`), not subtraction.
                 let is_operator = match next_char {
                     // In a value/condition context `&&`/`||` are boolean
                     // operators, so `a && b` is an expression, not a command.
@@ -466,9 +476,11 @@ impl Parser {
                     }
                     Some('+') => {
                         // `chmod +x file`: `+x` is a flag-style argument, not addition.
-                        // Mirror the `-` handling: `+` is an operator only when not
-                        // immediately followed by an identifier-ish char (e.g. `a + b`,
-                        // `x + 1`), so `chmod +x ...` parses as a command call.
+                        // `+` is an operator only when not immediately followed by an
+                        // identifier-ish char (e.g. `a + b`, `x + 1`), so `chmod +x ...`
+                        // parses as a command call. Unlike `-`, a spaced `+` still binds
+                        // (`a + 1`, `sum + x` are expressions): `+` has no standalone
+                        // command-argument convention.
                         if next_pos + 1 < self.input.len() {
                             let nc = self.input[next_pos + 1];
                             !(nc.is_ascii_alphabetic() || nc.is_ascii_digit() || nc == '+')
@@ -486,14 +498,13 @@ impl Parser {
                         // `<=` is comparison operator. `<` (and `<<`, `<<<`, `<(`) is redirection / command argument.
                         next_pos + 1 < self.input.len() && self.input[next_pos + 1] == '='
                     }
-                    Some('-') => {
-                        if next_pos + 1 < self.input.len() {
-                            let nc = self.input[next_pos + 1];
-                            !(nc.is_ascii_alphabetic() || nc.is_ascii_digit() || nc == '-')
-                        } else {
-                            false
-                        }
-                    }
+                    // A `-` after the leading word is a command argument, never
+                    // subtraction: it is a flag (`-x`, `--long`, `-5`, `-$VAR`) or the
+                    // POSIX stdin/stdout marker (`cmd -`, `python3 - <<'PY'`, `cat -
+                    // file`). Subtraction in a command-capable position requires a
+                    // value on the left (`$a - $b`, `1 - 2`, `$((...))`) or a value
+                    // context (condition, interpolation, parenthesized expression).
+                    Some('-') => false,
                     Some('/') => {
                         // /<alpha> or /<digit> or // is a path, not division
                         if next_pos + 1 < self.input.len() {
