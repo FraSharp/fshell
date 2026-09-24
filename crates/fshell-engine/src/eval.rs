@@ -763,6 +763,19 @@ fn lookup_variable_fallback(name: &str, env: &Env) -> Result<Val, EngineError> {
     if name == "?" || name == "status" {
         return Ok(Val::Int(env.exit_code()));
     }
+    if name == "$" {
+        // `$$` — the shell's own process id.
+        return Ok(Val::Int(std::process::id() as i64));
+    }
+    if name == "!" {
+        // `$!` — pid of the most recent background job, or the null value.
+        let pid = env.last_bg_pid.load(Ordering::Relaxed);
+        return Ok(if pid > 0 {
+            Val::Int(pid as i64)
+        } else {
+            Val::Null
+        });
+    }
     if name == "env" {
         env.ensure_env_populated();
     }
@@ -787,6 +800,16 @@ fn lookup_variable_fallback(name: &str, env: &Env) -> Result<Val, EngineError> {
     } else {
         Ok(Val::Null)
     }
+}
+
+/// One-time nudge the first time a bare assignment auto-declares a variable.
+fn warn_auto_declare(env: &Env, name: &str) {
+    if env.auto_declare_warned.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "\x1b[2mfsh: `{name}=...` declared '{name}' (bash-compatible); prefer `let {name} = ...` for new variables\x1b[0m"
+    );
 }
 
 fn member_access_dispatch(val: Val, member: &str) -> Result<Val, EngineError> {
@@ -1555,16 +1578,19 @@ fn try_eval_stmt_sync_inner(
             {
                 return Some(Ok(Flow::Normal));
             }
-            let mut vars = env.vars.write();
-            if let Some(entry) = vars.get_mut(name) {
-                *entry = val;
-                Some(Ok(Flow::Normal))
-            } else {
-                Some(Err(EngineError::VariableNotFound {
-                    name: name.clone(),
-                    span: None,
-                }))
+            {
+                let mut vars = env.vars.write();
+                if let Some(entry) = vars.get_mut(name) {
+                    *entry = val;
+                    return Some(Ok(Flow::Normal));
+                }
+                // POSIX/bash semantics: a bare `NAME=value` declares the
+                // variable. fsh historically required `let`; match bash so
+                // real scripts run, but nudge once toward the native form.
+                vars.insert(name.clone(), val);
             }
+            warn_auto_declare(env, name);
+            Some(Ok(Flow::Normal))
         }
         Stmt::Update { name, op, expr } => {
             let val_res = try_eval_sync(expr, env)?;
@@ -1591,10 +1617,20 @@ fn try_eval_stmt_sync_inner(
                 *entry = new_val;
                 Some(Ok(Flow::Normal))
             } else {
-                Some(Err(EngineError::VariableNotFound {
-                    name: name.clone(),
-                    span: None,
-                }))
+                // bash: `x+=…` on an unset variable starts from "" (string
+                // append) or 0 (arithmetic).
+                let base = match (&val, *op) {
+                    (Val::String(_), BinOp::Add) => Val::String(String::new()),
+                    _ => Val::Int(0),
+                };
+                let new_val = match eval_binop(*op, base, val) {
+                    Ok(nv) => nv,
+                    Err(e) => return Some(Err(e)),
+                };
+                vars.insert(name.clone(), new_val);
+                drop(vars);
+                warn_auto_declare(env, name);
+                Some(Ok(Flow::Normal))
             }
         }
         Stmt::Break => Some(Ok(Flow::Break)),
@@ -1805,16 +1841,17 @@ async fn eval_stmt_inner(
             {
                 return Ok(Flow::Normal);
             }
-            let mut vars = env.vars.write();
-            if let Some(entry) = vars.get_mut(name) {
-                *entry = val;
-                Ok(Flow::Normal)
-            } else {
-                Err(EngineError::VariableNotFound {
-                    name: name.clone(),
-                    span: None,
-                })
+            {
+                let mut vars = env.vars.write();
+                if let Some(entry) = vars.get_mut(name) {
+                    *entry = val;
+                    return Ok(Flow::Normal);
+                }
+                // POSIX/bash semantics: a bare `NAME=value` declares the variable.
+                vars.insert(name.clone(), val);
             }
+            warn_auto_declare(env, name);
+            Ok(Flow::Normal)
         }
         Stmt::Update { name, op, expr } => {
             let val = eval_expr(expr, env).await?;
@@ -1831,10 +1868,16 @@ async fn eval_stmt_inner(
                 *entry = new_val;
                 Ok(Flow::Normal)
             } else {
-                Err(EngineError::VariableNotFound {
-                    name: name.clone(),
-                    span: None,
-                })
+                // bash: `x+=…` on an unset variable starts from "" or 0.
+                let base = match (&val, *op) {
+                    (Val::String(_), BinOp::Add) => Val::String(String::new()),
+                    _ => Val::Int(0),
+                };
+                let new_val = eval_binop(*op, base, val)?;
+                vars.insert(name.clone(), new_val);
+                drop(vars);
+                warn_auto_declare(env, name);
+                Ok(Flow::Normal)
             }
         }
         Stmt::FnDef {

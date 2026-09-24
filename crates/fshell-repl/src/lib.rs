@@ -1565,6 +1565,7 @@ async fn handle_line_generic_inner(
         span.finish(fshell_engine::trace::SpanOutcome::Ok);
     }
 
+    let force_posix = env.options.read().interp_mode == fshell_engine::frontend::InterpMode::Posix;
     let mut parser = Parser::new(line_trimmed);
     let mut parse_span = env.trace.span(
         env.trace_context,
@@ -1572,16 +1573,41 @@ async fn handle_line_generic_inner(
         env.trace_mode,
         serde_json::Map::new(),
     );
-    let parsed = parser.parse_statements();
+    let parsed = if force_posix {
+        None
+    } else {
+        Some(parser.parse_statements())
+    };
     if let Some(span) = parse_span.take() {
-        span.finish(if parsed.is_ok() {
+        span.finish(if matches!(parsed, Some(Ok(_))) {
             fshell_engine::trace::SpanOutcome::Ok
         } else {
             fshell_engine::trace::SpanOutcome::Error
         });
     }
     match parsed {
-        Ok(stmts) => {
+        None => match fshell_engine::frontend::run_posix(line_trimmed, env).await {
+            Ok(_) => exit_code = Some(env.exit_code()),
+            Err(pe) => {
+                env.set_last_error_with_source(
+                    FshDiag::new(pe.clone()),
+                    line_trimmed.to_string(),
+                    "repl".to_string(),
+                );
+                let err_str = {
+                    let opts = env.options.read();
+                    let config = fshell_render::RenderConfig {
+                        format: opts.error_format,
+                        color: opts.error_color,
+                        is_interactive: true,
+                    };
+                    render_error(pe, line_trimmed, "repl", &config)
+                };
+                eprintln!("{}", err_str);
+                exit_code = Some(1);
+            }
+        },
+        Some(Ok(stmts)) => {
             for stmt in stmts {
                 if let Stmt::Exit(_) = stmt.unpack() {
                     match eval_stmt(&stmt, env, false).await {
@@ -1870,51 +1896,47 @@ async fn handle_line_generic_inner(
                 }
             }
         }
-        Err(e) => {
-            if fshell_engine::login::looks_like_posix(line_trimmed)
-                && let Some(handler) = fshell_engine::posix_handler()
-            {
-                match handler(line_trimmed.to_string(), Vec::new(), env.clone(), false).await {
-                    Ok((code, _)) => {
-                        env.set_exit_code(code as i64);
-                        exit_code = Some(code as i64);
-                    }
-                    Err(pe) => {
-                        env.set_last_error_with_source(
-                            FshDiag::new(pe.clone()),
-                            line_trimmed.to_string(),
-                            "repl".to_string(),
-                        );
-                        let err_str = {
-                            let opts = env.options.read();
-                            let config = fshell_render::RenderConfig {
-                                format: opts.error_format,
-                                color: opts.error_color,
-                                is_interactive: true,
-                            };
-                            render_error(pe, line_trimmed, "repl", &config)
-                        };
-                        eprintln!("{}", err_str);
-                        exit_code = Some(1);
-                    }
+        Some(Err(e)) => {
+            match fshell_engine::frontend::try_posix_fallback(line_trimmed, env).await {
+                Ok(Some(_flow)) => {
+                    exit_code = Some(env.exit_code());
                 }
-            } else {
-                env.set_last_error_with_source(
-                    FshDiag::new(e.clone()),
-                    line_trimmed.to_string(),
-                    "repl".to_string(),
-                );
-                let err_str = {
-                    let opts = env.options.read();
-                    let config = fshell_render::RenderConfig {
-                        format: opts.error_format,
-                        color: opts.error_color,
-                        is_interactive: true,
+                Ok(None) => {
+                    env.set_last_error_with_source(
+                        FshDiag::new(e.clone()),
+                        line_trimmed.to_string(),
+                        "repl".to_string(),
+                    );
+                    let err_str = {
+                        let opts = env.options.read();
+                        let config = fshell_render::RenderConfig {
+                            format: opts.error_format,
+                            color: opts.error_color,
+                            is_interactive: true,
+                        };
+                        render_error(e, line_trimmed, "repl", &config)
                     };
-                    render_error(e, line_trimmed, "repl", &config)
-                };
-                eprintln!("{}", err_str);
-                exit_code = Some(1);
+                    eprintln!("{}", err_str);
+                    exit_code = Some(1);
+                }
+                Err(pe) => {
+                    env.set_last_error_with_source(
+                        FshDiag::new(pe.clone()),
+                        line_trimmed.to_string(),
+                        "repl".to_string(),
+                    );
+                    let err_str = {
+                        let opts = env.options.read();
+                        let config = fshell_render::RenderConfig {
+                            format: opts.error_format,
+                            color: opts.error_color,
+                            is_interactive: true,
+                        };
+                        render_error(pe, line_trimmed, "repl", &config)
+                    };
+                    eprintln!("{}", err_str);
+                    exit_code = Some(1);
+                }
             }
         }
     }

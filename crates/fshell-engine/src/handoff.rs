@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Serializable snapshot of shell environment for process handoff.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -40,7 +40,21 @@ pub fn save_handoff(state: &HandoffState) -> Result<PathBuf, String> {
     }
 
     let final_path = cache_dir.join("handoff.json");
-    let tmp_path = cache_dir.join("handoff.json.tmp");
+    save_handoff_to(&final_path, state)?;
+    Ok(final_path)
+}
+
+/// Atomically write handoff state to an explicit path.
+///
+/// The caller chooses the path so concurrent callers — e.g. several background
+/// jobs spawned at once — do not clobber a single shared file.
+///
+/// Durability: fsync the temp file before rename and fsync the parent dir
+/// after rename so a crash/power loss cannot leave a torn handoff.
+/// Privacy: file is 0600 — handoff contains env vars / secrets.
+pub fn save_handoff_to(final_path: &Path, state: &HandoffState) -> Result<(), String> {
+    let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp_path = final_path.with_extension("tmp");
 
     let content = serde_json::to_string_pretty(state)
         .map_err(|e| format!("Failed to serialize handoff state: {e}"))?;
@@ -74,19 +88,19 @@ pub fn save_handoff(state: &HandoffState) -> Result<PathBuf, String> {
         }
     }
 
-    std::fs::rename(&tmp_path, &final_path)
+    std::fs::rename(&tmp_path, final_path)
         .map_err(|e| format!("Failed to atomically move handoff file: {e}"))?;
 
     // fsync parent dir so the rename is durable.
-    if let Ok(dir) = std::fs::File::open(&cache_dir) {
+    if let Ok(dir) = std::fs::File::open(parent) {
         let _ = dir.sync_all();
     }
     #[cfg(unix)]
     {
-        let _ = std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(final_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    Ok(final_path)
+    Ok(())
 }
 
 /// Read and restore handoff state from file.

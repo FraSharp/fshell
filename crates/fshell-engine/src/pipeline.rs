@@ -3422,16 +3422,19 @@ pub async fn run_script(input: &str, env: &Env) -> Result<Flow, EngineError> {
 }
 
 async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
+    // Explicit POSIX mode bypasses the native parser entirely.
+    if env.options.read().interp_mode == crate::frontend::InterpMode::Posix {
+        return crate::frontend::run_posix(input, env).await;
+    }
+
     let mut parser = Parser::new(input);
     let stmts = match parser.parse_statements() {
         Ok(s) => s,
         Err(e) => {
-            if crate::login::looks_like_posix(input)
-                && let Some(handler) = crate::posix_handler()
-            {
-                let (code, _) = handler(input.to_string(), Vec::new(), env.clone(), false).await?;
-                env.set_exit_code(code as i64);
-                return Ok(Flow::Normal);
+            // Native parsing failed before anything executed: safe to hand the
+            // whole input to POSIX if it is valid there.
+            if let Some(flow) = crate::frontend::try_posix_fallback(input, env).await? {
+                return Ok(flow);
             }
             return Err(e.into());
         }

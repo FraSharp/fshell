@@ -1135,9 +1135,9 @@ impl Parser {
                     self.next_char();
                     return Ok(Expr::Variable("?".to_string()));
                 }
-                // Check for positional / special variables: $#, $@, $*, $$, $0, $1..$9
+                // Check for positional / special variables: $#, $@, $*, $$, $!, $0, $1..$9
                 if let Some(c) = self.peek() {
-                    if c == '#' || c == '@' || c == '*' || c == '$' {
+                    if c == '#' || c == '@' || c == '*' || c == '$' || c == '!' {
                         self.next_char();
                         return Ok(Expr::Variable(c.to_string()));
                     }
@@ -1451,7 +1451,7 @@ impl Parser {
                 self.cmd_arg_mode = saved_arg;
                 Ok(Some(e))
             }
-            Some(sp @ ('?' | '#' | '@' | '*' | '$')) => {
+            Some(sp @ ('?' | '#' | '@' | '*' | '$' | '!')) => {
                 self.next_char();
                 Ok(Some(Expr::Variable(sp.to_string())))
             }

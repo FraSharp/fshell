@@ -51,9 +51,39 @@ where
 pub fn posix_handler() -> Option<PosixHandler> {
     POSIX_HANDLER.read().clone()
 }
+
+/// POSIX syntax classification reported by the registered classifier.
+///
+/// Mirrors `fshell_posix::parser::PosixSyntax` without forcing a dependency:
+/// the binary crate registers a converter at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PosixSyntax {
+    Complete,
+    Incomplete,
+    Invalid,
+}
+
+type PosixClassifier = Arc<dyn Fn(&str) -> PosixSyntax + Send + Sync>;
+static POSIX_CLASSIFIER: fshell_core::RwLock<Option<PosixClassifier>> =
+    fshell_core::RwLock::new(None);
+
+/// Register the POSIX syntax classifier (see [`PosixSyntax`]).
+pub fn register_posix_classifier<F>(classifier: F)
+where
+    F: Fn(&str) -> PosixSyntax + Send + Sync + 'static,
+{
+    *POSIX_CLASSIFIER.write() = Some(Arc::new(classifier));
+}
+
+/// Classify `input` as POSIX syntax, if a classifier is registered.
+pub fn classify_posix(input: &str) -> Option<PosixSyntax> {
+    POSIX_CLASSIFIER.read().as_ref().map(|c| c(input))
+}
+pub mod background;
 pub mod caps;
 pub mod completions;
 pub mod config;
+pub mod frontend;
 pub mod login;
 pub use completions::{load_completions, save_completions};
 pub mod exe;
@@ -806,6 +836,16 @@ pub struct ShellOptions {
     pub command_binaries: std::collections::HashMap<String, String>,
     pub confirm_destructive: bool,
     pub sandbox_all: bool,
+    /// How to choose between the native and POSIX engines.
+    #[serde(default)]
+    pub interp_mode: frontend::InterpMode,
+    /// Print a subtle notice when a line is executed via the POSIX fallback.
+    #[serde(default = "default_true")]
+    pub posix_fallback_notice: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ShellOptions {
@@ -850,6 +890,8 @@ impl Default for ShellOptions {
             command_binaries: std::collections::HashMap::new(),
             confirm_destructive: true,
             sandbox_all: false,
+            interp_mode: frontend::InterpMode::default(),
+            posix_fallback_notice: true,
         }
     }
 }
@@ -1003,6 +1045,11 @@ pub struct Env {
     /// iteration loop — the child inherits the correct environment via fork().
     pub is_env_modified: Arc<AtomicBool>,
     pub background_count: Arc<AtomicU64>,
+    /// Set once when the first bare `NAME=value` auto-declares a variable, so the
+    /// "prefer `let`" hint is shown at most once per session.
+    pub auto_declare_warned: Arc<std::sync::atomic::AtomicBool>,
+    /// PID of the most recent background job (`$!`), or 0 when there is none.
+    pub last_bg_pid: Arc<std::sync::atomic::AtomicI32>,
     pub background_notify: Arc<Notify>,
     /// Set while the REPL is executing a command (to distinguish "command is
     /// running, no foreground job" i.e. a builtin from "REPL is idle").
@@ -1885,6 +1932,8 @@ impl Env {
             backpressure_count: Arc::new(AtomicU64::new(0)),
             is_loading_init_script: Arc::new(AtomicBool::new(false)),
             is_env_modified: Arc::new(AtomicBool::new(false)),
+            auto_declare_warned: Arc::new(AtomicBool::new(false)),
+            last_bg_pid: Arc::new(std::sync::atomic::AtomicI32::new(0)),
             background_count: Arc::new(AtomicU64::new(0)),
             background_notify: Arc::new(Notify::new()),
             is_command_running: Arc::new(AtomicBool::new(false)),
@@ -2055,6 +2104,8 @@ impl Env {
             backpressure_count: Arc::new(AtomicU64::new(0)),
             is_loading_init_script: Arc::new(AtomicBool::new(false)),
             is_env_modified: Arc::new(AtomicBool::new(false)),
+            auto_declare_warned: Arc::new(AtomicBool::new(false)),
+            last_bg_pid: Arc::new(std::sync::atomic::AtomicI32::new(0)),
             background_count: Arc::new(AtomicU64::new(0)),
             background_notify: Arc::new(Notify::new()),
             is_command_running: Arc::new(AtomicBool::new(false)),
@@ -2159,6 +2210,8 @@ impl Env {
             backpressure_count: self.backpressure_count.clone(),
             is_loading_init_script: self.is_loading_init_script.clone(),
             is_env_modified: self.is_env_modified.clone(),
+            auto_declare_warned: self.auto_declare_warned.clone(),
+            last_bg_pid: self.last_bg_pid.clone(),
             background_count: self.background_count.clone(),
             background_notify: self.background_notify.clone(),
             is_command_running: self.is_command_running.clone(),

@@ -28,7 +28,31 @@ pub mod posix_builtins;
 pub use arithmetic::eval_arithmetic_expr;
 pub use eval::{EvalConfig, PosixExit, eval_source, eval_source_capture, eval_source_stream};
 pub use expand::{ExpansionConfig, expand_word, split_ifs};
-pub use parser::{ParsedScript, parse_posix_script};
+pub use parser::{ParsedScript, PosixSyntax, classify_posix, parse_posix_script};
 
 /// POSIX shell exit status — 0 success, non-zero failure, 127 not found, 126 not executable.
 pub type ExitCode = i32;
+
+/// Install the POSIX engine into `fshell-engine`.
+///
+/// Registers both the evaluation handler and the syntax classifier, so the
+/// engine's unified front-end can fall back to POSIX and decide continuation
+/// state. Idempotent; call once per process (the binary and the test harness
+/// both do).
+pub fn install_engine_hooks() {
+    fshell_engine::register_posix_handler(
+        |content: String, args: Vec<String>, env: fshell_engine::Env, capture: bool| async move {
+            let parsed = parse_posix_script(&content)?;
+            let cfg = EvalConfig {
+                positional: args,
+                ..Default::default()
+            };
+            eval_source_stream(&parsed, &env, &cfg, capture).await
+        },
+    );
+    fshell_engine::register_posix_classifier(|input: &str| match classify_posix(input) {
+        PosixSyntax::Complete => fshell_engine::PosixSyntax::Complete,
+        PosixSyntax::Incomplete => fshell_engine::PosixSyntax::Incomplete,
+        PosixSyntax::Invalid => fshell_engine::PosixSyntax::Invalid,
+    });
+}

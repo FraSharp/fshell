@@ -2264,14 +2264,16 @@ pub async fn run_ftui_repl(
                                         let trimmed = command_line.trim().to_string();
                                         if !trimmed.is_empty() {
                                             let validation =
-                                                fshell_core::validate_input(&command_line);
+                                                fshell_engine::frontend::classify_input(
+                                                    &command_line,
+                                                );
                                             let is_last_line = {
                                                 let chars = text_buf.chars();
                                                 let cursor = text_buf.cursor();
                                                 !chars.iter().skip(cursor).any(|&c| c == '\n')
                                             };
                                             match validation {
-                                                fshell_core::ValidationResult::Incomplete {
+                                                fshell_engine::frontend::InputClass::Incomplete {
                                                     ..
                                                 } => {
                                                     history_index = None;
@@ -2863,14 +2865,15 @@ pub async fn run_ftui_repl(
                             let command_line = text_buf.text();
                             let trimmed = command_line.trim().to_string();
                             if !trimmed.is_empty() {
-                                let validation = fshell_core::validate_input(&command_line);
+                                let validation =
+                                    fshell_engine::frontend::classify_input(&command_line);
                                 let is_last_line = {
                                     let chars = text_buf.chars();
                                     let cursor = text_buf.cursor();
                                     !chars.iter().skip(cursor).any(|&c| c == '\n')
                                 };
                                 match validation {
-                                    fshell_core::ValidationResult::Incomplete { .. } => {
+                                    fshell_engine::frontend::InputClass::Incomplete { .. } => {
                                         // Incomplete multi-line input — insert newline with auto-indentation and remain in editor
                                         history_index = None;
                                         let indent = fshell_core::compute_indent_depth_at(

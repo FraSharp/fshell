@@ -16,6 +16,9 @@ pub struct EvalConfig {
     pub positional: Vec<String>,
     /// If true, errexit (-e) handling is active inside this eval.
     pub errexit: bool,
+    /// The original source text, used to slice the body of a background job so
+    /// it can be re-run in a child process. Maybe empty for nested evals.
+    pub source: String,
 }
 
 /// Control-flow for POSIX evaluation.
@@ -43,7 +46,13 @@ pub async fn eval_source(
         None
     };
 
-    let result = eval_program(&parsed.program, env, cfg).await;
+    let result = {
+        let run_cfg = EvalConfig {
+            source: parsed.source.clone(),
+            ..cfg.clone()
+        };
+        eval_program(&parsed.program, env, &run_cfg).await
+    };
 
     if let Some(saved) = saved_positional {
         restore_positional(env, saved);
@@ -90,11 +99,15 @@ pub async fn eval_source_stream(
     };
     let mut last_code = 0;
 
+    let run_cfg = EvalConfig {
+        source: parsed.source.clone(),
+        ..cfg.clone()
+    };
     for complete in &parsed.program.complete_commands {
         match eval_compound_list_stream(
             complete,
             env,
-            cfg,
+            &run_cfg,
             IoStreamConfig {
                 capture_stdout,
                 ..Default::default()
@@ -207,6 +220,27 @@ fn restore_positional(env: &Env, saved: Vec<String>) {
     }
 }
 
+/// Extract the exact source text of an and-or list so a background job can be
+/// re-run verbatim in a child process.
+fn item_fragment(list: &AndOrList, source: &str) -> String {
+    if !source.is_empty()
+        && let Some(span) = SourceLocation::location(list)
+        && let Some(text) = slice_chars(source, span.start.index, span.end.index)
+        && !text.trim().is_empty()
+    {
+        return text;
+    }
+    format!("{list}")
+}
+
+/// Slice `source` by character indices (brush positions are char-based).
+fn slice_chars(source: &str, start: usize, end: usize) -> Option<String> {
+    if start > end {
+        return None;
+    }
+    Some(source.chars().skip(start).take(end - start).collect())
+}
+
 #[async_recursion]
 async fn eval_program(program: &Program, env: &Env, cfg: &EvalConfig) -> Result<i32, PosixError> {
     let mut last_code = 0;
@@ -241,6 +275,13 @@ async fn eval_compound_list_stream(
         None
     };
     for (i, item) in list.0.iter().enumerate() {
+        // `cmd &` — run the and-or list in a child process and continue.
+        if matches!(item.1, SeparatorOperator::Async) {
+            let fragment = item_fragment(&item.0, &cfg.source);
+            fshell_engine::background::spawn_background(&fragment, env)?;
+            last = 0;
+            continue;
+        }
         let step_io = if i == 0 {
             IoStreamConfig {
                 stdin_bytes: io_cfg.stdin_bytes.clone(),
@@ -1786,6 +1827,7 @@ async fn eval_simple_command_inner(
         let fn_cfg = EvalConfig {
             positional: args.to_vec(),
             errexit: cfg.errexit,
+            source: cfg.source.clone(),
         };
         let (code, out) = eval_compound_command_stream(&func_body, env, &fn_cfg, io_cfg).await?;
         restore_positional(env, saved);
@@ -1943,21 +1985,22 @@ async fn handle_posix_wait(args: &[String], env: &Env) -> Result<i32, PosixError
                 }
                 last_code = env.exit_code() as i32;
             } else {
-                // No job, try direct waitpid (may be external child)
+                // No job: the process may be an external child (already reaped
+                // by the background reaper) or not ours. POSIX treats an
+                // unknown pid as status 127 and keeps going — never fatal.
                 let mut status = 0;
                 let res = unsafe { libc::waitpid(pid, &mut status, 0) };
                 if res <= 0 {
-                    return Err(PosixError::Engine(EngineError::Generic {
-                        message: format!("wait: pid {pid} is not a child of this shell"),
-                        span: None,
-                    }));
-                }
-                let code = if (status & 0x7f) == 0 {
-                    (status >> 8) & 0xff
+                    eprintln!("wait: pid {pid} is not a child of this shell");
+                    last_code = 127;
                 } else {
-                    128 + (status & 0x7f)
-                };
-                last_code = code;
+                    let code = if (status & 0x7f) == 0 {
+                        (status >> 8) & 0xff
+                    } else {
+                        128 + (status & 0x7f)
+                    };
+                    last_code = code;
+                }
             }
             continue;
         }
@@ -2111,12 +2154,25 @@ async fn run_external_command(
         cmd.stderr(Stdio::from(f));
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
-        PosixError::Engine(EngineError::IoError {
-            message: format!("{}: {}", cmd_name, e),
-            span: None,
-        })
-    })?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // POSIX: a missing command is status 127, not a fatal error — the
+            // surrounding script (e.g. a loop) must keep running.
+            eprintln!("{cmd_name}: command not found");
+            return Ok((127, None));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("{cmd_name}: permission denied");
+            return Ok((126, None));
+        }
+        Err(e) => {
+            return Err(PosixError::Engine(EngineError::IoError {
+                message: format!("{}: {}", cmd_name, e),
+                span: None,
+            }));
+        }
+    };
 
     let stdin_task = if let Some(bytes) = effective_stdin
         && let Some(mut stdin) = child.stdin.take()

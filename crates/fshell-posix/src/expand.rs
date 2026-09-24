@@ -151,7 +151,17 @@ fn resolve_parameter_with_presence(
             SpecialParameter::LastExitStatus => (env.exit_code().to_string(), true),
             SpecialParameter::CurrentOptionFlags => (String::new(), true),
             SpecialParameter::ProcessId => (std::process::id().to_string(), true),
-            SpecialParameter::LastBackgroundProcessId => ("0".to_string(), true),
+            SpecialParameter::LastBackgroundProcessId => {
+                // `$!` is the pid of the most recent background job. It must
+                // never be "0": `kill -9 $!` would then signal the whole
+                // process group. Unset when there is no background job.
+                let pid = env.last_bg_pid.load(std::sync::atomic::Ordering::Relaxed);
+                if pid > 0 {
+                    (pid.to_string(), true)
+                } else {
+                    (String::new(), false)
+                }
+            }
             SpecialParameter::ShellName => ("fsh".to_string(), true),
         },
         Parameter::Named(name) => {

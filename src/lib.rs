@@ -72,6 +72,10 @@ struct Cli {
     /// Run in POSIX compatibility mode (sh/bash execution via fshell-posix)
     #[arg(long = "posix")]
     posix: bool,
+
+    /// Disable the POSIX fallback — interpret input as fsh-native only
+    #[arg(long = "native")]
+    native: bool,
 }
 
 /// Apply the CLI's error-rendering and suggestion flags to shell options.
@@ -103,6 +107,11 @@ fn apply_cli_render_options(env: &fshell_engine::Env, cli: &Cli) {
                 );
             }
         }
+    }
+    if cli.posix {
+        opts.interp_mode = fshell_engine::frontend::InterpMode::Posix;
+    } else if cli.native {
+        opts.interp_mode = fshell_engine::frontend::InterpMode::Native;
     }
 }
 
@@ -765,16 +774,7 @@ pub fn setup_panic_hook() {
 }
 
 fn init_posix_handler() {
-    fshell_engine::register_posix_handler(
-        |content: String, args: Vec<String>, env: fshell_engine::Env, capture: bool| async move {
-            let parsed = fshell_posix::parser::parse_posix_script(&content)?;
-            let cfg = fshell_posix::eval::EvalConfig {
-                positional: args,
-                ..Default::default()
-            };
-            fshell_posix::eval::eval_source_stream(&parsed, &env, &cfg, capture).await
-        },
-    );
+    fshell_posix::install_engine_hooks();
 }
 
 #[cfg(test)]

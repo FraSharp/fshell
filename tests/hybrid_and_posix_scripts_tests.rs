@@ -3,20 +3,13 @@ use fshell_core::Val;
 use fshell_engine::Env;
 
 fn setup_test_env() -> Env {
+    fshell_core::set_var("FSH_TEST_ENV", "1");
+    fshell_core::set_var("FSH_BINARY_PATH", env!("CARGO_BIN_EXE_fsh"));
     let env = Env::for_command();
     fshell_engine::populate_env_from_host(&env);
     fshell_builtins::init(&env);
     fshell_bridge::init(&env);
-    fshell_engine::register_posix_handler(
-        |content: String, args: Vec<String>, env: Env, capture: bool| async move {
-            let parsed = fshell_posix::parser::parse_posix_script(&content)?;
-            let cfg = fshell_posix::eval::EvalConfig {
-                positional: args,
-                ..Default::default()
-            };
-            fshell_posix::eval::eval_source_stream(&parsed, &env, &cfg, capture).await
-        },
-    );
+    fshell_posix::install_engine_hooks();
     env
 }
 

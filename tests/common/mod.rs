@@ -34,6 +34,9 @@ pub fn setup_test_env() -> Env {
     let z_db_path = std::env::temp_dir().join(format!("fsh_z_test_{}.json", std::process::id()));
     set_var("FSH_Z_DB_PATH", &z_db_path.to_string_lossy());
     set_var("FSH_TEST_ENV", "1");
+    // Background jobs spawn a child `fsh`; point them at the real binary rather
+    // than the test runner (see `fshell_engine::exe::resolve_exe`).
+    set_var("FSH_BINARY_PATH", env!("CARGO_BIN_EXE_fsh"));
 
     let env = Env::new();
     {
@@ -42,16 +45,7 @@ pub fn setup_test_env() -> Env {
     }
     fshell_builtins::init(&env);
     fshell_bridge::init(&env);
-    fshell_engine::register_posix_handler(
-        |content: String, args: Vec<String>, env: fshell_engine::Env, capture: bool| async move {
-            let parsed = fshell_posix::parser::parse_posix_script(&content)?;
-            let cfg = fshell_posix::eval::EvalConfig {
-                positional: args,
-                ..Default::default()
-            };
-            fshell_posix::eval::eval_source_stream(&parsed, &env, &cfg, capture).await
-        },
-    );
+    fshell_posix::install_engine_hooks();
     env
 }
 

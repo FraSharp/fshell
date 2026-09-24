@@ -20,6 +20,15 @@ pub fn resolve_exe() -> PathBuf {
 }
 
 fn resolve_exe_inner() -> PathBuf {
+    // Explicit override — used by the test harness to point background jobs at
+    // the real `fsh` binary, since `current_exe()` is the test runner there.
+    if let Some(override_path) = std::env::var_os("FSH_BINARY_PATH") {
+        let candidate = PathBuf::from(override_path);
+        if looks_valid(&candidate) {
+            return candidate;
+        }
+    }
+
     if let Ok(p) = std::env::current_exe() {
         if looks_valid(&p) {
             return p;
