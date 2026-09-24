@@ -14,7 +14,6 @@ members = [
     "crates/fshell-sandbox",
     "crates/fshell-hash",
     "crates/fshell-git",
-    "crates/fshell-panes",
     "crates/fshell-posix",
     "fuzz",
 ]
@@ -192,6 +191,5 @@ ustr = { workspace = true }
 fshell-sandbox = { path = "crates/fshell-sandbox" }
 fshell-semantic = { path = "crates/fshell-semantic" }
 fshell-hash = { workspace = true }
-fshell-panes = { path = "crates/fshell-panes" }
 ratatui = { workspace = true }
 proptest = { workspace = true }

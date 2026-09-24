@@ -37,10 +37,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 crossterm = { workspace = true }
 fshell-terminal = { workspace = true }
-futures = { workspace = true }
-tokio-util = { workspace = true }
 fshell-ls = { path = "../fshell-ls" }
-fshell-panes = { path = "../fshell-panes" }
 fshell-hash = { workspace = true }
 bytes = { workspace = true }
 toml_edit = { workspace = true }

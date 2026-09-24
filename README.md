@@ -33,7 +33,6 @@ structured like nushell, familiar like zsh, clean like rust.
   - [sqlite history explorer (`Ctrl+H`) & recall (`Ctrl+R`)](#sqlite-history-explorer-ctrlh--recall-ctrlr)
   - [aliases expand as you type](#aliases-expand-as-you-type)
   - [sub-millisecond git prompt & transient mode](#sub-millisecond-git-prompt--transient-mode)
-  - [terminal multiplexer (`mux`)](#terminal-multiplexer-mux)
   - [visual theme engine & config tui (`config edit`)](#visual-theme-engine--config-tui-config-edit)
 - [polyglot posix engine (zero migration pain)](#polyglot-posix-engine-zero-migration-pain)
 - [scripting in `.fsh`](#scripting-in-fsh)
@@ -305,16 +304,6 @@ one <kbd>Backspace</kbd> right afterwards puts the alias name back. it's on by d
 - **native git index inspection**: git branch names, dirty status, staged changes, and ahead/behind counts are read directly from git's binary indices without spawning slow `git status` subprocesses.
 - **transient prompt**: previous prompts collapse into a compact single line upon pressing <kbd>Enter</kbd>, keeping your scrollback clean and readable.
 
-### terminal multiplexer (`mux`)
-
-split terminal panes and manage workspace tabs directly inside the shell without needing `tmux` or `zellij`:
-
-```fsh
-mux split -h            # split pane horizontally
-mux split -v            # split pane vertically
-mux new-tab             # create a new tab
-```
-
 ### visual theme engine & config tui (`config edit`)
 
 - **24-bit truecolor theming**: built-in syntax highlighting palettes (Catppuccin, Gruvbox, Nord) with custom TOML theme support (`prompt.toml`).
@@ -476,7 +465,6 @@ fshell is a work in progress, and i'd rather list what isn't done than pretend o
 - **the sandbox and the capability system are early.** external-process sandboxing falls back to doing nothing where Landlock isn't available, and capabilities stay off unless you start with `-s`.
 - **`vault` isn't security-audited.** the crypto is hand-rolled; i wouldn't keep anything you'd be sad to lose in it yet.
 - **`json` and `csv` are not `jq`.** `json` ignores a query argument for now, and `csv` doesn't understand quoted fields.
-- **`mux` is new.** panes can outlive their process and the fd cleanup isn't perfect yet.
 - **`select` and `exec` do less than the docs imply.** `select` is an interactive picker, not a column projector, and `exec` runs the command as a normal job instead of replacing the shell process.
 - **`$?` in native scripts is unreliable right now** — it can get reset before a command's arguments are expanded, so don't lean on it in `.fsh` yet. the posix layer's `$?` is separate.
 

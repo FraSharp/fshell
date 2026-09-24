@@ -297,16 +297,7 @@ saves or restores interactive session workspaces.
 
 ---
 
-## terminal multiplexing & integrations
-
-### `mux`
-terminal multiplexer commands for split panes and windows:
-
-```fsh
-mux split -h            # split pane horizontally
-mux split -v            # split pane vertically
-mux new-tab             # create new tab
-```
+## integrations
 
 ### `direnv_init` / `zoxide_init` / `starship_init` / `fzf_init`
 helper builtins that emit initialization scripts for third-party shell tools.

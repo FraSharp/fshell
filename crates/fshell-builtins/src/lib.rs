@@ -31,7 +31,6 @@ pub mod help;
 pub mod integrations;
 pub mod intent;
 pub mod json;
-pub mod mux;
 pub mod ps;
 pub mod read;
 #[cfg(feature = "replace")]
@@ -102,7 +101,6 @@ pub fn init(env: &Env) {
         ("bindkey".to_string(), Arc::new(builtin_bind)),
         ("which".to_string(), Arc::new(which_builtin)),
         ("explain".to_string(), Arc::new(explain_builtin)),
-        ("mux".to_string(), Arc::new(mux::mux_builtin)),
         ("ls".to_string(), Arc::new(ls_builtin)),
         ("files".to_string(), Arc::new(files::files_builtin)),
         ("json".to_string(), Arc::new(json::json_builtin)),

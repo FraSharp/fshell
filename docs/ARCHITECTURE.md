@@ -42,7 +42,6 @@ this document describes the internal architecture of fshell (`fsh`) — workspac
   - [fshell-git](#fshell-git)
   - [fshell-render](#fshell-render)
   - [fshell-sandbox](#fshell-sandbox)
-  - [fshell-panes](#fshell-panes)
   - [fshell-repl](#fshell-repl)
 - [security & sandboxing](#security--sandboxing)
 - [performance architecture](#performance-architecture)
@@ -64,20 +63,18 @@ key architecture traits:
 
 ## workspace map & dependency graph
 
-the workspace is organized into 13 crates with strict dependency layering:
+the workspace is organized into 12 crates with strict dependency layering:
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
 │                           fshell (fsh)                            │
 └─────────────────────────────────┬─────────────────────────────────┘
                                   │
-      ┌───────────────────────────┴───────────────────────────┐
-      │                                                       │
-┌─────▼───────────┐                                  ┌────────▼────────┐
-│   fshell-repl   │                                  │   fshell-panes  │
-└─────┬───────────┘                                  └─────────┬───────┘
-      │                                                        │
-      ├────────────────────────────────────────────────────────┘
+      ┌───────────────────────────┘
+      │
+┌─────▼───────────┐
+│   fshell-repl   │
+└─────┬───────────┘
       │
 ┌─────▼───────────┐      ┌───────────────────┐      ┌──────────────────┐
 │  fshell-bridge  │      │  fshell-builtins  │      │   fshell-posix   │
@@ -117,7 +114,6 @@ the workspace is organized into 13 crates with strict dependency layering:
 | `fshell-builtins` | ~117 built-in commands registered into `Env` | `fshell-core`, `fshell-engine`, `fshell-ls`, `fshell-capabilities` |
 | `fshell-bridge` | external command fallback, globbing, path caching | `fshell-core`, `fshell-engine`, `fshell-capabilities` |
 | `fshell-posix` | POSIX/Bash syntax parser and runtime engine | `fshell-core`, `fshell-engine` |
-| `fshell-panes` | terminal multiplexer library and daemon binaries | `fshell-core`, `fshell-engine`, `crossterm`, `ratatui` |
 | `fshell-repl` | interactive prompt, FTUI, native line-editor, completions, config TUI, SQLite history | `fshell-engine`, `fshell-builtins`, `fshell-bridge`, `ratatui` |
 
 ---
@@ -376,9 +372,6 @@ miette-based diagnostic rendering engine. converts engine and parser errors into
 implements subprocess sandboxing via OS-level security primitives:
 - **Linux**: Landlock security rules and namespace unsharing.
 - **macOS**: SBPL (Seatbelt) sandbox profiles applied in subprocess `pre_exec` fork hooks.
-
-### fshell-panes
-terminal multiplexing core supporting split panes, tabbed windows, session attaching, and daemon communication (`fshell-panesd`).
 
 ### fshell-repl
 the interactive terminal frontend. integrates Reedline for line editing, FTUI for TUI rendering, interactive configuration visual editor (`config tui`), prompt customizer studio, SQLite history storage, fuzzy completion menus, and real-time syntax highlighting.

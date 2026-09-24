@@ -15,7 +15,6 @@ fshell-engine = { path = "../crates/fshell-engine" }
 fshell-builtins = { path = "../crates/fshell-builtins" }
 fshell-posix = { path = "../crates/fshell-posix" }
 fshell-hash = { path = "../crates/fshell-hash" }
-fshell-panes = { path = "../crates/fshell-panes" }
 brush-parser = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 serde_json = { workspace = true }
@@ -75,12 +74,6 @@ doc = false
 [[bin]]
 name = "codecs"
 path = "fuzz_targets/codecs.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "terminal_grid"
-path = "fuzz_targets/terminal_grid.rs"
 test = false
 doc = false
 
