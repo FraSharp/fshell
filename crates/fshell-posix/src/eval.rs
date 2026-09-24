@@ -866,8 +866,10 @@ async fn eval_compound_command_stream(
             eval_compound_list_stream(&brace.list, env, cfg, io_cfg).await
         }
         CompoundCommand::Subshell(sub) => {
-            let child = crate::bridge::fork_env_for_subshell(env);
-            let (code, out) = eval_compound_list_stream(&sub.list, &child, cfg, io_cfg).await?;
+            // A subshell is a real child process: it gets its own PID and
+            // signals, and its `exit`/assignments cannot touch the parent.
+            let fragment = compound_source(&sub.list, &cfg.source);
+            let (code, out) = run_child_shell(&fragment, io_cfg, env).await?;
             env.set_exit_code(code as i64);
             Ok((code, out))
         }
@@ -2096,6 +2098,12 @@ async fn write_builtin_output(
     }
 }
 
+/// Failure from a child process's stdout pump task.
+enum StdoutPumpError {
+    DownstreamClosed,
+    Io(std::io::Error),
+}
+
 async fn run_external_command(
     cmd_name: &str,
     args: &[String],
@@ -2105,12 +2113,6 @@ async fn run_external_command(
     env: &Env,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
     use std::process::Stdio;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    enum StdoutPumpError {
-        DownstreamClosed,
-        Io(std::io::Error),
-    }
 
     let effective_stdin = redir
         .stdin_bytes
@@ -2189,7 +2191,7 @@ async fn run_external_command(
         cmd.stderr(Stdio::from(f));
     }
 
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // POSIX: a missing command is status 127, not a fatal error — the
@@ -2209,11 +2211,36 @@ async fn run_external_command(
         }
     };
 
-    let stdin_task = if let Some(bytes) = effective_stdin
+    let stdin_bytes = effective_stdin.map(<[u8]>::to_vec);
+    let (status, captured_stdout) = finish_child(child, cmd_name, &mut io_cfg, stdin_bytes).await?;
+
+    let code = status.code().unwrap_or(127);
+    env.set_exit_code(code as i64);
+
+    if io_cfg.capture_stdout && redir.stdout_file.is_none() && io_cfg.stdout_stream.is_none() {
+        Ok((code, captured_stdout))
+    } else {
+        Ok((code, None))
+    }
+}
+
+/// Pump a spawned child's stdin/stdout according to the POSIX stream
+/// configuration and wait for it to exit.
+///
+/// Shared by external commands and by `( … )` subshells so both honour stdin
+/// bytes/streams and stdout streams/capture identically.
+async fn finish_child(
+    mut child: tokio::process::Child,
+    label: &str,
+    io_cfg: &mut IoStreamConfig,
+    stdin_bytes: Option<Vec<u8>>,
+) -> Result<(std::process::ExitStatus, Option<Vec<u8>>), PosixError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stdin_task = if let Some(bytes) = stdin_bytes
         && let Some(mut stdin) = child.stdin.take()
     {
-        let b = bytes.to_vec();
-        Some(tokio::spawn(async move { stdin.write_all(&b).await }))
+        Some(tokio::spawn(async move { stdin.write_all(&bytes).await }))
     } else if let Some(mut rx) = io_cfg.stdin_stream.take()
         && let Some(mut stdin) = child.stdin.take()
     {
@@ -2275,7 +2302,7 @@ async fn run_external_command(
     }
     .map_err(|e| {
         PosixError::Engine(EngineError::IoError {
-            message: format!("{}: {}", cmd_name, e),
+            message: format!("{}: {}", label, e),
             span: None,
         })
     })?;
@@ -2286,13 +2313,13 @@ async fn run_external_command(
             Ok(Err(StdoutPumpError::DownstreamClosed)) => None,
             Ok(Err(StdoutPumpError::Io(e))) => {
                 return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{}: {}", cmd_name, e),
+                    message: format!("{}: {}", label, e),
                     span: None,
                 }));
             }
             Err(e) => {
                 return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{} output task failed: {}", cmd_name, e),
+                    message: format!("{} output task failed: {}", label, e),
                     span: None,
                 }));
             }
@@ -2303,13 +2330,13 @@ async fn run_external_command(
             Ok(Err(StdoutPumpError::DownstreamClosed)) => None,
             Ok(Err(StdoutPumpError::Io(e))) => {
                 return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{}: {}", cmd_name, e),
+                    message: format!("{}: {}", label, e),
                     span: None,
                 }));
             }
             Err(e) => {
                 return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{} output task failed: {}", cmd_name, e),
+                    message: format!("{} output task failed: {}", label, e),
                     span: None,
                 }));
             }
@@ -2324,24 +2351,99 @@ async fn run_external_command(
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
             Ok(Err(e)) => {
                 return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{} stdin: {}", cmd_name, e),
+                    message: format!("{} stdin: {}", label, e),
                     span: None,
                 }));
             }
             Err(e) => {
                 return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{} stdin task failed: {}", cmd_name, e),
+                    message: format!("{} stdin task failed: {}", label, e),
                     span: None,
                 }));
             }
         }
     }
 
-    let code = status.code().unwrap_or(127);
-    env.set_exit_code(code as i64);
+    Ok((status, captured_stdout))
+}
 
-    if io_cfg.capture_stdout && redir.stdout_file.is_none() && io_cfg.stdout_stream.is_none() {
-        Ok((code, captured_stdout))
+/// The source text of a compound list, so a subshell can be re-run as a script.
+fn compound_source(list: &CompoundList, source: &str) -> String {
+    if !source.is_empty()
+        && let Some(span) = SourceLocation::location(list)
+        && let Some(text) = slice_chars(source, span.start.index, span.end.index)
+        && !text.trim().is_empty()
+    {
+        return text;
+    }
+    format!("{list}")
+}
+
+/// Evaluate `source` in a child `fsh` process (POSIX mode), as a subshell.
+///
+/// A real process gives the subshell its own PID, signals and `exit` without
+/// disturbing the parent, matching POSIX.
+async fn run_child_shell(
+    source: &str,
+    mut io_cfg: IoStreamConfig,
+    env: &Env,
+) -> Result<(i32, Option<Vec<u8>>), PosixError> {
+    use std::process::Stdio;
+
+    let launch = fshell_engine::background::prepare_child(source, env)?;
+
+    let mut cmd = tokio::process::Command::new(&launch.program);
+    cmd.args(&launch.args);
+    cmd.current_dir(env.cwd());
+    {
+        let vars = env.vars.read();
+        for (k, v) in vars.iter() {
+            if k == "env" {
+                if let Val::Map(m) = v {
+                    for (ek, ev) in m.iter() {
+                        cmd.env(ek.as_str(), ev.to_text());
+                    }
+                }
+            } else if !k.starts_with(|c: char| c.is_ascii_digit())
+                && k != "@"
+                && k != "#"
+                && k != "?"
+            {
+                cmd.env(k, v.to_text());
+            }
+        }
+    }
+
+    let want_stdin = io_cfg.stdin_bytes.is_some() || io_cfg.stdin_stream.is_some();
+    if want_stdin {
+        cmd.stdin(Stdio::piped());
+    }
+    if io_cfg.stdout_stream.is_some() || io_cfg.capture_stdout {
+        cmd.stdout(Stdio::piped());
+    }
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            for file in &launch.temp_files {
+                let _ = std::fs::remove_file(file);
+            }
+            return Err(PosixError::Engine(EngineError::IoError {
+                message: format!("subshell: {e}"),
+                span: None,
+            }));
+        }
+    };
+
+    let stdin_bytes = io_cfg.stdin_bytes.take();
+    let result = finish_child(child, "subshell", &mut io_cfg, stdin_bytes).await;
+    for file in &launch.temp_files {
+        let _ = std::fs::remove_file(file);
+    }
+    let (status, captured) = result?;
+    let code = status.code().unwrap_or(127);
+    if io_cfg.capture_stdout {
+        Ok((code, captured))
     } else {
         Ok((code, None))
     }

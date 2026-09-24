@@ -15,20 +15,21 @@ use std::sync::OnceLock;
 static CACHED_EXE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Resolve the current executable path, caching the result for the lifetime of the process.
+///
+/// `FSH_BINARY_PATH` always wins (checked on every call, not cached), so the
+/// test harness can point child shells at the real `fsh` regardless of when
+/// the cache was first populated.
 pub fn resolve_exe() -> PathBuf {
-    CACHED_EXE.get_or_init(resolve_exe_inner).clone()
-}
-
-fn resolve_exe_inner() -> PathBuf {
-    // Explicit override — used by the test harness to point background jobs at
-    // the real `fsh` binary, since `current_exe()` is the test runner there.
     if let Some(override_path) = std::env::var_os("FSH_BINARY_PATH") {
         let candidate = PathBuf::from(override_path);
         if looks_valid(&candidate) {
             return candidate;
         }
     }
+    CACHED_EXE.get_or_init(resolve_exe_inner).clone()
+}
 
+fn resolve_exe_inner() -> PathBuf {
     if let Ok(p) = std::env::current_exe() {
         if looks_valid(&p) {
             return p;

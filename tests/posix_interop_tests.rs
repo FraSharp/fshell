@@ -117,6 +117,27 @@ fn posix_disown_removes_the_job_from_jobs() {
 }
 
 #[test]
+fn subshell_isolates_state_and_propagates_exit_status() {
+    let out = FshCmd::new()
+        .cmd("for f in a; do x=outer; (x=inner; echo \"in=$x\"; exit 3); echo \"rc=$? out=$x\"; done")
+        .run()
+        .unwrap();
+    out.assert_success();
+    out.assert_stdout_contains("in=inner");
+    out.assert_stdout_contains("rc=3 out=outer");
+}
+
+#[test]
+fn subshell_works_as_a_pipeline_stage() {
+    let out = FshCmd::new()
+        .cmd("for f in a; do (echo a; echo b) | wc -l; done")
+        .run()
+        .unwrap();
+    out.assert_success();
+    out.assert_stdout_trimmed_eq("2");
+}
+
+#[test]
 fn native_flag_disables_the_posix_fallback() {
     let out = FshCmd::new()
         .arg("--native")

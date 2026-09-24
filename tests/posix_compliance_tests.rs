@@ -3,6 +3,8 @@ use fshell_core::Val;
 use fshell_engine::Env;
 
 fn setup_posix_env() -> Env {
+    // Subshells run as child `fsh` processes; point them at the real binary.
+    fshell_core::set_var("FSH_BINARY_PATH", env!("CARGO_BIN_EXE_fsh"));
     let env = Env::for_command();
     fshell_engine::populate_env_from_host(&env);
     fshell_builtins::init(&env);

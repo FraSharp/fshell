@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-//! Background job spawning.
+//! Child `fsh` processes for POSIX background jobs and subshells.
 //!
-//! POSIX `&` (and, later, `( … )` subshells) run in a real child process so
-//! that `$!`, `wait`, `kill`, `jobs`, `fg`/`bg` have standard semantics: there
-//! is a genuine PID to signal and reap, and the body is isolated from the
-//! parent's variables exactly like a forked subshell.
+//! POSIX `&` and `( … )` run in a real child process so that `$!`, `wait`,
+//! `kill`, `jobs`, `fg`/`bg` have standard semantics: there is a genuine PID to
+//! signal and reap, and the body is isolated from the parent's variables
+//! exactly like a forked subshell.
 //!
-//! The child is another `fsh` process. It receives the parent environment via
-//! a handoff file (the same mechanism `reload --full` uses) and runs the
-//! fragment in POSIX mode.
+//! The child is another `fsh` process. It receives the parent environment via a
+//! handoff file (the same mechanism `reload --full` uses) and runs the fragment
+//! in POSIX mode.
 
 use crate::handoff::{HandoffState, save_handoff_to};
 use crate::{EngineError, Env, Job, JobStatus};
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static BG_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -58,7 +60,7 @@ fn generic(message: String) -> EngineError {
     }
 }
 
-/// Best-effort removal of background job files left behind when a shell exited
+/// Best-effort removal of child-shell files left behind when a shell exited
 /// while its jobs were still running. Scoped to the files this module writes.
 fn sweep_stale(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -81,13 +83,22 @@ fn sweep_stale(dir: &std::path::Path) {
     }
 }
 
-/// Spawn `source` as a background job (POSIX mode) and return its PID.
+/// A child `fsh` invocation prepared to run a POSIX fragment.
+pub struct ChildLaunch {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    /// Temp files to remove once the child has exited.
+    pub temp_files: Vec<PathBuf>,
+}
+
+/// Write `source` and the current environment to temp files and describe the
+/// child `fsh` invocation that runs it in POSIX mode.
 ///
-/// Registers the job in the shared job table and records it as `$!`.
-pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
-    let exe = crate::exe::resolve_exe();
+/// The caller owns `temp_files` and must remove them when the child exits.
+pub fn prepare_child(source: &str, env: &Env) -> Result<ChildLaunch, EngineError> {
+    let program = crate::exe::resolve_exe();
     let dir = crate::cache_dir()
-        .ok_or_else(|| generic("cannot resolve cache dir for background job".to_string()))?;
+        .ok_or_else(|| generic("cannot resolve cache dir for a child shell".to_string()))?;
     let _ = std::fs::create_dir_all(&dir);
     sweep_stale(&dir);
 
@@ -100,18 +111,32 @@ pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
     let script_path = dir.join(format!("bg-{stamp}.fsh"));
 
     std::fs::write(&script_path, source)
-        .map_err(|e| generic(format!("background: cannot write job script: {e}")))?;
-    save_handoff_to(&state_path, &capture_handoff(env)).map_err(|e| {
+        .map_err(|e| generic(format!("child shell: cannot write script: {e}")))?;
+    if let Err(e) = save_handoff_to(&state_path, &capture_handoff(env)) {
         let _ = std::fs::remove_file(&script_path);
-        generic(format!("background: cannot write handoff: {e}"))
-    })?;
+        return Err(generic(format!("child shell: cannot write handoff: {e}")));
+    }
 
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("--posix")
-        .arg("--handoff")
-        .arg(&state_path)
-        .arg(&script_path)
-        .stdin(std::process::Stdio::null());
+    Ok(ChildLaunch {
+        program,
+        args: vec![
+            "--posix".into(),
+            "--handoff".into(),
+            state_path.clone().into(),
+            script_path.clone().into(),
+        ],
+        temp_files: vec![state_path, script_path],
+    })
+}
+
+/// Spawn `source` as a background job (POSIX mode) and return its PID.
+///
+/// Registers the job in the shared job table and records it as `$!`.
+pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
+    let launch = prepare_child(source, env)?;
+
+    let mut cmd = std::process::Command::new(&launch.program);
+    cmd.args(&launch.args).stdin(std::process::Stdio::null());
 
     #[cfg(unix)]
     {
@@ -128,8 +153,9 @@ pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
-            let _ = std::fs::remove_file(&state_path);
-            let _ = std::fs::remove_file(&script_path);
+            for file in &launch.temp_files {
+                let _ = std::fs::remove_file(file);
+            }
             return Err(generic(format!("background: cannot start job: {e}")));
         }
     };
@@ -163,6 +189,7 @@ pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
     // blocking wait, so this works with or without a tokio runtime.
     let reaper_env = env.clone();
     let cmd_str = source.to_string();
+    let temp_files = launch.temp_files;
     std::thread::spawn(move || {
         let code = child
             .wait()
@@ -173,8 +200,9 @@ pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
         if reaper_env.background_count.fetch_sub(1, Ordering::Relaxed) == 1 {
             reaper_env.background_notify.notify_waiters();
         }
-        let _ = std::fs::remove_file(&state_path);
-        let _ = std::fs::remove_file(&script_path);
+        for file in &temp_files {
+            let _ = std::fs::remove_file(file);
+        }
         if reaper_env.options.read().notify {
             let label = if code == 0 { "Done" } else { "Exit" };
             eprintln!("[{job_id}]\t{label} {code}\t{cmd_str}");
