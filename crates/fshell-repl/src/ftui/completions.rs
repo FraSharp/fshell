@@ -16,7 +16,7 @@ use std::sync::Arc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Truncate a string to a maximum display width, appending "…" if truncated.
-fn truncate_by_width(s: &str, max_width: usize) -> String {
+pub fn truncate_by_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_string();
     }
@@ -35,6 +35,19 @@ fn truncate_by_width(s: &str, max_width: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// Format byte length into human-readable size string.
+fn format_file_size(len: u64) -> String {
+    if len < 1024 {
+        format!("{len} B")
+    } else if len < 1024 * 1024 {
+        format!("{:.1} KB", len as f64 / 1024.0)
+    } else if len < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", len as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", len as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 /// Category groups for rendering completions with clean textual badges
@@ -844,17 +857,29 @@ impl CompletionsManager {
         };
         let max_value_width = (area_width as usize).saturating_sub(max_desc_width + 12);
 
-        let mut list_items = Vec::with_capacity(vis_end.saturating_sub(vis_start));
+        let mut sections = Vec::new();
+        let mut current_cat = None;
+        let mut current_items = Vec::new();
 
         for i in vis_start..vis_end {
             let s = &self.suggestions[i];
             let cat = categorize(s);
+            if current_cat != Some(cat) {
+                if !current_items.is_empty() {
+                    sections.push((current_cat, std::mem::take(&mut current_items)));
+                }
+                current_cat = Some(cat);
+            }
             let is_selected = i == self.selected_idx;
             let item = self.render_list_item(s, cat, is_selected, max_value_width, max_desc_width);
-            list_items.push(item);
+            current_items.push(item);
         }
 
-        (vec![(None, list_items)], total_display)
+        if !current_items.is_empty() {
+            sections.push((current_cat, current_items));
+        }
+
+        (sections, total_display)
     }
 
     #[allow(clippy::type_complexity)]
@@ -1058,16 +1083,39 @@ impl CompletionsManager {
             Some(desc) if !desc.is_empty() && desc != "Directory" && desc != "File" => {
                 Some(truncate_by_width(desc, max_desc_width))
             }
-            _ => {
-                if !matches!(
-                    category,
-                    CompletionCategory::Directory | CompletionCategory::File
-                ) {
-                    Some(category.label().to_string())
-                } else {
-                    None
+            _ => match category {
+                CompletionCategory::Directory => {
+                    let path = std::path::Path::new(value);
+                    if path.join(".git").exists() {
+                        Some("git repo".to_string())
+                    } else if let Ok(rd) = std::fs::read_dir(path) {
+                        let count = rd.count();
+                        Some(format!("{count} items"))
+                    } else {
+                        Some("dir".to_string())
+                    }
                 }
-            }
+                CompletionCategory::File => {
+                    let path = std::path::Path::new(value);
+                    if let Ok(meta) = std::fs::symlink_metadata(path) {
+                        if meta.is_symlink() {
+                            if let Ok(target) = std::fs::read_link(path) {
+                                Some(truncate_by_width(
+                                    &format!("-> {}", target.display()),
+                                    max_desc_width,
+                                ))
+                            } else {
+                                Some("symlink".to_string())
+                            }
+                        } else {
+                            Some(format_file_size(meta.len()))
+                        }
+                    } else {
+                        Some("file".to_string())
+                    }
+                }
+                _ => Some(category.label().to_string()),
+            },
         };
 
         if let Some(desc_text) = desc_opt {

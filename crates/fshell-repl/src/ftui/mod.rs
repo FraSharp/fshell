@@ -1251,37 +1251,60 @@ pub async fn run_ftui_repl(
                                 );
                             } else if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
                                 let total_items = comp_mgr.suggestions.len();
-                                let popup_budget_h = popup_area.height.max(3);
                                 let max_w = size.width.saturating_sub(2);
-                                let popup_w = if size.width >= 120 {
-                                    ((size.width as f64 * 0.5) as u16).clamp(50, 75).min(max_w)
+
+                                let test_layout = comp_mgr.compute_layout_mode(max_w);
+                                let is_grid = matches!(
+                                    test_layout,
+                                    crate::ftui::completions::CompletionLayoutMode::Grid { .. }
+                                );
+                                let show_sidecar = size.width >= 90 && !is_grid;
+
+                                let (list_w, sidecar_w, total_popup_w) = if show_sidecar {
+                                    let total_w = ((size.width as f64 * 0.75) as u16).clamp(70, 110).min(max_w);
+                                    let l_w = (total_w * 55 / 100).max(42);
+                                    let s_w = total_w.saturating_sub(l_w);
+                                    (l_w, s_w, total_w)
                                 } else {
-                                    (size.width / 2 + size.width / 4).clamp(40, 65).min(max_w)
+                                    let p_w = if size.width >= 120 {
+                                        ((size.width as f64 * 0.5) as u16).clamp(50, 75).min(max_w)
+                                    } else {
+                                        (size.width / 2 + size.width / 4).clamp(40, 65).min(max_w)
+                                    };
+                                    (p_w, 0, p_w)
                                 };
+
                                 let visual_cursor_col =
                                     cursor_col.saturating_sub(text_scroll_offset);
                                 let popup_x = (prompt_len + visual_cursor_col as u16)
-                                    .min(size.width.saturating_sub(popup_w).saturating_sub(1));
+                                    .min(size.width.saturating_sub(total_popup_w).saturating_sub(1));
 
-                                // R2: when the popup is at the bottom edge the inline
-                                // viewport scroll already made `popup_area` tall enough
-                                // to hold it below the prompt. Crushing only happens
-                                // when the terminal itself is shorter than prompt +
-                                // popup budget (tiny terminals). In that case render
-                                // at least 3 rows and clamp to the terminal bottom.
-                                let comp_h = popup_budget_h
-                                    .min(size.height.saturating_sub(popup_area.y).max(3));
-                                let comp_area = Rect::new(
-                                    popup_x,
-                                    popup_area.y,
-                                    popup_w
-                                        .min(size.width.saturating_sub(popup_x).saturating_sub(1)),
-                                    comp_h,
-                                );
+                                // Drop-up vs drop-down geometry resolution
+                                let prompt_cursor_y = prompt_line.y;
+                                let space_below = size.height.saturating_sub(prompt_cursor_y + prompt_h);
+                                let space_above = prompt_cursor_y;
+                                let render_upward = space_below < 8 && space_above > space_below;
 
-                                let list_area = comp_area;
+                                let popup_budget_h = 10u16
+                                    .min(if render_upward { space_above } else { space_below })
+                                    .max(4);
+                                let comp_h = popup_budget_h;
+                                let popup_y = if render_upward {
+                                    prompt_cursor_y.saturating_sub(comp_h)
+                                } else {
+                                    prompt_cursor_y + prompt_h
+                                };
 
-                                let layout = comp_mgr.compute_layout_mode(popup_w);
+                                let comp_area = Rect::new(popup_x, popup_y, total_popup_w, comp_h);
+                                f.render_widget(Clear, comp_area);
+
+                                let list_area = if show_sidecar {
+                                    Rect::new(comp_area.x, comp_area.y, list_w, comp_area.height)
+                                } else {
+                                    comp_area
+                                };
+
+                                let layout = comp_mgr.compute_layout_mode(list_w);
                                 completion_popup = Some((comp_area, layout));
                                 let selected_row = match layout {
                                     crate::ftui::completions::CompletionLayoutMode::Grid {
@@ -1306,16 +1329,24 @@ pub async fn run_ftui_repl(
                                     comp_mgr.render_popup(render_width, visible_rows);
 
                                 let mut list_items: Vec<ListItem> = Vec::new();
-                                for (_is_header, items) in &sections {
+                                let has_sections = sections.len() > 1;
+                                for (cat_opt, items) in &sections {
+                                    if has_sections && let Some(cat) = cat_opt {
+                                        let cat_label = format!("── {} ────────────────────────────────────────────────────────", cat.name());
+                                        let header_str = crate::ftui::completions::truncate_by_width(
+                                            &cat_label,
+                                            list_area.width.saturating_sub(4) as usize,
+                                        );
+                                        list_items.push(ListItem::new(Line::from(Span::styled(
+                                            format!(" {}", header_str),
+                                            theme.status.muted.to_style_dim(),
+                                        ))));
+                                    }
                                     for item in items {
                                         list_items.push(item.clone());
                                     }
                                 }
 
-                                let is_grid = matches!(
-                                    layout,
-                                    crate::ftui::completions::CompletionLayoutMode::Grid { .. }
-                                );
                                 let category_header = if is_grid {
                                     " Files & Dirs "
                                 } else {
@@ -1357,23 +1388,23 @@ pub async fn run_ftui_repl(
                                 }
 
                                 if total_display > visible_rows {
-                                    let list_area = Rect::new(
-                                        comp_area.x,
-                                        comp_area.y,
-                                        comp_area.width.saturating_sub(1),
-                                        comp_area.height,
+                                    let inner_list_area = Rect::new(
+                                        list_area.x,
+                                        list_area.y,
+                                        list_area.width.saturating_sub(1),
+                                        list_area.height,
                                     );
                                     let scroll_area = Rect::new(
-                                        comp_area.x + comp_area.width.saturating_sub(1),
-                                        comp_area.y.saturating_add(1),
+                                        list_area.x + list_area.width.saturating_sub(1),
+                                        list_area.y.saturating_add(1),
                                         1,
-                                        comp_area.height.saturating_sub(2),
+                                        list_area.height.saturating_sub(2),
                                     );
                                     let mut scrollbar_state =
                                         ScrollbarState::new(total_display).position(selected_row);
                                     f.render_widget(
                                         List::new(list_items).block(comp_block),
-                                        list_area,
+                                        inner_list_area,
                                     );
                                     f.render_stateful_widget(
                                         Scrollbar::default()
@@ -1390,8 +1421,70 @@ pub async fn run_ftui_repl(
                                 } else {
                                     f.render_widget(
                                         List::new(list_items).block(comp_block),
-                                        comp_area,
+                                        list_area,
                                     );
+                                }
+
+                                // Sidecar documentation preview
+                                if show_sidecar && sidecar_w > 0 {
+                                    let doc_area = Rect::new(
+                                        comp_area.x + list_w,
+                                        comp_area.y,
+                                        sidecar_w,
+                                        comp_area.height,
+                                    );
+                                    let doc_block = Block::default()
+                                        .borders(Borders::ALL)
+                                        .border_type(BorderType::Rounded)
+                                        .border_style(theme.status.muted.to_style_dim())
+                                        .title(" Documentation ")
+                                        .title_style(theme.widgets.title.to_style_bold());
+
+                                    let mut doc_lines = Vec::new();
+                                    if let Some(s) = comp_mgr.get_selected_suggestion() {
+                                        doc_lines.push(Line::from(Span::styled(
+                                            &s.value,
+                                            theme.widgets.title.to_style_bold(),
+                                        )));
+
+                                        if let Some(topic) = fshell_builtins::help::find_topic(&s.value) {
+                                            doc_lines.push(Line::raw(""));
+                                            doc_lines.push(Line::from(Span::styled(
+                                                topic.summary,
+                                                theme.widgets.foreground.to_style(),
+                                            )));
+                                            if !topic.syntax.is_empty() {
+                                                doc_lines.push(Line::raw(""));
+                                                doc_lines.push(Line::from(Span::styled(
+                                                    "Syntax:",
+                                                    theme.syntax.keyword.to_style_bold(),
+                                                )));
+                                                doc_lines.push(Line::from(Span::styled(
+                                                    format!("  {}", topic.syntax),
+                                                    theme.syntax.string.to_style(),
+                                                )));
+                                            }
+                                            if !topic.description.is_empty() {
+                                                doc_lines.push(Line::raw(""));
+                                                for l in topic.description.lines().take(4) {
+                                                    doc_lines.push(Line::from(Span::styled(
+                                                        l,
+                                                        theme.status.muted.to_style(),
+                                                    )));
+                                                }
+                                            }
+                                        } else if let Some(desc) = &s.description {
+                                            if !desc.is_empty() {
+                                                doc_lines.push(Line::raw(""));
+                                                doc_lines.push(Line::from(Span::styled(
+                                                    desc.as_str(),
+                                                    theme.widgets.foreground.to_style(),
+                                                )));
+                                            }
+                                        }
+                                    }
+
+                                    f.render_widget(Paragraph::new(doc_lines).block(doc_block), doc_area);
                                 }
                             } else if comp_mgr.visible {
                                 let empty_msg = Span::styled(
