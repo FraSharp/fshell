@@ -1515,11 +1515,11 @@ pub(crate) fn eval_binop(op: BinOp, l: Val, r: Val) -> Result<Val, EngineError> 
 
 /// Check for SIGINT at loop boundaries.
 pub(crate) fn check_sigint(env: &Env) -> Result<(), EngineError> {
-    if env.job_control.sigint_pending.load(Ordering::Acquire) {
+    if env.pipeline_cancelled() {
         env.job_control
             .sigint_pending
             .store(false, Ordering::SeqCst);
-        Err(EngineError::from("Interrupted by Ctrl+C"))
+        Err(EngineError::Interrupted { span: None })
     } else {
         Ok(())
     }
@@ -1532,13 +1532,20 @@ pub(crate) fn check_sigint(env: &Env) -> Result<(), EngineError> {
 pub(crate) async fn eval_loop_body(body: &[Stmt], env: &Env) -> Result<Flow, EngineError> {
     check_sigint(env)?;
     for stmt in body {
+        check_sigint(env)?;
         let res = if let Some(r) = try_eval_stmt_sync(stmt, env, false) {
             r
         } else {
             eval_stmt(stmt, env, false).await
         };
         match res {
-            Ok(Flow::Normal) => publish_completion(stmt, env),
+            Ok(Flow::Normal) => {
+                publish_completion(stmt, env);
+                if env.exit_code() == 130 {
+                    return Err(check_sigint(env).err().unwrap_or(EngineError::Interrupted { span: None }));
+                }
+                check_sigint(env)?;
+            }
             Ok(Flow::Break) => {
                 check_sigint(env)?;
                 return Ok(Flow::Break);
@@ -2529,6 +2536,7 @@ async fn eval_stmt_inner(
                 opts.errexit
             };
             loop {
+                check_sigint(env)?;
                 let cond_val = if let Some(res) = try_eval_sync(condition, env) {
                     res?
                 } else {
@@ -2547,7 +2555,9 @@ async fn eval_stmt_inner(
                     break;
                 }
                 match eval_loop_body(body, env).await? {
-                    Flow::Normal | Flow::Continue => {}
+                    Flow::Normal | Flow::Continue => {
+                        check_sigint(env)?;
+                    }
                     Flow::Break => return Ok(Flow::Normal),
                     flow => return Ok(flow),
                 }
@@ -2587,11 +2597,14 @@ async fn eval_stmt_inner(
                 }
             };
             for item in items {
+                check_sigint(env)?;
                 let mut local_map = FxHashMap::default();
                 local_map.insert(var.clone(), item);
                 let loop_env = env.push_scope(Arc::new(fshell_core::RwLock::new(local_map)));
                 match eval_loop_body(body, &loop_env).await? {
-                    Flow::Normal | Flow::Continue => {}
+                    Flow::Normal | Flow::Continue => {
+                        check_sigint(env)?;
+                    }
                     Flow::Break => break,
                     flow => return Ok(flow),
                 }

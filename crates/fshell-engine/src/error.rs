@@ -134,6 +134,16 @@ pub enum EngineError {
         #[label("non-exhaustive match here")]
         span: Option<SourceSpan>,
     },
+
+    #[error("Interrupted by signal")]
+    #[diagnostic(
+        code = "FSH-RT-002",
+        help("The command was interrupted by Ctrl+C.")
+    )]
+    Interrupted {
+        #[label("interrupted here")]
+        span: Option<SourceSpan>,
+    },
 }
 
 impl From<String> for EngineError {
@@ -175,6 +185,7 @@ impl EngineError {
             EngineError::Parse(_) => None,
             EngineError::MatchNonExhaustive { span, .. } => *span,
             EngineError::CycleDetected { span, .. } => *span,
+            EngineError::Interrupted { span, .. } => *span,
         }
     }
 
@@ -192,6 +203,7 @@ impl EngineError {
             EngineError::Parse(_) => {}
             EngineError::MatchNonExhaustive { span, .. } => *span = Some(new_span),
             EngineError::CycleDetected { span, .. } => *span = Some(new_span),
+            EngineError::Interrupted { span, .. } => *span = Some(new_span),
         }
     }
 
@@ -215,6 +227,7 @@ impl DiagnosticExt for EngineError {
             EngineError::Parse(p) => p.category(),
             EngineError::MatchNonExhaustive { .. } => "pattern",
             EngineError::CycleDetected { .. } => "reactive",
+            EngineError::Interrupted { .. } => "runtime",
         }
     }
 
@@ -232,6 +245,7 @@ impl DiagnosticExt for EngineError {
             EngineError::Parse(p) => p.code_enum(),
             EngineError::MatchNonExhaustive { .. } => Some(ErrorCode::RuntimeError),
             EngineError::CycleDetected { .. } => Some(ErrorCode::CycleDetected),
+            EngineError::Interrupted { .. } => Some(ErrorCode::Cancelled),
         }
     }
 

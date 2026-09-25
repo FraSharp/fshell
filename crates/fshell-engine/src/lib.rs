@@ -113,6 +113,7 @@ impl From<EngineError> for ShellError {
             EngineError::VariableNotFound { .. } => ErrorCode::RuntimeError,
             EngineError::CycleDetected { .. } => ErrorCode::RuntimeError,
             EngineError::Generic { .. } => ErrorCode::General,
+            EngineError::Interrupted { .. } => ErrorCode::Cancelled,
         };
         ShellError::new(code, e.to_string())
     }

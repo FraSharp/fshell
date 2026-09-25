@@ -1765,22 +1765,25 @@ async fn handle_line_generic_inner(
         None => match fshell_engine::frontend::run_posix(line_trimmed, env).await {
             Ok(_) => exit_code = Some(env.exit_code()),
             Err(pe) => {
-                env.set_last_error_with_source(
-                    FshDiag::new(pe.clone()),
-                    line_trimmed.to_string(),
-                    "repl".to_string(),
-                );
-                let err_str = {
+                if matches!(pe, fshell_engine::EngineError::Interrupted { .. }) {
+                    env.set_exit_code(130);
+                    exit_code = Some(130);
+                } else {
+                    env.set_last_error_with_source(
+                        FshDiag::new(pe.clone()),
+                        line_trimmed.to_string(),
+                        "repl".to_string(),
+                    );
                     let opts = env.options.read();
                     let config = fshell_render::RenderConfig {
                         format: opts.error_format,
                         color: opts.error_color,
                         is_interactive: true,
                     };
-                    render_error(pe, line_trimmed, "repl", &config)
-                };
-                eprintln!("{}", err_str);
-                exit_code = Some(1);
+                    let err_str = render_error(pe, line_trimmed, "repl", &config);
+                    eprintln!("{}", err_str);
+                    exit_code = Some(1);
+                }
             }
         },
         Some(Ok(stmts)) => {
@@ -1798,6 +1801,11 @@ async fn handle_line_generic_inner(
                             env.set_exit_code(1);
                         }
                         Err(e) => {
+                            if matches!(e, fshell_engine::EngineError::Interrupted { .. }) {
+                                env.set_exit_code(130);
+                                exit_code = Some(130);
+                                break;
+                            }
                             env.set_last_error_with_source(
                                 FshDiag::new(e.clone()),
                                 line_trimmed.to_string(),

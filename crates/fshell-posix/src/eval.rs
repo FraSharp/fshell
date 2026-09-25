@@ -92,6 +92,10 @@ pub async fn eval_source(
             return Err(e);
         }
         Err(PosixError::Break) | Err(PosixError::Continue) => 0,
+        Err(PosixError::Interrupted) => {
+            env.set_exit_code(130);
+            130
+        }
     };
 
     // Evaluating a whole script is the point at which the shell it ran in is
@@ -129,6 +133,10 @@ pub async fn eval_source_stream(
         ..cfg.clone()
     };
     for complete in &parsed.program.complete_commands {
+        if check_cancelled(env).is_err() {
+            env.set_exit_code(130);
+            return Err(EngineError::Interrupted { span: None });
+        }
         match eval_compound_list_stream(
             complete,
             env,
@@ -142,6 +150,11 @@ pub async fn eval_source_stream(
         {
             Ok((code, out)) => {
                 last_code = code;
+                if code == 130 || env.pipeline_cancelled() {
+                    let _ = check_cancelled(env);
+                    env.set_exit_code(130);
+                    return Err(EngineError::Interrupted { span: None });
+                }
                 if let (Some(acc), Some(bytes)) = (&mut captured, out) {
                     acc.extend_from_slice(&bytes);
                 }
@@ -152,6 +165,10 @@ pub async fn eval_source_stream(
             }
             Err(PosixError::Break) | Err(PosixError::Continue) => {
                 break;
+            }
+            Err(PosixError::Interrupted) => {
+                env.set_exit_code(130);
+                return Err(EngineError::Interrupted { span: None });
             }
             Err(PosixError::Engine(err)) => return Err(err),
         }
@@ -192,6 +209,7 @@ pub(crate) enum PosixError {
     Return(i32),
     Break,
     Continue,
+    Interrupted,
 }
 
 impl From<EngineError> for PosixError {
@@ -208,7 +226,19 @@ impl std::fmt::Display for PosixError {
             PosixError::Return(c) => write!(f, "return {c}"),
             PosixError::Break => write!(f, "break"),
             PosixError::Continue => write!(f, "continue"),
+            PosixError::Interrupted => write!(f, "interrupted"),
         }
+    }
+}
+
+pub(crate) fn check_cancelled(env: &Env) -> Result<(), PosixError> {
+    if env.pipeline_cancelled() {
+        env.job_control
+            .sigint_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Err(PosixError::Interrupted)
+    } else {
+        Ok(())
     }
 }
 
@@ -315,6 +345,7 @@ async fn eval_compound_list_stream(
         None
     };
     for (i, item) in list.0.iter().enumerate() {
+        check_cancelled(env)?;
         // `cmd &` — run the and-or list in a child process and continue.
         if matches!(item.1, SeparatorOperator::Async) {
             let fragment = item_fragment(&item.0, &cfg.source);
@@ -343,6 +374,10 @@ async fn eval_compound_list_stream(
         if let (Some(acc), Some(bytes)) = (&mut accumulated, out) {
             acc.extend_from_slice(&bytes);
         }
+        if code == 130 || env.pipeline_cancelled() {
+            check_cancelled(env)?;
+            return Err(PosixError::Interrupted);
+        }
     }
     let ret_out = if io_cfg.capture_stdout {
         accumulated
@@ -366,6 +401,10 @@ async fn eval_and_or_list_stream(
         capture_stdout: io_cfg.capture_stdout,
     };
     let (mut code, mut out) = eval_pipeline_stream(&list.first, env, cfg, first_io).await?;
+    if code == 130 || env.pipeline_cancelled() {
+        check_cancelled(env)?;
+        return Err(PosixError::Interrupted);
+    }
     // Which element the final status belongs to, so errexit can tell a failure the
     // shell must act on from one it is allowed to ignore.
     let mut evaluated_index = 0usize;
@@ -381,6 +420,7 @@ async fn eval_and_or_list_stream(
     };
 
     for (index, and_or) in list.additional.iter().enumerate() {
+        check_cancelled(env)?;
         let step_io = IoStreamConfig {
             stdin_bytes: None,
             stdin_stream: None,
@@ -397,6 +437,10 @@ async fn eval_and_or_list_stream(
                     if let (Some(acc), Some(b)) = (&mut accumulated, next_out) {
                         acc.extend_from_slice(&b);
                     }
+                    if code == 130 || env.pipeline_cancelled() {
+                        check_cancelled(env)?;
+                        return Err(PosixError::Interrupted);
+                    }
                 }
             }
             AndOr::Or(next) => {
@@ -407,6 +451,10 @@ async fn eval_and_or_list_stream(
                     last_out = next_out.clone();
                     if let (Some(acc), Some(b)) = (&mut accumulated, next_out) {
                         acc.extend_from_slice(&b);
+                    }
+                    if code == 130 || env.pipeline_cancelled() {
+                        check_cancelled(env)?;
+                        return Err(PosixError::Interrupted);
                     }
                 }
             }
@@ -1159,6 +1207,7 @@ async fn eval_compound_command_stream(
             };
             let mut prev_stream = io_cfg.stdin_stream;
             for (i, val) in values.into_iter().enumerate() {
+                check_cancelled(env)?;
                 {
                     let mut vars = env.vars.write();
                     vars.insert(for_clause.variable_name.clone(), Val::String(val));
@@ -1176,12 +1225,19 @@ async fn eval_compound_command_stream(
                 match eval_compound_list_stream(&for_clause.body.list, env, cfg, step_io).await {
                     Ok((code, out)) => {
                         last = code;
+                        if code == 130 || env.pipeline_cancelled() {
+                            check_cancelled(env)?;
+                            return Err(PosixError::Interrupted);
+                        }
                         if let (Some(acc), Some(bytes)) = (&mut accumulated, out) {
                             acc.extend_from_slice(&bytes);
                         }
                     }
                     Err(PosixError::Break) => break,
-                    Err(PosixError::Continue) => continue,
+                    Err(PosixError::Continue) => {
+                        check_cancelled(env)?;
+                        continue;
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -1197,6 +1253,7 @@ async fn eval_compound_command_stream(
                 None
             };
             loop {
+                check_cancelled(env)?;
                 // The condition is a question, so `-e` does not apply to it; the
                 // body is a command list like any other.
                 let cond_cfg = EvalConfig {
@@ -1211,6 +1268,10 @@ async fn eval_compound_command_stream(
                 };
                 let (cond_code, cond_out) =
                     eval_compound_list_stream(&while_clause.0, env, &cond_cfg, cond_io).await?;
+                if cond_code == 130 || env.pipeline_cancelled() {
+                    check_cancelled(env)?;
+                    return Err(PosixError::Interrupted);
+                }
                 if let Some(rem) = cond_out {
                     current_stdin_bytes = Some(rem);
                 }
@@ -1231,12 +1292,19 @@ async fn eval_compound_command_stream(
                 match eval_compound_list_stream(&while_clause.1.list, env, cfg, body_io).await {
                     Ok((code, out)) => {
                         last = code;
+                        if code == 130 || env.pipeline_cancelled() {
+                            check_cancelled(env)?;
+                            return Err(PosixError::Interrupted);
+                        }
                         if let (Some(acc), Some(bytes)) = (&mut accumulated, out) {
                             acc.extend_from_slice(&bytes);
                         }
                     }
                     Err(PosixError::Break) => break,
-                    Err(PosixError::Continue) => continue,
+                    Err(PosixError::Continue) => {
+                        check_cancelled(env)?;
+                        continue;
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -2356,6 +2424,68 @@ enum StdoutPumpError {
     Io(std::io::Error),
 }
 
+struct PosixForegroundGuard<'a> {
+    env: &'a Env,
+    job_id: Option<usize>,
+    pid: Option<i32>,
+    is_interactive: bool,
+}
+
+impl<'a> PosixForegroundGuard<'a> {
+    fn new(env: &'a Env, pid: Option<i32>, cmd_name: &str, is_interactive: bool) -> Self {
+        let job_id = if let Some(p) = pid {
+            let mut jobs = env.job_control.jobs.write();
+            let next_id = jobs.values().map(|j| j.id).max().unwrap_or(0) + 1;
+            jobs.insert(
+                p,
+                fshell_engine::Job {
+                    id: next_id,
+                    pgid: p,
+                    pids: vec![p],
+                    last_stage_pid: Some(p),
+                    last_stage_exit_code: None,
+                    cmd: cmd_name.to_string(),
+                    status: fshell_engine::JobStatus::Running,
+                    disowned: false,
+                    started_at: Some(std::time::Instant::now()),
+                },
+            );
+            if is_interactive {
+                let _ = env.set_foreground_job(Some(next_id));
+            }
+            Some(next_id)
+        } else {
+            None
+        };
+        Self {
+            env,
+            job_id,
+            pid,
+            is_interactive,
+        }
+    }
+}
+
+impl<'a> Drop for PosixForegroundGuard<'a> {
+    fn drop(&mut self) {
+        if let Some(jid) = self.job_id {
+            let _ = self.env.clear_foreground(jid);
+        }
+        if let Some(p) = self.pid {
+            let mut jobs = self.env.job_control.jobs.write();
+            jobs.remove(&p);
+        }
+        if self.is_interactive {
+            #[cfg(unix)]
+            unsafe {
+                libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+                libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpgrp());
+                libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+            }
+        }
+    }
+}
+
 async fn run_external_command(
     cmd_name: &str,
     args: &[String],
@@ -2454,6 +2584,39 @@ async fn run_external_command(
         }
     }
 
+    let has_controlling_terminal = !fshell_engine::is_test_mode()
+        && unsafe {
+            !env.is_captured
+                && libc::isatty(libc::STDIN_FILENO) == 1
+                && fshell_engine::is_stdout_a_tty()
+        };
+    let is_interactive = has_controlling_terminal
+        && !capture_requested
+        && io_cfg.stdout_stream.is_none()
+        && io_cfg.stdin_stream.is_none()
+        && redir.stdin_file.is_none();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+        unsafe {
+            cmd.as_std_mut().pre_exec(move || {
+                let mut set = std::mem::zeroed::<libc::sigset_t>();
+                libc::sigemptyset(&mut set);
+                libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+                libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                if is_interactive {
+                    libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+                    libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
+                    libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+                }
+                Ok(())
+            });
+        }
+    }
+
     let child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -2474,12 +2637,31 @@ async fn run_external_command(
         }
     };
 
+    let child_pid = child.id().map(|id| id as i32);
+    let _fg_guard = PosixForegroundGuard::new(env, child_pid, cmd_name, is_interactive);
+
     let stdin_bytes = effective_stdin.map(<[u8]>::to_vec);
     let (status, captured_stdout) =
-        finish_child(child, cmd_name, &mut io_cfg, stdin_bytes, stderr_into_pipe).await?;
+        finish_child(child, cmd_name, &mut io_cfg, stdin_bytes, stderr_into_pipe, env, child_pid).await?;
 
-    let code = status.code().unwrap_or(127);
+    let code = match status.code() {
+        Some(c) => c,
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                status.signal().map(|s| 128 + s).unwrap_or(127)
+            }
+            #[cfg(not(unix))]
+            127
+        }
+    };
     env.set_exit_code(code as i64);
+
+    if code == 130 || env.pipeline_cancelled() {
+        env.job_control.sigint_pending.store(false, std::sync::atomic::Ordering::SeqCst);
+        return Err(PosixError::Interrupted);
+    }
 
     if capture_requested {
         Ok((code, captured_stdout))
@@ -2499,6 +2681,8 @@ async fn finish_child(
     io_cfg: &mut IoStreamConfig,
     stdin_bytes: Option<Vec<u8>>,
     stderr_into_pipe: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+    env: &Env,
+    child_pgid: Option<i32>,
 ) -> Result<(std::process::ExitStatus, Option<Vec<u8>>), PosixError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -2575,9 +2759,28 @@ async fn finish_child(
             None
         };
 
+    let cancel_poll = async {
+        loop {
+            if env.pipeline_cancelled() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+
     let mut completed_stdout_pump = None;
     let status = if let Some(stdout_pump) = stdout_pump.as_mut() {
         tokio::select! {
+            _ = cancel_poll => {
+                if let Some(pgid) = child_pgid {
+                    #[cfg(unix)]
+                    unsafe { libc::kill(-pgid, libc::SIGINT); }
+                } else {
+                    let _ = child.start_kill();
+                }
+                let _ = child.wait().await;
+                return Err(PosixError::Interrupted);
+            }
             result = child.wait() => result,
             pump = stdout_pump => {
                 let should_kill = !matches!(&pump, Ok(Ok(_)));
@@ -2589,7 +2792,19 @@ async fn finish_child(
             }
         }
     } else {
-        child.wait().await
+        tokio::select! {
+            _ = cancel_poll => {
+                if let Some(pgid) = child_pgid {
+                    #[cfg(unix)]
+                    unsafe { libc::kill(-pgid, libc::SIGINT); }
+                } else {
+                    let _ = child.start_kill();
+                }
+                let _ = child.wait().await;
+                return Err(PosixError::Interrupted);
+            }
+            result = child.wait() => result,
+        }
     }
     .map_err(|e| {
         PosixError::Engine(EngineError::IoError {
@@ -2733,7 +2948,8 @@ async fn run_child_shell(
     };
 
     let stdin_bytes = io_cfg.stdin_bytes.take();
-    let result = finish_child(child, "subshell", &mut io_cfg, stdin_bytes, None).await;
+    let child_pid = child.id().map(|id| id as i32);
+    let result = finish_child(child, "subshell", &mut io_cfg, stdin_bytes, None, env, child_pid).await;
     for file in &launch.temp_files {
         let _ = std::fs::remove_file(file);
     }
@@ -2880,4 +3096,22 @@ fn parse_test_int(s: &str) -> Result<i64, String> {
     s.trim()
         .parse::<i64>()
         .map_err(|error| format!("integer expression expected: {:?} ({})", s.trim(), error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_posix_while_loop_cancellation() {
+        let env = Env::new();
+        env.job_control
+            .sigint_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let parsed = crate::parse_posix_script("while true; do :; done").expect("parse should succeed");
+        let result = eval_source_stream(&parsed, &env, &EvalConfig::default(), false).await;
+        assert!(matches!(result, Err(EngineError::Interrupted { .. })));
+        assert_eq!(env.exit_code(), 130);
+    }
 }
