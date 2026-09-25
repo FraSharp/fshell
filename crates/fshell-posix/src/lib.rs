@@ -47,7 +47,14 @@ pub fn install_engine_hooks() {
                 positional: args,
                 ..Default::default()
             };
-            eval_source_stream(&parsed, &env, &cfg, capture).await
+            let result = eval_source_stream(&parsed, &env, &cfg, capture).await;
+            // Whatever way the script left — fell off the end, `exit`, or a hard
+            // error — the EXIT handler runs: that is what `trap … EXIT` means.
+            let trap = eval::run_exit_trap(&env).await;
+            match result {
+                Err(error) => Err(error),
+                Ok(value) => trap.map(|()| value),
+            }
         },
     );
     fshell_engine::register_posix_classifier(|input: &str| match classify_posix(input) {

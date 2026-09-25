@@ -85,7 +85,7 @@ pub struct CaseReport {
 
 /// Run a case and collect per-engine results without asserting anything.
 pub fn run_case(case: &Case) -> CaseReport {
-    let fixture = match Fixture::new(case.name) {
+    let fixture = match Fixture::new(case) {
         Ok(fixture) => fixture,
         Err(error) => {
             return CaseReport {

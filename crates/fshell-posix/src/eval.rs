@@ -10,15 +10,30 @@ use crate::expand::{ExpansionConfig, expand_assignment_word, expand_word, expand
 use crate::parser::ParsedScript;
 
 /// How the POSIX evaluator was invoked.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct EvalConfig {
     /// Positional parameters for $1, $2, ... / $@ / $#
     pub positional: Vec<String>,
-    /// If true, errexit (-e) handling is active inside this eval.
+    /// Whether this evaluation context honours errexit (POSIX: it does not while
+    /// evaluating a condition). The *setting* is read live from the env, so
+    /// `set -e` inside a script takes effect.
     pub errexit: bool,
     /// The original source text, used to slice the body of a background job so
     /// it can be re-run in a child process. Maybe empty for nested evals.
     pub source: String,
+}
+
+impl Default for EvalConfig {
+    fn default() -> Self {
+        Self {
+            positional: Vec::new(),
+            // Honoured by default. The *setting* lives in the shell options and is
+            // read live, so this flag only ever suppresses errexit in the contexts
+            // POSIX exempts (a condition, a `!` pipeline).
+            errexit: true,
+            source: String::new(),
+        }
+    }
 }
 
 /// Control-flow for POSIX evaluation.
@@ -58,22 +73,32 @@ pub async fn eval_source(
         restore_positional(env, saved);
     }
 
-    match result {
+    let code = match result {
         Ok(code) => {
             env.set_exit_code(code as i64);
-            Ok(code)
+            code
         }
         Err(PosixError::Exit(code)) => {
             env.set_exit_code(code as i64);
-            Ok(code)
+            code
         }
         Err(PosixError::Return(code)) => {
             env.set_exit_code(code as i64);
-            Ok(code)
+            code
         }
-        Err(PosixError::Engine(e)) => Err(e),
-        Err(PosixError::Break) | Err(PosixError::Continue) => Ok(0),
-    }
+        Err(PosixError::Engine(e)) => {
+            // A hard error still leaves the shell, so the EXIT handler still runs.
+            run_exit_trap(env).await?;
+            return Err(e);
+        }
+        Err(PosixError::Break) | Err(PosixError::Continue) => 0,
+    };
+
+    // Evaluating a whole script is the point at which the shell it ran in is
+    // leaving it, so this is where `trap … EXIT` fires — for every way out,
+    // including `exit` and a hard error.
+    run_exit_trap(env).await?;
+    Ok(code)
 }
 
 /// Evaluate a parsed POSIX script and optionally capture its stdout bytes.
@@ -144,6 +169,21 @@ pub async fn eval_source_stream(
 pub async fn eval_source_capture(parsed: &ParsedScript, env: &Env) -> Result<Vec<u8>, EngineError> {
     let (_, out) = eval_source_stream(parsed, env, &EvalConfig::default(), true).await?;
     Ok(out.unwrap_or_default())
+}
+
+/// Run the `trap … EXIT` handler, if one is set.
+///
+/// POSIX runs it once, when the shell that set it leaves the script — including
+/// when the script leaves through `exit`. It is cleared before it runs, so a
+/// handler that itself exits cannot re-enter it.
+pub async fn run_exit_trap(env: &Env) -> Result<(), EngineError> {
+    let Some(handler) = env.posix_exit_trap.write().take() else {
+        return Ok(());
+    };
+    let parsed = crate::parser::parse_posix_script(&handler)?;
+    eval_source_stream(&parsed, env, &EvalConfig::default(), false)
+        .await
+        .map(|_| ())
 }
 
 pub(crate) enum PosixError {
@@ -326,6 +366,9 @@ async fn eval_and_or_list_stream(
         capture_stdout: io_cfg.capture_stdout,
     };
     let (mut code, mut out) = eval_pipeline_stream(&list.first, env, cfg, first_io).await?;
+    // Which element the final status belongs to, so errexit can tell a failure the
+    // shell must act on from one it is allowed to ignore.
+    let mut evaluated_index = 0usize;
     let mut last_out = out.clone();
     let mut accumulated = if io_cfg.capture_stdout {
         let mut v = Vec::new();
@@ -337,7 +380,7 @@ async fn eval_and_or_list_stream(
         None
     };
 
-    for and_or in &list.additional {
+    for (index, and_or) in list.additional.iter().enumerate() {
         let step_io = IoStreamConfig {
             stdin_bytes: None,
             stdin_stream: None,
@@ -348,6 +391,7 @@ async fn eval_and_or_list_stream(
             AndOr::And(next) => {
                 if code == 0 {
                     let (c, next_out) = eval_pipeline_stream(next, env, cfg, step_io).await?;
+                    evaluated_index = index + 1;
                     code = c;
                     last_out = next_out.clone();
                     if let (Some(acc), Some(b)) = (&mut accumulated, next_out) {
@@ -358,6 +402,7 @@ async fn eval_and_or_list_stream(
             AndOr::Or(next) => {
                 if code != 0 {
                     let (c, next_out) = eval_pipeline_stream(next, env, cfg, step_io).await?;
+                    evaluated_index = index + 1;
                     code = c;
                     last_out = next_out.clone();
                     if let (Some(acc), Some(b)) = (&mut accumulated, next_out) {
@@ -367,6 +412,30 @@ async fn eval_and_or_list_stream(
             }
         }
     }
+    // POSIX exempts every command of an and-or list except the last one, so the
+    // shell leaves only on a failure the *final* element ran into: `false && true`
+    // carries on, `true && false` does not. A `!`-negated pipeline is a question
+    // rather than a command, so it never triggers errexit either. The setting is
+    // read live, because `set -e` inside the script is what turns it on;
+    // `cfg.errexit` says whether *this* context honours it at all.
+    if cfg.errexit
+        && env.options.read().errexit
+        && code != 0
+        && evaluated_index + 1 == list.additional.len() + 1
+    {
+        let negated = if evaluated_index == 0 {
+            list.first.bang
+        } else {
+            match &list.additional[evaluated_index - 1] {
+                AndOr::And(pipeline) | AndOr::Or(pipeline) => pipeline.bang,
+            }
+        };
+        if !negated {
+            env.set_exit_code(code as i64);
+            return Err(PosixError::Exit(code));
+        }
+    }
+
     let ret_out = if io_cfg.capture_stdout {
         accumulated
     } else {
@@ -1036,13 +1105,20 @@ async fn eval_compound_command_stream(
             Ok((code, out))
         }
         CompoundCommand::IfClause(if_clause) => {
-            let cond_code = eval_compound_list(&if_clause.condition, env, cfg).await?;
+            // POSIX ignores `-e` while evaluating a condition: the clause is
+            // *asking* whether the command succeeds, so its failure is an answer,
+            // not a reason to leave.
+            let cond_cfg = EvalConfig {
+                errexit: false,
+                ..cfg.clone()
+            };
+            let cond_code = eval_compound_list(&if_clause.condition, env, &cond_cfg).await?;
             if cond_code == 0 {
                 eval_compound_list_stream(&if_clause.then, env, cfg, io_cfg).await
             } else if let Some(elses) = &if_clause.elses {
                 for else_clause in elses {
                     if let Some(cond) = &else_clause.condition {
-                        let c = eval_compound_list(cond, env, cfg).await?;
+                        let c = eval_compound_list(cond, env, &cond_cfg).await?;
                         if c == 0 {
                             return eval_compound_list_stream(&else_clause.body, env, cfg, io_cfg)
                                 .await;
@@ -1121,6 +1197,12 @@ async fn eval_compound_command_stream(
                 None
             };
             loop {
+                // The condition is a question, so `-e` does not apply to it; the
+                // body is a command list like any other.
+                let cond_cfg = EvalConfig {
+                    errexit: false,
+                    ..cfg.clone()
+                };
                 let cond_io = IoStreamConfig {
                     stdin_bytes: current_stdin_bytes.clone(),
                     stdin_stream: None,
@@ -1128,7 +1210,7 @@ async fn eval_compound_command_stream(
                     capture_stdout: io_cfg.capture_stdout,
                 };
                 let (cond_code, cond_out) =
-                    eval_compound_list_stream(&while_clause.0, env, cfg, cond_io).await?;
+                    eval_compound_list_stream(&while_clause.0, env, &cond_cfg, cond_io).await?;
                 if let Some(rem) = cond_out {
                     current_stdin_bytes = Some(rem);
                 }
@@ -1549,13 +1631,19 @@ async fn eval_simple_command_inner(
             }
         }
         "set" => {
-            crate::posix_builtins::shift::set_posix(env, args).map_err(|e| {
+            let rendered = crate::posix_builtins::shift::set_posix(env, args).map_err(|e| {
                 PosixError::Engine(EngineError::Generic {
                     message: e,
                     span: None,
                 })
             })?;
-            return Ok((0, None));
+            // `set -o` prints the options, and that output is the command's stdout:
+            // it goes through the redirection machinery like any other builtin's.
+            let out = match &rendered {
+                Some(text) => write_builtin_output(text, redir, capture_stdout).await?,
+                None => None,
+            };
+            return Ok((0, out));
         }
         "unset" => {
             let mut unset_fns_only = false;
@@ -2036,17 +2124,25 @@ fn parse_status_argument(value: Option<&String>, default: i64) -> Result<i32, St
     Ok(number.rem_euclid(256) as i32)
 }
 
+/// Render one trap the way `trap` and `trap -p` print it, so the output can be
+/// fed back to the shell.
+fn render_trap(name: &str, handler: &str) -> String {
+    if handler.is_empty() {
+        format!("trap -- '' {name}\n")
+    } else {
+        format!("trap -- '{}' {name}\n", handler.replace('\'', "'\\''"))
+    }
+}
+
 fn handle_posix_trap(args: &[String], env: &Env) -> Result<String, PosixError> {
     if args.is_empty() {
         let traps = env.posix_traps.read();
         let mut out = String::new();
         for (sig, handler) in traps.iter() {
-            if handler.is_empty() {
-                out.push_str(&format!("trap -- '' {}\n", sig.to_str()));
-            } else {
-                let esc = handler.replace('\'', "'\\''");
-                out.push_str(&format!("trap -- '{esc}' {}\n", sig.to_str()));
-            }
+            out.push_str(&render_trap(sig.to_str(), handler));
+        }
+        if let Some(handler) = env.posix_exit_trap.read().as_ref() {
+            out.push_str(&render_trap("EXIT", handler));
         }
         return Ok(out);
     }
@@ -2054,12 +2150,10 @@ fn handle_posix_trap(args: &[String], env: &Env) -> Result<String, PosixError> {
         let traps = env.posix_traps.read();
         let mut out = String::new();
         for (sig, handler) in traps.iter() {
-            if handler.is_empty() {
-                out.push_str(&format!("trap -- '' {}\n", sig.to_str()));
-            } else {
-                let esc = handler.replace('\'', "'\\''");
-                out.push_str(&format!("trap -- '{esc}' {}\n", sig.to_str()));
-            }
+            out.push_str(&render_trap(sig.to_str(), handler));
+        }
+        if let Some(handler) = env.posix_exit_trap.read().as_ref() {
+            out.push_str(&render_trap("EXIT", handler));
         }
         return Ok(out);
     }
@@ -2085,7 +2179,19 @@ fn handle_posix_trap(args: &[String], env: &Env) -> Result<String, PosixError> {
         .iter()
         .filter_map(|s| Signal::from_name(s))
         .collect();
-    if signals.is_empty() {
+    // `EXIT` is not a signal: it is the one handler that runs when the shell
+    // leaves the script, so it is stored on its own and may accompany or replace
+    // signal handlers.
+    let wants_exit = sig_args.iter().any(|s| s == "EXIT" || s == "0");
+    if wants_exit {
+        let mut exit_trap = env.posix_exit_trap.write();
+        *exit_trap = if action == "-" {
+            None
+        } else {
+            Some(action.to_string())
+        };
+    }
+    if signals.is_empty() && !wants_exit {
         return Err(PosixError::Engine(EngineError::Generic {
             message: "trap: no valid signals specified".to_string(),
             span: None,

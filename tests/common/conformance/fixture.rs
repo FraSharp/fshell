@@ -16,9 +16,12 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
+
+use super::case::Case;
 
 /// Files created in every fixture, as `(relative path, contents)`.
 const FILES: &[(&str, &str)] = &[
@@ -55,19 +58,25 @@ pub struct Fixture {
     root: TempDir,
     helper_dir: PathBuf,
     fsh_binary: PathBuf,
+    /// Extra sandbox files this case's tree carries.
+    tree: &'static [(&'static str, &'static str)],
+    /// Sandbox tools this case provides on `PATH`.
+    stubs: &'static [(&'static str, &'static str)],
 }
 
 impl Fixture {
-    /// Create a fixture tree for `case_name` and populate it.
-    pub fn new(case_name: &str) -> std::io::Result<Self> {
+    /// Create a fixture tree for `case` and populate it.
+    pub fn new(case: &Case) -> std::io::Result<Self> {
         let root = tempfile::Builder::new()
-            .prefix(&temp_prefix(case_name))
+            .prefix(&temp_prefix(case.name))
             .tempdir()?;
 
         let fixture = Self {
             root,
             helper_dir: helper_dir(),
             fsh_binary: PathBuf::from(env!("CARGO_BIN_EXE_fsh")),
+            tree: case.tree,
+            stubs: case.stubs,
         };
         fixture.reset()?;
         Ok(fixture)
@@ -98,6 +107,26 @@ impl Fixture {
             fs::write(&path, contents)?;
         }
         fs::write(root.join("target/CACHEDIR.TAG"), CACHEDIR_TAG)?;
+
+        // The case's own sandbox: the tree a workflow expects to find, and the
+        // tools it drives, both rebuilt from source on every invocation so one
+        // run cannot leave anything behind for the next.
+        for (relative, contents) in self.tree {
+            let path = root.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&path, contents)?;
+        }
+        if !self.stubs.is_empty() {
+            let bin = root.join("bin");
+            fs::create_dir_all(&bin)?;
+            for (name, script) in self.stubs {
+                let path = bin.join(name);
+                fs::write(&path, script)?;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+            }
+        }
 
         // Scratch space for child shells (POSIX subshells write temp files).
         fs::create_dir_all(root.join(".tmp"))?;
@@ -159,11 +188,19 @@ impl Fixture {
         env.insert("COLON".to_string(), "one:two:three".to_string());
 
         // `emit`/`argvdump` first so the corpus can call them by name, then the
-        // system directories holding the real utilities the corpus uses.
-        env.insert(
-            "PATH".to_string(),
-            format!("{}:/usr/bin:/bin", path_string(&self.helper_dir)),
-        );
+        // system directories holding the real utilities the corpus uses. A case
+        // with stubs gets those first of all: they stand in for the tooling a
+        // workflow drives, and must shadow the real thing.
+        let path = if self.stubs.is_empty() {
+            format!("{}:/usr/bin:/bin", path_string(&self.helper_dir))
+        } else {
+            format!(
+                "{}:{}:/usr/bin:/bin",
+                path_string(&root.join("bin")),
+                path_string(&self.helper_dir)
+            )
+        };
+        env.insert("PATH".to_string(), path);
 
         // fsh-specific isolation: no colour, no "did you mean", isolated state,
         // and a known binary for child shells (POSIX subshells re-exec `fsh`).

@@ -40,12 +40,12 @@ pub fn shift_posix(env: &Env, n: usize) -> Result<(), String> {
 }
 
 /// POSIX `set -- args` / `set -e` / `set +e` — set positional params and shell flags.
-pub fn set_posix(env: &Env, args: &[String]) -> Result<(), String> {
+pub fn set_posix(env: &Env, args: &[String]) -> Result<Option<String>, String> {
     let mut vars = env.vars.write();
     let mut opts = env.options.write();
 
     if args.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     // If first arg is "--", the rest are positional params
@@ -60,7 +60,7 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<(), String> {
         for (i, v) in positional.into_iter().enumerate() {
             vars.insert((i + 1).to_string(), v);
         }
-        return Ok(());
+        return Ok(None);
     }
 
     // Handle set -e / set +e etc. (errexit, nounset, xtrace, etc.)
@@ -91,6 +91,19 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<(), String> {
                 }
                 break;
             }
+            "-o" | "+o" => {
+                let enable = args[i] == "-o";
+                match args.get(i + 1).map(String::as_str) {
+                    Some(name) if set_named_option(name, enable, &mut opts) => {
+                        i += 1;
+                    }
+                    // `set -o` with no name prints the options; an unrecognised
+                    // name is a usage error rather than a silent success, so a
+                    // script cannot believe an option is on when it is not.
+                    None => return Ok(Some(list_named_options(&opts, enable))),
+                    Some(name) => return Err(format!("set: unknown option name '{name}'")),
+                }
+            }
             other if other.starts_with('-') || other.starts_with('+') => {
                 // Unknown flag — ignore for compatibility
             }
@@ -98,7 +111,49 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<(), String> {
         }
         i += 1;
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Set one named shell option (`set -o name` / `set +o name`).
+///
+/// Returns false for a name this shell does not implement, which the caller
+/// reports: POSIX names only a few, and quietly ignoring the rest is how a script
+/// ends up running with weaker settings than it asked for.
+fn set_named_option(name: &str, enable: bool, opts: &mut fshell_engine::ShellOptions) -> bool {
+    match name {
+        "errexit" => opts.errexit = enable,
+        "nounset" => opts.nounset = enable,
+        "xtrace" => opts.xtrace = enable,
+        "noexec" => opts.noexec = enable,
+        "noglob" => opts.noglob = enable,
+        "pipefail" => opts.pipefail = enable,
+        _ => return false,
+    }
+    true
+}
+
+/// Render the implemented options for `set -o` (readable) or `set +o` (a command
+/// that would restore them), the way POSIX requires.
+fn list_named_options(opts: &fshell_engine::ShellOptions, as_commands: bool) -> String {
+    let options = [
+        ("errexit", opts.errexit),
+        ("nounset", opts.nounset),
+        ("xtrace", opts.xtrace),
+        ("noexec", opts.noexec),
+        ("noglob", opts.noglob),
+        ("pipefail", opts.pipefail),
+    ];
+    let mut out = String::new();
+    for (name, enabled) in options {
+        if as_commands {
+            let sign = if enabled { "-o" } else { "+o" };
+            out.push_str(&format!("set {sign} {name}\n"));
+        } else {
+            let state = if enabled { "on" } else { "off" };
+            out.push_str(&format!("{name:<15}{state}\n"));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

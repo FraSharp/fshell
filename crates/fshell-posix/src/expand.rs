@@ -968,7 +968,7 @@ fn run_command_subst(
 ) -> Result<String, fshell_engine::EngineError> {
     let child_env = crate::bridge::fork_env_for_subshell(env);
     let parsed = crate::parser::parse_posix_script(cmd)?;
-    let bytes = std::thread::scope(|scope| {
+    let (code, bytes) = std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 let runtime = tokio::runtime::Builder::new_current_thread()
@@ -978,8 +978,15 @@ fn run_command_subst(
                         message: format!("command substitution runtime failed: {error}"),
                         span: None,
                     })?;
-                runtime
-                    .block_on(async { crate::eval::eval_source_capture(&parsed, &child_env).await })
+                runtime.block_on(async {
+                    crate::eval::eval_source_stream(
+                        &parsed,
+                        &child_env,
+                        &crate::eval::EvalConfig::default(),
+                        true,
+                    )
+                    .await
+                })
             })
             .join()
             .map_err(|_| fshell_engine::EngineError::Generic {
@@ -988,6 +995,14 @@ fn run_command_subst(
             })?
     })?;
 
+    // POSIX: a substitution's status is the status of the command it ran, and that
+    // is what `$?` reports afterwards. A command *containing* the substitution
+    // records its own status once it finishes expanding, so this cannot leak into
+    // it; an assignment that is nothing but the substitution takes it, which is the
+    // whole point (`out=$(cmd); rc=$?`).
+    env.set_exit_code(code as i64);
+
+    let bytes = bytes.unwrap_or_default();
     let mut output = String::from_utf8_lossy(&bytes).into_owned();
     while output.ends_with('\n') || output.ends_with('\r') {
         output.pop();

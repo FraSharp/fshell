@@ -99,6 +99,10 @@ pub struct Case {
     pub features: &'static [&'static str],
     /// Fixture-relative files whose contents form part of the outcome.
     pub files: &'static [&'static str],
+    /// Sandbox files written into the fixture tree before every invocation.
+    pub tree: &'static [(&'static str, &'static str)],
+    /// Sandbox tools written into `bin/` and put first on `PATH`.
+    pub stubs: &'static [(&'static str, &'static str)],
     /// Compare stderr text as well as stdout and status.
     pub compare_stderr: bool,
     pub known_failure: Option<KnownFailure>,
@@ -130,6 +134,8 @@ impl Case {
             oracle: Oracle::Posix,
             features: &[],
             files: &[],
+            tree: &[],
+            stubs: &[],
             compare_stderr: false,
             known_failure: None,
             expected_engine: None,
@@ -159,6 +165,8 @@ impl Case {
             },
             features: &[],
             files: &[],
+            tree: &[],
+            stubs: &[],
             compare_stderr: false,
             known_failure: None,
             expected_engine: None,
@@ -181,6 +189,27 @@ impl Case {
     /// Capture these fixture-relative files as part of the outcome.
     pub fn files(mut self, files: &'static [&'static str]) -> Self {
         self.files = files;
+        self
+    }
+
+    /// Extra sandbox files, as `(path relative to the fixture root, contents)`.
+    ///
+    /// Written on every fixture reset, so a workflow can assume the tree it would
+    /// find in a real checkout without any of it existing on disk.
+    pub fn tree(mut self, tree: &'static [(&'static str, &'static str)]) -> Self {
+        self.tree = tree;
+        self
+    }
+
+    /// Sandbox tools, as `(name, script)`, written executable into `bin/` and
+    /// placed first on `PATH`.
+    ///
+    /// A workflow is an agent's *command*, not the tooling it drives: standing a
+    /// fast, offline, harmless `cargo` (or `git`, or `python3`) in the way is what
+    /// lets a corpus of real-shaped commands run in milliseconds without touching
+    /// the machine it is running on.
+    pub fn stubs(mut self, stubs: &'static [(&'static str, &'static str)]) -> Self {
+        self.stubs = stubs;
         self
     }
 

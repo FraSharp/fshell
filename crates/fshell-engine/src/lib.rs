@@ -1089,6 +1089,11 @@ pub struct Env {
     pub(crate) suggestion_cache: Arc<Mutex<Option<crate::glob::SuggestionCache>>>,
     pub special_vars: Arc<special_vars::SpecialVars>,
     pub posix_traps: Arc<RwLock<FxHashMap<Signal, String>>>,
+    /// The POSIX `trap … EXIT` handler, if one is set.
+    ///
+    /// `EXIT` is not a signal, so it cannot live in [`posix_traps`]: it fires once,
+    /// when the shell that set it leaves the script, rather than on a signal.
+    pub posix_exit_trap: Arc<RwLock<Option<String>>>,
     pub posix_fns: Arc<RwLock<FxHashMap<String, Arc<dyn std::any::Any + Send + Sync>>>>,
     pub theme: Arc<RwLock<Arc<fshell_core::theme::Theme>>>,
     pub preview_theme: Arc<RwLock<Option<Arc<fshell_core::theme::Theme>>>>,
@@ -2026,6 +2031,7 @@ impl Env {
             suggestion_cache: Arc::new(Mutex::new(None)),
             special_vars: Arc::new(special_vars::SpecialVars::new()),
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
+            posix_exit_trap: Arc::new(RwLock::new(None)),
             posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
             theme: Arc::new(RwLock::new(Arc::new(
                 fshell_core::theme::Theme::default_theme(),
@@ -2199,6 +2205,7 @@ impl Env {
             suggestion_cache: Arc::new(Mutex::new(None)),
             special_vars: Arc::new(special_vars::SpecialVars::new()),
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
+            posix_exit_trap: Arc::new(RwLock::new(None)),
             posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
             theme: Arc::new(RwLock::new(Arc::new(
                 fshell_core::theme::Theme::default_theme(),
@@ -2306,6 +2313,7 @@ impl Env {
             suggestion_cache: self.suggestion_cache.clone(),
             special_vars: self.special_vars.clone(),
             posix_traps: self.posix_traps.clone(),
+            posix_exit_trap: self.posix_exit_trap.clone(),
             posix_fns: self.posix_fns.clone(),
             theme: self.theme.clone(),
             preview_theme: self.preview_theme.clone(),

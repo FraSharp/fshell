@@ -1887,9 +1887,13 @@ async fn execute_pipeline_inner(
                                     let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
                                     return;
                                 }
-                                // Forward last expression or return value to pipeline.
+                                // Forward the function's value to the pipeline. A
+                                // command that produced nothing has no value, so an
+                                // empty list is not forwarded: it would reach the
+                                // caller as a blank line.
                                 if let Some(v) = last_val
                                     && v != Val::Null
+                                    && !matches!(&v, Val::List(items) if items.is_empty())
                                 {
                                     let _ = out_tx.send(PipelinePayload::Data(Arc::new(v))).await;
                                 }
@@ -3579,6 +3583,13 @@ fn get_path_helper_paths() -> Vec<String> {
     Vec::new()
 }
 
+/// Add the conventional tool directories to `PATH` without reordering what the
+/// caller already set.
+///
+/// Enrichment exists so a shell launched without a login environment can still
+/// find `cargo` or a Homebrew tool. It must never *shadow* what the caller put on
+/// `PATH`: a shell that silently rewrites resolution order breaks sandboxes,
+/// stubbed test corpora and anyone who deliberately put a tool first.
 fn enrich_path(existing_path: &str) -> String {
     let current_paths: Vec<String> = existing_path
         .split(':')
@@ -3587,7 +3598,7 @@ fn enrich_path(existing_path: &str) -> String {
         .collect();
 
     let mut seen: std::collections::HashSet<String> = current_paths.iter().cloned().collect();
-    let mut to_prepend = Vec::new();
+    let mut to_append = Vec::new();
 
     let home = std::env::var("HOME").ok();
 
@@ -3612,16 +3623,16 @@ fn enrich_path(existing_path: &str) -> String {
     for cand in candidates {
         if !seen.contains(&cand) && std::path::Path::new(&cand).is_dir() {
             seen.insert(cand.clone());
-            to_prepend.push(cand);
+            to_append.push(cand);
         }
     }
 
-    if to_prepend.is_empty() {
+    if to_append.is_empty() {
         existing_path.to_string()
     } else if existing_path.is_empty() {
-        to_prepend.join(":")
+        to_append.join(":")
     } else {
-        format!("{}:{}", to_prepend.join(":"), existing_path)
+        format!("{}:{}", existing_path, to_append.join(":"))
     }
 }
 
