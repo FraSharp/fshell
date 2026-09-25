@@ -4,7 +4,6 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::panic))]
 #![allow(clippy::result_large_err)]
 use fshell_core::ShellError;
-use fshell_core::diagnostic::ErrorCode;
 #[allow(unused_imports)]
 use fshell_core::{ResourceHandle, Val};
 use fshell_engine::Env;
@@ -75,19 +74,6 @@ fn sql_stub(
     _span: Option<miette::SourceSpan>,
 ) -> Result<(), ShellError> {
     Err("sql: not implemented in this build".to_string().into())
-}
-
-fn chart_stub(
-    _in_rx: Option<fshell_engine::PipeStream>,
-    _args: Vec<Val>,
-    _env: &Env,
-    _tx: fshell_engine::PipeSender,
-    _span: Option<miette::SourceSpan>,
-) -> Result<(), ShellError> {
-    Err(ShellError::new(
-        ErrorCode::Unsupported,
-        "chart: not implemented in this build",
-    ))
 }
 
 pub fn init(env: &Env) {
@@ -178,7 +164,7 @@ pub fn init(env: &Env) {
         ("intent".to_string(), Arc::new(intent::intent_builtin)),
         ("http".to_string(), Arc::new(http_stub)),
         ("sql".to_string(), Arc::new(sql_stub)),
-        ("chart".to_string(), Arc::new(chart_stub)),
+        ("chart".to_string(), Arc::new(cmd::chart::chart_builtin)),
     ];
 
     #[cfg(feature = "ff")]

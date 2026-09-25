@@ -1387,6 +1387,7 @@ impl Parser {
                 "csv" => SerializationFormat::Csv,
                 "table" => SerializationFormat::Table,
                 "bar" => SerializationFormat::Bar,
+                "inspect" => SerializationFormat::Inspect,
                 _ => {
                     return Err(ParseError::SyntaxError {
                         message: format!("Unknown serialization format: {}", format_name),

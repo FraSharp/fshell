@@ -9,9 +9,7 @@ use crate::tui::components::{KeyHint, ScrollState, SearchBarState, StatusFooter,
 use crate::tui::theme;
 use fshell_core::lock::Mutex;
 use fshell_core::theme::Theme;
-use fshell_terminal::input::{
-    CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers,
-};
+use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -191,10 +189,7 @@ impl Picker {
 
                             let mut spans = Vec::new();
                             if is_selected {
-                                spans.push(Span::styled(
-                                    "❯ ",
-                                    theme::title_style(&self.theme),
-                                ));
+                                spans.push(Span::styled("❯ ", theme::title_style(&self.theme)));
                             } else {
                                 spans.push(Span::raw("  "));
                             }
@@ -272,12 +267,21 @@ impl Picker {
 
                             let msg = format!("Delete session '{session_name}'?");
                             let lines = vec![
-                                Line::from(Span::styled(msg, theme::status_warn_style(&self.theme))),
+                                Line::from(Span::styled(
+                                    msg,
+                                    theme::status_warn_style(&self.theme),
+                                )),
                                 Line::raw(""),
                                 Line::from(vec![
-                                    Span::styled("[y/Enter] ", theme::key_hint_key_style(&self.theme)),
+                                    Span::styled(
+                                        "[y/Enter] ",
+                                        theme::key_hint_key_style(&self.theme),
+                                    ),
                                     Span::raw("Confirm   "),
-                                    Span::styled("[n/Esc] ", theme::key_hint_key_style(&self.theme)),
+                                    Span::styled(
+                                        "[n/Esc] ",
+                                        theme::key_hint_key_style(&self.theme),
+                                    ),
                                     Span::raw("Cancel"),
                                 ]),
                             ];
@@ -307,10 +311,7 @@ impl Picker {
                                 .split(inner);
 
                             frame.render_widget(
-                                Paragraph::new(Span::styled(
-                                    msg,
-                                    theme::title_style(&self.theme),
-                                )),
+                                Paragraph::new(Span::styled(msg, theme::title_style(&self.theme))),
                                 rename_chunks[0],
                             );
 
@@ -347,100 +348,95 @@ impl Picker {
 
             // Modal input routing
             match &mut modal {
-                PickerModal::ConfirmDelete { item_value, .. } => {
-                    match key.key {
-                        Key::Character('y') | Key::Character('Y') | Key::Enter => {
-                            let path = PathBuf::from(&item_value);
-                            let json_path = path.clone();
-                            let log_path = path.with_extension("log");
-                            let _ = std::fs::remove_file(json_path);
-                            let _ = std::fs::remove_file(log_path);
+                PickerModal::ConfirmDelete { item_value, .. } => match key.key {
+                    Key::Character('y') | Key::Character('Y') | Key::Enter => {
+                        let path = PathBuf::from(&item_value);
+                        let json_path = path.clone();
+                        let log_path = path.with_extension("log");
+                        let _ = std::fs::remove_file(json_path);
+                        let _ = std::fs::remove_file(log_path);
 
-                            if let Some(pos) =
-                                self.items.iter().position(|it| it.value == *item_value)
-                            {
-                                self.items.remove(pos);
-                            }
-                            modal = PickerModal::None;
-                            continue;
+                        if let Some(pos) = self.items.iter().position(|it| it.value == *item_value)
+                        {
+                            self.items.remove(pos);
                         }
-                        Key::Character('n') | Key::Character('N') | Key::Escape => {
-                            modal = PickerModal::None;
-                            continue;
-                        }
-                        Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
-                            modal = PickerModal::None;
-                            continue;
-                        }
-                        _ => continue,
+                        modal = PickerModal::None;
+                        continue;
                     }
-                }
+                    Key::Character('n') | Key::Character('N') | Key::Escape => {
+                        modal = PickerModal::None;
+                        continue;
+                    }
+                    Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
+                        modal = PickerModal::None;
+                        continue;
+                    }
+                    _ => continue,
+                },
                 PickerModal::Rename {
                     item_value, input, ..
-                } => {
-                    match key.key {
-                        Key::Enter => {
-                            let new_name = input.query.trim().to_string();
-                            if !new_name.is_empty() {
-                                let path = PathBuf::from(&item_value);
-                                if let Ok(content) = std::fs::read_to_string(&path)
-                                    && let Ok(mut state) = serde_json::from_str::<
-                                        fshell_engine::handoff::HandoffState,
-                                    >(&content)
+                } => match key.key {
+                    Key::Enter => {
+                        let new_name = input.query.trim().to_string();
+                        if !new_name.is_empty() {
+                            let path = PathBuf::from(&item_value);
+                            if let Ok(content) = std::fs::read_to_string(&path)
+                                && let Ok(mut state) = serde_json::from_str::<
+                                    fshell_engine::handoff::HandoffState,
+                                >(&content)
+                            {
+                                state.vars.insert(
+                                    "FSH_SESSION_NAME".to_string(),
+                                    fshell_core::Val::String(new_name.clone()),
+                                );
+                                if let Ok(serialized) = serde_json::to_string_pretty(&state) {
+                                    let _ = std::fs::write(&path, &serialized);
+                                }
+
+                                let mtime = std::fs::metadata(&path)
+                                    .and_then(|m| m.modified())
+                                    .unwrap_or_else(|_| std::time::SystemTime::now());
+                                let age = std::time::SystemTime::now()
+                                    .duration_since(mtime)
+                                    .unwrap_or_default();
+                                let age_str = if age.as_secs() < 60 {
+                                    "just now".to_string()
+                                } else if age.as_secs() < 3600 {
+                                    format!("{}m ago", age.as_secs() / 60)
+                                } else if age.as_secs() < 86400 {
+                                    format!("{}h ago", age.as_secs() / 3600)
+                                } else {
+                                    format!("{}d ago", age.as_secs() / 86400)
+                                };
+
+                                let display = format!(
+                                    "Session {} [{}] (cwd: {}, active: {})",
+                                    state.session_id, new_name, state.cwd, age_str
+                                );
+
+                                if let Some(pos) =
+                                    self.items.iter().position(|it| it.value == *item_value)
                                 {
-                                    state.vars.insert(
-                                        "FSH_SESSION_NAME".to_string(),
-                                        fshell_core::Val::String(new_name.clone()),
-                                    );
-                                    if let Ok(serialized) = serde_json::to_string_pretty(&state) {
-                                        let _ = std::fs::write(&path, &serialized);
-                                    }
-
-                                    let mtime = std::fs::metadata(&path)
-                                        .and_then(|m| m.modified())
-                                        .unwrap_or_else(|_| std::time::SystemTime::now());
-                                    let age = std::time::SystemTime::now()
-                                        .duration_since(mtime)
-                                        .unwrap_or_default();
-                                    let age_str = if age.as_secs() < 60 {
-                                        "just now".to_string()
-                                    } else if age.as_secs() < 3600 {
-                                        format!("{}m ago", age.as_secs() / 60)
-                                    } else if age.as_secs() < 86400 {
-                                        format!("{}h ago", age.as_secs() / 3600)
-                                    } else {
-                                        format!("{}d ago", age.as_secs() / 86400)
-                                    };
-
-                                    let display = format!(
-                                        "Session {} [{}] (cwd: {}, active: {})",
-                                        state.session_id, new_name, state.cwd, age_str
-                                    );
-
-                                    if let Some(pos) =
-                                        self.items.iter().position(|it| it.value == *item_value)
-                                    {
-                                        self.items[pos].display = display;
-                                    }
+                                    self.items[pos].display = display;
                                 }
                             }
-                            modal = PickerModal::None;
-                            continue;
                         }
-                        Key::Escape => {
-                            modal = PickerModal::None;
-                            continue;
-                        }
-                        Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
-                            modal = PickerModal::None;
-                            continue;
-                        }
-                        _ => {
-                            input.handle_key(&key);
-                            continue;
-                        }
+                        modal = PickerModal::None;
+                        continue;
                     }
-                }
+                    Key::Escape => {
+                        modal = PickerModal::None;
+                        continue;
+                    }
+                    Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
+                        modal = PickerModal::None;
+                        continue;
+                    }
+                    _ => {
+                        input.handle_key(&key);
+                        continue;
+                    }
+                },
                 PickerModal::None => {}
             }
 

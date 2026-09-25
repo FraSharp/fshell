@@ -332,6 +332,94 @@ async fn history_async_builtin(
     Ok(())
 }
 
+pub fn explore_builtin(
+    _in_rx: Option<fshell_engine::PipeStream>,
+    _args: Vec<Val>,
+    _env: &Env,
+    _tx: fshell_engine::PipeSender,
+    _span: Option<miette::SourceSpan>,
+) -> Result<(), fshell_core::ShellError> {
+    Err("explore: interactive mode requires the async handler".into())
+}
+
+async fn explore_async_builtin(
+    mut in_rx: Option<fshell_engine::PipeStream>,
+    args: Vec<Val>,
+    env: Env,
+    tx: fshell_engine::PipeSender,
+    _span: Option<miette::SourceSpan>,
+) -> Result<(), fshell_core::ShellError> {
+    let mut items = Vec::new();
+    let mut title = "Pipeline".to_string();
+
+    for arg in &args {
+        match arg {
+            Val::List(l) => {
+                items.extend(l.clone());
+            }
+            Val::String(s) => {
+                title = s.clone();
+            }
+            other => {
+                items.push(other.clone());
+            }
+        }
+    }
+
+    if let Some(mut rx) = in_rx.take() {
+        while let Some(payload) = rx.recv().await {
+            match payload {
+                fshell_engine::PipelinePayload::Data(v) => match v.as_ref() {
+                    Val::List(l) => items.extend(l.clone()),
+                    other => items.push(other.clone()),
+                },
+                fshell_engine::PipelinePayload::Structured(data) => {
+                    let _ = tx
+                        .send(fshell_engine::PipelinePayload::Structured(data))
+                        .await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if items.is_empty() {
+        let _ = tx
+            .send(fshell_engine::PipelinePayload::Data(std::sync::Arc::new(
+                Val::String("(no items to explore)\n".to_string()),
+            )))
+            .await;
+        return Ok(());
+    }
+
+    let is_terminal = !fshell_engine::is_test_mode() && is_stdout_a_tty();
+
+    if is_terminal {
+        let theme = env.active_theme();
+        let items_clone = items.clone();
+        let title_clone = title.clone();
+        let inspector_res = tokio::task::spawn_blocking(move || {
+            crate::tui::inspector::run_table_inspector(items_clone, &title_clone, &theme)
+        })
+        .await
+        .map_err(|e| format!("explore: inspector task failed: {e}"))?;
+
+        if let Err(e) = inspector_res {
+            eprintln!("explore error: {e}");
+        }
+    } else {
+        let theme = env.active_theme();
+        let formatted = crate::format::format_val_compact(&Val::List(items), &theme);
+        let _ = tx
+            .send(fshell_engine::PipelinePayload::Data(std::sync::Arc::new(
+                Val::String(format!("{formatted}\n")),
+            )))
+            .await;
+    }
+
+    Ok(())
+}
+
 #[derive(Clone)]
 /// Snapshot of env values used for prompt rendering.
 /// Refreshed once per command execution instead of reading 5+ locks per keypress.
@@ -2258,6 +2346,10 @@ pub fn init(env: &Env) {
     }
     env.register_builtin("history", std::sync::Arc::new(history_builtin));
     env.register_async_builtin("history", history_async_builtin);
+    env.register_builtin("explore", std::sync::Arc::new(explore_builtin));
+    env.register_async_builtin("explore", explore_async_builtin);
+    env.register_builtin("inspect", std::sync::Arc::new(explore_builtin));
+    env.register_async_builtin("inspect", explore_async_builtin);
     env.set_config_tui_handler(std::sync::Arc::new(|env| {
         crate::config_tui::run_config_tui(env)
     }));

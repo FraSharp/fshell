@@ -312,6 +312,7 @@ pub enum SerializationFormat {
     Csv,
     Table,
     Bar,
+    Inspect,
 }
 
 /// A statement in the fshell AST.

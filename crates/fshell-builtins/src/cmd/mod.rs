@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 pub mod bind;
+pub mod chart;
 pub mod config;
 pub mod env;
 pub mod explain;

@@ -41,6 +41,7 @@ pub struct DataGridState {
     pub table_state: TableState,
     pub sort_column: Option<(String, SortDirection)>,
     pub filter_query: String,
+    pub active_column_idx: usize,
     pub col_offset: usize,
 }
 
@@ -98,6 +99,39 @@ impl DataGridState {
         self.table_state.select(Some(prev));
     }
 
+    pub fn next_column(&mut self, total_cols: usize) {
+        if total_cols == 0 {
+            self.active_column_idx = 0;
+            return;
+        }
+        if self.active_column_idx + 1 < total_cols {
+            self.active_column_idx += 1;
+        } else {
+            self.active_column_idx = 0;
+        }
+    }
+
+    pub fn prev_column(&mut self, total_cols: usize) {
+        if total_cols == 0 {
+            self.active_column_idx = 0;
+            return;
+        }
+        if self.active_column_idx > 0 {
+            self.active_column_idx -= 1;
+        } else {
+            self.active_column_idx = total_cols - 1;
+        }
+    }
+
+    pub fn toggle_active_sort(&mut self, columns: &[String]) {
+        if columns.is_empty() {
+            return;
+        }
+        let idx = self.active_column_idx.min(columns.len() - 1);
+        let col = &columns[idx];
+        self.toggle_sort(col);
+    }
+
     pub fn toggle_sort(&mut self, col_name: &str) {
         let new_dir = match &self.sort_column {
             Some((name, dir)) if name == col_name => dir.toggle(),
@@ -139,37 +173,41 @@ impl<'a> DataGrid<'a> {
         keys
     }
 
-    /// Filter and sort rows according to state.
-    pub fn prepare_rows(&self, _columns: &[String]) -> Vec<&'a Val> {
-        let query = self.state.filter_query.trim().to_lowercase();
-
-        let mut filtered: Vec<&'a Val> = self
-            .items
+    /// Filter and sort row indices according to query and sort specification.
+    pub fn filter_and_sort_indices(
+        items: &[Val],
+        query: &str,
+        sort: Option<&(String, SortDirection)>,
+    ) -> Vec<usize> {
+        let q = query.trim().to_lowercase();
+        let mut indices: Vec<usize> = items
             .iter()
-            .filter(|item| {
-                if query.is_empty() {
+            .enumerate()
+            .filter(|(_, item)| {
+                if q.is_empty() {
                     return true;
                 }
                 if let Val::Map(map) = item {
                     for (_, v) in map {
                         let text = v.to_text().to_lowercase();
-                        if text.contains(&query) {
+                        if text.contains(&q) {
                             return true;
                         }
                     }
                 }
                 false
             })
+            .map(|(idx, _)| idx)
             .collect();
 
-        if let Some((ref sort_col, dir)) = self.state.sort_column {
+        if let Some((sort_col, dir)) = sort {
             let key = ustr(sort_col);
-            filtered.sort_by(|a, b| {
-                let v_a = match a {
+            indices.sort_by(|&a_idx, &b_idx| {
+                let v_a = match &items[a_idx] {
                     Val::Map(m) => m.get(&key),
                     _ => None,
                 };
-                let v_b = match b {
+                let v_b = match &items[b_idx] {
                     Val::Map(m) => m.get(&key),
                     _ => None,
                 };
@@ -186,7 +224,7 @@ impl<'a> DataGrid<'a> {
                     (None, None) => std::cmp::Ordering::Equal,
                 };
 
-                if dir == SortDirection::Descending {
+                if *dir == SortDirection::Descending {
                     ord.reverse()
                 } else {
                     ord
@@ -194,7 +232,17 @@ impl<'a> DataGrid<'a> {
             });
         }
 
-        filtered
+        indices
+    }
+
+    /// Filter and sort rows according to state.
+    pub fn prepare_rows(&self, _columns: &[String]) -> Vec<&'a Val> {
+        let indices = Self::filter_and_sort_indices(
+            self.items,
+            &self.state.filter_query,
+            self.state.sort_column.as_ref(),
+        );
+        indices.into_iter().map(|idx| &self.items[idx]).collect()
     }
 
     pub fn render(self, area: Rect, buf: &mut Buffer) {
@@ -220,10 +268,7 @@ impl<'a> DataGrid<'a> {
         }
 
         // Determine column widths and alignments
-        let mut widths: Vec<usize> = columns
-            .iter()
-            .map(|c| c.width().max(6))
-            .collect();
+        let mut widths: Vec<usize> = columns.iter().map(|c| c.width().max(6)).collect();
 
         let mut is_numeric = vec![true; columns.len()];
 
@@ -244,13 +289,21 @@ impl<'a> DataGrid<'a> {
         }
 
         // Header cells
-        let header_cells = columns.iter().map(|col| {
+        let header_cells = columns.iter().enumerate().map(|(idx, col)| {
             let sort_indicator = match &self.state.sort_column {
                 Some((c, dir)) if c == col => format!(" {}", dir.symbol()),
                 _ => String::new(),
             };
             let title = format!("{col}{sort_indicator}");
-            Cell::from(title).style(theme::title_style(self.theme))
+            let base_style = theme::title_style(self.theme);
+            let style = if idx == self.state.active_column_idx {
+                base_style.add_modifier(
+                    ratatui::style::Modifier::UNDERLINED | ratatui::style::Modifier::BOLD,
+                )
+            } else {
+                base_style
+            };
+            Cell::from(title).style(style)
         });
 
         let header = Row::new(header_cells)
@@ -307,11 +360,6 @@ impl<'a> DataGrid<'a> {
             .row_highlight_style(theme::selected_style(self.theme))
             .highlight_symbol("❯ ");
 
-        ratatui::widgets::StatefulWidget::render(
-            table,
-            area,
-            buf,
-            &mut self.state.table_state,
-        );
+        ratatui::widgets::StatefulWidget::render(table, area, buf, &mut self.state.table_state);
     }
 }

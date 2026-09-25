@@ -1578,6 +1578,7 @@ pub fn format_pipeline(p: &fshell_core::Pipeline) -> String {
                     fshell_core::SerializationFormat::Csv => "@csv",
                     fshell_core::SerializationFormat::Table => "@table",
                     fshell_core::SerializationFormat::Bar => "@bar",
+                    fshell_core::SerializationFormat::Inspect => "@inspect",
                 };
                 f.to_string()
             }

@@ -4,8 +4,10 @@
 //! Unified TUI design system and component architecture for fshell.
 
 pub mod components;
+pub mod inspector;
 pub mod theme;
 
 pub use crate::terminal_mode::FullscreenTerminalGuard;
 pub use components::*;
+pub use inspector::run_table_inspector;
 pub use theme::*;

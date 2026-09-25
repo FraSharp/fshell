@@ -41,12 +41,7 @@ pub fn centered_fixed(width: u16, height: u16, r: Rect) -> Rect {
 
 /// Renders a clear backdrop and a rounded block frame for a modal dialog.
 /// Returns the inner `Rect` available for dialog contents.
-pub fn render_modal_frame(
-    area: Rect,
-    buf: &mut Buffer,
-    theme: &Theme,
-    title: &str,
-) -> Rect {
+pub fn render_modal_frame(area: Rect, buf: &mut Buffer, theme: &Theme, title: &str) -> Rect {
     // 1. Wipe out any characters beneath the dialog
     Clear.render(area, buf);
 

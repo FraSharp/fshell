@@ -103,6 +103,7 @@ pub fn format_pipeline(pipeline: &fshell_core::Pipeline) -> String {
                     SerializationFormat::Csv => "@csv",
                     SerializationFormat::Table => "@table",
                     SerializationFormat::Bar => "@bar",
+                    SerializationFormat::Inspect => "@inspect",
                 };
                 parts.push(f_str.to_string());
             }

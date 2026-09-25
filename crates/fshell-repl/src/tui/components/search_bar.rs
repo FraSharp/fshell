@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Debug, Clone, Default)]
 pub struct SearchBarState {
     pub query: String,
-    pub cursor: usize, // character index
+    pub cursor: usize,        // character index
     pub scroll_offset: usize, // horizontal scroll offset in characters
 }
 
@@ -227,10 +227,7 @@ impl SearchBarState {
 
                 // If cursor is at the end of the visible text
                 if !cursor_rendered && cursor_rel == char_idx {
-                    spans.push(Span::styled(
-                        "█",
-                        theme::title_style(theme),
-                    ));
+                    spans.push(Span::styled("█", theme::title_style(theme)));
                 }
             } else {
                 spans.push(Span::styled(visible_chars, text_style));

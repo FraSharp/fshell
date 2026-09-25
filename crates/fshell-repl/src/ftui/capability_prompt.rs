@@ -12,9 +12,7 @@ use crate::terminal_mode::FullscreenTerminalGuard;
 use crate::tui::components::modal_dialog;
 use crate::tui::theme;
 use fshell_engine::{CapAction, CapPromptRequest, CapPromptResponse, Env};
-use fshell_terminal::input::{
-    CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers,
-};
+use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};

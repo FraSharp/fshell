@@ -62,7 +62,9 @@ fn to_style(c: &ThemeColor) -> Style {
 }
 
 fn to_style_bold(c: &ThemeColor) -> Style {
-    Style::default().fg(to_color(c)).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(to_color(c))
+        .add_modifier(Modifier::BOLD)
 }
 
 fn to_style_dim(c: &ThemeColor) -> Style {
@@ -150,7 +152,10 @@ pub fn run_tui(env: &Env) -> Result<(), ShellError> {
     }
 
     let mut guard = TerminalGuard::new().map_err(ShellError::from)?;
-    guard.terminal.clear().map_err(|e| ShellError::from(e.to_string()))?;
+    guard
+        .terminal
+        .clear()
+        .map_err(|e| ShellError::from(e.to_string()))?;
 
     let theme = env.active_theme();
     let mut query = String::new();
@@ -258,10 +263,7 @@ pub fn run_tui(env: &Env) -> Result<(), ShellError> {
                 f.render_widget(Paragraph::new(Line::from(search_spans)), search_area);
 
                 f.render_widget(
-                    Paragraph::new(Span::styled(
-                        count_str,
-                        to_style_dim(&theme.status.muted),
-                    )),
+                    Paragraph::new(Span::styled(count_str, to_style_dim(&theme.status.muted))),
                     count_area,
                 );
 
@@ -404,8 +406,7 @@ pub fn run_tui(env: &Env) -> Result<(), ShellError> {
                         1,
                         doc_inner.height,
                     );
-                    let mut sbar_state =
-                        ScrollbarState::new(total_doc_lines).position(doc_scroll);
+                    let mut sbar_state = ScrollbarState::new(total_doc_lines).position(doc_scroll);
                     Scrollbar::default()
                         .orientation(ScrollbarOrientation::VerticalRight)
                         .begin_symbol(None)
@@ -421,16 +422,15 @@ pub fn run_tui(env: &Env) -> Result<(), ShellError> {
                 let key_style = to_style_bold(&theme.status.info);
                 let label_style = to_style(&theme.status.muted);
 
-                let mut footer_spans = vec![
-                    Span::styled(format!(" [Focus: {}]  ", focus.name()), to_style_bold(&theme.widgets.title)),
-                ];
+                let mut footer_spans = vec![Span::styled(
+                    format!(" [Focus: {}]  ", focus.name()),
+                    to_style_bold(&theme.widgets.title),
+                )];
 
                 let hints: &[(&str, &str)] = match focus {
-                    FocusArea::Search => &[
-                        ("Enter/↓", "Topics"),
-                        ("Tab", "Switch"),
-                        ("Esc", "Exit"),
-                    ],
+                    FocusArea::Search => {
+                        &[("Enter/↓", "Topics"), ("Tab", "Switch"), ("Esc", "Exit")]
+                    }
                     FocusArea::Topics => &[
                         ("j/k", "Select"),
                         ("Enter/→", "Read Doc"),
@@ -605,7 +605,9 @@ pub fn run_tui(env: &Env) -> Result<(), ShellError> {
                 Key::PageUp => {
                     doc_scroll = doc_scroll.saturating_sub(12);
                 }
-                Key::PageDown | Key::Character('d') if key.modifiers.contains(Modifiers::CONTROL) => {
+                Key::PageDown | Key::Character('d')
+                    if key.modifiers.contains(Modifiers::CONTROL) =>
+                {
                     if doc_scroll + 12 < total_doc_lines {
                         doc_scroll += 12;
                     }
@@ -643,12 +645,21 @@ fn format_topic_lines(topic: &HelpTopic, theme: &Theme) -> Vec<Line<'static>> {
     // 1. Header: Name + Category badge
     lines.push(Line::from(vec![
         Span::styled(topic.name.to_string(), title_style),
-        Span::styled(format!("  [{}]", topic.category.label()), to_style(&theme.syntax.keyword)),
+        Span::styled(
+            format!("  [{}]", topic.category.label()),
+            to_style(&theme.syntax.keyword),
+        ),
     ]));
 
     let rule = "─".repeat(50);
-    lines.push(Line::from(Span::styled(rule, to_style_dim(&theme.status.muted))));
-    lines.push(Line::from(Span::styled(topic.summary.to_string(), normal_style)));
+    lines.push(Line::from(Span::styled(
+        rule,
+        to_style_dim(&theme.status.muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        topic.summary.to_string(),
+        normal_style,
+    )));
     lines.push(Line::raw(""));
 
     // 2. Syntax
@@ -663,7 +674,10 @@ fn format_topic_lines(topic: &HelpTopic, theme: &Theme) -> Vec<Line<'static>> {
 
     // 3. Description
     if !topic.description.is_empty() {
-        lines.push(Line::from(Span::styled("DESCRIPTION", section_header_style)));
+        lines.push(Line::from(Span::styled(
+            "DESCRIPTION",
+            section_header_style,
+        )));
         for d_line in topic.description.lines() {
             lines.push(Line::from(vec![
                 Span::raw("  "),

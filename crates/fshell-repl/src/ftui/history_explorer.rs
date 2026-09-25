@@ -366,7 +366,10 @@ pub fn run_history_tui_with_theme(
                 if let Some(entry) = selected_entry {
                     let (status_text, status_style) = match entry.exit_code {
                         Some(0) => ("Success (0)", theme::status_ok_style(theme)),
-                        Some(code) => (format!("Failure ({code})").leak() as &str, theme::status_error_style(theme)),
+                        Some(code) => (
+                            format!("Failure ({code})").leak() as &str,
+                            theme::status_error_style(theme),
+                        ),
                         None => ("In Progress / Terminated", theme::status_warn_style(theme)),
                     };
 
@@ -382,7 +385,10 @@ pub fn run_history_tui_with_theme(
 
                     let lines = vec![
                         Line::from(Span::styled("Command:", theme::title_style(theme))),
-                        Line::from(Span::styled(&entry.command, theme::key_hint_key_style(theme))),
+                        Line::from(Span::styled(
+                            &entry.command,
+                            theme::key_hint_key_style(theme),
+                        )),
                         Line::raw(""),
                         Line::from(vec![
                             Span::styled("Exit Code:   ", label_style),
@@ -398,7 +404,10 @@ pub fn run_history_tui_with_theme(
                         ]),
                         Line::from(vec![
                             Span::styled("Host / User: ", label_style),
-                            Span::styled(format!("{} @ {}", entry.username, entry.hostname), val_style),
+                            Span::styled(
+                                format!("{} @ {}", entry.username, entry.hostname),
+                                val_style,
+                            ),
                         ]),
                         Line::from(vec![
                             Span::styled("Session ID:  ", label_style),
@@ -424,8 +433,8 @@ pub fn run_history_tui_with_theme(
                     f.render_widget(Paragraph::new(visible_lines), preview_inner);
                     preview_scroll_state.render_scrollbar(preview_inner, f.buffer_mut(), theme);
                 } else {
-                    let empty_msg = Paragraph::new("\n  No record selected")
-                        .style(theme::muted_style(theme));
+                    let empty_msg =
+                        Paragraph::new("\n  No record selected").style(theme::muted_style(theme));
                     f.render_widget(empty_msg, preview_inner);
                 }
 
@@ -500,88 +509,82 @@ pub fn run_history_tui_with_theme(
 
         // Pane-specific keys
         match focus {
-            FocusPane::Search => {
-                match key.key {
-                    Key::Down => {
-                        focus = FocusPane::List;
-                    }
-                    Key::Character('e') if key.modifiers.contains(Modifiers::CONTROL) => {
-                        if let Some(idx) = list_state.selected()
-                            && let Some(entry) = entries.get(idx)
-                        {
-                            return Ok(TuiResult::Edit(entry.command.clone()));
-                        }
-                    }
-                    _ => {
-                        if search_bar.handle_key(&key) {
-                            list_state.select(Some(0));
-                            should_requery = true;
-                        }
+            FocusPane::Search => match key.key {
+                Key::Down => {
+                    focus = FocusPane::List;
+                }
+                Key::Character('e') if key.modifiers.contains(Modifiers::CONTROL) => {
+                    if let Some(idx) = list_state.selected()
+                        && let Some(entry) = entries.get(idx)
+                    {
+                        return Ok(TuiResult::Edit(entry.command.clone()));
                     }
                 }
-            }
-            FocusPane::List => {
-                match key.key {
-                    Key::Character('/') => {
-                        focus = FocusPane::Search;
-                    }
-                    Key::Character('e') | Key::Character('E') => {
-                        if let Some(idx) = list_state.selected()
-                            && let Some(entry) = entries.get(idx)
-                        {
-                            return Ok(TuiResult::Edit(entry.command.clone()));
-                        }
-                    }
-                    Key::Up | Key::Character('k') if len > 0 => {
-                        let current = list_state.selected().unwrap_or(0);
-                        if current > 0 {
-                            list_state.select(Some(current - 1));
-                        } else {
-                            list_state.select(Some(len - 1));
-                        }
-                    }
-                    Key::Down | Key::Character('j') if len > 0 => {
-                        let current = list_state.selected().unwrap_or(0);
-                        if current + 1 < len {
-                            list_state.select(Some(current + 1));
-                        } else {
-                            list_state.select(Some(0));
-                        }
-                    }
-                    Key::PageUp => {
-                        let current = list_state.selected().unwrap_or(0);
-                        list_state.select(Some(current.saturating_sub(10)));
-                    }
-                    Key::PageDown if len > 0 => {
-                        let current = list_state.selected().unwrap_or(0);
-                        list_state.select(Some((current + 10).min(len - 1)));
-                    }
-                    Key::Home | Key::Character('g') => {
+                _ => {
+                    if search_bar.handle_key(&key) {
                         list_state.select(Some(0));
+                        should_requery = true;
                     }
-                    Key::End | Key::Character('G') if len > 0 => {
+                }
+            },
+            FocusPane::List => match key.key {
+                Key::Character('/') => {
+                    focus = FocusPane::Search;
+                }
+                Key::Character('e') | Key::Character('E') => {
+                    if let Some(idx) = list_state.selected()
+                        && let Some(entry) = entries.get(idx)
+                    {
+                        return Ok(TuiResult::Edit(entry.command.clone()));
+                    }
+                }
+                Key::Up | Key::Character('k') if len > 0 => {
+                    let current = list_state.selected().unwrap_or(0);
+                    if current > 0 {
+                        list_state.select(Some(current - 1));
+                    } else {
                         list_state.select(Some(len - 1));
                     }
-                    _ => {}
                 }
-            }
-            FocusPane::Preview => {
-                match key.key {
-                    Key::Character('/') => {
-                        focus = FocusPane::Search;
+                Key::Down | Key::Character('j') if len > 0 => {
+                    let current = list_state.selected().unwrap_or(0);
+                    if current + 1 < len {
+                        list_state.select(Some(current + 1));
+                    } else {
+                        list_state.select(Some(0));
                     }
-                    Key::Up | Key::Character('k') => {
-                        preview_scroll = preview_scroll.saturating_sub(1);
-                    }
-                    Key::Down | Key::Character('j') => {
-                        preview_scroll = preview_scroll.saturating_add(1);
-                    }
-                    Key::Home | Key::Character('g') => {
-                        preview_scroll = 0;
-                    }
-                    _ => {}
                 }
-            }
+                Key::PageUp => {
+                    let current = list_state.selected().unwrap_or(0);
+                    list_state.select(Some(current.saturating_sub(10)));
+                }
+                Key::PageDown if len > 0 => {
+                    let current = list_state.selected().unwrap_or(0);
+                    list_state.select(Some((current + 10).min(len - 1)));
+                }
+                Key::Home | Key::Character('g') => {
+                    list_state.select(Some(0));
+                }
+                Key::End | Key::Character('G') if len > 0 => {
+                    list_state.select(Some(len - 1));
+                }
+                _ => {}
+            },
+            FocusPane::Preview => match key.key {
+                Key::Character('/') => {
+                    focus = FocusPane::Search;
+                }
+                Key::Up | Key::Character('k') => {
+                    preview_scroll = preview_scroll.saturating_sub(1);
+                }
+                Key::Down | Key::Character('j') => {
+                    preview_scroll = preview_scroll.saturating_add(1);
+                }
+                Key::Home | Key::Character('g') => {
+                    preview_scroll = 0;
+                }
+                _ => {}
+            },
         }
     }
 }

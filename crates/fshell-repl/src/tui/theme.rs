@@ -83,3 +83,23 @@ pub fn key_hint_key_style(theme: &Theme) -> Style {
 pub fn key_hint_label_style(theme: &Theme) -> Style {
     theme.status.muted.to_style()
 }
+
+/// Standardized keyword style.
+pub fn keyword_style(theme: &Theme) -> Style {
+    theme.syntax.keyword.to_style_bold()
+}
+
+/// Standardized foreground text style.
+pub fn foreground_style(theme: &Theme) -> Style {
+    theme.widgets.foreground.to_style()
+}
+
+/// Standardized error style.
+pub fn error_style(theme: &Theme) -> Style {
+    theme.status.error.to_style_bold()
+}
+
+/// Standardized ok/success style.
+pub fn ok_style(theme: &Theme) -> Style {
+    theme.status.ok.to_style_bold()
+}

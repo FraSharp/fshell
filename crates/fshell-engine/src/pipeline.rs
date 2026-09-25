@@ -3111,6 +3111,52 @@ async fn execute_pipeline_inner(
                             .await;
                     });
                 }
+                SerializationFormat::Inspect => {
+                    let env_for_inspect = env_clone.clone();
+                    spawn_stage!(async move {
+                        let mut items: Vec<Val> = Vec::new();
+                        if let Some(mut rx) = current_rx {
+                            while let Some(payload) = rx.recv().await {
+                                if env_for_inspect.pipeline_cancelled() {
+                                    break;
+                                }
+                                match payload {
+                                    PipelinePayload::Data(val) => {
+                                        if items.len() < 100_000 {
+                                            match Arc::try_unwrap(val) {
+                                                Ok(v) => items.push(v),
+                                                Err(arc) => items.push((*arc).clone()),
+                                            }
+                                        }
+                                    }
+                                    PipelinePayload::Bytes(b) => {
+                                        forward_bytes_as_lines(&out_tx, &b).await;
+                                    }
+                                    PipelinePayload::Structured(d) => {
+                                        let _ = out_tx.send(PipelinePayload::Structured(d)).await;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(handler) = env_for_inspect
+                            .get_builtin("inspect")
+                            .or_else(|| env_for_inspect.get_builtin("explore"))
+                        {
+                            let _ = (handler)(
+                                None,
+                                vec![Val::List(items)],
+                                &env_for_inspect,
+                                out_tx,
+                                None,
+                            );
+                        } else {
+                            let rendered = render_table(&items);
+                            let _ = out_tx
+                                .send(PipelinePayload::Data(Arc::new(Val::String(rendered))))
+                                .await;
+                        }
+                    });
+                }
             },
             PipelineStage::FdRedirect { src_fd, dst_fd } => {
                 // Handle fd-to-fd redirection (e.g., `2>&1` means stderr -> stdout).

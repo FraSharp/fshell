@@ -359,6 +359,7 @@ impl Completer for FshellCompleter {
                     ("@csv ", "Parse or emit CSV data"),
                     ("@table ", "Render structured data as an ASCII table"),
                     ("@bar ", "Render numeric data as a bar chart"),
+                    ("@inspect ", "Open interactive fullscreen data inspector"),
                 ];
                 return pipe_ops
                     .into_iter()
@@ -394,8 +395,8 @@ impl Completer for FshellCompleter {
             }
 
             let all_ops = [
-                "filter", "map", "sort", "grep", "count", "limit", "@json", "@yaml", "@msgpack",
-                "@text", "@csv", "@table", "@bar",
+                "filter", "map", "sort", "grep", "count", "limit", "explore", "chart", "@json",
+                "@yaml", "@msgpack", "@text", "@csv", "@table", "@bar", "@inspect",
             ];
             if !downstream_trimmed.is_empty() {
                 let partial = all_ops
@@ -691,8 +692,8 @@ impl Completer for FshellCompleter {
 
         // Pipeline operators standalone
         let pipe_operators = [
-            "filter", "map", "sort", "grep", "count", "limit", "@json", "@yaml", "@msgpack",
-            "@text", "@csv", "@table", "@bar",
+            "filter", "map", "sort", "grep", "count", "limit", "explore", "chart", "@json",
+            "@yaml", "@msgpack", "@text", "@csv", "@table", "@bar", "@inspect",
         ];
         for op in &pipe_operators {
             if op.starts_with(&last_word_lower) {
@@ -703,6 +704,9 @@ impl Completer for FshellCompleter {
                     "grep" => "Grep text within pipeline items",
                     "count" => "Count pipeline items",
                     "limit" => "Limit pipeline output",
+                    "explore" => "Interactively explore structured data",
+                    "chart" => "Draw inline bar charts and histograms",
+                    "@inspect" => "Interactive fullscreen data inspector",
                     _ => "Pipeline boundary format",
                 };
                 suggestions.push(

@@ -148,7 +148,10 @@ pub fn show_text_pager_with_theme(text: &str, theme: &fshell_core::theme::Theme)
                 formatted_lines.push(ratatui::text::Line::from(line_spans));
             }
 
-            frame.render_widget(ratatui::widgets::Paragraph::new(formatted_lines), content_area);
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(formatted_lines),
+                content_area,
+            );
 
             let mut scroll_state = crate::tui::components::ScrollState::new();
             scroll_state.update(line_count, visible_height);
@@ -174,7 +177,13 @@ pub fn show_text_pager_with_theme(text: &str, theme: &fshell_core::theme::Theme)
             } else {
                 100
             };
-            let status_text = format!("{:>3}% │ {}:{} (col {})", pct, offset_y + 1, line_count, offset_x + 1);
+            let status_text = format!(
+                "{:>3}% │ {}:{} (col {})",
+                pct,
+                offset_y + 1,
+                line_count,
+                offset_x + 1
+            );
 
             let hints: &[crate::tui::components::KeyHint] = if searching {
                 &[
@@ -206,7 +215,10 @@ pub fn show_text_pager_with_theme(text: &str, theme: &fshell_core::theme::Theme)
                         )
                     }
                 } else {
-                    ratatui::text::Span::styled(" Search Mode ", crate::tui::theme::title_style(theme))
+                    ratatui::text::Span::styled(
+                        " Search Mode ",
+                        crate::tui::theme::title_style(theme),
+                    )
                 }
             } else {
                 ratatui::text::Span::styled(status_text, crate::tui::theme::title_style(theme))
@@ -260,7 +272,13 @@ pub fn show_text_pager_with_theme(text: &str, theme: &fshell_core::theme::Theme)
         } else {
             match key.key {
                 Key::Character('q') | Key::Escape => break,
-                Key::Character('c') if key.modifiers.contains(fshell_terminal::input::Modifiers::CONTROL) => break,
+                Key::Character('c')
+                    if key
+                        .modifiers
+                        .contains(fshell_terminal::input::Modifiers::CONTROL) =>
+                {
+                    break;
+                }
                 Key::Up | Key::Character('k') => {
                     offset_y = offset_y.saturating_sub(1);
                 }
@@ -275,13 +293,21 @@ pub fn show_text_pager_with_theme(text: &str, theme: &fshell_core::theme::Theme)
                 Key::Right | Key::Character('l') => {
                     offset_x = offset_x.saturating_add(4);
                 }
-                Key::PageUp | Key::Character('u') if key.modifiers.contains(fshell_terminal::input::Modifiers::CONTROL) => {
+                Key::PageUp | Key::Character('u')
+                    if key
+                        .modifiers
+                        .contains(fshell_terminal::input::Modifiers::CONTROL) =>
+                {
                     offset_y = offset_y.saturating_sub(visible_height);
                 }
                 Key::PageUp => {
                     offset_y = offset_y.saturating_sub(visible_height);
                 }
-                Key::PageDown | Key::Character('d') if key.modifiers.contains(fshell_terminal::input::Modifiers::CONTROL) => {
+                Key::PageDown | Key::Character('d')
+                    if key
+                        .modifiers
+                        .contains(fshell_terminal::input::Modifiers::CONTROL) =>
+                {
                     offset_y = (offset_y + visible_height).min(line_count.saturating_sub(1));
                 }
                 Key::PageDown => {
