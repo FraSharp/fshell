@@ -334,12 +334,51 @@ async fn history_async_builtin(
 
 pub fn explore_builtin(
     _in_rx: Option<fshell_engine::PipeStream>,
-    _args: Vec<Val>,
-    _env: &Env,
-    _tx: fshell_engine::PipeSender,
+    args: Vec<Val>,
+    env: &Env,
+    tx: fshell_engine::PipeSender,
     _span: Option<miette::SourceSpan>,
 ) -> Result<(), fshell_core::ShellError> {
-    Err("explore: interactive mode requires the async handler".into())
+    let mut items = Vec::new();
+    let mut title = "Pipeline".to_string();
+
+    for arg in &args {
+        match arg {
+            Val::List(l) => {
+                items.extend(l.clone());
+            }
+            Val::String(s) => {
+                title = s.clone();
+            }
+            other => {
+                items.push(other.clone());
+            }
+        }
+    }
+
+    if items.is_empty() {
+        let _ = tx.blocking_send(fshell_engine::PipelinePayload::Data(std::sync::Arc::new(
+            Val::String("(no items to explore)\n".to_string()),
+        )));
+        return Ok(());
+    }
+
+    let is_terminal = !fshell_engine::is_test_mode() && is_stdout_a_tty();
+
+    if is_terminal {
+        let theme = env.active_theme();
+        if let Err(e) = crate::tui::inspector::run_table_inspector(items, &title, &theme) {
+            eprintln!("explore error: {e}");
+        }
+    } else {
+        let theme = env.active_theme();
+        let formatted = crate::format::format_val_compact(&Val::List(items), &theme);
+        let _ = tx.blocking_send(fshell_engine::PipelinePayload::Data(std::sync::Arc::new(
+            Val::String(format!("{formatted}\n")),
+        )));
+    }
+
+    Ok(())
 }
 
 async fn explore_async_builtin(

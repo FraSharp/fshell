@@ -3138,7 +3138,22 @@ async fn execute_pipeline_inner(
                                 }
                             }
                         }
-                        if let Some(handler) = env_for_inspect
+                        if let Some(async_handler) = env_for_inspect
+                            .get_async_builtin("inspect")
+                            .or_else(|| env_for_inspect.get_async_builtin("explore"))
+                        {
+                            if let Err(e) = (async_handler)(
+                                None,
+                                vec![Val::List(items)],
+                                env_for_inspect.clone(),
+                                out_tx,
+                                None,
+                            )
+                            .await
+                            {
+                                eprintln!("inspect error: {e}");
+                            }
+                        } else if let Some(handler) = env_for_inspect
                             .get_builtin("inspect")
                             .or_else(|| env_for_inspect.get_builtin("explore"))
                         {
