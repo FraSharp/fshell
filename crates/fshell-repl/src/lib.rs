@@ -269,8 +269,14 @@ async fn history_async_builtin(
                 _ => "unknown".to_string(),
             }
         };
+        let theme = env.active_theme();
         let history_result = tokio::task::spawn_blocking(move || {
-            ftui::history_explorer::run_history_tui(&current_pwd, &current_host, &current_session)
+            ftui::history_explorer::run_history_tui_with_theme(
+                &current_pwd,
+                &current_host,
+                &current_session,
+                &theme,
+            )
         })
         .await
         .map_err(|e| format!("history: TUI task failed: {e}"))??;

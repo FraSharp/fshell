@@ -45,6 +45,7 @@ walkdir = { workspace = true }
 nu-ansi-term = { workspace = true }
 ratatui = { workspace = true }
 nucleo-matcher = { workspace = true }
+unicode-width = { workspace = true }
 getrandom = { workspace = true }
 
 # gated deps

@@ -1,24 +1,34 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use crate::help::{HelpTopic, TOPICS, render_full};
+//! Modern, two-pane interactive help reference browser built on Ratatui.
+
+use crate::help::{HelpTopic, TOPICS};
 use crossterm::{
+    cursor::{Hide, Show},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use fshell_core::ShellError;
+use fshell_core::theme::{Theme, ThemeColor};
 use fshell_engine::Env;
-use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers};
+use fshell_terminal::input::{
+    CrosstermEventSource, InputEvent, InputPoll, Key, KeyAction, Modifiers,
+};
 use nucleo_matcher::{Config, Matcher, Utf32String};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{
+        Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, StatefulWidget,
+    },
 };
 use std::io;
+use unicode_width::UnicodeWidthStr;
 
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -28,7 +38,7 @@ impl TerminalGuard {
     fn new() -> Result<Self, String> {
         enable_raw_mode().map_err(|e| e.to_string())?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;
+        execute!(stdout, EnterAlternateScreen, Hide).map_err(|e| e.to_string())?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
         Ok(Self { terminal })
@@ -37,9 +47,58 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = self.terminal.show_cursor();
+    }
+}
+
+fn to_color(c: &ThemeColor) -> Color {
+    let (r, g, b) = c.to_rgb();
+    Color::Rgb(r, g, b)
+}
+
+fn to_style(c: &ThemeColor) -> Style {
+    Style::default().fg(to_color(c))
+}
+
+fn to_style_bold(c: &ThemeColor) -> Style {
+    Style::default().fg(to_color(c)).add_modifier(Modifier::BOLD)
+}
+
+fn to_style_dim(c: &ThemeColor) -> Style {
+    Style::default().fg(to_color(c)).add_modifier(Modifier::DIM)
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FocusArea {
+    Search,
+    Topics,
+    Doc,
+}
+
+impl FocusArea {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Search => Self::Topics,
+            Self::Topics => Self::Doc,
+            Self::Doc => Self::Search,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Search => Self::Doc,
+            Self::Topics => Self::Search,
+            Self::Doc => Self::Topics,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Search => "Search",
+            Self::Topics => "Topics",
+            Self::Doc => "Documentation",
+        }
     }
 }
 
@@ -72,159 +131,333 @@ pub fn get_matching_topics(query: &str) -> Vec<&'static HelpTopic> {
             matched.push((topic, score));
         }
     }
-    // Sort by score descending, then by name for stable ordering of equal scores
     matched.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(b.0.name)));
     matched.into_iter().map(|(t, _)| t).collect()
 }
 
-pub fn run_tui(_env: &Env) -> Result<(), ShellError> {
+pub fn run_tui(env: &Env) -> Result<(), ShellError> {
+    if fshell_engine::is_test_mode() {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let stdin_fd = std::io::stdin().as_raw_fd();
+        if unsafe { libc::isatty(stdin_fd) } == 0 {
+            return Ok(());
+        }
+    }
+
     let mut guard = TerminalGuard::new().map_err(ShellError::from)?;
+    guard.terminal.clear().map_err(|e| ShellError::from(e.to_string()))?;
+
+    let theme = env.active_theme();
     let mut query = String::new();
-    let mut search_focused = true;
-    let mut selected_index = 0;
-    let mut detail_scroll = 0;
+    let mut focus = FocusArea::Search;
+    let mut selected_index = 0usize;
+    let mut doc_scroll = 0usize;
     let mut matches = get_matching_topics(&query);
     let mut input = CrosstermEventSource::new();
+    let mut list_state = ListState::default();
+    list_state.select(Some(0));
 
     loop {
-        // Draw the interface
-        let current_query = query.clone();
-        let current_search_focused = search_focused;
-        let current_selected_index = selected_index;
-        let current_detail_scroll = detail_scroll;
-        let current_matches = matches.clone();
+        let topic_count = matches.len();
+        if topic_count == 0 {
+            selected_index = 0;
+            list_state.select(None);
+        } else if selected_index >= topic_count {
+            selected_index = topic_count.saturating_sub(1);
+            list_state.select(Some(selected_index));
+        } else {
+            list_state.select(Some(selected_index));
+        }
+
+        // Selected topic structured lines
+        let selected_topic = matches.get(selected_index).copied();
+        let doc_lines = selected_topic
+            .map(|t| format_topic_lines(t, &theme))
+            .unwrap_or_else(|| vec![Line::from("No topic selected.")]);
+        let total_doc_lines = doc_lines.len();
 
         guard
             .terminal
             .draw(|f| {
-                let chunks = Layout::default()
+                let size = f.area();
+                if size.width < 10 || size.height < 6 {
+                    return;
+                }
+
+                // Outer master block
+                let outer_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(to_style_dim(&theme.status.muted))
+                    .title(" Help Reference ")
+                    .title_style(to_style_bold(&theme.widgets.title));
+
+                let inner = outer_block.inner(size);
+                f.render_widget(outer_block, size);
+
+                // Main vertical division:
+                // [0] Search row (1 line)
+                // [1] Divider (1 line)
+                // [2] Master-detail content (Min 4 lines)
+                // [3] Divider (1 line)
+                // [4] Status Footer (1 line)
+                let layout = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Length(3), // Search box
-                        Constraint::Min(5),    // Middle columns
-                        Constraint::Length(1), // Status bar
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Min(4),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
                     ])
-                    .split(f.area());
+                    .split(inner);
 
-                // 1. Search box rendering
-                let search_style = if current_search_focused {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let search_title = if current_search_focused {
-                    " Search (fuzzy) "
-                } else {
-                    " Search — / to focus, Esc to navigate "
-                };
-                let search_block = Block::default()
-                    .borders(Borders::ALL)
-                    .title(search_title)
-                    .border_style(search_style);
-                let search_paragraph = Paragraph::new(current_query.as_str()).block(search_block);
-                f.render_widget(search_paragraph, chunks[0]);
+                let search_row = layout[0];
+                let top_div = layout[1];
+                let middle_content = layout[2];
+                let bot_div = layout[3];
+                let footer_row = layout[4];
 
-                // 2. Middle area rendering
-                let middle_columns = Layout::default()
+                // 1. Search Bar
+                let count_str = format!("Topics: {topic_count} matches ");
+                let count_w = count_str.width() as u16;
+                let input_w = search_row.width.saturating_sub(count_w + 2);
+
+                let search_area = Rect::new(search_row.x, search_row.y, input_w, 1);
+                let count_area = Rect::new(
+                    search_row.x + search_row.width.saturating_sub(count_w),
+                    search_row.y,
+                    count_w,
+                    1,
+                );
+
+                let search_focused = focus == FocusArea::Search;
+                let search_prefix_style = if search_focused {
+                    to_style_bold(&theme.widgets.title)
+                } else {
+                    to_style_dim(&theme.status.muted)
+                };
+
+                let mut search_spans = vec![Span::styled("/ ", search_prefix_style)];
+                if query.is_empty() && !search_focused {
+                    search_spans.push(Span::styled(
+                        "Type to search topics...",
+                        to_style_dim(&theme.status.muted),
+                    ));
+                } else {
+                    search_spans.push(Span::raw(&query));
+                    if search_focused {
+                        search_spans.push(Span::styled("█", to_style_bold(&theme.widgets.title)));
+                    }
+                }
+                f.render_widget(Paragraph::new(Line::from(search_spans)), search_area);
+
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        count_str,
+                        to_style_dim(&theme.status.muted),
+                    )),
+                    count_area,
+                );
+
+                // Dividers
+                let div_line = "─".repeat(inner.width as usize);
+                let div_style = to_style_dim(&theme.status.muted);
+                f.render_widget(Paragraph::new(Span::styled(&div_line, div_style)), top_div);
+                f.render_widget(Paragraph::new(Span::styled(&div_line, div_style)), bot_div);
+
+                // 2. Middle Content: Sidebar (30%) + Reading Pane (70%)
+                let content_chunks = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Percentage(30), // Left column (sidebar)
-                        Constraint::Percentage(70), // Right column (detail)
-                    ])
-                    .split(chunks[1]);
+                    .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+                    .split(middle_content);
 
-                // Left column: List of matching topics
-                let list_items: Vec<ListItem> = if current_matches.is_empty() {
-                    vec![
-                        ListItem::new(" (no matches) ").style(Style::default().fg(Color::DarkGray)),
-                    ]
+                let sidebar_area = content_chunks[0];
+                let reading_area = content_chunks[1];
+
+                // Left Sidebar: Topics list
+                let topics_focused = focus == FocusArea::Topics;
+                let sidebar_border_style = if topics_focused {
+                    to_style_bold(&theme.widgets.title)
                 } else {
-                    current_matches
+                    to_style_dim(&theme.status.muted)
+                };
+
+                let sidebar_block = Block::default()
+                    .borders(Borders::RIGHT)
+                    .border_style(sidebar_border_style)
+                    .title(" Topics ")
+                    .title_style(if topics_focused {
+                        to_style_bold(&theme.widgets.title)
+                    } else {
+                        to_style_dim(&theme.status.muted)
+                    });
+
+                let sidebar_inner = sidebar_block.inner(sidebar_area);
+                f.render_widget(sidebar_block, sidebar_area);
+
+                let list_items: Vec<ListItem> = if matches.is_empty() {
+                    vec![ListItem::new("  (no matches)").style(to_style_dim(&theme.status.muted))]
+                } else {
+                    matches
                         .iter()
                         .enumerate()
                         .map(|(i, t)| {
-                            let style = if i == current_selected_index {
-                                Style::default().fg(Color::Black).bg(Color::Cyan)
+                            let is_sel = i == selected_index;
+                            let prefix = if is_sel { "❯ " } else { "  " };
+
+                            let mut spans = vec![
+                                Span::styled(
+                                    prefix,
+                                    if is_sel {
+                                        to_style_bold(&theme.widgets.title)
+                                    } else {
+                                        Style::default()
+                                    },
+                                ),
+                                Span::styled(
+                                    t.name,
+                                    if is_sel {
+                                        Style::default().add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default()
+                                    },
+                                ),
+                            ];
+
+                            let cat_tag = match t.category {
+                                crate::help::HelpCategory::Builtin => " builtin",
+                                crate::help::HelpCategory::Pipeline => " pipe",
+                                crate::help::HelpCategory::Language => " lang",
+                                crate::help::HelpCategory::Security => " sec",
+                                crate::help::HelpCategory::Concepts => " info",
+                            };
+                            spans.push(Span::styled(cat_tag, to_style_dim(&theme.status.muted)));
+
+                            let row_style = if is_sel {
+                                Style::default()
+                                    .bg(to_color(&theme.widgets.item_selected_bg))
+                                    .fg(to_color(&theme.widgets.item_selected_fg))
+                                    .add_modifier(Modifier::BOLD)
                             } else {
                                 Style::default()
                             };
-                            ListItem::new(format!(" {}", t.name)).style(style)
+
+                            ListItem::new(Line::from(spans)).style(row_style)
                         })
                         .collect()
                 };
 
-                let list_block = Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Topics ")
-                    .border_style(Style::default().fg(Color::DarkGray));
-                let list = List::new(list_items).block(list_block);
-                f.render_widget(list, middle_columns[0]);
+                let list_widget = List::new(list_items)
+                    .highlight_symbol("❯ ")
+                    .highlight_style(
+                        Style::default()
+                            .bg(to_color(&theme.widgets.item_selected_bg))
+                            .fg(to_color(&theme.widgets.item_selected_fg))
+                            .add_modifier(Modifier::BOLD),
+                    );
 
-                // Right column: Detailed scrollable text of the selected topic
-                if let Some(topic) = current_matches.get(current_selected_index) {
-                    let detail_text = render_full(topic, false);
-                    let detail_block = Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!(" {} Help ", topic.name))
-                        .border_style(Style::default().fg(Color::DarkGray));
+                f.render_stateful_widget(list_widget, sidebar_inner, &mut list_state);
 
-                    let detail_paragraph = Paragraph::new(detail_text)
-                        .block(detail_block)
-                        .scroll((current_detail_scroll, 0));
+                // Right Reading Pane
+                let doc_focused = focus == FocusArea::Doc;
+                let doc_title = selected_topic
+                    .map(|t| format!(" {} ", t.name))
+                    .unwrap_or_else(|| " Documentation ".to_string());
 
-                    f.render_widget(detail_paragraph, middle_columns[1]);
-                } else {
-                    let detail_block = Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Help ")
-                        .border_style(Style::default().fg(Color::DarkGray));
-                    let detail_paragraph = Paragraph::new("No topic selected.").block(detail_block);
-                    f.render_widget(detail_paragraph, middle_columns[1]);
+                let doc_block = Block::default()
+                    .borders(Borders::NONE)
+                    .title(doc_title)
+                    .title_style(if doc_focused {
+                        to_style_bold(&theme.widgets.title)
+                    } else {
+                        to_style_dim(&theme.status.muted)
+                    });
+
+                let doc_inner = doc_block.inner(reading_area);
+                f.render_widget(doc_block, reading_area);
+
+                let visible_doc_h = doc_inner.height as usize;
+                if doc_scroll + visible_doc_h > total_doc_lines {
+                    doc_scroll = total_doc_lines.saturating_sub(visible_doc_h);
                 }
 
-                // 3. Status bar rendering
-                let status_style = Style::default().fg(Color::Black).bg(Color::Gray);
-                let n_matches = current_matches.len();
-                let topic_count_str = format!("{} topics", n_matches);
-                let item_str = if current_selected_index < n_matches {
-                    format!(" · item {}/{}", current_selected_index + 1, n_matches)
-                } else {
-                    String::new()
-                };
-                let mode_hint_str = if current_search_focused {
-                    " [Enter/Esc] Confirm ".to_string()
-                } else {
-                    " [/] Search [j/k] Navigate [q] Quit ".to_string()
-                };
-                let status_text = Line::from(vec![
-                    Span::styled(" ", status_style),
-                    Span::styled(&topic_count_str, status_style),
-                    Span::styled(&item_str, status_style),
-                    Span::styled(" ·", status_style),
-                    Span::styled(mode_hint_str, status_style),
-                ]);
-                let status_paragraph = Paragraph::new(status_text);
-                f.render_widget(status_paragraph, chunks[2]);
+                let visible_lines: Vec<Line> = doc_lines
+                    .into_iter()
+                    .skip(doc_scroll)
+                    .take(visible_doc_h)
+                    .collect();
 
-                // Cursor: only visible in search mode, hidden in nav mode
-                if current_search_focused {
-                    f.set_cursor_position((
-                        chunks[0].x + 1 + current_query.len() as u16,
-                        chunks[0].y + 1,
-                    ));
+                let doc_p = Paragraph::new(visible_lines);
+                f.render_widget(doc_p, doc_inner);
+
+                // Scrollbar for doc
+                if total_doc_lines > visible_doc_h && doc_inner.width > 2 {
+                    let scrollbar_area = Rect::new(
+                        doc_inner.x + doc_inner.width.saturating_sub(1),
+                        doc_inner.y,
+                        1,
+                        doc_inner.height,
+                    );
+                    let mut sbar_state =
+                        ScrollbarState::new(total_doc_lines).position(doc_scroll);
+                    Scrollbar::default()
+                        .orientation(ScrollbarOrientation::VerticalRight)
+                        .begin_symbol(None)
+                        .end_symbol(None)
+                        .track_symbol(Some("│"))
+                        .thumb_symbol("┃")
+                        .style(to_style_dim(&theme.status.muted))
+                        .thumb_style(to_style_bold(&theme.widgets.title))
+                        .render(scrollbar_area, f.buffer_mut(), &mut sbar_state);
                 }
+
+                // 3. Status Footer
+                let key_style = to_style_bold(&theme.status.info);
+                let label_style = to_style(&theme.status.muted);
+
+                let mut footer_spans = vec![
+                    Span::styled(format!(" [Focus: {}]  ", focus.name()), to_style_bold(&theme.widgets.title)),
+                ];
+
+                let hints: &[(&str, &str)] = match focus {
+                    FocusArea::Search => &[
+                        ("Enter/↓", "Topics"),
+                        ("Tab", "Switch"),
+                        ("Esc", "Exit"),
+                    ],
+                    FocusArea::Topics => &[
+                        ("j/k", "Select"),
+                        ("Enter/→", "Read Doc"),
+                        ("/", "Search"),
+                        ("Tab", "Switch"),
+                        ("q", "Quit"),
+                    ],
+                    FocusArea::Doc => &[
+                        ("j/k", "Scroll Line"),
+                        ("Ctrl-D/U", "Half Page"),
+                        ("h/Esc", "Topics"),
+                        ("/", "Search"),
+                        ("Tab", "Switch"),
+                        ("q", "Quit"),
+                    ],
+                };
+
+                for (key, desc) in hints {
+                    footer_spans.push(Span::styled(format!("[{key}] "), key_style));
+                    footer_spans.push(Span::styled(format!("{desc}  "), label_style));
+                }
+
+                f.render_widget(Paragraph::new(Line::from(footer_spans)), footer_row);
             })
             .map_err(|e| ShellError::from(e.to_string()))?;
 
-        // Read event
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let stdin_fd = std::io::stdin().as_raw_fd();
-            if unsafe { libc::isatty(stdin_fd) } == 0 {
-                break;
-            }
-        }
+        // Read input
         let key = match input
             .poll(std::time::Duration::from_millis(100))
             .map_err(|e| ShellError::from(e.to_string()))?
@@ -233,91 +466,253 @@ pub fn run_tui(_env: &Env) -> Result<(), ShellError> {
             InputPoll::Event(_) | InputPoll::Timeout => continue,
             InputPoll::Closed => break,
         };
-        {
-            // Global shortcuts — work in both modes
-            if key.key == Key::PageUp {
-                let height = guard.terminal.size().map(|s| s.height).unwrap_or(24);
-                let scroll_amount = height.saturating_sub(6).max(1);
-                detail_scroll = detail_scroll.saturating_sub(scroll_amount);
+
+        if key.action != KeyAction::Press {
+            continue;
+        }
+
+        // Global shortcuts
+        if key.modifiers.contains(Modifiers::CONTROL) && key.key == Key::Character('c') {
+            break;
+        }
+
+        match key.key {
+            Key::Tab => {
+                focus = if key.modifiers.contains(Modifiers::SHIFT) {
+                    focus.prev()
+                } else {
+                    focus.next()
+                };
                 continue;
             }
-            if key.key == Key::PageDown {
-                let height = guard.terminal.size().map(|s| s.height).unwrap_or(24);
-                let scroll_amount = height.saturating_sub(6).max(1);
-
-                // Get current topic line count to clamp scroll
-                if let Some(topic) = matches.get(selected_index) {
-                    let total_lines = render_full(topic, false).lines().count();
-                    let detail_height = height.saturating_sub(6) as usize;
-                    let max_scroll = total_lines.saturating_sub(detail_height) as u16;
-                    detail_scroll = (detail_scroll + scroll_amount).min(max_scroll);
-                }
+            Key::BackTab => {
+                focus = focus.prev();
                 continue;
             }
+            _ => {}
+        }
 
-            if search_focused {
-                match key.key {
-                    Key::Character(c)
-                        if (key.modifiers.is_empty() || key.modifiers == Modifiers::SHIFT) =>
-                    {
-                        query.push(c);
-                        detail_scroll = 0;
-                        matches = get_matching_topics(&query);
-                        if matches.is_empty() {
-                            selected_index = 0;
-                        } else if selected_index >= matches.len() {
-                            selected_index = matches.len() - 1;
-                        }
-                    }
-                    Key::Backspace => {
-                        query.pop();
-                        detail_scroll = 0;
-                        matches = get_matching_topics(&query);
-                        if matches.is_empty() {
-                            selected_index = 0;
-                        } else if selected_index >= matches.len() {
-                            selected_index = matches.len() - 1;
-                        }
-                    }
-                    Key::Escape | Key::Enter => {
-                        search_focused = false;
-                    }
-                    Key::Up if selected_index > 0 => {
-                        selected_index -= 1;
-                        detail_scroll = 0;
-                    }
-                    Key::Down if !matches.is_empty() && selected_index < matches.len() - 1 => {
-                        selected_index += 1;
-                        detail_scroll = 0;
-                    }
-                    _ => {}
+        // Focus-specific key handling
+        match focus {
+            FocusArea::Search => match key.key {
+                Key::Enter | Key::Down => {
+                    focus = FocusArea::Topics;
                 }
-            } else {
-                match key.key {
-                    Key::Character('q') | Key::Escape => {
+                Key::Escape => {
+                    if query.is_empty() {
                         break;
                     }
-                    Key::Character('/') => {
-                        search_focused = true;
-                    }
-                    Key::Character('f') if key.modifiers.contains(Modifiers::CONTROL) => {
-                        search_focused = true;
-                    }
-                    Key::Up | Key::Character('k') if selected_index > 0 => {
-                        selected_index -= 1;
-                        detail_scroll = 0;
-                    }
-                    Key::Down | Key::Character('j')
-                        if !matches.is_empty() && selected_index < matches.len() - 1 =>
-                    {
-                        selected_index += 1;
-                        detail_scroll = 0;
-                    }
-                    _ => {}
+                    query.clear();
+                    matches = get_matching_topics(&query);
+                    selected_index = 0;
+                    doc_scroll = 0;
                 }
-            }
+                Key::Backspace => {
+                    query.pop();
+                    matches = get_matching_topics(&query);
+                    selected_index = 0;
+                    doc_scroll = 0;
+                }
+                Key::Character('u') if key.modifiers.contains(Modifiers::CONTROL) => {
+                    query.clear();
+                    matches = get_matching_topics(&query);
+                    selected_index = 0;
+                    doc_scroll = 0;
+                }
+                Key::Character('w') if key.modifiers.contains(Modifiers::CONTROL) => {
+                    while let Some(c) = query.pop() {
+                        if c.is_whitespace() {
+                            break;
+                        }
+                    }
+                    matches = get_matching_topics(&query);
+                    selected_index = 0;
+                    doc_scroll = 0;
+                }
+                Key::Character(c) if !key.modifiers.contains(Modifiers::CONTROL) => {
+                    query.push(c);
+                    matches = get_matching_topics(&query);
+                    selected_index = 0;
+                    doc_scroll = 0;
+                }
+                _ => {}
+            },
+            FocusArea::Topics => match key.key {
+                Key::Character('q') | Key::Escape => {
+                    break;
+                }
+                Key::Character('/') => {
+                    focus = FocusArea::Search;
+                }
+                Key::Enter | Key::Right | Key::Character('l') => {
+                    focus = FocusArea::Doc;
+                }
+                Key::Up | Key::Character('k') if topic_count > 0 => {
+                    if selected_index > 0 {
+                        selected_index -= 1;
+                    } else {
+                        selected_index = topic_count - 1;
+                    }
+                    doc_scroll = 0;
+                }
+                Key::Down | Key::Character('j') if topic_count > 0 => {
+                    if selected_index + 1 < topic_count {
+                        selected_index += 1;
+                    } else {
+                        selected_index = 0;
+                    }
+                    doc_scroll = 0;
+                }
+                Key::PageUp => {
+                    selected_index = selected_index.saturating_sub(10);
+                    doc_scroll = 0;
+                }
+                Key::PageDown if topic_count > 0 => {
+                    selected_index = (selected_index + 10).min(topic_count - 1);
+                    doc_scroll = 0;
+                }
+                Key::Home | Key::Character('g') => {
+                    selected_index = 0;
+                    doc_scroll = 0;
+                }
+                Key::End | Key::Character('G') if topic_count > 0 => {
+                    selected_index = topic_count - 1;
+                    doc_scroll = 0;
+                }
+                _ => {}
+            },
+            FocusArea::Doc => match key.key {
+                Key::Character('q') => {
+                    break;
+                }
+                Key::Escape | Key::Left | Key::Character('h') => {
+                    focus = FocusArea::Topics;
+                }
+                Key::Character('/') => {
+                    focus = FocusArea::Search;
+                }
+                Key::Up | Key::Character('k') => {
+                    doc_scroll = doc_scroll.saturating_sub(1);
+                }
+                Key::Down | Key::Character('j') => {
+                    if doc_scroll + 1 < total_doc_lines {
+                        doc_scroll += 1;
+                    }
+                }
+                Key::PageUp | Key::Character('u') if key.modifiers.contains(Modifiers::CONTROL) => {
+                    doc_scroll = doc_scroll.saturating_sub(12);
+                }
+                Key::PageUp => {
+                    doc_scroll = doc_scroll.saturating_sub(12);
+                }
+                Key::PageDown | Key::Character('d') if key.modifiers.contains(Modifiers::CONTROL) => {
+                    if doc_scroll + 12 < total_doc_lines {
+                        doc_scroll += 12;
+                    }
+                }
+                Key::PageDown => {
+                    if doc_scroll + 12 < total_doc_lines {
+                        doc_scroll += 12;
+                    }
+                }
+                Key::Home | Key::Character('g') => {
+                    doc_scroll = 0;
+                }
+                Key::End | Key::Character('G') => {
+                    doc_scroll = total_doc_lines.saturating_sub(5);
+                }
+                _ => {}
+            },
         }
     }
 
     Ok(())
+}
+
+fn format_topic_lines(topic: &HelpTopic, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    let title_style = to_style_bold(&theme.widgets.title);
+    let section_header_style = to_style_bold(&theme.syntax.keyword);
+    let normal_style = Style::default();
+    let muted_style = to_style_dim(&theme.status.muted);
+    let flag_style = to_style_bold(&theme.syntax.variable);
+    let syntax_style = to_style(&theme.syntax.string);
+    let example_input_style = to_style(&theme.syntax.operator);
+
+    // 1. Header: Name + Category badge
+    lines.push(Line::from(vec![
+        Span::styled(topic.name.to_string(), title_style),
+        Span::styled(format!("  [{}]", topic.category.label()), to_style(&theme.syntax.keyword)),
+    ]));
+
+    let rule = "─".repeat(50);
+    lines.push(Line::from(Span::styled(rule, to_style_dim(&theme.status.muted))));
+    lines.push(Line::from(Span::styled(topic.summary.to_string(), normal_style)));
+    lines.push(Line::raw(""));
+
+    // 2. Syntax
+    if !topic.syntax.is_empty() {
+        lines.push(Line::from(Span::styled("SYNTAX", section_header_style)));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(topic.syntax.to_string(), syntax_style),
+        ]));
+        lines.push(Line::raw(""));
+    }
+
+    // 3. Description
+    if !topic.description.is_empty() {
+        lines.push(Line::from(Span::styled("DESCRIPTION", section_header_style)));
+        for d_line in topic.description.lines() {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(d_line.to_string(), normal_style),
+            ]));
+        }
+        lines.push(Line::raw(""));
+    }
+
+    // 4. Flags / Options
+    if !topic.flags.is_empty() {
+        lines.push(Line::from(Span::styled("OPTIONS", section_header_style)));
+        for f in topic.flags {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{:<20}", f.flag), flag_style),
+                Span::styled(f.desc.to_string(), muted_style),
+            ]));
+        }
+        lines.push(Line::raw(""));
+    }
+
+    // 5. Examples
+    if !topic.examples.is_empty() {
+        lines.push(Line::from(Span::styled("EXAMPLES", section_header_style)));
+        for ex in topic.examples {
+            lines.push(Line::from(vec![
+                Span::styled("  fsh> ", to_style_dim(&theme.status.muted)),
+                Span::styled(ex.input.to_string(), example_input_style),
+            ]));
+            if !ex.explanation.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::raw("       "),
+                    Span::styled(ex.explanation.to_string(), muted_style),
+                ]));
+            }
+            lines.push(Line::raw(""));
+        }
+    }
+
+    // 6. See Also
+    if !topic.related.is_empty() {
+        lines.push(Line::from(Span::styled("SEE ALSO", section_header_style)));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(topic.related.join(", "), to_style(&theme.status.info)),
+        ]));
+        lines.push(Line::raw(""));
+    }
+
+    lines
 }

@@ -5,28 +5,65 @@
 
 use crate::history::query_history;
 use crate::terminal_mode::FullscreenTerminalGuard;
+use crate::tui::components::{KeyHint, ScrollState, SearchBarState, StatusFooter};
+use crate::tui::theme;
 use chrono::TimeZone;
+use fshell_core::theme::Theme;
 use fshell_terminal::input::{
     CrosstermEventSource, InputEvent, InputPoll, Key, KeyAction, Modifiers,
 };
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style, Stylize},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
 use std::io;
+use unicode_width::UnicodeWidthStr;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiResult {
     Execute(String),
     Edit(String),
     Cancel,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FocusPane {
+    Search,
+    List,
+    Preview,
+}
+
+impl FocusPane {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Search => Self::List,
+            Self::List => Self::Preview,
+            Self::Preview => Self::Search,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Search => Self::Preview,
+            Self::List => Self::Search,
+            Self::Preview => Self::List,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Search => "Search",
+            Self::List => "List",
+            Self::Preview => "Preview",
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum FilterMode {
     Global,
     Host,
@@ -37,51 +74,73 @@ enum FilterMode {
 impl FilterMode {
     fn next(self) -> Self {
         match self {
-            FilterMode::Global => FilterMode::Host,
-            FilterMode::Host => FilterMode::Cwd,
-            FilterMode::Cwd => FilterMode::Session,
-            FilterMode::Session => FilterMode::Global,
+            Self::Global => Self::Host,
+            Self::Host => Self::Cwd,
+            Self::Cwd => Self::Session,
+            Self::Session => Self::Global,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
-            FilterMode::Global => "GLOBAL",
-            FilterMode::Host => "HOST",
-            FilterMode::Cwd => "DIRECTORY",
-            FilterMode::Session => "SESSION",
-        }
-    }
-
-    fn color(self) -> Color {
-        match self {
-            FilterMode::Global => Color::Cyan,
-            FilterMode::Host => Color::LightBlue,
-            FilterMode::Cwd => Color::LightYellow,
-            FilterMode::Session => Color::LightMagenta,
+            Self::Global => "GLOBAL",
+            Self::Host => "HOST",
+            Self::Cwd => "DIRECTORY",
+            Self::Session => "SESSION",
         }
     }
 }
 
-/// Runs the fullscreen interactive history explorer TUI.
 pub fn run_history_tui(
     current_cwd: &str,
     current_host: &str,
     current_session: &str,
 ) -> Result<TuiResult, String> {
-    // Setup terminal
-    let _guard = FullscreenTerminalGuard::enter(false)
-        .map_err(|e| format!("Failed to initialize terminal TUI: {}", e))?;
+    run_history_tui_with_theme(
+        current_cwd,
+        current_host,
+        current_session,
+        &Theme::default_theme(),
+    )
+}
+
+/// Runs the fullscreen interactive history explorer TUI with active theme.
+pub fn run_history_tui_with_theme(
+    current_cwd: &str,
+    current_host: &str,
+    current_session: &str,
+    theme: &Theme,
+) -> Result<TuiResult, String> {
+    if fshell_engine::is_test_mode() {
+        return Ok(TuiResult::Cancel);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let stdin_fd = std::io::stdin().as_raw_fd();
+        if unsafe { libc::isatty(stdin_fd) } == 0 {
+            return Ok(TuiResult::Cancel);
+        }
+    }
+
+    let _guard = FullscreenTerminalGuard::enter(true)
+        .map_err(|e| format!("Failed to initialize terminal TUI: {e}"))?;
     let mut stdout = io::stdout();
     let backend = CrosstermBackend::new(&mut stdout);
     let mut terminal =
-        Terminal::new(backend).map_err(|e| format!("Failed to create terminal: {}", e))?;
+        Terminal::new(backend).map_err(|e| format!("Failed to create terminal: {e}"))?;
+    terminal.clear().map_err(|e| e.to_string())?;
 
-    // UI state
-    let mut search_query = String::new();
+    let mut search_bar = SearchBarState::new();
+    let mut focus = FocusPane::Search;
     let mut filter_mode = FilterMode::Global;
     let mut list_state = ListState::default();
     list_state.select(Some(0));
+
+    let mut preview_scroll = 0usize;
+    let mut list_scroll_state = ScrollState::new();
+    let mut preview_scroll_state = ScrollState::new();
 
     let mut should_requery = true;
     let mut entries = Vec::new();
@@ -89,13 +148,13 @@ pub fn run_history_tui(
 
     loop {
         if should_requery {
-            let search_for_sql = if search_query.trim().is_empty() {
+            let search_for_sql = if search_bar.query.trim().is_empty() {
                 None
             } else {
-                Some(search_query.trim())
+                Some(search_bar.query.trim())
             };
             entries = query_history(
-                Some(200),
+                Some(300),
                 search_for_sql,
                 match filter_mode {
                     FilterMode::Cwd => Some(current_cwd),
@@ -114,135 +173,201 @@ pub fn run_history_tui(
             .unwrap_or_default();
             should_requery = false;
 
-            // Adjust selected index if it goes out of bounds
             let len = entries.len();
             if len == 0 {
                 list_state.select(None);
             } else {
-                match list_state.selected() {
-                    Some(idx) => {
-                        if idx >= len {
-                            list_state.select(Some(len - 1));
-                        }
-                    }
-                    None => {
-                        list_state.select(Some(0));
-                    }
+                let cur = list_state.selected().unwrap_or(0);
+                if cur >= len {
+                    list_state.select(Some(len - 1));
                 }
             }
+            preview_scroll = 0;
         }
 
         let len = entries.len();
 
-        // Draw TUI
         terminal
             .draw(|f| {
                 let size = f.area();
+                if size.width < 10 || size.height < 6 {
+                    return;
+                }
 
-                // Main vertical layout
-                let main_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(3), // Search box
-                        Constraint::Min(5),    // Main list & preview area
-                        Constraint::Length(1), // Status bar
-                    ])
-                    .split(size);
-
-                // 1. Search Box
-                let search_block = Block::default()
+                // Outer master block
+                let outer_block = Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title(Span::styled(
-                        " Interactive Search History ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                let search_text = format!("  {}", search_query);
-                let search_p = Paragraph::new(search_text).block(search_block);
-                f.render_widget(search_p, main_chunks[0]);
+                    .border_style(theme::border_style(theme))
+                    .title(" History Explorer ")
+                    .title_style(theme::title_style(theme));
 
-                // Split middle area into left (list) and right (preview card)
+                let inner = outer_block.inner(size);
+                f.render_widget(outer_block, size);
+
+                // Main vertical division:
+                // [0] Search Bar (1 line)
+                // [1] Divider line (1 line)
+                // [2] Middle Content (List + Preview)
+                // [3] Divider line (1 line)
+                // [4] Status Footer (1 line)
+                let layout = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1), // Search Bar
+                        Constraint::Length(1), // Divider
+                        Constraint::Min(4),    // Middle panes
+                        Constraint::Length(1), // Divider
+                        Constraint::Length(1), // Footer
+                    ])
+                    .split(inner);
+
+                let search_area = layout[0];
+                let top_div_area = layout[1];
+                let middle_area = layout[2];
+                let bot_div_area = layout[3];
+                let footer_area = layout[4];
+
+                // 1. Search Bar with Filter Tag on right
+                let filter_str = format!("Filter: {} ", filter_mode.name());
+                let filter_w = filter_str.width() as u16;
+                let search_input_w = search_area.width.saturating_sub(filter_w + 2);
+
+                let search_sub_area = Rect::new(search_area.x, search_area.y, search_input_w, 1);
+                let filter_tag_area = Rect::new(
+                    search_area.x + search_area.width.saturating_sub(filter_w),
+                    search_area.y,
+                    filter_w,
+                    1,
+                );
+
+                search_bar.render(
+                    search_sub_area,
+                    f.buffer_mut(),
+                    theme,
+                    "/ ",
+                    "Type to search history...",
+                    focus == FocusPane::Search,
+                );
+
+                let filter_badge = Line::from(vec![
+                    Span::styled("Filter: ", theme::muted_style(theme)),
+                    Span::styled(filter_mode.name(), theme::title_style(theme)),
+                ]);
+                f.render_widget(Paragraph::new(filter_badge), filter_tag_area);
+
+                // Dividers
+                let div_line = "─".repeat(inner.width as usize);
+                f.render_widget(
+                    Paragraph::new(Span::styled(&div_line, theme::border_style(theme))),
+                    top_div_area,
+                );
+                f.render_widget(
+                    Paragraph::new(Span::styled(&div_line, theme::border_style(theme))),
+                    bot_div_area,
+                );
+
+                // 2. Middle area: List (55%) and Preview (45%)
                 let middle_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                    .split(main_chunks[1]);
+                    .split(middle_area);
 
-                // 2. Left List of commands
+                let list_area = middle_chunks[0];
+                let preview_area = middle_chunks[1];
+
+                // --- Left List Pane ---
+                let list_focused = focus == FocusPane::List;
+                let list_border_style = if list_focused {
+                    theme::border_focused_style(theme)
+                } else {
+                    theme::border_style(theme)
+                };
+
                 let list_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(Span::styled(
-                        " History Logs ",
-                        Style::default().fg(Color::LightGreen),
-                    ));
+                    .borders(Borders::RIGHT)
+                    .border_style(list_border_style)
+                    .title(format!(" Commands ({len}) "))
+                    .title_style(if list_focused {
+                        theme::title_style(theme)
+                    } else {
+                        theme::muted_style(theme)
+                    });
+
+                let list_inner = list_block.inner(list_area);
+                f.render_widget(list_block, list_area);
+
+                let visible_list_h = list_inner.height as usize;
+                list_scroll_state.update(len, visible_list_h);
+                if let Some(sel) = list_state.selected() {
+                    list_scroll_state.ensure_visible(sel);
+                }
 
                 let items: Vec<ListItem> = entries
                     .iter()
-                    .map(|entry| {
-                        let status_icon = if entry.exit_code == Some(0) {
-                            Span::styled(" [ok] ", Style::default().fg(Color::Green))
-                        } else if entry.exit_code.is_none() {
-                            Span::styled(" [?] ", Style::default().fg(Color::Yellow))
-                        } else {
-                            Span::styled(" [!] ", Style::default().fg(Color::Red))
+                    .skip(list_scroll_state.offset)
+                    .take(visible_list_h)
+                    .enumerate()
+                    .map(|(offset_i, entry)| {
+                        let item_idx = list_scroll_state.offset + offset_i;
+                        let is_selected = list_state.selected() == Some(item_idx);
+
+                        let status_span = match entry.exit_code {
+                            Some(0) => Span::styled("✔ ", theme::status_ok_style(theme)),
+                            Some(_) => Span::styled("✘ ", theme::status_error_style(theme)),
+                            None => Span::styled("? ", theme::status_warn_style(theme)),
                         };
 
                         let duration_text = if entry.duration_ms < 1000 {
-                            format!("{}ms", entry.duration_ms)
+                            format!("{:>5}ms", entry.duration_ms)
                         } else {
-                            format!("{:.1}s", entry.duration_ms as f64 / 1000.0)
+                            format!("{:>4.1}s", entry.duration_ms as f64 / 1000.0)
                         };
 
-                        let cmd_span =
-                            Span::styled(&entry.command, Style::default().fg(Color::White));
-                        let dur_span = Span::styled(
-                            format!("  ({})", duration_text),
-                            Style::default().fg(Color::DarkGray),
-                        );
+                        let dur_span =
+                            Span::styled(format!(" {duration_text}"), theme::muted_style(theme));
+                        let cmd_span = Span::raw(&entry.command);
 
-                        ListItem::new(Line::from(vec![status_icon, cmd_span, dur_span]))
+                        let row_style = if is_selected {
+                            theme::selected_style(theme)
+                        } else {
+                            Style::default()
+                        };
+
+                        ListItem::new(Line::from(vec![status_span, cmd_span, dur_span]))
+                            .style(row_style)
                     })
                     .collect();
 
                 let list_widget = List::new(items)
-                    .block(list_block)
-                    .highlight_style(
-                        Style::default()
-                            .bg(Color::Rgb(40, 44, 52))
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                    .highlight_symbol(" ❯ ");
+                    .highlight_style(theme::selected_style(theme))
+                    .highlight_symbol("❯ ");
 
-                f.render_stateful_widget(list_widget, middle_chunks[0], &mut list_state);
+                f.render_stateful_widget(list_widget, list_inner, &mut list_state);
+                list_scroll_state.render_scrollbar(list_inner, f.buffer_mut(), theme);
 
-                // 3. Right Details Card
-                let selected_entry = list_state.selected().and_then(|idx| entries.get(idx));
+                // --- Right Preview Pane ---
+                let preview_focused = focus == FocusPane::Preview;
+                let preview_title_style = if preview_focused {
+                    theme::title_style(theme)
+                } else {
+                    theme::muted_style(theme)
+                };
+
                 let preview_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Double)
-                    .title(Span::styled(
-                        " Execution Context ",
-                        Style::default()
-                            .fg(Color::LightMagenta)
-                            .add_modifier(Modifier::BOLD),
-                    ));
+                    .borders(Borders::NONE)
+                    .title(" Execution Context ")
+                    .title_style(preview_title_style);
 
+                let preview_inner = preview_block.inner(preview_area);
+                f.render_widget(preview_block, preview_area);
+
+                let selected_entry = list_state.selected().and_then(|idx| entries.get(idx));
                 if let Some(entry) = selected_entry {
-                    let status_str = match entry.exit_code {
-                        Some(0) => Span::styled(
-                            "Success (0)",
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Some(code) => Span::styled(
-                            format!("Failure ({})", code),
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                        ),
-                        None => Span::styled("Unknown/None", Style::default().fg(Color::Yellow)),
+                    let (status_text, status_style) = match entry.exit_code {
+                        Some(0) => ("Success (0)", theme::status_ok_style(theme)),
+                        Some(code) => (format!("Failure ({code})").leak() as &str, theme::status_error_style(theme)),
+                        None => ("In Progress / Terminated", theme::status_warn_style(theme)),
                     };
 
                     let datetime = chrono::Utc
@@ -252,106 +377,75 @@ pub fn run_history_tui(
                     let local_time = datetime.with_timezone(&chrono::Local);
                     let time_str = local_time.format("%Y-%m-%d %H:%M:%S").to_string();
 
-                    let details = vec![
+                    let label_style = theme::muted_style(theme);
+                    let val_style = Style::default();
+
+                    let lines = vec![
+                        Line::from(Span::styled("Command:", theme::title_style(theme))),
+                        Line::from(Span::styled(&entry.command, theme::key_hint_key_style(theme))),
+                        Line::raw(""),
                         Line::from(vec![
-                            Span::styled("Command:  ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(
-                                &entry.command,
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]),
-                        Line::from(""),
-                        Line::from(vec![
-                            Span::styled("CWD:      ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(&entry.cwd, Style::default().fg(Color::LightBlue)),
-                        ]),
-                        Line::from(""),
-                        Line::from(vec![
-                            Span::styled("Time:     ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(time_str, Style::default().fg(Color::LightGreen)),
+                            Span::styled("Exit Code:   ", label_style),
+                            Span::styled(status_text, status_style),
                         ]),
                         Line::from(vec![
-                            Span::styled("Duration: ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(
-                                format!("{} ms", entry.duration_ms),
-                                Style::default().fg(Color::LightYellow),
-                            ),
+                            Span::styled("Executed:    ", label_style),
+                            Span::styled(time_str, val_style),
                         ]),
                         Line::from(vec![
-                            Span::styled("Status:   ", Style::default().fg(Color::DarkGray)),
-                            status_str,
-                        ]),
-                        Line::from(""),
-                        Line::from(vec![
-                            Span::styled("Host:     ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(&entry.hostname, Style::default().fg(Color::LightCyan)),
+                            Span::styled("Working Dir: ", label_style),
+                            Span::styled(&entry.cwd, theme::to_style(&theme.syntax.string)),
                         ]),
                         Line::from(vec![
-                            Span::styled("User:     ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(&entry.username, Style::default().fg(Color::LightMagenta)),
+                            Span::styled("Host / User: ", label_style),
+                            Span::styled(format!("{} @ {}", entry.username, entry.hostname), val_style),
                         ]),
                         Line::from(vec![
-                            Span::styled("Session:  ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(&entry.session_id, Style::default().fg(Color::LightRed)),
+                            Span::styled("Session ID:  ", label_style),
+                            Span::styled(&entry.session_id, label_style),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("Duration:    ", label_style),
+                            Span::styled(format!("{} ms", entry.duration_ms), val_style),
                         ]),
                     ];
 
-                    let preview_p = Paragraph::new(details).block(preview_block).scroll((0, 0));
-                    f.render_widget(preview_p, middle_chunks[1]);
+                    let total_lines = lines.len();
+                    let visible_preview_h = preview_inner.height as usize;
+                    preview_scroll_state.update(total_lines, visible_preview_h);
+                    preview_scroll_state.offset = preview_scroll;
+
+                    let visible_lines: Vec<Line> = lines
+                        .into_iter()
+                        .skip(preview_scroll)
+                        .take(visible_preview_h)
+                        .collect();
+
+                    f.render_widget(Paragraph::new(visible_lines), preview_inner);
+                    preview_scroll_state.render_scrollbar(preview_inner, f.buffer_mut(), theme);
                 } else {
-                    let empty_p = Paragraph::new("\n\n   No details to display")
-                        .block(preview_block)
-                        .dark_gray();
-                    f.render_widget(empty_p, middle_chunks[1]);
+                    let empty_msg = Paragraph::new("\n  No record selected")
+                        .style(theme::muted_style(theme));
+                    f.render_widget(empty_msg, preview_inner);
                 }
 
-                // 4. Status Bar
-                let status_style = Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 30));
+                // 3. Status Footer
+                let hints = &[
+                    KeyHint::new("Enter", "Run"),
+                    KeyHint::new("e", "Edit"),
+                    KeyHint::new("Tab", "Focus"),
+                    KeyHint::new("Ctrl-R", "Filter"),
+                    KeyHint::new("j/k", "Navigate"),
+                    KeyHint::new("Esc", "Quit"),
+                ];
 
-                let status_line = Line::from(vec![
-                    Span::styled(
-                        " [Enter] ",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("Run ", Style::default().fg(Color::White)),
-                    Span::styled(
-                        " [Tab] ",
-                        Style::default()
-                            .fg(Color::LightCyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("Edit ", Style::default().fg(Color::White)),
-                    Span::styled(
-                        " [Ctrl-R] ",
-                        Style::default()
-                            .fg(Color::LightYellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("Filter: ", Style::default().fg(Color::White)),
-                    Span::styled(
-                        format!(" {} ", filter_mode.name()),
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(filter_mode.color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "  [Esc] ",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("Quit", Style::default().fg(Color::White)),
-                ]);
-
-                let status_p = Paragraph::new(status_line).style(status_style);
-                f.render_widget(status_p, main_chunks[2]);
+                let status_label = format!("Focus: {}", focus.name());
+                StatusFooter::new(theme, hints)
+                    .with_status(Span::styled(status_label, theme::title_style(theme)))
+                    .render(footer_area, f.buffer_mut());
             })
-            .map_err(|e| format!("Failed to draw UI: {}", e))?;
+            .map_err(|e| format!("Failed to draw UI: {e}"))?;
 
-        // Handle keys. Closing the input terminal cancels this screen cleanly.
         let key = match input
             .poll(std::time::Duration::from_millis(100))
             .map_err(|error| error.to_string())?
@@ -360,67 +454,133 @@ pub fn run_history_tui(
             InputPoll::Event(_) | InputPoll::Timeout => continue,
             InputPoll::Closed => return Ok(TuiResult::Cancel),
         };
-        if key.action == KeyAction::Press {
-            // Check Ctrl-C first
-            if key.modifiers.contains(Modifiers::CONTROL) && key.key == Key::Character('c') {
-                return Ok(TuiResult::Cancel);
-            }
 
-            // Check Ctrl-R for cycling filters
-            if key.modifiers.contains(Modifiers::CONTROL) && key.key == Key::Character('r') {
-                filter_mode = filter_mode.next();
-                list_state.select(Some(0));
-                should_requery = true;
+        if key.action != KeyAction::Press {
+            continue;
+        }
+
+        if key.modifiers.contains(Modifiers::CONTROL) && key.key == Key::Character('c') {
+            return Ok(TuiResult::Cancel);
+        }
+
+        if key.modifiers.contains(Modifiers::CONTROL) && key.key == Key::Character('r') {
+            filter_mode = filter_mode.next();
+            list_state.select(Some(0));
+            should_requery = true;
+            continue;
+        }
+
+        // Global keys
+        match key.key {
+            Key::Tab => {
+                focus = if key.modifiers.contains(Modifiers::SHIFT) {
+                    focus.prev()
+                } else {
+                    focus.next()
+                };
                 continue;
             }
+            Key::BackTab => {
+                focus = focus.prev();
+                continue;
+            }
+            Key::Enter => {
+                if let Some(idx) = list_state.selected()
+                    && let Some(entry) = entries.get(idx)
+                {
+                    return Ok(TuiResult::Execute(entry.command.clone()));
+                }
+                return Ok(TuiResult::Cancel);
+            }
+            Key::Escape => {
+                return Ok(TuiResult::Cancel);
+            }
+            _ => {}
+        }
 
-            match key.key {
-                Key::Escape => {
-                    return Ok(TuiResult::Cancel);
-                }
-                Key::Enter => {
-                    if let Some(idx) = list_state.selected()
-                        && let Some(entry) = entries.get(idx)
-                    {
-                        return Ok(TuiResult::Execute(entry.command.clone()));
+        // Pane-specific keys
+        match focus {
+            FocusPane::Search => {
+                match key.key {
+                    Key::Down => {
+                        focus = FocusPane::List;
                     }
-                    return Ok(TuiResult::Cancel);
-                }
-                Key::Tab => {
-                    if let Some(idx) = list_state.selected()
-                        && let Some(entry) = entries.get(idx)
-                    {
-                        return Ok(TuiResult::Edit(entry.command.clone()));
+                    Key::Character('e') if key.modifiers.contains(Modifiers::CONTROL) => {
+                        if let Some(idx) = list_state.selected()
+                            && let Some(entry) = entries.get(idx)
+                        {
+                            return Ok(TuiResult::Edit(entry.command.clone()));
+                        }
                     }
-                    return Ok(TuiResult::Cancel);
-                }
-                Key::Up if len > 0 => {
-                    let current = list_state.selected().unwrap_or(0);
-                    if current > 0 {
-                        list_state.select(Some(current - 1));
-                    } else {
-                        list_state.select(Some(len - 1));
+                    _ => {
+                        if search_bar.handle_key(&key) {
+                            list_state.select(Some(0));
+                            should_requery = true;
+                        }
                     }
                 }
-                Key::Down if len > 0 => {
-                    let current = list_state.selected().unwrap_or(0);
-                    if current < len - 1 {
-                        list_state.select(Some(current + 1));
-                    } else {
+            }
+            FocusPane::List => {
+                match key.key {
+                    Key::Character('/') => {
+                        focus = FocusPane::Search;
+                    }
+                    Key::Character('e') | Key::Character('E') => {
+                        if let Some(idx) = list_state.selected()
+                            && let Some(entry) = entries.get(idx)
+                        {
+                            return Ok(TuiResult::Edit(entry.command.clone()));
+                        }
+                    }
+                    Key::Up | Key::Character('k') if len > 0 => {
+                        let current = list_state.selected().unwrap_or(0);
+                        if current > 0 {
+                            list_state.select(Some(current - 1));
+                        } else {
+                            list_state.select(Some(len - 1));
+                        }
+                    }
+                    Key::Down | Key::Character('j') if len > 0 => {
+                        let current = list_state.selected().unwrap_or(0);
+                        if current + 1 < len {
+                            list_state.select(Some(current + 1));
+                        } else {
+                            list_state.select(Some(0));
+                        }
+                    }
+                    Key::PageUp => {
+                        let current = list_state.selected().unwrap_or(0);
+                        list_state.select(Some(current.saturating_sub(10)));
+                    }
+                    Key::PageDown if len > 0 => {
+                        let current = list_state.selected().unwrap_or(0);
+                        list_state.select(Some((current + 10).min(len - 1)));
+                    }
+                    Key::Home | Key::Character('g') => {
                         list_state.select(Some(0));
                     }
+                    Key::End | Key::Character('G') if len > 0 => {
+                        list_state.select(Some(len - 1));
+                    }
+                    _ => {}
                 }
-                Key::Backspace => {
-                    search_query.pop();
-                    list_state.select(Some(0));
-                    should_requery = true;
+            }
+            FocusPane::Preview => {
+                match key.key {
+                    Key::Character('/') => {
+                        focus = FocusPane::Search;
+                    }
+                    Key::Up | Key::Character('k') => {
+                        preview_scroll = preview_scroll.saturating_sub(1);
+                    }
+                    Key::Down | Key::Character('j') => {
+                        preview_scroll = preview_scroll.saturating_add(1);
+                    }
+                    Key::Home | Key::Character('g') => {
+                        preview_scroll = 0;
+                    }
+                    _ => {}
                 }
-                Key::Character(c) => {
-                    search_query.push(c);
-                    list_state.select(Some(0));
-                    should_requery = true;
-                }
-                _ => {}
             }
         }
     }
