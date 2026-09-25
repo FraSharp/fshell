@@ -181,9 +181,9 @@ pub fn format_expr(expr: &Expr) -> String {
             s.push('"');
             for part in parts {
                 match part {
-                    fshell_core::StringPart::Lit(l) => s.push_str(l),
-                    fshell_core::StringPart::Expr(e) => {
-                        s.push_str(&format!("{{{}}}", format_expr(e)));
+                    fshell_core::StringPart::Lit { text, .. } => s.push_str(text),
+                    fshell_core::StringPart::Expr { expr, .. } => {
+                        s.push_str(&format!("{{{}}}", format_expr(expr)));
                     }
                 }
             }
@@ -297,9 +297,9 @@ pub fn format_expr(expr: &Expr) -> String {
             s.push_str("<<");
             for part in parts {
                 match part {
-                    fshell_core::StringPart::Lit(l) => s.push_str(l),
-                    fshell_core::StringPart::Expr(e) => {
-                        s.push_str(&format!("{{{}}}", format_expr(e)));
+                    fshell_core::StringPart::Lit { text, .. } => s.push_str(text),
+                    fshell_core::StringPart::Expr { expr, .. } => {
+                        s.push_str(&format!("{{{}}}", format_expr(expr)));
                     }
                 }
             }

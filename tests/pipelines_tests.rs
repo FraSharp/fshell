@@ -1498,8 +1498,15 @@ async fn test_external_pipeline_process_group_and_piping() {
         let mut out_rx = rx;
         let mut output = String::new();
         while let Some(payload) = out_rx.recv().await {
-            if let PipelinePayload::Data(val) = payload {
-                output.push_str(&val.to_text());
+            // The last stage of a pipeline is not decoded into a typed value: with
+            // no downstream consumer, its stdout is the command's own bytes. This
+            // test is about piping and process groups, so collect either shape.
+            match payload {
+                PipelinePayload::Data(val) => output.push_str(&val.to_text()),
+                PipelinePayload::Bytes(bytes) => {
+                    output.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                _ => {}
             }
         }
         output

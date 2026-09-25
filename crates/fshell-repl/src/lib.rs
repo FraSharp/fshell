@@ -1585,6 +1585,48 @@ async fn handle_line_generic_inner(
             fshell_engine::trace::SpanOutcome::Error
         });
     }
+    // A line native accepts but cannot give POSIX meaning is handed to POSIX,
+    // exactly as it would be in a script. Decided before the trace so a line
+    // records one decision, and before execution so no side effect can run
+    // twice.
+    let mut parsed = parsed;
+    let divert = if force_posix
+        || env.options.read().interp_mode != fshell_engine::frontend::InterpMode::Auto
+    {
+        None
+    } else {
+        parsed
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|stmts| fshell_engine::compat::required_posix_semantics(stmts))
+    };
+    if let Some(requirement) = divert {
+        fshell_engine::frontend::trace_engine(
+            "posix",
+            &fshell_engine::frontend::reason::native_incompatible(requirement.label()),
+        );
+        // Executed by the POSIX arm below, as if the native parser had refused.
+        parsed = None;
+    }
+
+    // Record the engine this line is about to be committed to. `force_posix`
+    // already bypassed the native parser; otherwise a successful parse means
+    // native owns it. A parse that fails and finds no POSIX fallback writes
+    // nothing, because no routing decision was made.
+    if force_posix {
+        fshell_engine::frontend::trace_engine(
+            "posix",
+            fshell_engine::frontend::reason::EXPLICIT_POSIX,
+        );
+    } else if matches!(parsed, Some(Ok(_))) {
+        let reason =
+            if env.options.read().interp_mode == fshell_engine::frontend::InterpMode::Native {
+                fshell_engine::frontend::reason::EXPLICIT_NATIVE
+            } else {
+                fshell_engine::frontend::reason::NATIVE_SAFE
+            };
+        fshell_engine::frontend::trace_engine("native", reason);
+    }
     match parsed {
         None => match fshell_engine::frontend::run_posix(line_trimmed, env).await {
             Ok(_) => exit_code = Some(env.exit_code()),

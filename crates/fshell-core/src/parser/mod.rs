@@ -321,7 +321,12 @@ fn parse_string_parts(s: &str, base_span: SourceSpan) -> Result<Vec<StringPart>,
 fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
     fn flush(parts: &mut Vec<StringPart>, lit: &mut String) {
         if !lit.is_empty() {
-            parts.push(StringPart::Lit(std::mem::take(lit)));
+            // Body text of a heredoc or `"""…"""`: interpolated, but every
+            // character is literal.
+            parts.push(StringPart::Lit {
+                text: std::mem::take(lit),
+                quote: QuoteKind::Double,
+            });
         }
     }
 
@@ -341,7 +346,10 @@ fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
                         p.cmd_arg_mode = false;
                         let e = p.parse_braced_variable()?;
                         p.cmd_arg_mode = saved;
-                        parts.push(StringPart::Expr(Box::new(e)));
+                        parts.push(StringPart::Expr {
+                            expr: Box::new(e),
+                            quote: QuoteKind::Double,
+                        });
                     }
                     Some('(') => {
                         p.next_char(); // '$'
@@ -362,9 +370,12 @@ fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
                                     p.skip_whitespace();
                                     if p.peek() == Some(')') {
                                         p.next_char();
-                                        parts.push(StringPart::Expr(Box::new(
-                                            Expr::ArithmeticExpansion(Box::new(inner)),
-                                        )));
+                                        parts.push(StringPart::Expr {
+                                            expr: Box::new(Expr::ArithmeticExpansion(Box::new(
+                                                inner,
+                                            ))),
+                                            quote: QuoteKind::Double,
+                                        });
                                         handled = true;
                                     }
                                 }
@@ -375,7 +386,10 @@ fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
                         }
                         if !handled {
                             let e = p.parse_cmd_substitution()?;
-                            parts.push(StringPart::Expr(Box::new(e)));
+                            parts.push(StringPart::Expr {
+                                expr: Box::new(e),
+                                quote: QuoteKind::Double,
+                            });
                         }
                         p.cmd_arg_mode = saved;
                     }
@@ -383,7 +397,10 @@ fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
                         p.next_char(); // '$'
                         p.next_char(); // special parameter char
                         flush(&mut parts, &mut lit);
-                        parts.push(StringPart::Expr(Box::new(Expr::Variable(sp.to_string()))));
+                        parts.push(StringPart::Expr {
+                            expr: Box::new(Expr::Variable(sp.to_string())),
+                            quote: QuoteKind::Double,
+                        });
                     }
                     Some(nc) if nc.is_ascii_alphanumeric() || nc == '_' => {
                         p.next_char(); // '$'
@@ -396,7 +413,10 @@ fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
                             }
                         }
                         flush(&mut parts, &mut lit);
-                        parts.push(StringPart::Expr(Box::new(Expr::Variable(name))));
+                        parts.push(StringPart::Expr {
+                            expr: Box::new(Expr::Variable(name)),
+                            quote: QuoteKind::Double,
+                        });
                     }
                     _ => {
                         p.next_char();
@@ -740,7 +760,10 @@ mod tests {
         let expr = parser.parse_expr().unwrap();
         assert_eq!(
             expr.unpack(),
-            &Expr::String(vec![StringPart::Lit("\x1Bhello".to_string())])
+            &Expr::String(vec![StringPart::Lit {
+                text: "\x1Bhello".to_string(),
+                quote: QuoteKind::Double,
+            }])
         );
     }
 
@@ -750,7 +773,10 @@ mod tests {
         let expr = parser.parse_expr().unwrap();
         assert_eq!(
             expr.unpack(),
-            &Expr::String(vec![StringPart::Lit("\u{00E9}".to_string())])
+            &Expr::String(vec![StringPart::Lit {
+                text: "\u{00E9}".to_string(),
+                quote: QuoteKind::Double,
+            }])
         );
     }
 
@@ -773,7 +799,10 @@ mod tests {
         let expr = parser.parse_expr().unwrap();
         assert_eq!(
             expr.unpack(),
-            &Expr::String(vec![StringPart::Lit("null\x00byte".to_string())])
+            &Expr::String(vec![StringPart::Lit {
+                text: "null\x00byte".to_string(),
+                quote: QuoteKind::Double,
+            }])
         );
     }
 
@@ -787,7 +816,10 @@ mod tests {
         let result = parser.parse_expr().unwrap();
         assert_eq!(
             result.unpack(),
-            &Expr::String(vec![StringPart::Lit("\\z".to_string())])
+            &Expr::String(vec![StringPart::Lit {
+                text: "\\z".to_string(),
+                quote: QuoteKind::Double,
+            }])
         );
 
         // Test \. specifically — common grep use case
@@ -795,7 +827,10 @@ mod tests {
         let result2 = parser2.parse_expr().unwrap();
         assert_eq!(
             result2.unpack(),
-            &Expr::String(vec![StringPart::Lit("\\.".to_string())])
+            &Expr::String(vec![StringPart::Lit {
+                text: "\\.".to_string(),
+                quote: QuoteKind::Double,
+            }])
         );
     }
 
@@ -924,7 +959,10 @@ mod tests {
                 assert!(!*bash);
                 assert_eq!(
                     path.unpack(),
-                    &Expr::String(vec![StringPart::Lit("config.fsh".to_string())])
+                    &Expr::String(vec![StringPart::Lit {
+                        text: "config.fsh".to_string(),
+                        quote: QuoteKind::Double,
+                    }])
                 );
             }
             _ => panic!("Expected Stmt::Source, got {:?}", stmt),
@@ -937,7 +975,10 @@ mod tests {
                 assert!(*bash);
                 assert_eq!(
                     path.unpack(),
-                    &Expr::String(vec![StringPart::Lit("config.sh".to_string())])
+                    &Expr::String(vec![StringPart::Lit {
+                        text: "config.sh".to_string(),
+                        quote: QuoteKind::Double,
+                    }])
                 );
             }
             _ => panic!("Expected Stmt::Source with bash flag, got {:?}", stmt2),
@@ -987,11 +1028,17 @@ mod tests {
                             assert_eq!(parts.len(), 2);
                             assert_eq!(
                                 parts[0],
-                                StringPart::Expr(Box::new(Expr::Variable("HOME".to_string())))
+                                StringPart::Expr {
+                                    expr: Box::new(Expr::Variable("HOME".to_string())),
+                                    quote: QuoteKind::Unquoted,
+                                }
                             );
                             assert_eq!(
                                 parts[1],
-                                StringPart::Lit("/.config/fshell/init.fsh".to_string())
+                                StringPart::Lit {
+                                    text: "/.config/fshell/init.fsh".to_string(),
+                                    quote: QuoteKind::Unquoted,
+                                }
                             );
                         }
                         other => panic!("Expected Expr::String, got {:?}", other),
@@ -1075,11 +1122,13 @@ mod tests {
                     assert_eq!(args.len(), 2);
                     assert_eq!(
                         args[0],
-                        Expr::String(vec![StringPart::Lit("+x".to_string())])
+                        Expr::String(vec![StringPart::unquoted("+x".to_string())])
                     );
                     assert_eq!(
                         args[1],
-                        Expr::String(vec![StringPart::Lit("start-tModLoader.sh".to_string())])
+                        Expr::String(vec![StringPart::unquoted(
+                            "start-tModLoader.sh".to_string()
+                        )])
                     );
                 } else {
                     panic!("Expected CommandCall stage");
@@ -1123,7 +1172,7 @@ mod tests {
                     assert_eq!(args.len(), 3);
                     assert_eq!(
                         args[1],
-                        Expr::String(vec![StringPart::Lit("+".to_string())])
+                        Expr::String(vec![StringPart::unquoted("+".to_string())])
                     );
                 }
             }
@@ -1163,7 +1212,7 @@ mod tests {
         );
         assert_eq!(
             args[2].unpack(),
-            &Expr::String(vec![StringPart::Lit("-".into())])
+            &Expr::String(vec![StringPart::unquoted("-")])
         );
     }
 
@@ -1194,7 +1243,7 @@ mod tests {
                 .iter()
                 .map(|arg| match arg.unpack() {
                     Expr::String(parts) => match parts.as_slice() {
-                        [StringPart::Lit(s)] => s.as_str(),
+                        [StringPart::Lit { text: s, .. }] => s.as_str(),
                         other => panic!("unexpected arg parts for {src}: {other:?}"),
                     },
                     other => panic!("unexpected arg for {src}: {other:?}"),
@@ -1223,7 +1272,7 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert_eq!(
             args[0].unpack(),
-            &Expr::String(vec![StringPart::Lit("-".into())])
+            &Expr::String(vec![StringPart::unquoted("-")])
         );
         assert!(
             pipeline
@@ -1600,15 +1649,15 @@ mod tests {
     fn test_parse_string_parts_no_interp() {
         let parts = parse_string_parts("hello world", SourceSpan::new(0.into(), 0)).unwrap();
         assert_eq!(parts.len(), 1);
-        assert!(matches!(&parts[0], StringPart::Lit(s) if s == "hello world"));
+        assert!(matches!(&parts[0], StringPart::Lit { text: s, .. } if s == "hello world"));
     }
 
     #[test]
     fn test_parse_string_parts_var_interp() {
         let parts = parse_string_parts("hello $name", SourceSpan::new(0.into(), 0)).unwrap();
         assert_eq!(parts.len(), 2);
-        assert!(matches!(&parts[0], StringPart::Lit(s) if s == "hello "));
-        assert!(matches!(&parts[1], StringPart::Expr(_)));
+        assert!(matches!(&parts[0], StringPart::Lit { text: s, .. } if s == "hello "));
+        assert!(matches!(&parts[1], StringPart::Expr { .. }));
     }
 
     #[test]
@@ -1617,8 +1666,8 @@ mod tests {
         // double-quoted string.
         let parts = parse_string_parts("count: ${name}", SourceSpan::new(0.into(), 0)).unwrap();
         assert_eq!(parts.len(), 2);
-        assert!(matches!(&parts[0], StringPart::Lit(s) if s == "count: "));
-        assert!(matches!(&parts[1], StringPart::Expr(_)));
+        assert!(matches!(&parts[0], StringPart::Lit { text: s, .. } if s == "count: "));
+        assert!(matches!(&parts[1], StringPart::Expr { .. }));
 
         // Modifiers like `${path:t}` must expand, not be parsed as a generic
         // expression (which used to fail on the `:t`).
@@ -1626,7 +1675,7 @@ mod tests {
         assert_eq!(modifier.len(), 1);
         assert!(matches!(
             &modifier[0],
-            StringPart::Expr(e)
+            StringPart::Expr { expr: e, .. }
                 if matches!(
                     e.unpack(),
                     Expr::VarWithModifier {
@@ -1641,14 +1690,16 @@ mod tests {
         assert_eq!(special.len(), 2);
         assert!(matches!(
             &special[1],
-            StringPart::Expr(e) if matches!(e.unpack(), Expr::Variable(name) if name == "@")
+            StringPart::Expr { expr: e, .. } if matches!(e.unpack(), Expr::Variable(name) if name == "@")
         ));
 
         // Bare braces stay literal text (nginx/JSON bodies).
         let literal_brace =
             parse_string_parts("server { listen 80; }", SourceSpan::new(0.into(), 0)).unwrap();
         assert_eq!(literal_brace.len(), 1);
-        assert!(matches!(&literal_brace[0], StringPart::Lit(s) if s == "server { listen 80; }"));
+        assert!(
+            matches!(&literal_brace[0], StringPart::Lit { text: s, .. } if s == "server { listen 80; }")
+        );
     }
 
     #[test]
@@ -1668,17 +1719,17 @@ mod tests {
         let Expr::String(parts) = args[0].unpack() else {
             panic!("expected interpolated string");
         };
-        assert!(matches!(&parts[0], StringPart::Lit(value) if value == "before "));
+        assert!(matches!(&parts[0], StringPart::Lit { text: value, .. } if value == "before "));
         assert!(matches!(
             &parts[1],
-            StringPart::Expr(expr) if matches!(expr.unpack(), Expr::InlinePipeline(_))
+            StringPart::Expr { expr, .. } if matches!(expr.unpack(), Expr::InlinePipeline(_))
         ));
-        assert!(matches!(&parts[2], StringPart::Lit(value) if value == " "));
+        assert!(matches!(&parts[2], StringPart::Lit { text: value, .. } if value == " "));
         assert!(matches!(
             &parts[3],
-            StringPart::Expr(expr) if matches!(expr.unpack(), Expr::ArithmeticExpansion(_))
+            StringPart::Expr { expr, .. } if matches!(expr.unpack(), Expr::ArithmeticExpansion(_))
         ));
-        assert!(matches!(&parts[4], StringPart::Lit(value) if value == " after"));
+        assert!(matches!(&parts[4], StringPart::Lit { text: value, .. } if value == " after"));
     }
 
     #[test]
@@ -1809,15 +1860,15 @@ mod tests {
                     assert_eq!(args.len(), 3);
                     assert_eq!(
                         args[0],
-                        Expr::String(vec![StringPart::Lit("a".to_string())])
+                        Expr::String(vec![StringPart::unquoted("a".to_string())])
                     );
                     assert_eq!(
                         args[1],
-                        Expr::String(vec![StringPart::Lit("b".to_string())])
+                        Expr::String(vec![StringPart::unquoted("b".to_string())])
                     );
                     assert_eq!(
                         args[2],
-                        Expr::String(vec![StringPart::Lit("c".to_string())])
+                        Expr::String(vec![StringPart::unquoted("c".to_string())])
                     );
                 } else {
                     panic!("Expected CommandCall");
@@ -1843,11 +1894,11 @@ mod tests {
                     assert_eq!(args.len(), 2);
                     assert_eq!(
                         args[0],
-                        Expr::String(vec![StringPart::Lit("file.txt".to_string())])
+                        Expr::String(vec![StringPart::unquoted("file.txt".to_string())])
                     );
                     assert_eq!(
                         args[1],
-                        Expr::String(vec![StringPart::Lit("file.bak".to_string())])
+                        Expr::String(vec![StringPart::unquoted("file.bak".to_string())])
                     );
                 }
             }
@@ -1865,15 +1916,15 @@ mod tests {
                     assert_eq!(args.len(), 3);
                     assert_eq!(
                         args[0],
-                        Expr::String(vec![StringPart::Lit("1".to_string())])
+                        Expr::String(vec![StringPart::unquoted("1".to_string())])
                     );
                     assert_eq!(
                         args[1],
-                        Expr::String(vec![StringPart::Lit("2".to_string())])
+                        Expr::String(vec![StringPart::unquoted("2".to_string())])
                     );
                     assert_eq!(
                         args[2],
-                        Expr::String(vec![StringPart::Lit("3".to_string())])
+                        Expr::String(vec![StringPart::unquoted("3".to_string())])
                     );
                 }
             }
@@ -1913,14 +1964,14 @@ mod tests {
             matches!(
                 arg.unpack(),
                 Expr::String(parts)
-                    if parts == &vec![StringPart::Lit("{}".to_string())]
+                    if parts == &vec![StringPart::unquoted("{}".to_string())]
             )
         }));
         assert!(args.iter().any(|arg| {
             matches!(
                 arg.unpack(),
                 Expr::String(parts)
-                    if parts == &vec![StringPart::Lit("+".to_string())]
+                    if parts == &vec![StringPart::unquoted("+".to_string())]
             )
         }));
     }
@@ -2116,8 +2167,17 @@ mod tests {
                 if let PipelineStage::CommandCall { args, .. } = &p.stages[0] {
                     if let Expr::String(parts) = args[0].unpack() {
                         assert_eq!(parts.len(), 2);
-                        assert_eq!(parts[0], StringPart::Lit("exit: ".to_string()));
-                        if let StringPart::Expr(inner_expr) = &parts[1] {
+                        assert_eq!(
+                            parts[0],
+                            StringPart::Lit {
+                                text: "exit: ".to_string(),
+                                quote: QuoteKind::Double,
+                            }
+                        );
+                        if let StringPart::Expr {
+                            expr: inner_expr, ..
+                        } = &parts[1]
+                        {
                             assert_eq!(inner_expr.unpack(), &Expr::Variable("?".to_string()));
                         } else {
                             panic!("Expected StringPart::Expr");
@@ -2139,8 +2199,17 @@ mod tests {
                 if let PipelineStage::CommandCall { args, .. } = &p.stages[0] {
                     if let Expr::String(parts) = args[0].unpack() {
                         assert_eq!(parts.len(), 2);
-                        assert_eq!(parts[0], StringPart::Lit("exit: ".to_string()));
-                        if let StringPart::Expr(inner_expr) = &parts[1] {
+                        assert_eq!(
+                            parts[0],
+                            StringPart::Lit {
+                                text: "exit: ".to_string(),
+                                quote: QuoteKind::Double,
+                            }
+                        );
+                        if let StringPart::Expr {
+                            expr: inner_expr, ..
+                        } = &parts[1]
+                        {
                             assert_eq!(inner_expr.unpack(), &Expr::Ident("?".to_string()));
                         } else {
                             panic!("Expected StringPart::Expr");
@@ -2501,7 +2570,9 @@ mod tests {
                     assert_eq!(args.len(), 3);
                     assert_eq!(
                         args[2],
-                        Expr::String(vec![StringPart::Lit("@opencode-ai/cli@next".to_string())])
+                        Expr::String(vec![StringPart::unquoted(
+                            "@opencode-ai/cli@next".to_string()
+                        )])
                     );
                     return;
                 }
@@ -2522,7 +2593,7 @@ mod tests {
                     assert_eq!(args.len(), 1);
                     assert_eq!(
                         args[0],
-                        Expr::String(vec![StringPart::Lit("@json".to_string())])
+                        Expr::String(vec![StringPart::unquoted("@json".to_string())])
                     );
                     return;
                 }
@@ -2543,7 +2614,7 @@ mod tests {
                     assert_eq!(args.len(), 2);
                     assert_eq!(
                         args[0],
-                        Expr::String(vec![StringPart::Lit(
+                        Expr::String(vec![StringPart::unquoted(
                             "user@github.com:notes.txt".to_string()
                         )])
                     );
@@ -2587,17 +2658,17 @@ mod tests {
             if let Expr::Pipeline(pipeline) = expr.unpack() {
                 assert_eq!(pipeline.stages.len(), 1);
                 if let PipelineStage::CommandCall { args, .. } = &pipeline.stages[0] {
-                    let got: Vec<String> = args
-                        .iter()
-                        .map(|a| match a.unpack() {
-                            Expr::String(parts) if parts.len() == 1 => match &parts[0] {
-                                StringPart::Lit(s) => s.clone(),
-                                _ => format!("{a:?}"),
-                            },
-                            Expr::Ident(name) => name.clone(),
-                            other => format!("{other:?}"),
-                        })
-                        .collect();
+                    let got: Vec<String> =
+                        args.iter()
+                            .map(|a| match a.unpack() {
+                                // The argument's text, however many fragments its
+                                // quoting produced.
+                                Expr::String(parts) => StringPart::literal_text(parts)
+                                    .unwrap_or_else(|| format!("{a:?}")),
+                                Expr::Ident(name) => name.clone(),
+                                other => format!("{other:?}"),
+                            })
+                            .collect();
                     let want: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
                     assert_eq!(got, want, "`echo {input}` args mismatch");
                     return;
@@ -2653,11 +2724,22 @@ mod tests {
             panic!("expected command call");
         };
         assert_eq!(args.len(), 1, "expected one path argument, got {args:?}");
+        // One argument whose value is the path. The escaped spaces are separate
+        // fragments now — that is the point of tracking provenance — but they
+        // must still concatenate back to exactly this text, and they must be
+        // marked literal rather than pattern syntax.
+        let Expr::String(parts) = args[0].unpack() else {
+            panic!("expected string argument, got {:?}", args[0]);
+        };
         assert_eq!(
-            args[0],
-            Expr::String(vec![StringPart::Lit(
-                "/var/folders/nw/n7d16zv95_9fyvhl5n57v7hh0000gn/T/TemporaryItems/NSIRD_screencaptureui_K3f6Md/Screenshot 2026-09-20 at 13.32.09.png".to_string()
-            )])
+            StringPart::literal_text(parts).as_deref(),
+            Some(
+                "/var/folders/nw/n7d16zv95_9fyvhl5n57v7hh0000gn/T/TemporaryItems/NSIRD_screencaptureui_K3f6Md/Screenshot 2026-09-20 at 13.32.09.png"
+            )
+        );
+        assert!(
+            parts.iter().any(|p| p.quote() == QuoteKind::Escaped),
+            "escaped spaces must be recorded as literal, got {parts:?}"
         );
     }
 
@@ -2677,7 +2759,7 @@ mod tests {
             PipelineStage::Write {
                 path: Expr::String(parts),
                 ..
-            } if parts == &vec![StringPart::Lit("/tmp/output file.txt".to_string())]
+            } if parts == &vec![StringPart::unquoted("/tmp/output file.txt".to_string())]
         )));
     }
 
@@ -2693,11 +2775,11 @@ mod tests {
                     assert_eq!(args.len(), 2, "expected 2 expanded args, got {:?}", args);
                     assert_eq!(
                         args[0],
-                        Expr::String(vec![StringPart::Lit("file1".to_string())])
+                        Expr::String(vec![StringPart::unquoted("file1".to_string())])
                     );
                     assert_eq!(
                         args[1],
-                        Expr::String(vec![StringPart::Lit("file2".to_string())])
+                        Expr::String(vec![StringPart::unquoted("file2".to_string())])
                     );
                     return;
                 }
@@ -2860,7 +2942,10 @@ mod tests {
         };
         assert_eq!(
             pattern.unpack(),
-            &Expr::String(vec![StringPart::Lit(r"\.tmp$".to_string())])
+            &Expr::String(vec![StringPart::Lit {
+                text: r"\.tmp$".to_string(),
+                quote: QuoteKind::Single,
+            }])
         );
     }
 
@@ -2873,7 +2958,7 @@ mod tests {
         };
         assert_eq!(
             args[0].unpack(),
-            &Expr::String(vec![StringPart::Lit("app.toml".to_string())])
+            &Expr::String(vec![StringPart::unquoted("app.toml".to_string())])
         );
     }
 
@@ -2887,7 +2972,10 @@ mod tests {
         };
         assert_eq!(
             expr.unpack(),
-            &Expr::String(vec![StringPart::Lit(r"\.rs$".to_string())])
+            &Expr::String(vec![StringPart::Lit {
+                text: r"\.rs$".to_string(),
+                quote: QuoteKind::Single,
+            }])
         );
     }
 
@@ -2901,7 +2989,13 @@ mod tests {
         };
         match expr.unpack() {
             Expr::MultiLineString { parts, .. } => {
-                assert_eq!(parts, &vec![StringPart::Lit("hello\nworld".to_string())]);
+                assert_eq!(
+                    parts,
+                    &vec![StringPart::Lit {
+                        text: "hello\nworld".to_string(),
+                        quote: QuoteKind::Single,
+                    }]
+                );
             }
             other => panic!("Expected MultiLineString, got {other:?}"),
         }
@@ -2930,7 +3024,7 @@ mod tests {
             };
             assert!(
                 matches!(&args[0], Expr::String(parts)
-                    if matches!(parts.as_slice(), [StringPart::Lit(_)])),
+                    if matches!(parts.as_slice(), [StringPart::Lit { text: _, .. }])),
                 "{src}: quoted argument must stay a string, got {:?}",
                 args[0]
             );
@@ -2993,10 +3087,12 @@ mod tests {
                     match &args[0] {
                         Expr::String(parts) => {
                             assert_eq!(parts.len(), 2);
-                            assert!(matches!(&parts[0], StringPart::Lit(s) if s == "a"));
+                            assert!(
+                                matches!(&parts[0], StringPart::Lit { text: s, .. } if s == "a")
+                            );
                             assert!(matches!(
                                 &parts[1],
-                                StringPart::Expr(e)
+                                StringPart::Expr { expr: e, .. }
                                     if matches!(e.unpack(), Expr::Ident(n) if n == "b")
                             ));
                         }
@@ -3025,7 +3121,7 @@ mod tests {
                             assert_eq!(parts.len(), 1);
                             assert!(matches!(
                                 &parts[0],
-                                StringPart::Expr(e)
+                                StringPart::Expr { expr: e, .. }
                                     if matches!(
                                         e.unpack(),
                                         Expr::VarWithModifier {
@@ -3057,7 +3153,7 @@ mod tests {
                         Expr::String(parts) => {
                             assert!(matches!(
                                 &parts[0],
-                                StringPart::Expr(e)
+                                StringPart::Expr { expr: e, .. }
                                     if matches!(
                                         e.unpack(),
                                         Expr::VarWithModifier {
@@ -3089,7 +3185,7 @@ mod tests {
                 match alt_expr.unpack() {
                     Expr::String(parts) => {
                         assert_eq!(parts.len(), 1);
-                        assert!(matches!(&parts[0], StringPart::Lit(s) if s == "alt"));
+                        assert!(matches!(&parts[0], StringPart::Lit { text: s, .. } if s == "alt"));
                     }
                     other => panic!("Expected literal String value, got {:?}", other),
                 }
@@ -3108,7 +3204,9 @@ mod tests {
                 match default_expr.unpack() {
                     Expr::String(parts) => {
                         assert_eq!(parts.len(), 1);
-                        assert!(matches!(&parts[0], StringPart::Lit(s) if s == "fallback"));
+                        assert!(
+                            matches!(&parts[0], StringPart::Lit { text: s, .. } if s == "fallback")
+                        );
                     }
                     other => panic!("Expected literal String default, got {:?}", other),
                 }
@@ -3132,7 +3230,7 @@ mod tests {
                         assert_eq!(parts.len(), 1);
                         assert!(matches!(
                             &parts[0],
-                            StringPart::Expr(e) if matches!(e.unpack(), Expr::Variable(v) if v == "other")
+                            StringPart::Expr { expr: e, .. } if matches!(e.unpack(), Expr::Variable(v) if v == "other")
                         ));
                     }
                     other => panic!("Expected interpolated String value, got {:?}", other),

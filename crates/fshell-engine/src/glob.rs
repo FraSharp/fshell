@@ -2,42 +2,98 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::Env;
+use crate::word::ExpandedWord;
 use fshell_core::Val;
 use std::time::Instant;
 
 pub fn expand_globs(args: Vec<Val>, env: &Env) -> Result<Vec<Val>, String> {
-    let mut expanded_args = Vec::new();
+    expand_args_with_words(args, &[], env)
+}
+
+/// Expand command arguments, honouring each word's source quoting where known.
+///
+/// `words` runs parallel to `args`: a `None` entry means the argument has no
+/// source word (a bare variable's value, say) and is expanded as before. A word
+/// whose pattern characters are all quoted or escaped is data, not a pattern,
+/// so it reaches argv untouched however pattern-like it looks — that is what
+/// makes `'*.rs'` one literal argument instead of a file list.
+pub fn expand_args_with_words(
+    args: Vec<Val>,
+    words: &[Option<ExpandedWord>],
+    env: &Env,
+) -> Result<Vec<Val>, String> {
     let (nullglob, nocaseglob) = {
-        {
-            let opts = env.options.read();
-            (opts.nullglob, opts.nocaseglob)
-        }
+        let opts = env.options.read();
+        (opts.nullglob, opts.nocaseglob)
     };
 
-    for arg in args {
-        if let Val::String(s) = arg {
-            let tilde_expanded = if s == "~" {
-                env.home_dir().to_string_lossy().into_owned()
-            } else if let Some(rest) = s.strip_prefix("~/") {
-                env.home_dir().join(rest).to_string_lossy().into_owned()
+    let mut expanded_args = Vec::new();
+    for (index, arg) in args.into_iter().enumerate() {
+        let text = match &arg {
+            Val::String(s) => s.clone(),
+            _ => {
+                expanded_args.push(arg);
+                continue;
+            }
+        };
+        let word = words.get(index).and_then(Option::as_ref);
+
+        if let Some(word) = word
+            && !word.needs_expansion()
+        {
+            expanded_args.push(arg);
+            continue;
+        }
+
+        // Prefer the source-derived pattern: its quoted fragments are escaped,
+        // so a literal `*` cannot act as a wildcard, while an unquoted one
+        // still does.
+        let pattern = match word {
+            Some(word) => word.glob_pattern(),
+            None => text.clone(),
+        };
+        let pattern = expand_tilde(&pattern, env);
+
+        let braced = expand_braces(&pattern);
+        if let [single] = braced.as_slice() {
+            // Ask for matches only, so a miss is distinguishable from a match
+            // whose name happens to equal the pattern. On a miss the word is
+            // used literally — as its own text, never as the pattern, or the
+            // escaping added above would leak into argv.
+            let matches =
+                fshell_core::glob_utils::expand_glob_with_options(single, true, nocaseglob);
+            if matches.is_empty() {
+                if !nullglob {
+                    expanded_args.push(Val::String(text));
+                }
             } else {
-                s
-            };
-            let braced = expand_braces(&tilde_expanded);
-            for pattern in braced {
-                let globbed = fshell_core::glob_utils::expand_glob_with_options(
-                    &pattern, nullglob, nocaseglob,
-                );
-                for file in globbed {
+                for file in matches {
                     expanded_args.push(Val::String(file));
                 }
             }
         } else {
-            expanded_args.push(arg);
+            // Brace expansion produced several words; each expands on its own.
+            for braced in braced {
+                for file in
+                    fshell_core::glob_utils::expand_glob_with_options(&braced, nullglob, nocaseglob)
+                {
+                    expanded_args.push(Val::String(file));
+                }
+            }
         }
     }
 
     Ok(expanded_args)
+}
+
+fn expand_tilde(s: &str, env: &Env) -> String {
+    if s == "~" {
+        env.home_dir().to_string_lossy().into_owned()
+    } else if let Some(rest) = s.strip_prefix("~/") {
+        env.home_dir().join(rest).to_string_lossy().into_owned()
+    } else {
+        s.to_string()
+    }
 }
 
 /// If `s` looks like a brace range (e.g. "1..3", "a..z", "01..05"),

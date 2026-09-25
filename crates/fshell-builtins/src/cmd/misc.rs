@@ -773,7 +773,26 @@ fn truncate_utf8_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// C `printf` reuses the format string until the arguments are used up.
+///
+/// Each pass consumes the arguments its conversions name; a pass that consumed
+/// none ends the output, so `printf 'x\n' a b` still prints once and
+/// `printf '%s\n'` with no arguments prints one empty line.
 fn format_printf(format: &str, args: &[Val]) -> Result<String, String> {
+    let mut result = String::new();
+    let mut start = 0;
+    loop {
+        let (chunk, consumed) = format_printf_pass(format, &args[start..])?;
+        result.push_str(&chunk);
+        if consumed == 0 || start + consumed >= args.len() {
+            return Ok(result);
+        }
+        start += consumed;
+    }
+}
+
+/// One pass of the format string, reporting how many arguments it consumed.
+fn format_printf_pass(format: &str, args: &[Val]) -> Result<(String, usize), String> {
     let mut result = String::new();
     let mut arg_idx = 0;
     let mut chars = format.chars().peekable();
@@ -1066,7 +1085,7 @@ fn format_printf(format: &str, args: &[Val]) -> Result<String, String> {
         }
     }
 
-    Ok(result)
+    Ok((result, arg_idx))
 }
 
 pub fn printf_builtin(
@@ -1088,6 +1107,10 @@ pub fn printf_builtin(
 
     let (interpreted_format, _) = interpret_ansi_escapes(&format_str);
     let output = format_printf(&interpreted_format, format_args).map_err(ShellError::from)?;
+
+    // `printf` emits exactly what its format says, so the display boundary must
+    // not add a newline: the trailing NUL is this shell's marker for that.
+    let output = format!("{output}\0");
 
     tokio::spawn(async move {
         let _ = tx

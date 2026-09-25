@@ -5,6 +5,7 @@
 #![allow(clippy::await_holding_lock, unused_imports, dead_code)]
 
 pub mod assertions;
+pub mod conformance;
 pub mod context;
 pub mod fixture_runner;
 pub mod fixtures;

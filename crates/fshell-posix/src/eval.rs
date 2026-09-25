@@ -375,17 +375,99 @@ async fn eval_and_or_list_stream(
     Ok((code, ret_out))
 }
 
-#[derive(Debug, Clone, Default)]
+/// Where a standard descriptor points once a command's redirections have been
+/// applied in source order.
+///
+/// The order is the semantics, and it is why this is a table rather than a pair
+/// of flags. `2>&1` means "stderr := whatever stdout points at *right now*", so
+/// `> out 2>&1` sends both streams to `out` while `2>&1 > out` leaves stderr on
+/// the original stdout. A `stderr_to_stdout: bool` cannot express that, because
+/// by the time someone read it the ordering information would already be gone.
+#[derive(Clone)]
+pub(crate) enum FdTarget {
+    /// A descriptor of this process (0, 1 or 2), materialised by duplicating it.
+    /// Duplication is required rather than inheritance: `2>&1` on an
+    /// unredirected stdout has to give the child fd 1, not fd 2.
+    Process(i32),
+    /// The in-process pipeline channel carrying this stage's output.
+    Pipe(tokio::sync::mpsc::Sender<bytes::Bytes>),
+    /// An open file, shared by every descriptor duplicated onto it so concurrent
+    /// writers do not fight over separate offsets.
+    File(std::sync::Arc<std::sync::Mutex<std::fs::File>>),
+    /// Explicitly closed (`n>&-`).
+    Closed,
+}
+
+impl std::fmt::Debug for FdTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FdTarget::Process(fd) => write!(f, "Process({fd})"),
+            FdTarget::Pipe(_) => f.write_str("Pipe"),
+            FdTarget::File(_) => f.write_str("File"),
+            FdTarget::Closed => f.write_str("Closed"),
+        }
+    }
+}
+
+/// The result of applying a command's redirections, in order.
+#[derive(Debug, Clone)]
 pub struct RedirectionContext {
     pub stdin_bytes: Option<Vec<u8>>,
     pub stdin_file: Option<std::path::PathBuf>,
-    pub stdout_file: Option<(std::path::PathBuf, bool)>, // (path, append)
-    pub stderr_file: Option<(std::path::PathBuf, bool)>, // (path, append)
-    pub stderr_to_stdout: bool,
-    pub stdout_to_stderr: bool,
+    /// Destinations of fd 0, 1 and 2 after every redirection was applied.
+    targets: [FdTarget; 3],
+}
+
+impl Default for RedirectionContext {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl RedirectionContext {
+    /// Seed the descriptor table for a command, then apply its redirections.
+    ///
+    /// Seeding matters: a stage whose stdout is the pipeline channel starts with
+    /// fd 1 pointing at that channel, so a later `2>&1` correctly duplicates the
+    /// channel rather than the process's own stdout.
+    pub(crate) fn new(stdout_stream: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>) -> Self {
+        Self {
+            stdin_bytes: None,
+            stdin_file: None,
+            targets: [
+                FdTarget::Process(0),
+                match stdout_stream {
+                    Some(tx) => FdTarget::Pipe(tx.clone()),
+                    None => FdTarget::Process(1),
+                },
+                FdTarget::Process(2),
+            ],
+        }
+    }
+
+    /// Destination of fd 1.
+    pub(crate) fn stdout(&self) -> &FdTarget {
+        &self.targets[1]
+    }
+
+    /// Destination of fd 2.
+    pub(crate) fn stderr(&self) -> &FdTarget {
+        &self.targets[2]
+    }
+
+    /// Destination of fd 0.
+    pub(crate) fn stdin(&self) -> &FdTarget {
+        &self.targets[0]
+    }
+
+    /// The open file fd 1 was redirected to, if any.
+    pub(crate) fn stdout_file(&self) -> Option<&std::sync::Arc<std::sync::Mutex<std::fs::File>>> {
+        match &self.targets[1] {
+            FdTarget::File(handle) => Some(handle),
+            _ => None,
+        }
+    }
+
     pub(crate) fn apply_item(
         &mut self,
         redir: &IoRedirect,
@@ -403,59 +485,38 @@ impl RedirectionContext {
 
                 match target {
                     IoFileRedirectTarget::Filename(w) => {
-                        let expanded = expand_word(
-                            &w.value,
-                            env,
-                            &ExpansionConfig {
-                                do_glob: false,
-                                ..Default::default()
-                            },
-                            positional,
-                        )?;
-                        let filename = expanded.join(" ");
-                        let raw_path = std::path::PathBuf::from(filename);
-                        let path = if raw_path.is_absolute() {
-                            raw_path
-                        } else {
-                            env.cwd().join(raw_path)
-                        };
-
+                        let path = self.resolve_path(w, env, positional)?;
                         match fd {
                             0 => {
-                                match std::fs::read(&path) {
-                                    Ok(bytes) => {
-                                        self.stdin_bytes = Some(bytes);
-                                    }
-                                    Err(e) => {
-                                        return Err(PosixError::Engine(EngineError::IoError {
-                                            message: format!("{}: {}", path.display(), e),
-                                            span: None,
-                                        }));
-                                    }
-                                }
+                                let bytes = std::fs::read(&path).map_err(|e| {
+                                    PosixError::Engine(EngineError::IoError {
+                                        message: format!("{}: {}", path.display(), e),
+                                        span: None,
+                                    })
+                                })?;
+                                self.stdin_bytes = Some(bytes);
                                 self.stdin_file = Some(path);
                             }
-                            1 => self.stdout_file = Some((path, append)),
-                            2 => self.stderr_file = Some((path, append)),
-                            _ => {}
+                            1 | 2 => {
+                                // Open the target *now*, before the command runs.
+                                // POSIX establishes the redirection whether or not
+                                // the command writes, so this is what makes
+                                // `: > file` create or truncate it — the idiomatic
+                                // way to clear a file or start a log.
+                                let handle = open_redirect_file(&path, append)?;
+                                self.targets[fd as usize] = FdTarget::File(handle);
+                            }
+                            _ => return Err(unsupported_descriptor(fd)),
                         }
                     }
                     IoFileRedirectTarget::Duplicate(w) => {
                         let dest =
                             expand_word(&w.value, env, &ExpansionConfig::default(), positional)?
                                 .join(" ");
-                        if dest == "1" && fd == 2 {
-                            self.stderr_to_stdout = true;
-                        } else if dest == "2" && fd == 1 {
-                            self.stdout_to_stderr = true;
-                        }
+                        self.duplicate(fd, dest.trim())?;
                     }
                     IoFileRedirectTarget::Fd(target_fd) => {
-                        if *target_fd == 1 && fd == 2 {
-                            self.stderr_to_stdout = true;
-                        } else if *target_fd == 2 && fd == 1 {
-                            self.stdout_to_stderr = true;
-                        }
+                        self.duplicate(fd, &target_fd.to_string())?;
                     }
                     _ => {}
                 }
@@ -507,28 +568,144 @@ impl RedirectionContext {
                 self.stdin_bytes = Some(content.into_bytes());
             }
             IoRedirect::OutputAndError(w, append) => {
-                let expanded = expand_word(
-                    &w.value,
-                    env,
-                    &ExpansionConfig {
-                        do_glob: false,
-                        ..Default::default()
-                    },
-                    positional,
-                )?;
-                let filename = expanded.join(" ");
-                let raw_path = std::path::PathBuf::from(filename);
-                let path = if raw_path.is_absolute() {
-                    raw_path
-                } else {
-                    env.cwd().join(raw_path)
-                };
-                self.stdout_file = Some((path.clone(), *append));
-                self.stderr_file = Some((path, *append));
+                let path = self.resolve_path(w, env, positional)?;
+                let handle = open_redirect_file(&path, *append)?;
+                self.targets[1] = FdTarget::File(handle.clone());
+                self.targets[2] = FdTarget::File(handle);
             }
         }
         Ok(())
     }
+
+    /// Point `src_fd` at whatever `dest` currently points at.
+    fn duplicate(&mut self, src_fd: i32, dest: &str) -> Result<(), PosixError> {
+        if dest == "-" {
+            self.targets[src_fd as usize] = FdTarget::Closed;
+            return Ok(());
+        }
+        let dest_fd: i32 = dest.parse().map_err(|_| {
+            PosixError::Engine(EngineError::Generic {
+                message: format!("{src_fd}>&{dest}: bad file descriptor"),
+                span: None,
+            })
+        })?;
+        if !(0..=2).contains(&dest_fd) {
+            return Err(unsupported_descriptor(dest_fd));
+        }
+        // Copy the *current* target: this is exactly what makes redirection
+        // order observable, and is the whole reason the table is ordered.
+        self.targets[src_fd as usize] = self.targets[dest_fd as usize].clone();
+        Ok(())
+    }
+
+    /// Expand a redirection target word to an absolute path.
+    fn resolve_path(
+        &self,
+        word: &Word,
+        env: &Env,
+        positional: &[String],
+    ) -> Result<std::path::PathBuf, PosixError> {
+        let expanded = expand_word(
+            &word.value,
+            env,
+            &ExpansionConfig {
+                do_glob: false,
+                ..Default::default()
+            },
+            positional,
+        )?;
+        let raw_path = std::path::PathBuf::from(expanded.join(" "));
+        Ok(if raw_path.is_absolute() {
+            raw_path
+        } else {
+            env.cwd().join(raw_path)
+        })
+    }
+}
+
+/// Open a redirection target for writing, truncating unless appending.
+fn open_redirect_file(
+    path: &std::path::Path,
+    append: bool,
+) -> Result<std::sync::Arc<std::sync::Mutex<std::fs::File>>, PosixError> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(!append)
+        .append(append)
+        .open(path)
+        .map_err(|e| {
+            PosixError::Engine(EngineError::IoError {
+                message: format!("{}: {}", path.display(), e),
+                span: None,
+            })
+        })?;
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(file)))
+}
+
+/// Only the three standard descriptors are implemented. Anything else is
+/// rejected rather than silently dropped, because accepting a redirection and
+/// ignoring it is worse than refusing it.
+fn unsupported_descriptor(fd: i32) -> PosixError {
+    PosixError::Engine(EngineError::Generic {
+        message: format!("redirection of file descriptor {fd} is not supported (only 0, 1 and 2)"),
+        span: None,
+    })
+}
+
+/// Write to a shared redirect handle.
+fn write_shared_file(
+    handle: &std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+    bytes: &[u8],
+) -> Result<(), PosixError> {
+    use std::io::Write;
+    let mut file = handle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    file.write_all(bytes).map_err(|e| {
+        PosixError::Engine(EngineError::IoError {
+            message: format!("redirect write error: {e}"),
+            span: None,
+        })
+    })
+}
+
+/// Duplicate a process descriptor as a child's stdio.
+///
+/// `dup` rather than `Stdio::inherit()`: inheriting gives the child the
+/// descriptor of the *same number*, which is wrong for a duplication such as
+/// `2>&1`, where the child's fd 2 must become this process's fd 1.
+fn dup_stdio(fd: i32) -> Result<std::process::Stdio, PosixError> {
+    use std::os::fd::FromRawFd;
+    let duplicated = unsafe { libc::dup(fd) };
+    if duplicated < 0 {
+        return Err(PosixError::Engine(EngineError::IoError {
+            message: format!("dup({fd}) failed: {}", std::io::Error::last_os_error()),
+            span: None,
+        }));
+    }
+    // `Stdio::from` takes ownership, so the duplicated descriptor is closed when
+    // the command drops it. The original descriptor is untouched.
+    Ok(std::process::Stdio::from(unsafe {
+        std::fs::File::from_raw_fd(duplicated)
+    }))
+}
+
+/// Clone a shared redirect handle for handing to a child process. `try_clone`
+/// duplicates the descriptor, so both fds share one file offset and interleave
+/// in write order.
+fn clone_shared_file(
+    handle: &std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+) -> Result<std::fs::File, PosixError> {
+    let file = handle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    file.try_clone().map_err(|e| {
+        PosixError::Engine(EngineError::IoError {
+            message: format!("redirect dup error: {e}"),
+            span: None,
+        })
+    })
 }
 
 #[derive(Debug, Default)]
@@ -652,7 +829,7 @@ async fn eval_command_stream(
     match cmd {
         Command::Simple(simple) => eval_simple_command(simple, env, cfg, io_cfg).await,
         Command::Compound(compound, redirects) => {
-            let mut redir = RedirectionContext::default();
+            let mut redir = RedirectionContext::new(io_cfg.stdout_stream.as_ref());
             if let Some(list) = redirects {
                 for r in &list.0 {
                     match redir.apply_item(r, env, &cfg.positional) {
@@ -671,7 +848,10 @@ async fn eval_command_stream(
                     }
                 }
             }
-            let capture = io_cfg.capture_stdout || redir.stdout_file.is_some();
+            // Take the redirect handle before moving the stdin bytes out of
+            // `redir`, so the table stays borrowable afterwards.
+            let stdout_handle = redir.stdout_file().cloned();
+            let capture = io_cfg.capture_stdout || stdout_handle.is_some();
             let sub_io = IoStreamConfig {
                 stdin_bytes: redir.stdin_bytes.or(io_cfg.stdin_bytes),
                 stdin_stream: io_cfg.stdin_stream,
@@ -679,30 +859,12 @@ async fn eval_command_stream(
                 capture_stdout: capture,
             };
             let (code, out) = eval_compound_command_stream(compound, env, cfg, sub_io).await?;
-            if let Some((path, append)) = &redir.stdout_file
+            if let Some(handle) = &stdout_handle
                 && let Some(bytes) = &out
             {
-                use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(!*append)
-                    .append(*append)
-                    .open(path)
-                    .map_err(|e| {
-                        PosixError::Engine(EngineError::IoError {
-                            message: format!("{}: {}", path.display(), e),
-                            span: None,
-                        })
-                    })?;
-                file.write_all(bytes).map_err(|e| {
-                    PosixError::Engine(EngineError::IoError {
-                        message: format!("{}: {}", path.display(), e),
-                        span: None,
-                    })
-                })?;
+                write_shared_file(handle, bytes)?;
             }
-            let ret_out = if io_cfg.capture_stdout && redir.stdout_file.is_none() {
+            let ret_out = if io_cfg.capture_stdout && stdout_handle.is_none() {
                 out
             } else {
                 None
@@ -1139,22 +1301,44 @@ async fn eval_simple_command(
                     )?;
                     args.extend(expanded);
                 }
+                // POSIX: `name=value` is an assignment only *before* the command
+                // word. After it the word is an ordinary argument, so rebuild its
+                // source text and expand it exactly like any other word — which is
+                // what makes `make PREFIX=/usr`, `git -c foo=bar` and `argvdump n=1`
+                // behave. Position is structural, not textual: brush records it by
+                // placing the item in `prefix` or `suffix`, and this is the suffix
+                // loop, so the information is already here and must not be folded
+                // into the prefix assignment path.
                 CommandPrefixOrSuffixItem::AssignmentWord(assign, _) => {
                     let name = match &assign.name {
                         AssignmentName::VariableName(n) => n.clone(),
                         AssignmentName::ArrayElementName(n, idx) => format!("{}[{}]", n, idx),
                     };
-                    let value = match &assign.value {
-                        AssignmentValue::Scalar(word) => {
-                            expand_assignment_word(&word.value, env, positional)?
+                    // `Word::value` is the raw, unexpanded source text, including
+                    // any quoting, so the rebuilt word re-parses with its quotes.
+                    let raw = match &assign.value {
+                        AssignmentValue::Scalar(word) => format!("{name}={}", word.value),
+                        // Arrays are outside the POSIX subset this engine promises;
+                        // render the word literally rather than dropping the argument.
+                        AssignmentValue::Array(elems) => {
+                            let joined = elems
+                                .iter()
+                                .map(|(_, w)| w.value.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            format!("{name}=({joined})")
                         }
-                        AssignmentValue::Array(elems) => elems
-                            .iter()
-                            .map(|(_, w)| w.value.clone())
-                            .collect::<Vec<_>>()
-                            .join(" "),
                     };
-                    prefix_assignments.push((name, value));
+                    let expanded = expand_word(
+                        &raw,
+                        env,
+                        &ExpansionConfig {
+                            do_glob: !env.options.read().noglob,
+                            ..Default::default()
+                        },
+                        positional,
+                    )?;
+                    args.extend(expanded);
                 }
                 CommandPrefixOrSuffixItem::IoRedirect(r) => {
                     redirects.push(r);
@@ -1164,7 +1348,7 @@ async fn eval_simple_command(
         }
     }
 
-    let mut redir = RedirectionContext::default();
+    let mut redir = RedirectionContext::new(io_cfg.stdout_stream.as_ref());
     for r in &redirects {
         match redir.apply_item(r, env, positional) {
             Ok(()) => {}
@@ -1214,7 +1398,7 @@ async fn eval_simple_command(
     all_args.extend(args);
     let args = all_args;
 
-    let capture_stdout = io_cfg.capture_stdout || redir.stdout_file.is_some();
+    let capture_stdout = io_cfg.capture_stdout || redir.stdout_file().is_some();
 
     let is_decl_cmd = matches!(
         cmd_name.as_str(),
@@ -1321,6 +1505,24 @@ async fn eval_simple_command_inner(
             };
             return Err(PosixError::Return(code));
         }
+        "local" => {
+            // A declaration builtin: its operands name shell variables. A
+            // function-local *scope* is not implemented yet, so a name declared
+            // this way outlives the call — the `compose/local-does-not-leak` case
+            // pins that gap.
+            let mut vars = env.vars.write();
+            for arg in args {
+                match arg.split_once('=') {
+                    Some((name, value)) => {
+                        vars.insert(name.to_string(), Val::String(value.to_string()));
+                    }
+                    None => {
+                        vars.entry(arg.to_string()).or_insert(Val::Null);
+                    }
+                }
+            }
+            return Ok((0, None));
+        }
         "break" => return Err(PosixError::Break),
         "continue" => return Err(PosixError::Continue),
         "shift" => {
@@ -1410,13 +1612,7 @@ async fn eval_simple_command_inner(
                         rendered.push_str(&format!("export {}={:?}\n", k, v.to_text()));
                     }
                 }
-                let out = write_builtin_output(
-                    &rendered,
-                    redir,
-                    io_cfg.stdout_stream.as_ref(),
-                    io_cfg.capture_stdout,
-                )
-                .await?;
+                let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout).await?;
                 return Ok((0, out));
             }
             for arg in &exports {
@@ -1471,13 +1667,7 @@ async fn eval_simple_command_inner(
             for diagnostic in &result.diagnostics {
                 eprintln!("{diagnostic}");
             }
-            let out = write_builtin_output(
-                &result.output,
-                redir,
-                io_cfg.stdout_stream.as_ref(),
-                io_cfg.capture_stdout,
-            )
-            .await?;
+            let out = write_builtin_output(&result.output, redir, io_cfg.capture_stdout).await?;
             return Ok((result.status, out));
         }
         "getopts" => {
@@ -1497,13 +1687,7 @@ async fn eval_simple_command_inner(
                         span: None,
                     })
                 })?;
-            let out = write_builtin_output(
-                &rendered,
-                redir,
-                io_cfg.stdout_stream.as_ref(),
-                io_cfg.capture_stdout,
-            )
-            .await?;
+            let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout).await?;
             return Ok((code, out));
         }
         "eval" => {
@@ -1543,13 +1727,7 @@ async fn eval_simple_command_inner(
             if !no_newline {
                 text.push('\n');
             }
-            let out = write_builtin_output(
-                &text,
-                redir,
-                io_cfg.stdout_stream.as_ref(),
-                io_cfg.capture_stdout,
-            )
-            .await?;
+            let out = write_builtin_output(&text, redir, io_cfg.capture_stdout).await?;
             return Ok((0, out));
         }
         "cd" => {
@@ -1594,13 +1772,7 @@ async fn eval_simple_command_inner(
         }
         "pwd" => {
             let text = format!("{}\n", env.cwd().display());
-            let out = write_builtin_output(
-                &text,
-                redir,
-                io_cfg.stdout_stream.as_ref(),
-                io_cfg.capture_stdout,
-            )
-            .await?;
+            let out = write_builtin_output(&text, redir, io_cfg.capture_stdout).await?;
             return Ok((0, out));
         }
         "exec" => {
@@ -1617,13 +1789,7 @@ async fn eval_simple_command_inner(
         }
         "trap" => {
             let rendered = handle_posix_trap(args, env)?;
-            let out = write_builtin_output(
-                &rendered,
-                redir,
-                io_cfg.stdout_stream.as_ref(),
-                capture_stdout,
-            )
-            .await?;
+            let out = write_builtin_output(&rendered, redir, capture_stdout).await?;
             return Ok((0, out));
         }
         "wait" => {
@@ -1637,13 +1803,7 @@ async fn eval_simple_command_inner(
                     let current = unsafe { libc::umask(0o022 as libc::mode_t) };
                     unsafe { libc::umask(current) };
                     let text = format!("{:04o}\n", current);
-                    let out = write_builtin_output(
-                        &text,
-                        redir,
-                        io_cfg.stdout_stream.as_ref(),
-                        io_cfg.capture_stdout,
-                    )
-                    .await?;
+                    let out = write_builtin_output(&text, redir, io_cfg.capture_stdout).await?;
                     return Ok((0, out));
                 }
                 Some(mask_arg) => {
@@ -1676,13 +1836,7 @@ async fn eval_simple_command_inner(
                 for (name, expansion) in env.get_all_aliases() {
                     out.push_str(&format!("alias {name}='{expansion}'\n"));
                 }
-                let out = write_builtin_output(
-                    &out,
-                    redir,
-                    io_cfg.stdout_stream.as_ref(),
-                    io_cfg.capture_stdout,
-                )
-                .await?;
+                let out = write_builtin_output(&out, redir, io_cfg.capture_stdout).await?;
                 return Ok((0, out));
             }
             let mut listed = String::new();
@@ -1700,13 +1854,7 @@ async fn eval_simple_command_inner(
             if listed.is_empty() {
                 return Ok((status, None));
             }
-            let out = write_builtin_output(
-                &listed,
-                redir,
-                io_cfg.stdout_stream.as_ref(),
-                io_cfg.capture_stdout,
-            )
-            .await?;
+            let out = write_builtin_output(&listed, redir, io_cfg.capture_stdout).await?;
             return Ok((status, out));
         }
         "unalias" => {
@@ -1778,13 +1926,7 @@ async fn eval_simple_command_inner(
             } else {
                 format!("{}\n", rl.rlim_cur)
             };
-            let out = write_builtin_output(
-                &text,
-                redir,
-                io_cfg.stdout_stream.as_ref(),
-                io_cfg.capture_stdout,
-            )
-            .await?;
+            let out = write_builtin_output(&text, redir, io_cfg.capture_stdout).await?;
             return Ok((0, out));
         }
         "times" => {
@@ -1830,9 +1972,18 @@ async fn eval_simple_command_inner(
             errexit: cfg.errexit,
             source: cfg.source.clone(),
         };
-        let (code, out) = eval_compound_command_stream(&func_body, env, &fn_cfg, io_cfg).await?;
+        let result = eval_compound_command_stream(&func_body, env, &fn_cfg, io_cfg).await;
         restore_positional(env, saved);
-        return Ok((code, out));
+        // `return` ends the function, not the script that called it: a caller sees
+        // the status the function returned with and carries on.
+        return match result {
+            Ok((code, out)) => Ok((code, out)),
+            Err(PosixError::Return(code)) => {
+                env.set_exit_code(code as i64);
+                Ok((code, None))
+            }
+            Err(other) => Err(other),
+        };
     }
 
     // Job control is shared with the native engine: run `jobs`, `kill`, `fg`,
@@ -2052,49 +2203,44 @@ async fn handle_posix_wait(args: &[String], env: &Env) -> Result<i32, PosixError
 async fn write_builtin_output(
     rendered: &str,
     redir: &RedirectionContext,
-    stdout_stream: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>,
     capture_stdout: bool,
 ) -> Result<Option<Vec<u8>>, PosixError> {
-    if let Some((path, append)) = &redir.stdout_file {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(!*append)
-            .append(*append)
-            .open(path)
-            .map_err(|e| {
-                PosixError::Engine(EngineError::IoError {
-                    message: format!("redirect error: {}: {}", path.display(), e),
-                    span: None,
-                })
-            })?;
-        file.write_all(rendered.as_bytes()).map_err(|e| {
-            PosixError::Engine(EngineError::IoError {
-                message: format!("redirect write error: {}: {}", path.display(), e),
-                span: None,
+    match redir.stdout() {
+        // The target was opened when the redirection was applied, so writing must
+        // go through that handle: re-opening by path here would truncate a file
+        // that `>>` or a second redirect in the same command had already touched.
+        FdTarget::File(handle) => {
+            write_shared_file(handle, rendered.as_bytes())?;
+            Ok(if capture_stdout {
+                Some(Vec::new())
+            } else {
+                None
             })
-        })?;
-        if capture_stdout {
-            Ok(Some(Vec::new()))
-        } else {
-            Ok(None)
         }
-    } else if let Some(tx) = stdout_stream {
-        let chunk = bytes::Bytes::copy_from_slice(rendered.as_bytes());
-        let _ = tx.send(chunk).await;
-        if capture_stdout {
-            Ok(Some(rendered.as_bytes().to_vec()))
-        } else {
-            Ok(None)
+        FdTarget::Pipe(tx) => {
+            let chunk = bytes::Bytes::copy_from_slice(rendered.as_bytes());
+            let _ = tx.send(chunk).await;
+            Ok(if capture_stdout {
+                Some(rendered.as_bytes().to_vec())
+            } else {
+                None
+            })
         }
-    } else if capture_stdout {
-        Ok(Some(rendered.as_bytes().to_vec()))
-    } else {
-        print!("{}", rendered);
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        Ok(None)
+        FdTarget::Closed => Ok(if capture_stdout {
+            Some(Vec::new())
+        } else {
+            None
+        }),
+        FdTarget::Process(_) => {
+            if capture_stdout {
+                Ok(Some(rendered.as_bytes().to_vec()))
+            } else {
+                print!("{}", rendered);
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -2155,40 +2301,51 @@ async fn run_external_command(
         cmd.stdin(Stdio::from(f));
     } else if effective_stdin.is_some() || io_cfg.stdin_stream.is_some() {
         cmd.stdin(Stdio::piped());
+    } else if matches!(redir.stdin(), FdTarget::Closed) {
+        // `0<&-` (or `<&-`) closes stdin rather than leaving it inherited.
+        cmd.stdin(Stdio::null());
     }
 
-    if let Some((stdout_file, append)) = &redir.stdout_file {
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(!*append)
-            .append(*append)
-            .open(stdout_file)
-            .map_err(|e| {
-                PosixError::Engine(EngineError::IoError {
-                    message: format!("{}: {}", stdout_file.display(), e),
-                    span: None,
-                })
-            })?;
-        cmd.stdout(Stdio::from(f));
-    } else if io_cfg.stdout_stream.is_some() || io_cfg.capture_stdout {
-        cmd.stdout(Stdio::piped());
+    // fd 1, taken from the ordered descriptor table. The table was built by
+    // applying the redirections in source order, so whatever it says here already
+    // accounts for things like `2>&1 > out` versus `> out 2>&1`.
+    let capture_requested = io_cfg.capture_stdout && matches!(redir.stdout(), FdTarget::Process(1));
+    match redir.stdout() {
+        FdTarget::File(handle) => {
+            cmd.stdout(Stdio::from(clone_shared_file(handle)?));
+        }
+        FdTarget::Pipe(_) => {
+            cmd.stdout(Stdio::piped());
+        }
+        FdTarget::Closed => {
+            cmd.stdout(Stdio::null());
+        }
+        FdTarget::Process(fd) => {
+            if capture_requested {
+                cmd.stdout(Stdio::piped());
+            } else {
+                cmd.stdout(dup_stdio(*fd)?);
+            }
+        }
     }
 
-    if let Some((stderr_file, append)) = &redir.stderr_file {
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(!*append)
-            .append(*append)
-            .open(stderr_file)
-            .map_err(|e| {
-                PosixError::Engine(EngineError::IoError {
-                    message: format!("{}: {}", stderr_file.display(), e),
-                    span: None,
-                })
-            })?;
-        cmd.stderr(Stdio::from(f));
+    // fd 2, likewise: if it was duplicated onto fd 1 then it must end up exactly
+    // where fd 1 goes — the same file, or the same pipeline channel.
+    let mut stderr_into_pipe: Option<tokio::sync::mpsc::Sender<bytes::Bytes>> = None;
+    match redir.stderr() {
+        FdTarget::File(handle) => {
+            cmd.stderr(Stdio::from(clone_shared_file(handle)?));
+        }
+        FdTarget::Pipe(tx) => {
+            cmd.stderr(Stdio::piped());
+            stderr_into_pipe = Some(tx.clone());
+        }
+        FdTarget::Closed => {
+            cmd.stderr(Stdio::null());
+        }
+        FdTarget::Process(fd) => {
+            cmd.stderr(dup_stdio(*fd)?);
+        }
     }
 
     let child = match cmd.spawn() {
@@ -2212,12 +2369,13 @@ async fn run_external_command(
     };
 
     let stdin_bytes = effective_stdin.map(<[u8]>::to_vec);
-    let (status, captured_stdout) = finish_child(child, cmd_name, &mut io_cfg, stdin_bytes).await?;
+    let (status, captured_stdout) =
+        finish_child(child, cmd_name, &mut io_cfg, stdin_bytes, stderr_into_pipe).await?;
 
     let code = status.code().unwrap_or(127);
     env.set_exit_code(code as i64);
 
-    if io_cfg.capture_stdout && redir.stdout_file.is_none() && io_cfg.stdout_stream.is_none() {
+    if capture_requested {
         Ok((code, captured_stdout))
     } else {
         Ok((code, None))
@@ -2234,6 +2392,7 @@ async fn finish_child(
     label: &str,
     io_cfg: &mut IoStreamConfig,
     stdin_bytes: Option<Vec<u8>>,
+    stderr_into_pipe: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
 ) -> Result<(std::process::ExitStatus, Option<Vec<u8>>), PosixError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -2284,6 +2443,32 @@ async fn finish_child(
         })
     };
 
+    // When fd 2 was duplicated onto fd 1 this stage's stderr belongs in the same
+    // pipeline channel as its stdout, so it is pumped into that channel too. The
+    // pump has to be running before we wait, or a chatty child could block on a
+    // full stderr pipe.
+    let stderr_pump: Option<tokio::task::JoinHandle<Result<Vec<u8>, StdoutPumpError>>> =
+        if let Some(tx) = stderr_into_pipe
+            && let Some(mut stderr) = child.stderr.take()
+        {
+            Some(tokio::spawn(async move {
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let n = stderr.read(&mut buf).await.map_err(StdoutPumpError::Io)?;
+                    if n == 0 {
+                        break;
+                    }
+                    let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+                    if tx.send(chunk).await.is_err() {
+                        return Err(StdoutPumpError::DownstreamClosed);
+                    }
+                }
+                Ok(Vec::new())
+            }))
+        } else {
+            None
+        };
+
     let mut completed_stdout_pump = None;
     let status = if let Some(stdout_pump) = stdout_pump.as_mut() {
         tokio::select! {
@@ -2306,6 +2491,12 @@ async fn finish_child(
             span: None,
         })
     })?;
+
+    // The child has exited, so its stderr pipe is closed and this cannot block.
+    // A closed downstream channel is not an error worth propagating.
+    if let Some(pump) = stderr_pump {
+        let _ = pump.await;
+    }
 
     let captured_stdout = if let Some(pump) = completed_stdout_pump {
         match pump {
@@ -2436,7 +2627,7 @@ async fn run_child_shell(
     };
 
     let stdin_bytes = io_cfg.stdin_bytes.take();
-    let result = finish_child(child, "subshell", &mut io_cfg, stdin_bytes).await;
+    let result = finish_child(child, "subshell", &mut io_cfg, stdin_bytes, None).await;
     for file in &launch.temp_files {
         let _ = std::fs::remove_file(file);
     }

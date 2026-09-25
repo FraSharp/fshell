@@ -1,6 +1,7 @@
 /*
 !/.gitignore
 !/.github/
+!/AGENTS.md
 !/Cargo.toml
 !/Cargo.lock
 !/build.rs

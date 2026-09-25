@@ -261,6 +261,10 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
 
         // POSIX mode: evaluate via fshell-posix engine
         if cli.posix {
+            fshell_engine::frontend::trace_engine(
+                "posix",
+                fshell_engine::frontend::reason::EXPLICIT_POSIX,
+            );
             let mut timing = trace_span(&trace, "command.posix_execute", TraceMode::Posix);
             let parsed = fshell_posix::parser::parse_posix_script(cmd).unwrap_or_else(|e| {
                 eprintln!("POSIX parse error: {e}");
@@ -481,6 +485,12 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
                 // POSIX file dispatch: shebang auto-detect or --posix flag
                 let use_posix = cli.posix || fshell_posix::parser::is_posix_shebang(&content);
                 if use_posix {
+                    let reason = if cli.posix {
+                        fshell_engine::frontend::reason::EXPLICIT_POSIX
+                    } else {
+                        fshell_engine::frontend::reason::POSIX_SHEBANG
+                    };
+                    fshell_engine::frontend::trace_engine("posix", reason);
                     let mut timing = trace_span(&trace, "script.posix_parse", TraceMode::Posix);
                     match fshell_posix::parser::parse_posix_script(&content) {
                         Ok(parsed) => {

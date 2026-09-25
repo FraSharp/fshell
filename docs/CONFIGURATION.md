@@ -77,7 +77,7 @@ unsetopt pipefail   # disable option
 | `did_you_mean` | `true` | suggest corrections when commands are not found |
 | `expand_aliases` | `true` | expand a command-position alias in the editor when you type the space after it |
 | `error_color` | `true` | colorize error diagnostics |
-| `json_auto_parse`| `true` | automatically parse external JSON stdout into `Val` objects |
+| `json_auto_parse`| `true` | automatically parse external JSON stdout into `Val` objects when a downstream stage consumes a value |
 | `status_bar` | `false` | display interactive bottom status bar in FTUI |
 | `confirm_destructive` | `true` | require confirmation for destructive commands (`rm -rf /` etc.) |
 | `quiet_aliases` | `false` | suppress warnings when an alias shadows a builtin or user function |

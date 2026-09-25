@@ -1016,6 +1016,27 @@ pub struct ChatConfig {
     pub model_override: Option<String>,
 }
 
+/// The pipeline ledger slot one `Env` records into.
+///
+/// Set on the per-stage clones a pipeline spawns, which is why a nested pipeline
+/// — a command substitution inside a stage, say — cannot disturb the enclosing
+/// pipeline's slots: the stages of each pipeline carry their own.
+#[derive(Clone)]
+pub(crate) struct StageSlot {
+    outcomes: Arc<execution::PipelineOutcomes>,
+    slot: execution::Slot,
+}
+
+impl StageSlot {
+    pub(crate) fn new(outcomes: Arc<execution::PipelineOutcomes>, slot: execution::Slot) -> Self {
+        Self { outcomes, slot }
+    }
+
+    pub(crate) fn outcomes(&self) -> &Arc<execution::PipelineOutcomes> {
+        &self.outcomes
+    }
+}
+
 #[derive(Clone)]
 pub struct Env {
     pub scope: scope::Scope,
@@ -1058,6 +1079,10 @@ pub struct Env {
     pub prompt_config: Arc<RwLock<PromptConfig>>,
     pub is_customizer_active: Arc<AtomicBool>,
     pub is_last_stage: bool,
+    /// The pipeline slot this `Env` records into, when it is a stage of a
+    /// pipeline. A stage's status belongs to the stage rather than to shared
+    /// state, so nothing another stage does can change it.
+    stage: Option<StageSlot>,
     pub is_captured: bool,
     pub completions: Arc<RwLock<fshell_hash::FxHashMap<String, fshell_core::CommandCompletion>>>,
     pub ast_cache: Arc<RwLock<crate::ast_cache::AstCache>>,
@@ -1467,11 +1492,67 @@ impl Env {
         *self.prompt.last_exit_code.write() = code;
     }
 
-    /// Single source of truth for exit-status bookkeeping within an
-    /// invocation. Pipeline stage routing (`is_last_stage` / `pipefail`) is
-    /// handled by the caller; this only updates the invocation status.
+    /// Commit the status of a completed statement: the value `$?` expands to.
+    ///
+    /// Pipeline stage routing (`is_last_stage` / `pipefail`) is handled by the
+    /// caller, and stages accumulate into [`Self::stage_status`]; this is where
+    /// a finalized statement publishes its result.
     pub fn set_exit_code(&self, code: i64) {
         self.execution.set_exit_code(code);
+    }
+
+    /// Give this `Env` the pipeline slot it records into.
+    pub(crate) fn attach_stage(
+        &mut self,
+        outcomes: Arc<execution::PipelineOutcomes>,
+        slot: execution::Slot,
+    ) {
+        self.stage = Some(StageSlot::new(outcomes, slot));
+    }
+
+    /// Record a status for this stage.
+    ///
+    /// A stage owns its own slot, so this cannot race another stage — which is
+    /// what `false | true` under `pipefail` used to depend on. An `Env` that is
+    /// not part of a pipeline has nowhere to record and says nothing.
+    pub(crate) fn record_stage_status(&self, status: i64) {
+        if let Some(stage) = &self.stage {
+            stage.outcomes.record_status(stage.slot, status);
+        }
+    }
+
+    /// The status this stage recorded for itself, if it recorded one.
+    pub(crate) fn recorded_stage_status(&self) -> Option<i64> {
+        self.stage
+            .as_ref()
+            .and_then(|stage| stage.outcomes.recorded_status(stage.slot))
+    }
+
+    /// Record this stage's failure as an engine-level one.
+    ///
+    /// Used where the stage knows the failure but has no diagnostic to hand to
+    /// the collector — the text travels separately, and may be redirected away or
+    /// swallowed by a later stage. The class is what the pipeline's finalizer acts
+    /// on, so it is recorded here where the failure happens.
+    pub(crate) fn record_hard_stage_failure(&self) {
+        if let Some(stage) = &self.stage {
+            stage
+                .outcomes
+                .record_failure(stage.slot, PipelineFailure::Hard(None));
+        }
+    }
+
+    /// Record this stage's failure.
+    ///
+    /// The failure travels here and not in the diagnostic's text: the text is
+    /// routed, and a redirect may send it to a file or nowhere at all, while
+    /// whether the command failed is a fact about the command.
+    pub(crate) fn record_stage_failure(&self, diag: FshDiag) {
+        if let Some(stage) = &self.stage {
+            stage
+                .outcomes
+                .record_failure(stage.slot, classify_diag(diag));
+        }
     }
 
     /// Record a diagnostic as the last active failure in the shell session.
@@ -1507,21 +1588,18 @@ impl Env {
 
     /// Mark the command being evaluated as failed and record its status.
     ///
-    /// Within a pipeline only the last stage owns the invocation status:
-    /// earlier stages signal their failure through diagnostics (and `pipefail`
-    /// is resolved by the pipeline finalizer). Letting a non-last stage write
-    /// the shared status raced the last stage and produced a
-    /// scheduling-dependent `$?` (for example `false | true`).
+    /// The status belongs to the stage that reported it: within a pipeline every
+    /// stage keeps its own, so an earlier command's failure is visible to
+    /// `pipefail` instead of being overwritten by whatever ran last.
+    ///
+    /// This records the stage's own slot, never `$?`: a stage's status becomes
+    /// observable only when the statement finalizer commits it.
     pub fn report_stage_error(&self) {
-        if self.is_last_stage {
-            self.set_exit_code(1);
-        }
+        self.record_hard_stage_failure();
     }
 
     pub fn report_stage_error_code(&self, code: i64) {
-        if self.is_last_stage {
-            self.set_exit_code(code);
-        }
+        self.record_stage_status(code);
     }
 
     pub fn enforce_capability(&self, cmd_name: &str, action: CapAction) -> Result<(), EngineError> {
@@ -1941,6 +2019,7 @@ impl Env {
             prompt_config: Arc::new(RwLock::new(PromptConfig::default())),
             is_customizer_active: Arc::new(AtomicBool::new(false)),
             is_last_stage: false,
+            stage: None,
             is_captured: false,
             completions: Arc::new(RwLock::new(fshell_hash::FxHashMap::default())),
             ast_cache: Arc::new(RwLock::new(crate::ast_cache::AstCache::new(64))),
@@ -2113,6 +2192,7 @@ impl Env {
             prompt_config: Arc::new(RwLock::new(PromptConfig::default())),
             is_customizer_active: Arc::new(AtomicBool::new(false)),
             is_last_stage: false,
+            stage: None,
             is_captured: false,
             completions: Arc::new(RwLock::new(fshell_hash::FxHashMap::default())),
             ast_cache: Arc::new(RwLock::new(crate::ast_cache::AstCache::new(64))),
@@ -2219,6 +2299,7 @@ impl Env {
             prompt_config: self.prompt_config.clone(),
             is_customizer_active: self.is_customizer_active.clone(),
             is_last_stage: self.is_last_stage,
+            stage: self.stage.clone(),
             is_captured: self.is_captured,
             completions: self.completions.clone(),
             ast_cache: self.ast_cache.clone(),
@@ -2564,7 +2645,7 @@ pub async fn load_config_script(env: &Env) -> Result<(), String> {
         );
         let path_str = init_path.to_string_lossy().to_string();
         let source_stmt = Stmt::Source {
-            path: Expr::String(vec![StringPart::Lit(path_str)]),
+            path: Expr::String(vec![StringPart::unquoted(path_str)]),
             bash: false,
         };
         env.is_loading_init_script
@@ -2724,7 +2805,7 @@ fn wait_for_job_inner(
                     if !defer_foreground_clear {
                         let _ = env.clear_foreground(job_id);
                     }
-                    return env.exit_code() as i32;
+                    return env.recorded_stage_status().unwrap_or(0) as i32;
                 }
                 _ => {}
             }
@@ -2732,20 +2813,9 @@ fn wait_for_job_inner(
             let mut jobs = lock_jobs!(env.job_control.jobs.write());
             jobs.retain(|k, _| *k != pid);
             drop(jobs);
-            let is_foreground = *env.job_control.fg_mutex.lock() == Some(job_id);
-            if !defer_foreground_clear {
-                let _ = env.clear_foreground(job_id);
-            }
             let exit_code = 1;
-            if !env.is_invocation || is_foreground {
-                env.set_exit_code(exit_code as i64);
-            } else {
-                let is_pipefail = env.options.read().pipefail;
-                let should_set = env.is_last_stage || is_pipefail;
-                if should_set && (!is_pipefail || env.exit_code() == 0) {
-                    env.set_exit_code(exit_code as i64);
-                }
-            }
+            // The stage records its own status; arbitration is the finalizer's.
+            env.record_stage_status(exit_code as i64);
             return exit_code;
         }
         if w_if_stopped(status) {
@@ -2827,18 +2897,9 @@ fn wait_for_job_inner(
                     let _ = std::io::Write::flush(&mut std::io::stderr());
                 }
             }
-            let pipefail = env.options.read().pipefail;
-            if !env.is_invocation {
-                env.set_exit_code(exit_code as i64);
-            } else if is_foreground || env.is_last_stage || pipefail {
-                if env.is_last_stage {
-                    if !pipefail || env.exit_code() == 0 || exit_code != 0 {
-                        env.set_exit_code(exit_code as i64);
-                    }
-                } else if pipefail && exit_code != 0 {
-                    env.set_exit_code(exit_code as i64);
-                }
-            }
+            // The stage records its own status; `pipefail` arbitration belongs to
+            // the finalizer, which can see every stage instead of the last writer.
+            env.record_stage_status(exit_code as i64);
             return exit_code;
         }
     }
@@ -2924,7 +2985,7 @@ pub fn spawn_job_group_waiter(env: Env, pgid: i32, job_id: usize, foreground: bo
                 drop(jobs);
                 if group_finished {
                     if foreground {
-                        env.set_exit_code(last_stage_code.unwrap_or(code) as i64);
+                        env.record_stage_status(last_stage_code.unwrap_or(code) as i64);
                     }
                     let _ = env.clear_foreground(job_id);
                     return;
@@ -3176,13 +3237,41 @@ pub fn pipeline_channel_size(env: &Env) -> usize {
 /// A failure collected from a pipeline stage while it runs.
 ///
 /// Distinguishes a logical `false` (a `filter` that dropped everything, a
-/// failed `test`: exit code 1, no user-visible error) from a hard error
-/// carrying its full diagnostic, so control-flow decisions never rely on
-/// string matching against error text.
+/// failed `test`: exit code 1, no user-visible error) and a *reported* failure
+/// (a command that could not be found, say: the shell has already told the user
+/// and continues with the command's status) from a hard error carrying its full
+/// diagnostic, so control-flow decisions never rely on string matching against
+/// error text.
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineFailure {
     ConditionFalse,
-    Hard(fshell_core::FshDiag),
+    /// The command failed as a command. It is not an engine failure, so the
+    /// statement continues with `status` instead of unwinding.
+    Reported {
+        status: i64,
+    },
+    /// The engine failed. The diagnostic is carried when there is one to show.
+    ///
+    /// A stage records the class whether or not its diagnostic text ever reached
+    /// the collector: routing and consumption move diagnostics around without
+    /// changing what happened, so classification must not depend on arrival.
+    Hard(Option<fshell_core::FshDiag>),
+}
+
+impl PipelineFailure {
+    /// The status this failure leaves behind.
+    ///
+    /// A reported failure carries the command's own status. Everything else is a
+    /// plain failure, except that a hard error still keeps whatever status its
+    /// diagnostic named.
+    pub(crate) fn status(&self) -> i64 {
+        match self {
+            PipelineFailure::ConditionFalse => 1,
+            PipelineFailure::Reported { status } => *status,
+            PipelineFailure::Hard(Some(diag)) => diag.reported_status().unwrap_or(1),
+            PipelineFailure::Hard(None) => 1,
+        }
+    }
 }
 
 /// The single finalized outcome of a pipeline.
@@ -3197,51 +3286,108 @@ pub(crate) struct PipelineOutcome {
     pub failure: Option<PipelineFailure>,
 }
 
-/// Pure pipeline finalizer: computes exit code and typed failure from
-/// collected stage failures and the last stage's exit code. Logical `false`
-/// failures yield exit 1 without hard-error rendering; with `pipefail`, any
-/// nonzero exit code wins over the synthesized 1.
+/// Remember a hard failure, preferring one that can be shown to the user.
+///
+/// A later diagnostic-bearing failure replaces an earlier one, but a failure
+/// recorded without its diagnostic never replaces one that has text: the class is
+/// the same either way, and only one of them can be rendered.
+fn note_hard(last_hard: &mut Option<PipelineFailure>, failure: &PipelineFailure) {
+    match (last_hard.as_ref(), failure) {
+        (Some(PipelineFailure::Hard(Some(_))), PipelineFailure::Hard(None)) => {}
+        (_, PipelineFailure::Hard(_)) => *last_hard = Some(failure.clone()),
+        _ => {}
+    }
+}
+
+/// Reduce a pipeline's per-stage outcomes to the statement's outcome.
+///
+/// POSIX defines a pipeline's status as its last command's, and `pipefail` as
+/// the last command that failed. The per-stage ledger answers both for every
+/// stage instead of for whichever one happened to write last, which is what the
+/// single status slot could not do.
+///
+/// A failure's class outranks its status: an engine-level error aborts, then a
+/// reported failure carries the command's status and the statement carries on.
 pub(crate) fn pipeline_finalize(
+    outcomes: &crate::execution::PipelineOutcomes,
     failures: Vec<PipelineFailure>,
-    last_ec: i64,
     pipefail: bool,
 ) -> PipelineOutcome {
-    let mut saw_condition_false = false;
+    let stages = outcomes.command_stages();
+    let last_recorded = stages.last().and_then(|stage| stage.status());
+    let mut exit_code = if pipefail {
+        stages
+            .iter()
+            .rev()
+            .find_map(|stage| stage.status().filter(|status| *status != 0))
+            .unwrap_or(0)
+    } else {
+        // A stage that recorded nothing exited cleanly.
+        last_recorded.unwrap_or(0)
+    };
+
     let mut last_hard: Option<PipelineFailure> = None;
+    let mut last_reported: Option<i64> = None;
+    let mut saw_condition_false = false;
     for failure in &failures {
         match failure {
             PipelineFailure::ConditionFalse => saw_condition_false = true,
-            PipelineFailure::Hard(_) => last_hard = Some(failure.clone()),
+            PipelineFailure::Reported { status } => last_reported = Some(*status),
+            PipelineFailure::Hard(_) => note_hard(&mut last_hard, failure),
+        }
+    }
+    // A failure recorded by a stage keeps its class even when the diagnostic's
+    // text never reached the collector.
+    for stage in &stages {
+        match stage.failure() {
+            Some(PipelineFailure::ConditionFalse) => saw_condition_false = true,
+            Some(PipelineFailure::Reported { status }) => last_reported = Some(*status),
+            Some(failure @ PipelineFailure::Hard(_)) => note_hard(&mut last_hard, failure),
+            None => {}
+        }
+    }
+    // A hard failure is never status 0: it aborts the statement, so whatever the
+    // other stages recorded must not read as success.
+    if last_hard.is_some() {
+        exit_code = exit_code.max(1);
+    } else {
+        // A failure names the status only where the pipeline's own stages did not:
+        // POSIX takes the last command's status, so a later successful stage keeps
+        // it (`nosuchcmd | true` is 0), while a stage that recorded nothing yields
+        // to the failure it reported.
+        let reported = last_reported.or(saw_condition_false.then_some(1));
+        let unspecified = if pipefail {
+            exit_code == 0
+        } else {
+            last_recorded.is_none()
+        };
+        if unspecified && let Some(status) = reported {
+            exit_code = status;
         }
     }
 
-    let has_any = saw_condition_false || last_hard.is_some();
-    let exit_code = if has_any {
-        if pipefail {
-            if last_ec != 0 { last_ec } else { 1 }
-        } else if last_hard.is_some() {
-            // A hard failure must never finalize to 0, even when no stage wrote
-            // a nonzero status (a stage that errors via a channel diagnostic
-            // rather than the shared status slot leaves last_ec at 0).
-            if last_ec != 0 { last_ec } else { 1 }
-        } else {
-            1
+    // The pipeline's own output boundary finishes last, so a failure there is the
+    // last word on the pipeline's success — and a redirection that failed leaves
+    // the pipeline failing, whatever the stages exited with.
+    if let Some(failure) = outcomes.boundary_outcome().failure() {
+        match failure {
+            PipelineFailure::ConditionFalse => saw_condition_false = true,
+            PipelineFailure::Reported { status } => last_reported = Some(*status),
+            failure @ PipelineFailure::Hard(_) => note_hard(&mut last_hard, failure),
         }
-    } else {
-        last_ec
-    };
+        exit_code = exit_code.max(1);
+    }
 
-    let err = if last_hard.is_some() {
+    let failure = if last_hard.is_some() {
         last_hard
+    } else if let Some(status) = last_reported {
+        Some(PipelineFailure::Reported { status })
     } else if saw_condition_false {
         Some(PipelineFailure::ConditionFalse)
     } else {
         None
     };
-    PipelineOutcome {
-        exit_code,
-        failure: err,
-    }
+    PipelineOutcome { exit_code, failure }
 }
 
 /// Apply a finalized pipeline outcome to shell control flow.
@@ -3261,7 +3407,16 @@ pub(crate) fn apply_pipeline_outcome(
 
     match outcome.failure {
         Some(PipelineFailure::ConditionFalse) => Ok(Flow::ConditionFalse),
-        Some(PipelineFailure::Hard(diag)) => Err(engine_error_from_diag(&diag)),
+        // A reported failure has already reached the user and its status is
+        // committed above: a command's failure is not a reason to unwind.
+        Some(PipelineFailure::Reported { .. }) => Ok(Flow::Normal),
+        Some(PipelineFailure::Hard(Some(diag))) => Err(engine_error_from_diag(&diag)),
+        // The class was recorded without its diagnostic: the failure still
+        // aborts, it simply has no text of its own to show.
+        Some(PipelineFailure::Hard(None)) => Err(EngineError::PipelineError {
+            message: "a pipeline stage failed".to_string(),
+            span: None,
+        }),
         None => Ok(Flow::Normal),
     }
 }
@@ -3381,6 +3536,49 @@ pub fn is_condition_false_diag(diag: &fshell_core::FshDiag) -> bool {
     diag.is_condition_false()
 }
 
+/// Classify a stage diagnostic into the failure it represents.
+///
+/// This is the one place that decides what a stage's failure means:
+///
+/// * logical `false` is silent and yields status 1;
+/// * a *reported* failure (a command that could not be found) is an observation
+///   about the command, which the shell prints and carries on from;
+/// * anything else is an engine-level error, which aborts the statement.
+pub(crate) fn classify_diag(diag: fshell_core::FshDiag) -> PipelineFailure {
+    if is_condition_false_diag(&diag) {
+        return PipelineFailure::ConditionFalse;
+    }
+    if let Some(status) = diag.reported_status() {
+        return PipelineFailure::Reported { status };
+    }
+    PipelineFailure::Hard(Some(diag))
+}
+
+/// Print a stage diagnostic where routing sent it.
+///
+/// Only *reported* failures print here. A command that could not be found says
+/// so on the shell's stderr — and suppressing that is exactly what `2>/dev/null`
+/// is for — while an engine-level error is the shell's own report, rendered by
+/// whoever handles the abort. Either way the failure is already recorded in the
+/// pipeline's ledger, so the text can go anywhere, including nowhere.
+pub(crate) fn render_stage_diag(env: &Env, diag: &fshell_core::FshDiag) {
+    if diag.reported_status().is_none() {
+        return;
+    }
+    let config = {
+        let opts = env.options.read();
+        fshell_render::RenderConfig {
+            format: opts.error_format,
+            color: opts.error_color,
+            // Match the surface the message lands on: an interactive shell
+            // renders compactly, a script or a pipe gets the full block.
+            is_interactive: std::io::IsTerminal::is_terminal(&std::io::stderr()),
+        }
+    };
+    let rendered = fshell_render::render(diag.clone(), None, "", &config);
+    eprintln!("{rendered}");
+}
+
 thread_local! {
     static IS_RUNNING_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -3487,6 +3685,7 @@ pub type AsyncFallbackHandler = Arc<
 >;
 
 // Extracted modules
+pub mod compat;
 pub mod eval;
 pub mod format;
 pub mod glob;
@@ -3495,6 +3694,7 @@ pub mod pipeline;
 pub mod suggestions;
 #[cfg(test)]
 pub mod tests;
+pub mod word;
 
 pub use eval::{
     eval_expr, eval_stmt, get_path_executables, get_path_executables_at, invalidate_path_cache,

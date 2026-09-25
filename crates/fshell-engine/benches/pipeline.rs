@@ -220,7 +220,7 @@ fn pipeline_grep_10k(c: &mut Criterion) {
                 span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Grep {
-                pattern: Expr::String(vec![StringPart::Lit("item_5".to_string())]),
+                pattern: Expr::String(vec![StringPart::unquoted("item_5".to_string())]),
             },
         ],
         boundaries: vec![1],
@@ -370,7 +370,9 @@ fn pipeline_filter_string_10k(c: &mut Criterion) {
                 condition: Expr::BinaryOp {
                     op: fshell_core::BinOp::Eq,
                     lhs: Box::new(Expr::Ident("group".to_string())),
-                    rhs: Box::new(Expr::String(vec![StringPart::Lit("alpha".to_string())])),
+                    rhs: Box::new(Expr::String(vec![StringPart::unquoted(
+                        "alpha".to_string(),
+                    )])),
                 },
             },
         ],

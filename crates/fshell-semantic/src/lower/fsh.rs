@@ -23,7 +23,7 @@ fn span() -> SourceSpan {
 }
 
 fn lit(value: impl Into<String>) -> Expr {
-    Expr::String(vec![StringPart::Lit(value.into())])
+    Expr::String(vec![StringPart::unquoted(value)])
 }
 
 fn whole(value: i64) -> Expr {

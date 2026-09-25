@@ -47,6 +47,9 @@ pub enum ErrorCode {
     CapabilityDenied, // FSH-EXEC-003
     ConditionFalse,   // FSH-EXEC-004
     CommandFailed,    // FSH-EXEC-005
+    /// The command exists but could not be started (not executable, or its
+    /// interpreter is missing). POSIX reports this as status 126.
+    CommandNotExecutable, // FSH-EXEC-006
 
     // I/O & Filesystem
     FileNotFound,     // FSH-IO-001
@@ -55,6 +58,9 @@ pub enum ErrorCode {
     AlreadyExists,    // FSH-IO-004
     IsDirectory,      // FSH-IO-005
     NotDirectory,     // FSH-IO-006
+    /// A redirection could not be performed (a missing input file, an
+    /// unwritable destination). POSIX reports this as status 1.
+    RedirectionFailed, // FSH-IO-007
 
     // Network
     NetworkError,      // FSH-NET-001
@@ -118,12 +124,14 @@ impl ErrorCode {
             ErrorCode::CapabilityDenied => "FSH-EXEC-003",
             ErrorCode::ConditionFalse => "FSH-EXEC-004",
             ErrorCode::CommandFailed => "FSH-EXEC-005",
+            ErrorCode::CommandNotExecutable => "FSH-EXEC-006",
             ErrorCode::FileNotFound => "FSH-IO-001",
             ErrorCode::PermissionDenied => "FSH-IO-002",
             ErrorCode::IoError => "FSH-IO-003",
             ErrorCode::AlreadyExists => "FSH-IO-004",
             ErrorCode::IsDirectory => "FSH-IO-005",
             ErrorCode::NotDirectory => "FSH-IO-006",
+            ErrorCode::RedirectionFailed => "FSH-IO-007",
             ErrorCode::NetworkError => "FSH-NET-001",
             ErrorCode::Timeout => "FSH-NET-002",
             ErrorCode::ConnectionRefused => "FSH-NET-003",
@@ -172,12 +180,14 @@ impl ErrorCode {
             ErrorCode::CapabilityDenied => "CapabilityDenied",
             ErrorCode::ConditionFalse => "ConditionFalse",
             ErrorCode::CommandFailed => "CommandFailed",
+            ErrorCode::CommandNotExecutable => "CommandNotExecutable",
             ErrorCode::FileNotFound => "FileNotFound",
             ErrorCode::PermissionDenied => "PermissionDenied",
             ErrorCode::IoError => "IoError",
             ErrorCode::AlreadyExists => "AlreadyExists",
             ErrorCode::IsDirectory => "IsDirectory",
             ErrorCode::NotDirectory => "NotDirectory",
+            ErrorCode::RedirectionFailed => "RedirectionFailed",
             ErrorCode::NetworkError => "NetworkError",
             ErrorCode::Timeout => "Timeout",
             ErrorCode::ConnectionRefused => "ConnectionRefused",
@@ -225,7 +235,8 @@ impl ErrorCode {
             ErrorCode::CommandNotFound
             | ErrorCode::RuntimeError
             | ErrorCode::ConditionFalse
-            | ErrorCode::CommandFailed => "execution",
+            | ErrorCode::CommandFailed
+            | ErrorCode::CommandNotExecutable => "execution",
             ErrorCode::CapabilityDenied | ErrorCode::SandboxDenied | ErrorCode::SandboxError => {
                 "security"
             }
@@ -234,7 +245,8 @@ impl ErrorCode {
             | ErrorCode::IoError
             | ErrorCode::AlreadyExists
             | ErrorCode::IsDirectory
-            | ErrorCode::NotDirectory => "io",
+            | ErrorCode::NotDirectory
+            | ErrorCode::RedirectionFailed => "io",
             ErrorCode::NetworkError | ErrorCode::Timeout | ErrorCode::ConnectionRefused => {
                 "network"
             }
@@ -311,6 +323,14 @@ impl ErrorCode {
             ErrorCode::ConditionFalse => "A test or boolean condition evaluated to false.",
             ErrorCode::CommandFailed => {
                 "An external process or builtin command exited with a non-zero status."
+            }
+            ErrorCode::CommandNotExecutable => {
+                "The command exists but could not be started: it is not executable, or \
+                 the interpreter it names is missing."
+            }
+            ErrorCode::RedirectionFailed => {
+                "A redirection could not be performed: the input file is missing, or the \
+                 destination could not be written."
             }
             ErrorCode::FileNotFound => "The specified file or directory path does not exist.",
             ErrorCode::PermissionDenied => {
@@ -392,12 +412,14 @@ impl FromStr for ErrorCode {
             "FSH-EXEC-003" => Ok(ErrorCode::CapabilityDenied),
             "FSH-EXEC-004" => Ok(ErrorCode::ConditionFalse),
             "FSH-EXEC-005" | "FSH-BLT-004" => Ok(ErrorCode::CommandFailed),
+            "FSH-EXEC-006" => Ok(ErrorCode::CommandNotExecutable),
             "FSH-IO-001" => Ok(ErrorCode::FileNotFound),
             "FSH-IO-002" => Ok(ErrorCode::PermissionDenied),
             "FSH-IO-003" => Ok(ErrorCode::IoError),
             "FSH-IO-004" => Ok(ErrorCode::AlreadyExists),
             "FSH-IO-005" => Ok(ErrorCode::IsDirectory),
             "FSH-IO-006" => Ok(ErrorCode::NotDirectory),
+            "FSH-IO-007" => Ok(ErrorCode::RedirectionFailed),
             "FSH-NET-001" => Ok(ErrorCode::NetworkError),
             "FSH-NET-002" | "FSH-BLT-007" => Ok(ErrorCode::Timeout),
             "FSH-NET-003" => Ok(ErrorCode::ConnectionRefused),
@@ -602,6 +624,28 @@ impl FshDiag {
             let s = c.to_string();
             s == "FSH-EXEC-004" || s == "fshell::engine::E014"
         })
+    }
+
+    /// The status this diagnostic declares, when it describes a *command-level*
+    /// failure rather than an engine one.
+    ///
+    /// A command that could not be found, a command that could not be started, or
+    /// a redirection that could not be performed are all observations about a
+    /// command: the shell reports them and carries on with the command's status,
+    /// exactly as it does for a command that ran and exited non-zero. Anything
+    /// else is an engine-level error, which aborts the statement.
+    pub fn reported_status(&self) -> Option<i64> {
+        if self.is_condition_false() {
+            // Logical false has its own status (1) and stays silent.
+            return None;
+        }
+        match self.code? {
+            ErrorCode::CommandNotFound => Some(127),
+            // POSIX: found but not executable, or its interpreter is missing.
+            ErrorCode::CommandNotExecutable => Some(126),
+            ErrorCode::RedirectionFailed => Some(1),
+            _ => None,
+        }
     }
 }
 

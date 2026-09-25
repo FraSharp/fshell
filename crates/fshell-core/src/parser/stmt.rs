@@ -265,7 +265,7 @@ impl Parser {
                                                 }
                                             })?);
                                         }
-                                        Expr::String(vec![StringPart::Lit(val)])
+                                        Expr::String(vec![StringPart::unquoted(val)])
                                     }
                                 };
                                 inline_env.push((name, value));
@@ -1186,8 +1186,8 @@ impl Parser {
                     let mut s = String::new();
                     for part in parts {
                         match part {
-                            StringPart::Lit(lit) => s.push_str(&lit),
-                            StringPart::Expr(_) => {
+                            StringPart::Lit { text, .. } => s.push_str(&text),
+                            StringPart::Expr { .. } => {
                                 return Err(ParseError::SyntaxError {
                                     message: "Unexpected expression in command path".to_string(),
                                     span: self.current_span(),
@@ -1362,7 +1362,7 @@ impl Parser {
                                     span: self.current_span(),
                                 });
                             }
-                            Expr::String(vec![StringPart::Lit(val)])
+                            Expr::String(vec![StringPart::unquoted(val)])
                         }
                     };
                     inline_env.push((ident, value));
@@ -1555,17 +1555,26 @@ impl Parser {
                     if (name == "export" || name == "unset")
                         && let Expr::Ident(id) = arg
                     {
-                        arg = Expr::String(vec![StringPart::Lit(id)]);
+                        arg = Expr::String(vec![StringPart::unquoted(id)]);
                     }
+                    // Only an unquoted `{a,b}` is brace syntax. Quoted text that
+                    // merely looks like braces — `'{"a":[1,2]}'` — is data, and
+                    // splitting it on the comma inside `[…]` would hand the
+                    // command fragments of a JSON argument.
                     if let Expr::String(parts) = &arg
                         && parts.len() == 1
-                        && matches!(&parts[0], StringPart::Lit(s) if s.contains('{'))
+                        && matches!(
+                            &parts[0],
+                            StringPart::Lit { text, quote }
+                                if *quote == crate::ast::QuoteKind::Unquoted
+                                    && text.contains('{')
+                        )
                     {
-                        if let StringPart::Lit(s) = &parts[0] {
+                        if let StringPart::Lit { text: s, .. } = &parts[0] {
                             let expanded = expand_braces(s);
                             if expanded.len() > 1 {
                                 for word in expanded {
-                                    args.push(Expr::String(vec![StringPart::Lit(word)]));
+                                    args.push(Expr::String(vec![StringPart::unquoted(word)]));
                                 }
                             } else {
                                 args.push(arg);

@@ -3,7 +3,8 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use fshell_core::{
-    BinOp, Expr, FxIndexMap, LiteralPattern, MatchArm, MatchPattern, Stmt, StringPart, Val,
+    BinOp, Expr, FxIndexMap, LiteralPattern, MatchArm, MatchPattern, QuoteKind, Stmt, StringPart,
+    Val,
 };
 use fshell_engine::{Env, eval_expr, eval_stmt};
 use fshell_hash::FxBuildHasher;
@@ -44,12 +45,18 @@ fn eval_literals_and_expressions(c: &mut Criterion) {
         Expr::Float(1.5),
         Expr::Ident("x".to_string()),
         Expr::Ident("unknown".to_string()),
-        Expr::String(vec![StringPart::Lit("hello".to_string())]),
+        Expr::String(vec![StringPart::unquoted("hello".to_string())]),
         Expr::String(vec![
-            StringPart::Lit("Hello, ".to_string()),
-            StringPart::Expr(Box::new(Expr::Variable("name".to_string()))),
-            StringPart::Lit("! Value is ".to_string()),
-            StringPart::Expr(Box::new(Expr::Variable("x".to_string()))),
+            StringPart::unquoted("Hello, ".to_string()),
+            StringPart::Expr {
+                expr: Box::new(Expr::Variable("name".to_string())),
+                quote: QuoteKind::Unquoted,
+            },
+            StringPart::unquoted("! Value is ".to_string()),
+            StringPart::Expr {
+                expr: Box::new(Expr::Variable("x".to_string())),
+                quote: QuoteKind::Unquoted,
+            },
         ]),
         Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)]),
         Expr::Map(vec![("a".to_string(), Expr::Int(1))]),
@@ -100,8 +107,12 @@ fn eval_binary_ops(c: &mut Criterion) {
         },
         Expr::BinaryOp {
             op: BinOp::Add,
-            lhs: Box::new(Expr::String(vec![StringPart::Lit("hello".to_string())])),
-            rhs: Box::new(Expr::String(vec![StringPart::Lit("world".to_string())])),
+            lhs: Box::new(Expr::String(vec![StringPart::unquoted(
+                "hello".to_string(),
+            )])),
+            rhs: Box::new(Expr::String(vec![StringPart::unquoted(
+                "world".to_string(),
+            )])),
         },
         Expr::BinaryOp {
             op: BinOp::Sub,

@@ -209,6 +209,34 @@ single-quoted strings are raw and do not perform interpolation:
 let raw = 'literal {no_interp} string'
 ```
 
+### backslash escapes in words
+
+a backslash quotes the next character in an unquoted word. fsh recognises a
+small set of *structural* escapes and preserves every other one verbatim:
+
+| input | argument text | rule |
+|-------|---------------|------|
+| `\ ` (backslash space) | ` ` | the space stays inside the word |
+| `\;` `\|` `\&` `\<` `\>` `\(` `\)` `\{` `\}` `\[` `\]` | the bare character | shell syntax characters lose the backslash before reaching argv, so `find` receives a literal `;` terminator |
+| `\` + newline | removed | line continuation |
+| anything else — `\*`, `\.`, `\d` | `\` *and* the character | unknown escapes are kept intact, so an unquoted regex such as `\.rs$` reaches `grep` unaltered |
+
+escaping also decides what is data and what is pattern: a backslash-escaped
+metacharacter never globs, just as a quoted one never does. `\*.rs`, `'*.rs'`
+and `"*.rs"` are all literal.
+
+> [!IMPORTANT]
+> the last rule is a deliberate divergence from POSIX shells, which drop the
+> backslash before **every** escaped character. Native fsh therefore gives
+> `\*.rs` the text `\*.rs` where `bash` gives `*.rs`. Both are literal — the
+> difference is the *value*, not whether it globs. The divergence is pinned by
+> the `native/escaped-glob-is-not-expanded` conformance case.
+>
+> this is **one** rule, not a per-character policy: either fsh keeps unknown
+> escapes intact (today) or it strips the backslash for every metacharacter and
+> the value of `\*`, `\?`, `\[`, `\{` … changes together. Changing it is a
+> language decision, not a compatibility patch.
+
 ### ansi-c quoting
 
 strings prefixed with `$'...'` interpret c-style escape sequences (`\n`, `\t`, `\r`, `\xHH`, `\uXXXX`):
@@ -327,6 +355,12 @@ let ok = !false && (cpu < 80.0 or mem < 90.0)
 > predicate, ...) `&&`/`||` are boolean operators. At statement level they chain
 > commands on the previous command's exit status, as in a normal shell:
 > `cargo test && echo passed`.
+>
+> `$?` (also `$status`) is the exit status of the last *completed* command. A
+> command expands its own words before it runs, so the status can never be
+> half-updated while a word is expanding: `false; echo "$?"` prints `1`, and
+> `false; echo "$?"; echo "$?"` prints `1` then `0`, because the second `echo`
+> reports the first one.
 
 ### regex matching
 
@@ -623,6 +657,44 @@ try {
 ```
 
 the catch variable contains `code`, `name`, `category`, `message`, `help`, `fix`, `suggestions` and `docs_url`, and is scoped to the catch block (it does not leak into the surrounding scope). control flow (`Flow { Break, Continue, Return, Exit, ConditionFalse }`) is not an error and passes through `try` / `catch` transparently; logical false (`ConditionFalse`, exit 1) never renders as an error line and drives `&&`/`||` and `$?`.
+
+### command failures vs engine errors
+
+a failing *command* is not a failing *engine*, and the two behave differently:
+
+- an **engine error** (a type error, an unresolvable path, a denied capability) aborts the statement and is what `try` / `catch` captures;
+- a **command failure** is reported and the script continues with the command's status. `nosuchcmd` is the clearest case: it prints the diagnostic and leaves `$?` at `127`, so `nosuchcmd; echo $?` prints `127`, `nosuchcmd && ...` short-circuits, `nosuchcmd || ...` runs, and `set -e` still stops the script.
+
+this is the shell rule that a command's outcome is data (`$?`), while only the engine's own failures unwind.
+
+the statuses a command-level failure leaves behind follow posix:
+
+| failure | status |
+| --- | --- |
+| command not found | `127` |
+| found but not executable (or its interpreter is missing) | `126` |
+| a redirection that cannot be performed (missing input file, unwritable destination) | `1` |
+
+a stage records its own outcome — status and failure class — in the pipeline's own ledger, which is what the statement finalizer reads. two consequences are worth knowing:
+
+- **redirection moves text, never the failure.** `nosuchcmd 2>/dev/null` silences the message and still leaves `$?` at `127`. the shell's *own* fatal report is not a command's diagnostic and is not suppressible.
+- **`pipefail` sees every stage.** a pipeline's status is its last command's, or, with `pipefail`, the rightmost command that failed — so `false | true` is `0` and, with `pipefail`, `1`.
+
+---
+
+## native vs posix: where they deliberately differ
+
+the two engines are not meant to behave identically, and these are the places where the difference is a decision rather than a bug. in each case POSIX owns the compatibility semantics, and auto-routing is what sends a script to the engine that has them.
+
+| | native | posix |
+| --- | --- | --- |
+| unquoted `$var` / `$(...)` | one typed value, never split | field-split per `IFS` |
+| a `List` value | travels as one value (`"$l"` and `$l` agree) | no lists; text splits |
+| bare `true` / `false` | `Bool` values | utility commands reading `true`/`false` from `PATH` |
+
+so `argvdump $BAR` with `BAR="a b"` is one argument in native and two under POSIX, and `true | cat` emits the value `true` in native while POSIX runs the command and emits nothing. if you need splitting in a native script, be explicit: iterate the list, or format it, rather than relying on a word-level split that would make a typed pipeline stringly.
+
+still open: what a *structured* value interpolates to. `"$map"` currently yields the tagged native representation (`{"type":"Map",...}`) rather than JSON, on the view that interpolation should be a canonical native text form and JSON should be asked for with `@json`. that choice is not final.
 
 ---
 

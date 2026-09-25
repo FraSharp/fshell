@@ -25,6 +25,28 @@ impl Default for ExpansionConfig {
     }
 }
 
+/// The home directory of `user`, from the password database.
+///
+/// POSIX `~user` names *that* user's home directory; only an unqualified `~`
+/// means the current shell's. A user with no entry leaves the caller to fall
+/// back to `$HOME`.
+fn user_home(user: &str) -> Option<String> {
+    let name = std::ffi::CString::new(user).ok()?;
+    // SAFETY: `getpwnam` returns a pointer into a static buffer that stays valid
+    // until the next lookup, and the home directory is copied out immediately.
+    unsafe {
+        let pwd = libc::getpwnam(name.as_ptr());
+        if pwd.is_null() {
+            return None;
+        }
+        let dir = (*pwd).pw_dir;
+        if dir.is_null() {
+            return None;
+        }
+        Some(std::ffi::CStr::from_ptr(dir).to_string_lossy().into_owned())
+    }
+}
+
 fn effective_ifs(cfg: &ExpansionConfig, env: &fshell_engine::Env) -> String {
     if let Some(s) = &cfg.ifs {
         return s.clone();
@@ -124,6 +146,29 @@ fn get_effective_positional(env: &fshell_engine::Env, fallback: &[String]) -> Ve
     fallback.to_vec()
 }
 
+/// Look up a variable's value, consulting the inherited environment.
+///
+/// `env.vars` holds the shell's own variables, while the process environment is
+/// imported into a nested map under the key `"env"` (`Env::ensure_env_populated`).
+/// Expansion has to see both: an inherited variable that the shell has not
+/// explicitly assigned is still readable. Without this, `FOO=abc fsh --posix -c
+/// 'echo "$FOO"'` prints nothing even though child processes do receive `FOO`,
+/// which is silently wrong for anything driven by the calling environment.
+///
+/// Precedence is the shell's own variables first, then the imported environment.
+/// `Env::unset_var` removes from both stores, so an unset variable does not
+/// resurface through this fallback.
+pub(crate) fn lookup_var(env: &fshell_engine::Env, name: &str) -> Option<Val> {
+    let vars = env.vars.read();
+    if let Some(val) = vars.get(name) {
+        return Some(val.clone());
+    }
+    match vars.get("env") {
+        Some(Val::Map(environment)) => environment.get(&ustr::ustr(name)).cloned(),
+        _ => None,
+    }
+}
+
 /// Resolve a Parameter to its string value from Env.
 fn resolve_parameter_with_presence(
     param: &Parameter,
@@ -174,9 +219,7 @@ fn resolve_parameter_with_presence(
             {
                 return (val.to_text(), true);
             }
-            env.vars
-                .read()
-                .get(name.as_str())
+            lookup_var(env, name.as_str())
                 .map(|v| (v.to_text(), true))
                 .unwrap_or_else(|| (String::new(), false))
         }
@@ -363,21 +406,21 @@ fn expand_word_internal(
                 append_unquoted(&mut expanded, &mut glob_pattern, &mut has_glob, &val);
             }
             WordPiece::TildeExpansion(te) => {
-                let home = env.home_dir().to_string_lossy().into_owned();
-                match te {
-                    word::TildeExpr::Home | word::TildeExpr::UserHome(_) => append_literal(
-                        &mut expanded,
-                        &mut glob_pattern,
-                        &home,
-                        preserve_pattern_quoting,
-                    ),
-                    _ => append_literal(
-                        &mut expanded,
-                        &mut glob_pattern,
-                        &home,
-                        preserve_pattern_quoting,
-                    ),
-                }
+                let home = match te {
+                    // POSIX: `~user` is that user's home directory, not the current
+                    // shell's, and a user with no entry leaves the word untouched.
+                    word::TildeExpr::UserHome(user) => match user_home(user) {
+                        Some(home) => home,
+                        None => format!("~{user}"),
+                    },
+                    _ => env.home_dir().to_string_lossy().into_owned(),
+                };
+                append_literal(
+                    &mut expanded,
+                    &mut glob_pattern,
+                    &home,
+                    preserve_pattern_quoting,
+                );
             }
             WordPiece::CommandSubstitution(cmd) => {
                 let out = run_command_subst(cmd, env)?;

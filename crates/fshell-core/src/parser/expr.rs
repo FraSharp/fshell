@@ -43,7 +43,7 @@ impl Parser {
                 // String literal pattern
                 let expr = self.parse_string_literal()?;
                 if let Expr::String(parts) = expr {
-                    let has_interp = parts.iter().any(|p| matches!(p, StringPart::Expr(_)));
+                    let has_interp = parts.iter().any(|p| matches!(p, StringPart::Expr { .. }));
                     if has_interp {
                         return Err(ParseError::SyntaxError {
                             message: "String interpolation is not supported in match patterns"
@@ -54,8 +54,8 @@ impl Parser {
                     let s = parts
                         .iter()
                         .filter_map(|p| match p {
-                            StringPart::Lit(s) => Some(s.as_str()),
-                            _ => None,
+                            StringPart::Lit { text, .. } => Some(text.as_str()),
+                            StringPart::Expr { .. } => None,
                         })
                         .collect::<Vec<_>>()
                         .join("");
@@ -731,7 +731,7 @@ impl Parser {
                 span: self.current_span(),
             });
         }
-        Ok(Expr::String(vec![StringPart::Lit(path)]))
+        Ok(Expr::String(vec![StringPart::unquoted(path)]))
     }
 
     /// Parse one unquoted command argument.
@@ -744,15 +744,39 @@ impl Parser {
     pub(crate) fn parse_command_arg(&mut self) -> Result<Expr, ParseError> {
         let mut parts = Vec::new();
         let mut literal = String::new();
+        let mut literal_quote = QuoteKind::Unquoted;
         let mut brace_depth = 0usize;
         let mut had_quoted_segment = false;
         let mut saw_segment = false;
 
-        let flush_literal = |parts: &mut Vec<StringPart>, literal: &mut String| {
+        // Text accumulates per quoting form, and a change of form starts a new
+        // fragment. Collapsing them into one buffer would lose exactly the
+        // information that decides whether a character is data or pattern
+        // syntax: `foo'*'*.rs` is one word in which only the trailing `*.rs`
+        // may glob.
+        fn flush_literal(parts: &mut Vec<StringPart>, literal: &mut String, quote: &mut QuoteKind) {
             if !literal.is_empty() {
-                parts.push(StringPart::Lit(std::mem::take(literal)));
+                parts.push(StringPart::Lit {
+                    text: std::mem::take(literal),
+                    quote: *quote,
+                });
             }
-        };
+            *quote = QuoteKind::Unquoted;
+        }
+
+        fn push_text(
+            parts: &mut Vec<StringPart>,
+            literal: &mut String,
+            quote: &mut QuoteKind,
+            kind: QuoteKind,
+            text: &str,
+        ) {
+            if *quote != kind && !literal.is_empty() {
+                flush_literal(parts, literal, quote);
+            }
+            *quote = kind;
+            literal.push_str(text);
+        }
 
         while let Some(c) = self.peek() {
             if c.is_whitespace()
@@ -776,7 +800,13 @@ impl Parser {
                                 self.next_char();
                             }
                         }
-                        Some(escaped) if escaped.is_whitespace() => literal.push(escaped),
+                        Some(escaped) if escaped.is_whitespace() => push_text(
+                            &mut parts,
+                            &mut literal,
+                            &mut literal_quote,
+                            QuoteKind::Escaped,
+                            &escaped.to_string(),
+                        ),
                         // Shell syntax characters lose their quoting
                         // backslash before reaching argv. Keep the narrow
                         // unknown-escape preservation below for regexes such
@@ -788,14 +818,27 @@ impl Parser {
                                 '|' | ';' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | '[' | ']'
                             ) =>
                         {
-                            literal.push(escaped);
+                            push_text(
+                                &mut parts,
+                                &mut literal,
+                                &mut literal_quote,
+                                QuoteKind::Escaped,
+                                &escaped.to_string(),
+                            );
                         }
                         Some(escaped) => {
                             // Keep unknown escapes intact for regexes and other
                             // command arguments; escaped whitespace is the one
                             // case where the backslash is syntactic.
-                            literal.push('\\');
-                            literal.push(escaped);
+                            let mut retained = String::from('\\');
+                            retained.push(escaped);
+                            push_text(
+                                &mut parts,
+                                &mut literal,
+                                &mut literal_quote,
+                                QuoteKind::Escaped,
+                                &retained,
+                            );
                         }
                         None => {
                             return Err(ParseError::UnexpectedEof {
@@ -806,11 +849,14 @@ impl Parser {
                 }
                 '"' => {
                     had_quoted_segment = true;
-                    flush_literal(&mut parts, &mut literal);
+                    flush_literal(&mut parts, &mut literal, &mut literal_quote);
                     let quoted = self.parse_string_literal()?;
                     match quoted {
                         Expr::String(quoted_parts) => parts.extend(quoted_parts),
-                        other => parts.push(StringPart::Expr(Box::new(other))),
+                        other => parts.push(StringPart::Expr {
+                            expr: Box::new(other),
+                            quote: QuoteKind::Double,
+                        }),
                     }
                 }
                 '\'' => {
@@ -831,7 +877,13 @@ impl Parser {
                             }
                         }
                     }
-                    literal.push_str(&quoted);
+                    push_text(
+                        &mut parts,
+                        &mut literal,
+                        &mut literal_quote,
+                        QuoteKind::Single,
+                        &quoted,
+                    );
                 }
                 '$' => {
                     let is_expansion = self.pos + 1 < self.input.len()
@@ -843,33 +895,48 @@ impl Parser {
                             || self.input[self.pos + 1] == '_');
                     if !is_expansion {
                         self.next_char();
-                        literal.push('$');
+                        push_text(
+                            &mut parts,
+                            &mut literal,
+                            &mut literal_quote,
+                            QuoteKind::Unquoted,
+                            "$",
+                        );
                         continue;
                     }
-                    flush_literal(&mut parts, &mut literal);
+                    flush_literal(&mut parts, &mut literal, &mut literal_quote);
                     let saved_arg = self.cmd_arg_mode;
                     self.cmd_arg_mode = false;
                     let expansion = self.parse_primary_expr()?;
                     self.cmd_arg_mode = saved_arg;
                     match expansion {
                         Expr::String(expanded_parts) => parts.extend(expanded_parts),
-                        other => parts.push(StringPart::Expr(Box::new(other))),
+                        other => parts.push(StringPart::Expr {
+                            expr: Box::new(other),
+                            quote: QuoteKind::Unquoted,
+                        }),
                     }
                 }
                 '<' | '>' if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '(' => {
-                    flush_literal(&mut parts, &mut literal);
+                    flush_literal(&mut parts, &mut literal, &mut literal_quote);
                     let saved_arg = self.cmd_arg_mode;
                     self.cmd_arg_mode = false;
                     let expansion = self.parse_primary_expr()?;
                     self.cmd_arg_mode = saved_arg;
-                    parts.push(StringPart::Expr(Box::new(expansion)));
+                    parts.push(StringPart::Expr {
+                        expr: Box::new(expansion),
+                        quote: QuoteKind::Unquoted,
+                    });
                 }
                 '(' if parts.is_empty() && literal.is_empty() => {
                     let saved_arg = self.cmd_arg_mode;
                     self.cmd_arg_mode = false;
                     let expression = self.parse_primary_expr()?;
                     self.cmd_arg_mode = saved_arg;
-                    parts.push(StringPart::Expr(Box::new(expression)));
+                    parts.push(StringPart::Expr {
+                        expr: Box::new(expression),
+                        quote: QuoteKind::Unquoted,
+                    });
                 }
                 // Raw string argument: `grep r"\.tmp$"`. Adjacent `r"` would
                 // otherwise be ordinary shell adjacency (`r` + a quoted word).
@@ -880,7 +947,14 @@ impl Parser {
                     had_quoted_segment = true;
                     self.next_char(); // consume 'r'
                     let raw = self.parse_raw_string_content()?;
-                    literal.push_str(&raw);
+                    // A raw string is literal text: never a pattern, never split.
+                    push_text(
+                        &mut parts,
+                        &mut literal,
+                        &mut literal_quote,
+                        QuoteKind::Single,
+                        &raw,
+                    );
                 }
                 '{' if parts.is_empty() && literal.is_empty() && !self.is_brace_expansion() => {
                     // `{}` is the standard opaque placeholder used by
@@ -890,7 +964,13 @@ impl Parser {
                     if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '}' {
                         self.next_char();
                         self.next_char();
-                        literal.push_str("{}");
+                        push_text(
+                            &mut parts,
+                            &mut literal,
+                            &mut literal_quote,
+                            QuoteKind::Unquoted,
+                            "{}",
+                        );
                         continue;
                     }
                     // Preserve fshell map literals as structured command arguments.
@@ -900,9 +980,18 @@ impl Parser {
                     self.cmd_arg_mode = saved_arg;
                     return Ok(map);
                 }
-                _ => literal.push(self.next_char().ok_or_else(|| ParseError::UnexpectedEof {
-                    span: self.current_span(),
-                })?),
+                _ => {
+                    let ch = self.next_char().ok_or_else(|| ParseError::UnexpectedEof {
+                        span: self.current_span(),
+                    })?;
+                    push_text(
+                        &mut parts,
+                        &mut literal,
+                        &mut literal_quote,
+                        QuoteKind::Unquoted,
+                        &ch.to_string(),
+                    );
+                }
             }
             if c == '{' {
                 brace_depth += 1;
@@ -911,7 +1000,7 @@ impl Parser {
             }
         }
 
-        flush_literal(&mut parts, &mut literal);
+        flush_literal(&mut parts, &mut literal, &mut literal_quote);
         if parts.is_empty() {
             if saw_segment {
                 return Ok(Expr::String(Vec::new()));
@@ -924,8 +1013,8 @@ impl Parser {
         if !had_quoted_segment && parts.len() == 1 {
             if let Some(only) = parts.pop() {
                 match only {
-                    StringPart::Expr(expr) => return Ok(*expr),
-                    StringPart::Lit(value) => {
+                    StringPart::Expr { expr, .. } => return Ok(*expr),
+                    StringPart::Lit { text: value, quote } => {
                         if value == "true" {
                             return Ok(Expr::Bool(true));
                         }
@@ -948,7 +1037,7 @@ impl Parser {
                                 return Ok(Expr::Float(float));
                             }
                         }
-                        parts.push(StringPart::Lit(value));
+                        parts.push(StringPart::Lit { text: value, quote });
                     }
                 }
             }
@@ -1002,23 +1091,23 @@ impl Parser {
                     return self.parse_bare_path_or_string();
                 } else {
                     self.next_char();
-                    return Ok(Expr::String(vec![StringPart::Lit("=".to_string())]));
+                    return Ok(Expr::String(vec![StringPart::unquoted("=".to_string())]));
                 }
             }
             if c == '!' {
                 if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '=' {
                     self.next_char();
                     self.next_char();
-                    return Ok(Expr::String(vec![StringPart::Lit("!=".to_string())]));
+                    return Ok(Expr::String(vec![StringPart::unquoted("!=".to_string())]));
                 }
                 if self.pos + 1 < self.input.len() && self.input[self.pos + 1].is_whitespace() {
                     self.next_char();
-                    return Ok(Expr::String(vec![StringPart::Lit("!".to_string())]));
+                    return Ok(Expr::String(vec![StringPart::unquoted("!".to_string())]));
                 }
             }
             if c == ']' {
                 self.next_char();
-                return Ok(Expr::String(vec![StringPart::Lit("]".to_string())]));
+                return Ok(Expr::String(vec![StringPart::unquoted("]".to_string())]));
             }
             // A leading `+flag` (e.g. `chmod +x file`) is a literal argument, not unary plus.
             if c == '+'
@@ -1164,7 +1253,10 @@ impl Parser {
                     let rest = self.parse_bare_path_or_string()?;
                     if let Expr::String(parts) = rest {
                         let mut combined = Vec::new();
-                        combined.push(StringPart::Expr(Box::new(Expr::Variable(name))));
+                        combined.push(StringPart::Expr {
+                            expr: Box::new(Expr::Variable(name)),
+                            quote: QuoteKind::Unquoted,
+                        });
                         combined.extend(parts);
                         return Ok(Expr::String(combined));
                     }
@@ -1182,7 +1274,10 @@ impl Parser {
             {
                 self.next_char(); // consume 'r'
                 let s = self.parse_raw_string_content()?;
-                Ok(Expr::String(vec![StringPart::Lit(s)]))
+                Ok(Expr::String(vec![StringPart::Lit {
+                    text: s,
+                    quote: QuoteKind::Single,
+                }]))
             }
             Some('"') => {
                 // Check for triple-quote """
@@ -1221,7 +1316,10 @@ impl Parser {
                         span: self.current_span(),
                     });
                 }
-                Ok(Expr::String(vec![StringPart::Lit(s)]))
+                Ok(Expr::String(vec![StringPart::Lit {
+                    text: s,
+                    quote: QuoteKind::Single,
+                }]))
             }
             Some('`') => {
                 self.next_char();
@@ -1835,7 +1933,7 @@ impl Parser {
                 }
             }
         }
-        Ok(Expr::String(vec![StringPart::Lit(s)]))
+        Ok(Expr::String(vec![StringPart::unquoted(s)]))
     }
 
     /// Parse the value of a `:-`, `:=`, `:?`, or `:+` modifier: a shell word of
@@ -1860,7 +1958,7 @@ impl Parser {
                     // Quoted segment: delegate to the string literal parser and
                     // merge its parts (quote removal, escapes, interpolation).
                     if !current_lit.is_empty() {
-                        parts.push(StringPart::Lit(std::mem::take(&mut current_lit)));
+                        parts.push(StringPart::unquoted(std::mem::take(&mut current_lit)));
                     }
                     if let Expr::String(inner) = self.parse_string_literal()? {
                         parts.extend(inner);
@@ -1869,10 +1967,13 @@ impl Parser {
                 Some('$') => {
                     self.next_char();
                     if !current_lit.is_empty() {
-                        parts.push(StringPart::Lit(std::mem::take(&mut current_lit)));
+                        parts.push(StringPart::unquoted(std::mem::take(&mut current_lit)));
                     }
                     if let Some(expr) = self.try_parse_dollar_var()? {
-                        parts.push(StringPart::Expr(Box::new(expr)));
+                        parts.push(StringPart::Expr {
+                            expr: Box::new(expr),
+                            quote: QuoteKind::Unquoted,
+                        });
                     } else {
                         current_lit.push('$');
                         continue;
@@ -1885,10 +1986,10 @@ impl Parser {
             }
         }
         if !current_lit.is_empty() {
-            parts.push(StringPart::Lit(current_lit));
+            parts.push(StringPart::unquoted(current_lit));
         }
         if parts.is_empty() {
-            Ok(Expr::String(vec![StringPart::Lit(String::new())]))
+            Ok(Expr::String(vec![StringPart::unquoted(String::new())]))
         } else {
             Ok(Expr::String(parts))
         }
@@ -1905,7 +2006,7 @@ impl Parser {
             s.push(c);
             self.next_char();
         }
-        Ok(Expr::String(vec![StringPart::Lit(s)]))
+        Ok(Expr::String(vec![StringPart::unquoted(s)]))
     }
 
     /// Parse here-string: `<<< "string"` — syntactic sugar for `echo "string" |`.
@@ -2000,7 +2101,10 @@ impl Parser {
                     // These must be interpolated (e.g. "a $(echo hi) b") rather than left literal.
                     if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '(' {
                         if !current_lit.is_empty() {
-                            parts.push(StringPart::Lit(std::mem::take(&mut current_lit)));
+                            parts.push(StringPart::Lit {
+                                text: std::mem::take(&mut current_lit),
+                                quote: QuoteKind::Double,
+                            });
                         }
                         self.next_char(); // consume '$'
                         // Check for arithmetic expansion $((...))
@@ -2019,9 +2123,12 @@ impl Parser {
                                     self.skip_whitespace();
                                     if self.peek() == Some(')') {
                                         self.next_char();
-                                        parts.push(StringPart::Expr(Box::new(
-                                            Expr::ArithmeticExpansion(Box::new(inner)),
-                                        )));
+                                        parts.push(StringPart::Expr {
+                                            expr: Box::new(Expr::ArithmeticExpansion(Box::new(
+                                                inner,
+                                            ))),
+                                            quote: QuoteKind::Double,
+                                        });
                                         continue;
                                     }
                                 }
@@ -2030,15 +2137,24 @@ impl Parser {
                         }
                         // Command substitution $(...)
                         let expr = self.parse_cmd_substitution()?;
-                        parts.push(StringPart::Expr(Box::new(expr)));
+                        parts.push(StringPart::Expr {
+                            expr: Box::new(expr),
+                            quote: QuoteKind::Double,
+                        });
                         continue;
                     }
                     self.next_char();
                     if !current_lit.is_empty() {
-                        parts.push(StringPart::Lit(std::mem::take(&mut current_lit)));
+                        parts.push(StringPart::Lit {
+                            text: std::mem::take(&mut current_lit),
+                            quote: QuoteKind::Double,
+                        });
                     }
                     if let Some(expr) = self.try_parse_dollar_var()? {
-                        parts.push(StringPart::Expr(Box::new(expr)));
+                        parts.push(StringPart::Expr {
+                            expr: Box::new(expr),
+                            quote: QuoteKind::Double,
+                        });
                     } else {
                         current_lit.push('$');
                         continue;
@@ -2053,7 +2169,10 @@ impl Parser {
                     } else {
                         self.next_char();
                         if !current_lit.is_empty() {
-                            parts.push(StringPart::Lit(current_lit));
+                            parts.push(StringPart::Lit {
+                                text: current_lit,
+                                quote: QuoteKind::Double,
+                            });
                             current_lit = String::new();
                         }
                         let saved_arg = self.cmd_arg_mode;
@@ -2063,7 +2182,10 @@ impl Parser {
                         let expr = self.parse_expr_with_pipeline(false)?;
                         self.cmd_arg_mode = saved_arg;
                         self.expect('}')?;
-                        parts.push(StringPart::Expr(Box::new(expr)));
+                        parts.push(StringPart::Expr {
+                            expr: Box::new(expr),
+                            quote: QuoteKind::Double,
+                        });
                     }
                 }
                 Some(_) => {
@@ -2076,7 +2198,10 @@ impl Parser {
             }
         }
         if !current_lit.is_empty() {
-            parts.push(StringPart::Lit(current_lit));
+            parts.push(StringPart::Lit {
+                text: current_lit,
+                quote: QuoteKind::Double,
+            });
         }
         Ok(Expr::String(parts))
     }
@@ -2201,7 +2326,10 @@ impl Parser {
         }
         let dedented = dedent(&content, DedentMode::All);
         Ok(Expr::MultiLineString {
-            parts: vec![StringPart::Lit(dedented)],
+            parts: vec![StringPart::Lit {
+                text: dedented,
+                quote: QuoteKind::Single,
+            }],
             dedent: DedentMode::All,
         })
     }
@@ -2497,7 +2625,7 @@ impl Parser {
                     self.next_char();
                 }
                 let lit = format!("{}{}", val_str, raw_suffix);
-                return Ok(Expr::String(vec![StringPart::Lit(lit)]));
+                return Ok(Expr::String(vec![StringPart::unquoted(lit)]));
             }
         }
 

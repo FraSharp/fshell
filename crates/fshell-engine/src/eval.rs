@@ -3,8 +3,8 @@
 
 use crate::profiler::{ProfilerCategory, ProfilerState};
 use crate::{
-    BuiltinHandler, EngineError, Env, Flow, IS_TRUSTED_CONTEXT, PipelineFailure, PipelinePayload,
-    ReactiveEvent, collect_pipeline, dispatch_on_signal, format_pipeline, spawn_pipeline_stream,
+    BuiltinHandler, EngineError, Env, Flow, IS_TRUSTED_CONTEXT, PipelinePayload, ReactiveEvent,
+    collect_pipeline, dispatch_on_signal, format_pipeline, spawn_pipeline_stream,
 };
 use fshell_core::diagnostic::FshDiag;
 use fshell_core::{
@@ -119,8 +119,8 @@ fn expr_label(expr: &Expr) -> String {
             let s: String = parts
                 .iter()
                 .map(|p| match p {
-                    fshell_core::StringPart::Lit(s) => s.as_str(),
-                    fshell_core::StringPart::Expr(_) => "{...}",
+                    fshell_core::StringPart::Lit { text, .. } => text.as_str(),
+                    fshell_core::StringPart::Expr { .. } => "{...}",
                 })
                 .collect();
             if s.len() > 40 {
@@ -181,13 +181,9 @@ fn extract_setopt_args(stmt: &Stmt) -> Option<(String, Vec<String>)> {
             let arg_strs: Vec<String> = args
                 .iter()
                 .filter_map(|a| match a {
-                    Expr::String(parts) if parts.len() == 1 => {
-                        if let fshell_core::StringPart::Lit(s) = &parts[0] {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    }
+                    // A whole-literal word names an option, whatever quoting was
+                    // used to write it.
+                    Expr::String(parts) => fshell_core::StringPart::literal_text(parts),
                     Expr::Ident(s) => Some(s.clone()),
                     _ => None,
                 })
@@ -261,6 +257,11 @@ async fn try_run_startup_builtin(
     {
         return None;
     }
+    // This builtin is the whole statement, so it owns the statement's outcome.
+    let outcomes = crate::execution::PipelineOutcomes::new();
+    outcomes.set_stages(1);
+    let mut builtin_env = env.clone();
+    builtin_env.attach_stage(outcomes.clone(), crate::execution::Slot::Stage(0));
 
     let stage = pipeline.stages.first()?;
     let PipelineStage::CommandCall {
@@ -286,9 +287,11 @@ async fn try_run_startup_builtin(
 
     let (out_tx, _out_rx) = tokio::sync::mpsc::channel(1);
 
-    match handler(None, evaluated_args, env, out_tx, None) {
+    match handler(None, evaluated_args, &builtin_env, out_tx, None) {
         Ok(()) => {
-            let last_ec = env.exit_code();
+            // The statement is complete: publish what the builtin recorded.
+            let last_ec = crate::pipeline_finalize(&outcomes, Vec::new(), false).exit_code;
+            env.set_exit_code(last_ec);
             let errexit = Some(env.options.read())?.errexit;
             if errexit && last_ec != 0 {
                 return Some(Ok(Flow::Exit(last_ec as i32)));
@@ -342,23 +345,58 @@ macro_rules! eval_async_val {
     };
 }
 
-macro_rules! interp_string {
+/// Interpolate a word, keeping each fragment's quoting.
+///
+/// This is the single implementation of word interpolation: the plain string
+/// value below is derived from it, so a word's text and its provenance cannot
+/// disagree.
+macro_rules! interp_word {
     ($parts:expr, $env:expr, $eval:tt) => {{
-        let mut res = String::new();
+        let mut word = $crate::word::ExpandedWord::default();
         for part in $parts {
             match part {
-                fshell_core::StringPart::Lit(s) => res.push_str(s),
-                fshell_core::StringPart::Expr(e) => {
-                    let val = $eval!(e, $env);
-                    match val {
-                        Val::String(s) => res.push_str(&s),
-                        other => res.push_str(&other.to_text()),
-                    }
+                fshell_core::StringPart::Lit { text, quote } => word.push(text.clone(), *quote),
+                fshell_core::StringPart::Expr { expr, quote } => {
+                    let val = $eval!(expr, $env);
+                    let text = match val {
+                        Val::String(s) => s,
+                        // A command substitution's output is bytes, not an fsh
+                        // value: it contributes newline-separated text with its
+                        // trailing newlines stripped, the way POSIX strips `$(...)`.
+                        other
+                            if matches!(
+                                expr.unpack(),
+                                Expr::Pipeline(_) | Expr::InlinePipeline(_)
+                            ) =>
+                        {
+                            substitution_text(&other)
+                        }
+                        other => other.to_text(),
+                    };
+                    word.push(text, *quote);
                 }
             }
         }
-        res
+        word
     }};
+}
+
+macro_rules! interp_string {
+    ($parts:expr, $env:expr, $eval:tt) => {
+        interp_word!($parts, $env, $eval).text()
+    };
+}
+
+/// Evaluate a word to its value *and* its source quoting.
+///
+/// The pipeline uses this for command arguments so that globbing and brace
+/// expansion can tell a quoted `*` from an active one — which the `Val` alone
+/// cannot say, since quoting is a property of the word rather than the value.
+pub async fn eval_word(
+    parts: &[fshell_core::StringPart],
+    env: &Env,
+) -> Result<crate::word::ExpandedWord, EngineError> {
+    Ok(interp_word!(parts, env, eval_async_val))
 }
 
 macro_rules! build_list {
@@ -894,28 +932,34 @@ pub(crate) async fn eval_if_stmt(expr: &Expr, env: &Env) -> Result<(Flow, Val), 
     } else if let Some(else_body) = else_body {
         else_body
     } else {
+        // No branch ran, so the `if` completed successfully.
+        env.set_exit_code(0);
         return Ok((Flow::Normal, Val::Null));
     };
 
     let mut result = Val::Null;
     for stmt in body {
-        match stmt.unpack() {
+        let flow = match stmt.unpack() {
             // Nested `if` in statement position: recurse so its flow propagates.
             Stmt::Expr(e) if matches!(e.unpack(), Expr::If { .. }) => {
                 let (flow, val) = eval_if_stmt(e, env).await?;
                 result = val;
-                if !flow.is_normal() {
-                    return Ok((flow, result));
-                }
+                flow
             }
-            Stmt::Expr(e) => {
+            // A simple expression yields the body's value, so an `if` can still be
+            // a function's last expression. A *pipeline* in statement position is
+            // not an expression to capture: it runs as a statement, which is what
+            // publishes its status.
+            Stmt::Expr(e) if !matches!(e.unpack(), Expr::Pipeline(_) | Expr::InlinePipeline(_)) => {
                 result = eval_expr(e, env).await?;
+                Flow::Normal
             }
-            other => match eval_stmt(other, env, false).await? {
-                Flow::Normal => {}
-                flow => return Ok((flow, result)),
-            },
+            other => eval_stmt(other, env, false).await?,
+        };
+        if !flow.is_normal() {
+            return Ok((flow, result));
         }
+        publish_completion(stmt, env);
     }
     Ok((Flow::Normal, result))
 }
@@ -1076,7 +1120,7 @@ pub fn eval_expr<'a>(
 
                     let mut stages = Vec::with_capacity(pipeline.stages.len() + 1);
                     stages.push(PipelineStage::Read {
-                        path: Expr::String(vec![fshell_core::StringPart::Lit(
+                        path: Expr::String(vec![fshell_core::StringPart::unquoted(
                             fifo.to_string_lossy().to_string(),
                         )]),
                     });
@@ -1494,7 +1538,7 @@ pub(crate) async fn eval_loop_body(body: &[Stmt], env: &Env) -> Result<Flow, Eng
             eval_stmt(stmt, env, false).await
         };
         match res {
-            Ok(Flow::Normal) => {}
+            Ok(Flow::Normal) => publish_completion(stmt, env),
             Ok(Flow::Break) => {
                 check_sigint(env)?;
                 return Ok(Flow::Break);
@@ -1670,35 +1714,10 @@ fn try_eval_stmt_sync_inner(
         Stmt::Expr(expr) => {
             if matches!(expr.unpack(), Expr::Pipeline(_) | Expr::InlinePipeline(_)) {
                 None
-            } else if let Expr::If {
-                condition,
-                then_body,
-                else_body,
-            } = expr.unpack()
-            {
-                let cond_val = match try_eval_sync(condition, env)? {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                let is_truthy = match val_to_bool(&cond_val) {
-                    Ok(b) => b,
-                    Err(e) => return Some(Err(e)),
-                };
-                let body = if is_truthy {
-                    then_body
-                } else if let Some(else_body) = else_body {
-                    else_body
-                } else {
-                    return Some(Ok(Flow::Normal));
-                };
-                for s in body {
-                    let flow_res = try_eval_stmt_sync(s, env, _unsafe_context)?;
-                    match flow_res {
-                        Ok(Flow::Normal) => {}
-                        other => return Some(other),
-                    }
-                }
-                Some(Ok(Flow::Normal))
+            } else if matches!(expr.unpack(), Expr::If { .. }) {
+                // A composite publishes its body's status, which the statement
+                // evaluator owns: there is one definition of that, not two.
+                None
             } else {
                 let val_res = try_eval_sync(expr, env)?;
                 let val = match val_res {
@@ -1744,10 +1763,79 @@ pub(crate) fn write_val_stdout(v: &Val) {
             }
         }
         other => {
-            let _ = writeln!(h, "{}", other.to_text());
+            let _ = writeln!(h, "{}", external_text(other));
         }
     }
     let _ = h.flush();
+}
+
+/// The text a command substitution contributes to a word.
+///
+/// The bytes a command wrote, not the values fsh captured: items leave
+/// newline-separated (the external boundary) and trailing newlines are stripped,
+/// exactly as POSIX strips `$(...)`.
+fn substitution_text(v: &Val) -> String {
+    external_text(v).trim_end_matches('\n').to_string()
+}
+
+/// Render a value as it should leave the shell.
+///
+/// This is the external byte boundary, and it is deliberately an explicit
+/// conversion rather than a consequence of the internal representation. A map
+/// becomes an ordinary JSON object; a list stays one item per line, because a
+/// list of strings has to remain directly pipeable into ordinary Unix tools.
+/// `Val::to_text()` is the *display* rendering and emits fsh's tagged serde form
+/// for maps, which no other program can consume — so a value crossing this
+/// boundary must not use it.
+fn external_text(v: &Val) -> String {
+    match v {
+        Val::Map(map) => json_object(map),
+        Val::List(items) => items
+            .iter()
+            .map(external_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_text(),
+    }
+}
+
+/// Serialise a value as plain JSON, for maps and anything nested inside them.
+fn json_value_text(v: &Val) -> String {
+    match v {
+        Val::Null => "null".to_string(),
+        Val::Bool(value) => value.to_string(),
+        Val::Int(value) => value.to_string(),
+        Val::Float(value) => serde_json::Number::from_f64(*value)
+            .map(|number| number.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        Val::String(value) => serde_json::Value::String(value.clone()).to_string(),
+        Val::List(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(json_value_text)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Val::Map(map) => json_object(map),
+        // Values with no JSON analogue (dates, blobs, capability handles) are
+        // carried as their text rendering rather than failing the whole write.
+        other => serde_json::Value::String(other.to_text()).to_string(),
+    }
+}
+
+fn json_object(map: &fshell_core::FxIndexMap<ustr::Ustr, Val>) -> String {
+    let entries: Vec<String> = map
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "{}:{}",
+                serde_json::Value::String(key.as_str().to_string()),
+                json_value_text(value)
+            )
+        })
+        .collect();
+    format!("{{{}}}", entries.join(","))
 }
 
 /// Core statement evaluator.
@@ -1793,6 +1881,63 @@ async fn eval_block_flow(
         if !flow.is_normal() {
             return Ok(flow);
         }
+    }
+    Ok(Flow::Normal)
+}
+
+/// Whether a statement publishes a status when it completes.
+///
+/// A pipeline publishes its finalized status, a value expression publishes 0 or 1
+/// for its value, a nested composite publishes its own body's, and a command-form
+/// construct publishes what the command did. Everything else — `let`, `x = 1`,
+/// `fn`, a declaration — has no status of its own, so it completes successfully.
+///
+/// This is what defines a composite statement's status once, for every composite:
+/// the status of the statement it executed last.
+pub(crate) fn publishes_own_status(stmt: &Stmt) -> bool {
+    matches!(
+        stmt.unpack(),
+        Stmt::Expr(_)
+            | Stmt::While { .. }
+            | Stmt::For { .. }
+            | Stmt::TryCatch { .. }
+            | Stmt::Unsafe { .. }
+            | Stmt::WithCaps { .. }
+            | Stmt::Match { .. }
+            | Stmt::PosixBlock { .. }
+    )
+}
+
+/// Publish the status a statement leaves behind when it publishes none of its own.
+pub(crate) fn publish_completion(stmt: &Stmt, env: &Env) {
+    if !publishes_own_status(stmt) {
+        env.set_exit_code(0);
+    }
+}
+
+/// Run a `{ ... }` body the way the script driver runs a script: every statement
+/// that completes publishes its status.
+///
+/// A composite statement's status is the status of the statement it executed
+/// last, so its body cannot be run by the bare evaluator: a child that publishes
+/// no value (`x = 1`) would leave the status where the previous statement put it.
+/// A body that runs nothing at all completes successfully (`if false { ... }`).
+pub(crate) async fn eval_publishing_block(
+    body: &[Stmt],
+    env: &Env,
+    unsafe_context: bool,
+) -> Result<Flow, EngineError> {
+    let mut completed = false;
+    for stmt in body {
+        match eval_stmt(stmt, env, unsafe_context).await? {
+            Flow::Normal => {}
+            flow => return Ok(flow),
+        }
+        completed = true;
+        publish_completion(stmt, env);
+    }
+    if !completed {
+        env.set_exit_code(0);
     }
     Ok(Flow::Normal)
 }
@@ -1951,31 +2096,34 @@ async fn eval_stmt_inner(
                 } else if let Some(else_body) = else_body {
                     else_body
                 } else {
-                    return Ok(Flow::Normal);
+                    // No branch ran, so the `if` completed successfully.
+                    return eval_publishing_block(&[], env, false).await;
                 };
-                for s in body {
-                    let flow = eval_stmt(s, env, false).await?;
-                    if flow != Flow::Normal {
-                        return Ok(flow);
-                    }
-                }
-                return Ok(Flow::Normal);
+                return eval_publishing_block(body, env, false).await;
             } else if let Expr::Pipeline(pipeline) | Expr::InlinePipeline(pipeline) = expr.unpack()
             {
                 if let Some(result) = try_run_startup_builtin(pipeline, env).await {
                     return result;
                 }
 
-                // Reset the status register so the finalizer below reads this
-                // pipeline's own exit status, not a stale value left by a
-                // prior (possibly errexit-aborted) statement.
-                env.set_exit_code(0);
+                // Start this pipeline's status accumulator so the finalizer
+                // below reads this pipeline's own exit status rather than a
+                // value left by a prior statement. It is scratch, not `$?`: the
+                // committed status survives until the finalizer replaces it, so
+                // expansion during this pipeline still sees the previously
+                // completed command.
+                //
+                // The pipeline's stages record into this ledger, on a clone so a
+                // pipeline nested inside it cannot displace their slots.
+                let outcomes = crate::execution::PipelineOutcomes::new();
+                let mut pipeline_env = env.clone();
+                pipeline_env.attach_stage(outcomes.clone(), crate::execution::Slot::Boundary);
 
                 // Pipeline expressions must print output (like run_script_stmt does),
                 // not capture it. collect_pipeline would set is_captured=true and
                 // silently discard output.
-                let mut rx = spawn_pipeline_stream(pipeline, env);
-                let mut errors: Vec<crate::PipelineFailure> = Vec::new();
+                let mut rx = spawn_pipeline_stream(pipeline, &pipeline_env);
+                let mut failures: Vec<crate::PipelineFailure> = Vec::new();
                 while let Some(payload) = rx.recv().await {
                     match payload {
                         PipelinePayload::Data(v) => {
@@ -1986,12 +2134,8 @@ async fn eval_stmt_inner(
                             let _ = std::io::stdout().write_all(&b);
                         }
                         PipelinePayload::Structured(d) => {
-                            if crate::is_condition_false_diag(&d) {
-                                // Logical false: exit 1 but don't print an error line.
-                                errors.push(PipelineFailure::ConditionFalse);
-                            } else {
-                                errors.push(PipelineFailure::Hard(d));
-                            }
+                            crate::render_stage_diag(env, &d);
+                            failures.push(crate::classify_diag(d));
                         }
                     }
                 }
@@ -2002,8 +2146,7 @@ async fn eval_stmt_inner(
                     return Ok(Flow::Exit(code));
                 }
                 let pipefail = env.options.read().pipefail;
-                let last_ec = env.exit_code();
-                let outcome = crate::pipeline_finalize(errors, last_ec, pipefail);
+                let outcome = crate::pipeline_finalize(&outcomes, failures, pipefail);
                 return crate::apply_pipeline_outcome(env, outcome);
             } else {
                 let val = eval_expr(expr, env).await?;
@@ -2028,11 +2171,14 @@ async fn eval_stmt_inner(
             catch_body,
         } => {
             let mut caught_err: Option<EngineError> = None;
+            // A `try` whose body runs nothing, or whose failure the catch handles,
+            // completes successfully unless the catch body says otherwise.
+            env.set_exit_code(0);
             for s in try_body {
                 // Control-flow signals propagate through try/catch — only
                 // real errors are caught.
                 match eval_stmt(s, env, false).await {
-                    Ok(Flow::Normal) => {}
+                    Ok(Flow::Normal) => publish_completion(s, env),
                     Ok(flow) => return Ok(flow),
                     Err(e) => {
                         caught_err = Some(e);
@@ -2050,7 +2196,7 @@ async fn eval_stmt_inner(
                 let mut frame = FxHashMap::default();
                 frame.insert(catch_var.clone(), err_val);
                 let catch_env = env.push_scope(Arc::new(fshell_core::RwLock::new(frame)));
-                match eval_block_flow(catch_body, &catch_env, false).await? {
+                match eval_publishing_block(catch_body, &catch_env, false).await? {
                     Flow::Normal => {}
                     flow => return Ok(flow),
                 }
@@ -2086,12 +2232,9 @@ async fn eval_stmt_inner(
                 cap_prompt_tx: env.caps.cap_prompt_tx.clone(),
                 cap_prompt_rx: env.caps.cap_prompt_rx.clone(),
             };
-            for s in body {
-                match eval_stmt(s, &scoped_env, false).await {
-                    Ok(Flow::Normal) => {}
-                    Ok(flow) => return Ok(flow),
-                    Err(e) => return Err(e),
-                }
+            match eval_publishing_block(body, &scoped_env, false).await? {
+                Flow::Normal => {}
+                flow => return Ok(flow),
             }
             Ok(Flow::Normal)
         }
@@ -2158,7 +2301,7 @@ async fn eval_stmt_inner(
                     } else {
                         env.push_scope(Arc::new(fshell_core::RwLock::new(bindings)))
                     };
-                    match eval_block_flow(&arm.body, &arm_env, false).await? {
+                    match eval_publishing_block(&arm.body, &arm_env, false).await? {
                         Flow::Normal => {}
                         flow => return Ok(flow),
                     }
@@ -2378,6 +2521,9 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::While { condition, body } => {
+            // A loop that runs no iteration completed successfully; an iteration
+            // that runs publishes its own last statement's status.
+            env.set_exit_code(0);
             let old_errexit = {
                 let opts = env.options.read();
                 opts.errexit
@@ -2410,6 +2556,8 @@ async fn eval_stmt_inner(
         }
         // `for <var> in <iterable> { body }`
         Stmt::For { var, iter, body } => {
+            // A loop that runs no iteration completed successfully.
+            env.set_exit_code(0);
             let iterable = eval_expr(iter, env).await?;
             let items = match iterable {
                 Val::List(items) => items,
@@ -2485,7 +2633,7 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::Unsafe { body } => {
-            match eval_block_flow(body, env, true).await? {
+            match eval_publishing_block(body, env, true).await? {
                 Flow::Normal => {}
                 flow => return Ok(flow),
             }

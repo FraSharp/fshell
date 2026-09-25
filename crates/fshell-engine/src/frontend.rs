@@ -59,6 +59,62 @@ pub fn classify_input(input: &str) -> InputClass {
     }
 }
 
+/// Environment variable naming a file to append routing decisions to.
+///
+/// Deliberately unset in normal use: this is a test instrument, not a feature.
+/// When unset the whole cost is one environment lookup and nothing is written,
+/// so it cannot change what a user observes.
+pub const ENGINE_TRACE_VAR: &str = "FSH_ENGINE_TRACE";
+
+/// Why the router chose an engine.
+///
+/// The reason matters as much as the engine: `native-incompatible:PosixTildeUser`
+/// and `native-parse-failed` both end in POSIX but mean opposite things about
+/// native's capabilities. Recording only the engine would let a case pass for
+/// the wrong reason — and would let the router drift into "prefer POSIX when
+/// possible" without anyone noticing.
+pub mod reason {
+    /// `--posix` was passed: the user chose POSIX.
+    pub const EXPLICIT_POSIX: &str = "explicit-posix";
+    /// A script's shebang asked for POSIX, not the flag.
+    pub const POSIX_SHEBANG: &str = "posix-shebang";
+    /// `--native` was passed: the user chose native.
+    pub const EXPLICIT_NATIVE: &str = "explicit-native";
+    /// Auto mode, the native parser accepted, and native owns these semantics.
+    pub const NATIVE_SAFE: &str = "native-safe";
+    /// Auto mode and the native parser rejected the input, so POSIX got it.
+    pub const NATIVE_PARSE_FAILED: &str = "native-parse-failed";
+    /// Auto mode, native parsed the input, but the construct needs POSIX
+    /// semantics native deliberately does not provide.
+    pub fn native_incompatible(requirement: &str) -> String {
+        format!("native-incompatible:{requirement}")
+    }
+}
+
+/// Append one routing decision to `$FSH_ENGINE_TRACE`, when that is set.
+///
+/// Best effort by construction — tracing must never change shell semantics, so
+/// an unset, empty, or unwritable path is silently ignored. Nothing is written
+/// to stdout or stderr: the trace is a file, so it cannot contaminate a
+/// pipeline or perturb a comparison.
+pub fn trace_engine(engine: &str, reason: &str) {
+    use std::io::Write as _;
+
+    let Some(path) = std::env::var_os(ENGINE_TRACE_VAR) else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "engine={engine} reason={reason}");
+    }
+}
+
 /// Run `input` through the POSIX engine.
 pub async fn run_posix(input: &str, env: &Env) -> Result<Flow, EngineError> {
     let handler = crate::posix_handler().ok_or_else(|| EngineError::Generic {
@@ -113,6 +169,7 @@ pub async fn try_posix_fallback(input: &str, env: &Env) -> Result<Option<Flow>, 
     if !matches!(crate::classify_posix(input), Some(PosixSyntax::Complete)) {
         return Ok(None);
     }
+    trace_engine("posix", reason::NATIVE_PARSE_FAILED);
     Ok(Some(run_posix(input, env).await?))
 }
 

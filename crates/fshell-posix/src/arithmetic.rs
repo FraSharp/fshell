@@ -328,7 +328,7 @@ impl<'a> ArithParser<'a> {
         {
             Some(v)
         } else {
-            self.env.vars.read().get(name).cloned()
+            crate::expand::lookup_var(self.env, name)
         };
         if let Some(v) = v_opt {
             let text = match v {

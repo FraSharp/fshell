@@ -553,8 +553,15 @@ async fn test_integration_command_binaries_override() {
         let mut out_rx = rx;
         let mut output = String::new();
         while let Some(payload) = out_rx.recv().await {
-            if let PipelinePayload::Data(val) = payload {
-                output.push_str(&val.to_text());
+            // With no downstream stage the override's stdout stays the command's
+            // own bytes rather than being decoded into a typed value, so accept
+            // either payload shape.
+            match payload {
+                PipelinePayload::Data(val) => output.push_str(&val.to_text()),
+                PipelinePayload::Bytes(bytes) => {
+                    output.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                _ => {}
             }
         }
         output

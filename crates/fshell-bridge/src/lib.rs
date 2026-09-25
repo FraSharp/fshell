@@ -833,9 +833,10 @@ pub async fn run_external(
                 .maybe_with_span(span));
             }
             return Err(ShellError::new(
-                ErrorCode::CommandFailed,
+                ErrorCode::CommandNotExecutable,
                 format!("Failed to spawn {name}: {e}"),
             )
+            .with_help("Check that the file is executable and that its interpreter exists.")
             .maybe_with_span(span));
         }
     };
@@ -971,12 +972,20 @@ pub async fn run_external(
         let json_auto_parse = env.options.read().json_auto_parse;
         let env_clone = env.clone();
         let is_structured = structured::is_known_structured_command(&name_owned, &args_strs);
+        // Decoding an external command's stdout into a typed value only makes sense
+        // when a downstream stage actually consumes a value. At the terminal
+        // boundary the command's own bytes must survive verbatim: re-serialising
+        // whatever happened to parse as JSON rewrote the output (`{"a":1}` came
+        // back in fsh's tagged form and `[1,2]` became two lines), which breaks
+        // composability with every ordinary Unix tool that speaks JSON.
+        let auto_parse_json = json_auto_parse && has_next;
+        let decode_into_value = is_structured || auto_parse_json;
         let output_cancelled_clone = output_cancelled.clone();
         io_tasks.push(tokio::spawn(async move {
             use structured::{ParseResult, ParseState};
             use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
-            if !is_structured && !json_auto_parse {
+            if !decode_into_value {
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
                     let n = match async_stdout.read(&mut buf).await {
@@ -1044,7 +1053,7 @@ pub async fn run_external(
                                 }
                                 ParseResult::Fallthrough => {
                                     // Fall back to existing JSON detection
-                                    if json_auto_parse
+                                    if auto_parse_json
                                         && ((trimmed.starts_with('{') && trimmed.ends_with('}'))
                                             || (trimmed.starts_with('[') && trimmed.ends_with(']')))
                                     {

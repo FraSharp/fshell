@@ -71,11 +71,80 @@ pub enum OnHandler {
     FunctionName(String),
 }
 
+/// How a fragment of a word was written, which decides whether its characters
+/// are literal data or pattern syntax.
+///
+/// This has to be tracked per fragment, not per word. `foo'*'*.rs` is one word
+/// whose middle `*` is literal and whose trailing `*.rs` is a pattern, so a
+/// single "the word was quoted" flag is not expressive enough to describe it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum QuoteKind {
+    /// Bare text. Pattern metacharacters are active and the field is splittable.
+    Unquoted,
+    /// `'…'` — every character is literal, never a pattern.
+    Single,
+    /// `"…"` — interpolated, but every character is literal, never a pattern.
+    Double,
+    /// Backslash-escaped source text. Literal like quoted text, but no
+    /// interpolation; the text keeps whatever backslashes the parser retained.
+    Escaped,
+}
+
+impl QuoteKind {
+    /// Whether characters in this fragment are literal rather than pattern
+    /// syntax. Expansion must not treat them as metacharacters.
+    pub fn is_literal(self) -> bool {
+        !matches!(self, QuoteKind::Unquoted)
+    }
+}
+
 /// A segment of an interpolated string.
+///
+/// Each segment records how it was written, so the distinction between data and
+/// pattern syntax survives parsing all the way to expansion. Consumers that only
+/// need the word's text can ignore `quote`; consumers that glob or split the
+/// result cannot.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StringPart {
-    Lit(String),
-    Expr(Box<Expr>),
+    Lit { text: String, quote: QuoteKind },
+    Expr { expr: Box<Expr>, quote: QuoteKind },
+}
+
+impl StringPart {
+    /// Literal text that fsh synthesised itself, so it has no source quoting.
+    ///
+    /// For parser sites use the struct literal instead: choosing a `QuoteKind`
+    /// there is a real decision about how the text behaves.
+    pub fn unquoted(text: impl Into<String>) -> Self {
+        StringPart::Lit {
+            text: text.into(),
+            quote: QuoteKind::Unquoted,
+        }
+    }
+
+    /// The quoting of this fragment, whichever variant it is.
+    pub fn quote(&self) -> QuoteKind {
+        match self {
+            StringPart::Lit { quote, .. } | StringPart::Expr { quote, .. } => *quote,
+        }
+    }
+
+    /// The word's text, if the whole word is literal — of any quoting form.
+    ///
+    /// This is the faithful translation of "this word is a plain string": before
+    /// quote provenance existed, all literal text lived in a single `Lit`, so
+    /// callers asked `parts.len() == 1`. A word may now be several literal
+    /// fragments (`foo'bar'`), and those still mean a plain string.
+    pub fn literal_text(parts: &[StringPart]) -> Option<String> {
+        let mut text = String::new();
+        for part in parts {
+            match part {
+                StringPart::Lit { text: lit, .. } => text.push_str(lit),
+                StringPart::Expr { .. } => return None,
+            }
+        }
+        Some(text)
+    }
 }
 
 /// Binary operators.

@@ -50,8 +50,10 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 autobins = false
+default-run = "fsh"
 include = [
     "src/**/*",
+    "tests/helpers/**/*",
     "vendor/crossterm/**/*",
     "build.rs",
     "LICENSE",
@@ -88,6 +90,20 @@ extract = ["fshell-builtins/extract"]
 [[bin]]
 name = "fsh"
 path = "src/main.rs"
+
+# Deterministic argv inspector used by the differential conformance suite
+# (`tests/conformance_tests.rs`). It is a test instrument, not a shipping
+# utility: it exists so shell word expansion can be observed without the
+# semantics of a real utility obscuring the result.
+[[bin]]
+name = "argvdump"
+path = "tests/helpers/argvdump.rs"
+
+# Deterministic stdout/stderr/exit emitter used by the differential conformance
+# suite for redirection, stream-merging and exit-status cases.
+[[bin]]
+name = "emit"
+path = "tests/helpers/emit.rs"
 
 [dependencies]
 fshell-core = { path = "crates/fshell-core" }

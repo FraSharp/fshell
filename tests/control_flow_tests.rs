@@ -737,7 +737,7 @@ async fn test_eval_source_statement() {
     std::fs::write(&script_path, "let sourced_val = 99\n").unwrap();
 
     let source_stmt = Stmt::Source {
-        path: fshell_core::Expr::String(vec![fshell_core::StringPart::Lit(
+        path: fshell_core::Expr::String(vec![fshell_core::StringPart::unquoted(
             script_path.to_string_lossy().to_string(),
         )]),
         bash: false,
@@ -947,7 +947,15 @@ async fn test_exit_code_tracking_failure() {
     .await
     .unwrap();
 
-    assert_eq!(env.exit_code(), 42, "exit 42 should set exit code 42");
+    // A command is not a completed statement: its status stays in the pipeline's
+    // ledger until the statement that owns it finalizes, which is what keeps `$?`
+    // from moving while a command's words are still expanding. Which slot holds
+    // that pending status is covered by the engine's own unit tests.
+    assert_eq!(
+        env.exit_code(),
+        0,
+        "`$?` must not move until a statement completes"
+    );
 }
 
 #[tokio::test]
@@ -1313,58 +1321,32 @@ fn test_glob_expand_single_word() {
 async fn test_integration_exit_code_variables() {
     let mut env = setup_test_env();
     env.is_last_stage = true;
-    let (tx, _rx) = tokio::sync::mpsc::channel(100);
 
-    // 1. Run external command that fails with 42
-    fshell_bridge::run_external(
-        "sh",
-        vec![
-            Val::String("-c".to_string()),
-            Val::String("exit 42".to_string()),
-        ],
-        None,
-        &env,
-        tx.clone(),
-        false,
-        None,
-    )
-    .await
-    .unwrap();
-
-    // Check $? and $status via eval_expr
-    let mut parser = Parser::new("$?");
-    let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = stmts[0].unpack() {
-        let res = eval_expr(expr, &env).await.unwrap();
-        assert_eq!(res, Val::Int(42));
+    // `$?` and `$status` report the last *completed statement*, so these drive
+    // real statements: a command's status becomes observable when the statement
+    // that owns it finalizes, and stays put while its words expand.
+    async fn run_statement(script: &str, env: &Env) {
+        let stmts = Parser::new(script).parse_statements().unwrap();
+        for stmt in &stmts {
+            eval_stmt(stmt, env, false).await.unwrap();
+        }
     }
 
-    let mut parser = Parser::new("$status");
-    let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = stmts[0].unpack() {
-        let res = eval_expr(expr, &env).await.unwrap();
-        assert_eq!(res, Val::Int(42));
+    async fn status_of(name: &str, env: &Env) -> Val {
+        eval_expr(&Expr::Variable(name.to_string()), env)
+            .await
+            .unwrap()
     }
 
-    // 2. Run external command that succeeds
-    fshell_bridge::run_external("true", vec![], None, &env, tx, false, None)
-        .await
-        .unwrap();
+    // 1. An external command that fails with 42
+    run_statement("sh -c 'exit 42'", &env).await;
+    assert_eq!(status_of("?", &env).await, Val::Int(42));
+    assert_eq!(status_of("status", &env).await, Val::Int(42));
 
-    // Check $? and $status are now 0
-    let mut parser = Parser::new("$?");
-    let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = stmts[0].unpack() {
-        let res = eval_expr(expr, &env).await.unwrap();
-        assert_eq!(res, Val::Int(0));
-    }
-
-    let mut parser = Parser::new("$status");
-    let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = stmts[0].unpack() {
-        let res = eval_expr(expr, &env).await.unwrap();
-        assert_eq!(res, Val::Int(0));
-    }
+    // 2. An external command that succeeds
+    run_statement("true", &env).await;
+    assert_eq!(status_of("?", &env).await, Val::Int(0));
+    assert_eq!(status_of("status", &env).await, Val::Int(0));
 }
 
 // ---------------------------------------------------------------------------

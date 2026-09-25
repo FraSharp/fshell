@@ -5,7 +5,7 @@ use crate::eval::{eval_binop, is_query_stage, matches_pattern, pad_truncate, par
 use crate::glob::expand_braces;
 use crate::suggestions::levenshtein_distance;
 use crate::*;
-use fshell_core::ast::{BinOp, Expr, Stmt};
+use fshell_core::ast::{BinOp, Expr, QuoteKind, Stmt};
 use fshell_core::env_utils::{remove_var, set_var};
 use fshell_core::{
     FxIndexMap, LiteralPattern, MatchArm, MatchPattern, Param, Parser, Pipeline, PipelineStage,
@@ -181,9 +181,22 @@ mod tests {
         );
     }
 
+    /// A pipeline ledger with `stages` command slots.
+    fn ledger(stages: usize) -> std::sync::Arc<crate::execution::PipelineOutcomes> {
+        let outcomes = crate::execution::PipelineOutcomes::new();
+        outcomes.set_stages(stages);
+        outcomes
+    }
+
+    fn record(outcomes: &crate::execution::PipelineOutcomes, index: usize, status: i64) {
+        outcomes.record_status(crate::execution::Slot::Stage(index), status);
+    }
+
     #[test]
     fn finalize_no_failures_keeps_last_exit_code() {
-        let outcome = pipeline_finalize(Vec::new(), 7, false);
+        let outcomes = ledger(1);
+        record(&outcomes, 0, 7);
+        let outcome = pipeline_finalize(&outcomes, Vec::new(), false);
         assert_eq!(outcome.exit_code, 7);
         assert!(outcome.failure.is_none());
     }
@@ -194,7 +207,7 @@ mod tests {
             PipelineFailure::ConditionFalse,
             PipelineFailure::ConditionFalse,
         ];
-        let outcome = pipeline_finalize(failures, 0, false);
+        let outcome = pipeline_finalize(&ledger(1), failures, false);
         assert_eq!(outcome.exit_code, 1);
         assert!(matches!(
             outcome.failure,
@@ -203,9 +216,13 @@ mod tests {
     }
 
     #[test]
-    fn finalize_condition_false_respects_nonzero_last_exit_code() {
-        let outcome = pipeline_finalize(vec![PipelineFailure::ConditionFalse], 3, false);
-        assert_eq!(outcome.exit_code, 1);
+    fn finalize_condition_false_keeps_the_stage_own_status() {
+        // Logical `false` decides control flow; the status is still whatever the
+        // stage recorded for itself.
+        let outcomes = ledger(1);
+        record(&outcomes, 0, 3);
+        let outcome = pipeline_finalize(&outcomes, vec![PipelineFailure::ConditionFalse], false);
+        assert_eq!(outcome.exit_code, 3);
         assert!(matches!(
             outcome.failure,
             Some(PipelineFailure::ConditionFalse)
@@ -223,14 +240,16 @@ mod tests {
             span: None,
         });
         let failures = vec![
-            PipelineFailure::Hard(hard_a),
+            PipelineFailure::Hard(Some(hard_a)),
             PipelineFailure::ConditionFalse,
-            PipelineFailure::Hard(hard_b),
+            PipelineFailure::Hard(Some(hard_b)),
         ];
-        let outcome = pipeline_finalize(failures, 2, false);
+        let outcomes = ledger(1);
+        record(&outcomes, 0, 2);
+        let outcome = pipeline_finalize(&outcomes, failures, false);
         assert_eq!(outcome.exit_code, 2);
         match outcome.failure {
-            Some(PipelineFailure::Hard(diag)) => {
+            Some(PipelineFailure::Hard(Some(diag))) => {
                 assert!(diag.report.to_string().contains("last failure"));
             }
             other => panic!("expected PipelineFailure::Hard, got {other:?}"),
@@ -239,22 +258,30 @@ mod tests {
 
     #[test]
     fn finalize_pipefail_synthesizes_exit_1_when_last_stage_succeeded() {
-        let failures = vec![PipelineFailure::Hard(FshDiag::new(EngineError::Generic {
-            message: "boom".to_string(),
-            span: None,
-        }))];
-        let outcome = pipeline_finalize(failures, 0, true);
+        let failures = vec![PipelineFailure::Hard(Some(FshDiag::new(
+            EngineError::Generic {
+                message: "boom".to_string(),
+                span: None,
+            },
+        )))];
+        let outcomes = ledger(1);
+        record(&outcomes, 0, 0);
+        let outcome = pipeline_finalize(&outcomes, failures, true);
         assert_eq!(outcome.exit_code, 1);
         assert!(outcome.failure.is_some());
     }
 
     #[test]
     fn finalize_pipefail_prefers_nonzero_last_exit_code() {
-        let failures = vec![PipelineFailure::Hard(FshDiag::new(EngineError::Generic {
-            message: "boom".to_string(),
-            span: None,
-        }))];
-        let outcome = pipeline_finalize(failures, 5, true);
+        let failures = vec![PipelineFailure::Hard(Some(FshDiag::new(
+            EngineError::Generic {
+                message: "boom".to_string(),
+                span: None,
+            },
+        )))];
+        let outcomes = ledger(1);
+        record(&outcomes, 0, 5);
+        let outcome = pipeline_finalize(&outcomes, failures, true);
         assert_eq!(outcome.exit_code, 5);
     }
 
@@ -1025,7 +1052,7 @@ mod tests {
         let env = Env::new();
         assert_eq!(
             eval_expr(
-                &Expr::String(vec![StringPart::Lit("hello world".into())]),
+                &Expr::String(vec![StringPart::unquoted("hello world")]),
                 &env
             )
             .await
@@ -1041,9 +1068,12 @@ mod tests {
             .write()
             .insert("name".into(), Val::String("Alice".into()));
         let expr = Expr::String(vec![
-            StringPart::Lit("Hello, ".into()),
-            StringPart::Expr(Box::new(Expr::Ident("name".into()))),
-            StringPart::Lit("!".into()),
+            StringPart::unquoted("Hello, "),
+            StringPart::Expr {
+                expr: Box::new(Expr::Ident("name".into())),
+                quote: QuoteKind::Unquoted,
+            },
+            StringPart::unquoted("!"),
         ]);
         assert_eq!(
             eval_expr(&expr, &env).await.unwrap(),
@@ -1056,8 +1086,11 @@ mod tests {
         let env = Env::new();
         env.vars.write().insert("val".into(), Val::Int(42));
         let expr = Expr::String(vec![
-            StringPart::Lit("value=".into()),
-            StringPart::Expr(Box::new(Expr::Variable("val".into()))),
+            StringPart::unquoted("value="),
+            StringPart::Expr {
+                expr: Box::new(Expr::Variable("val".into())),
+                quote: QuoteKind::Unquoted,
+            },
         ]);
         assert_eq!(
             eval_expr(&expr, &env).await.unwrap(),
@@ -1120,7 +1153,7 @@ mod tests {
             ("a".into(), Expr::Int(10)),
             (
                 "b".into(),
-                Expr::String(vec![StringPart::Lit("hello".into())]),
+                Expr::String(vec![StringPart::unquoted("hello")]),
             ),
         ]);
         let val = eval_expr(&expr, &env).await.unwrap();
@@ -1522,14 +1555,14 @@ mod tests {
                     pattern: MatchPattern::Literal(LiteralPattern::Int(0)),
                     body: vec![Stmt::Let {
                         name: "matched".into(),
-                        expr: Expr::String(vec![StringPart::Lit("zero".into())]),
+                        expr: Expr::String(vec![StringPart::unquoted("zero")]),
                     }],
                 },
                 MatchArm {
                     pattern: MatchPattern::Literal(LiteralPattern::Int(42)),
                     body: vec![Stmt::Let {
                         name: "matched".into(),
-                        expr: Expr::String(vec![StringPart::Lit("forty-two".into())]),
+                        expr: Expr::String(vec![StringPart::unquoted("forty-two")]),
                     }],
                 },
             ],
@@ -1803,7 +1836,7 @@ mod tests {
         .unwrap();
 
         let stmt = Stmt::Source {
-            path: Expr::String(vec![StringPart::Lit(
+            path: Expr::String(vec![StringPart::unquoted(
                 file_path.to_string_lossy().to_string(),
             )]),
             bash: true,
@@ -1836,7 +1869,7 @@ mod tests {
         .unwrap();
 
         let stmt = Stmt::Source {
-            path: Expr::String(vec![StringPart::Lit(
+            path: Expr::String(vec![StringPart::unquoted(
                 file_path.to_string_lossy().to_string(),
             )]),
             bash: false,
@@ -1869,7 +1902,7 @@ mod tests {
         std::fs::write(&file_path, b"let x = | invalid fshell syntax !!!\n").unwrap();
 
         let stmt = Stmt::Source {
-            path: Expr::String(vec![StringPart::Lit(
+            path: Expr::String(vec![StringPart::unquoted(
                 file_path.to_string_lossy().to_string(),
             )]),
             bash: false,
@@ -2182,57 +2215,116 @@ mod proptests {
     }
 
     fn hard_failure(message: &str) -> crate::PipelineFailure {
-        crate::PipelineFailure::Hard(fshell_core::diagnostic::FshDiag::from(
+        crate::PipelineFailure::Hard(Some(fshell_core::diagnostic::FshDiag::from(
             fshell_core::ShellError::new(
                 fshell_core::diagnostic::ErrorCode::CommandFailed,
                 message.to_string(),
             ),
-        ))
+        )))
+    }
+
+    /// A pipeline ledger with `stages` command slots.
+    fn ledger(stages: usize) -> std::sync::Arc<crate::execution::PipelineOutcomes> {
+        let outcomes = crate::execution::PipelineOutcomes::new();
+        outcomes.set_stages(stages);
+        outcomes
+    }
+
+    fn record(outcomes: &crate::execution::PipelineOutcomes, index: usize, status: i64) {
+        outcomes.record_status(crate::execution::Slot::Stage(index), status);
     }
 
     #[test]
     fn pipeline_finalize_hard_failure_is_never_zero() {
         // Regression: a hard failure produced through a channel diagnostic (not
-        // the shared status slot) left `last_ec` at 0 and finalized the whole
-        // pipeline to exit 0.
-        let outcome = crate::pipeline_finalize(vec![hard_failure("boom")], 0, false);
+        // a recorded status) must not finalize the whole pipeline to exit 0.
+        let outcome = crate::pipeline_finalize(&ledger(1), vec![hard_failure("boom")], false);
         assert_ne!(outcome.exit_code, 0);
         assert!(outcome.failure.is_some());
     }
 
     #[test]
     fn pipeline_finalize_hard_failure_preserves_nonzero_status() {
-        let outcome = crate::pipeline_finalize(vec![hard_failure("boom")], 3, false);
+        let outcomes = ledger(1);
+        record(&outcomes, 0, 3);
+        let outcome = crate::pipeline_finalize(&outcomes, Vec::new(), false);
         assert_eq!(outcome.exit_code, 3);
     }
 
     #[test]
     fn pipeline_finalize_success_uses_last_status() {
-        let outcome = crate::pipeline_finalize(Vec::new(), 7, false);
-        assert_eq!(outcome.exit_code, 7);
+        let outcomes = ledger(2);
+        record(&outcomes, 0, 7);
+        record(&outcomes, 1, 0);
+        let outcome = crate::pipeline_finalize(&outcomes, Vec::new(), false);
+        assert_eq!(outcome.exit_code, 0);
         assert!(outcome.failure.is_none());
     }
 
     #[test]
     fn pipeline_finalize_condition_false_without_pipefail_is_one() {
-        let outcome =
-            crate::pipeline_finalize(vec![crate::PipelineFailure::ConditionFalse], 0, false);
+        let outcome = crate::pipeline_finalize(
+            &ledger(1),
+            vec![crate::PipelineFailure::ConditionFalse],
+            false,
+        );
         assert_eq!(outcome.exit_code, 1);
     }
 
     #[test]
-    fn non_last_stage_error_does_not_clobber_status() {
-        // Only the last stage owns the invocation status; an earlier stage's
-        // failure must not race the last stage for it (`false | true`).
+    fn pipefail_sees_every_stage_not_just_the_last_writer() {
+        // `false | true`: the earlier stage's failure must not be overwritten by
+        // the later stage's success. POSIX takes the last stage's status;
+        // `pipefail` takes the last stage that failed.
+        let outcomes = ledger(2);
+        record(&outcomes, 0, 1);
+        record(&outcomes, 1, 0);
+
+        let posix = crate::pipeline_finalize(&outcomes, Vec::new(), false);
+        assert_eq!(posix.exit_code, 0, "the last command succeeded");
+        let with_pipefail = crate::pipeline_finalize(&outcomes, Vec::new(), true);
+        assert_eq!(with_pipefail.exit_code, 1, "the earlier stage failed");
+    }
+
+    #[test]
+    fn a_stage_records_into_its_own_slot() {
+        // Recording a stage's status is not committing `$?`, and an `Env` that is
+        // not part of a pipeline records nowhere.
+        let outcomes = ledger(1);
         let mut env = Env::new();
         env.set_exit_code(5);
-        env.is_last_stage = false;
-        env.report_stage_error();
+        env.attach_stage(outcomes.clone(), crate::execution::Slot::Stage(0));
         env.report_stage_error_code(127);
-        assert_eq!(env.exit_code(), 5, "non-last stage must not write status");
+        assert_eq!(
+            outcomes.recorded_status(crate::execution::Slot::Stage(0)),
+            Some(127)
+        );
+        assert_eq!(env.exit_code(), 5, "`$?` must not move");
 
-        env.is_last_stage = true;
-        env.report_stage_error();
-        assert_eq!(env.exit_code(), 1, "last stage owns the status");
+        let bare = Env::new();
+        bare.report_stage_error();
+        assert_eq!(bare.recorded_stage_status(), None);
+    }
+
+    #[test]
+    fn stage_status_never_moves_the_expanded_status() {
+        // `$?` expands to the status of the last *completed* statement, so a
+        // pipeline in flight must be invisible to it. This is the bug that made
+        // `false; echo "$?"` print 0: the executor cleared the status slot it
+        // was still accumulating into before the word expanded.
+        let env = Env::new();
+        env.set_exit_code(3);
+
+        // A stage records into its pipeline's ledger, never into `$?`.
+        let outcomes = ledger(1);
+        let mut stage_env = env.clone();
+        stage_env.attach_stage(outcomes.clone(), crate::execution::Slot::Stage(0));
+        stage_env.record_stage_status(127);
+        assert_eq!(env.exit_code(), 3, "a running pipeline must not move `$?`");
+
+        // Finalizing the statement publishes what the pipeline recorded.
+        let accumulated = crate::pipeline_finalize(&outcomes, Vec::new(), false).exit_code;
+        env.set_exit_code(accumulated);
+        assert_eq!(env.exit_code(), 127);
     }
 }

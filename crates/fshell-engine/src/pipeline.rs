@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use crate::Flow;
 use crate::eval::{json_value_to_val, val_to_json_value};
 use crate::{
     CapAction, EngineError, Env, LocalScope, PendingSuggestion, PipeSender, PipeStream,
     PipelinePayload, SuggestionMode, cmp_vals, decode_csv_input, eval_expr, eval_stmt,
-    expand_alias_with_args, expand_globs, get_suggested_command, is_external_command_at,
-    pipeline_channel_size, render_bar_chart, render_table, run_boundary_operator,
+    expand_alias_with_args, get_suggested_command, is_external_command_at, pipeline_channel_size,
+    render_bar_chart, render_table, run_boundary_operator,
 };
-use crate::{Flow, PipelineFailure};
 use fshell_core::ShellError;
 use fshell_core::lock::{Mutex, RwLock};
 use fshell_core::{
@@ -68,6 +68,10 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
     let (tx, mut rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
     let mut env_clone = env.clone();
     env_clone.is_captured = true;
+    // The nested pipeline gets its own ledger, installed on the clone it runs
+    // on, so its stages never touch the enclosing pipeline's slots.
+    let outcomes = crate::execution::PipelineOutcomes::new();
+    env_clone.attach_stage(outcomes.clone(), crate::execution::Slot::Boundary);
     // A command substitution is a separate, captured execution tree. It must
     // not join the surrounding foreground pipeline's process group or count
     // toward that pipeline's launch barrier. Inheriting the context lets a
@@ -82,7 +86,6 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
         }
     });
     let mut results = Vec::new();
-    let mut has_logical_error = false;
     while let Some(payload) = rx.recv().await {
         if env.pipeline_cancelled() {
             break;
@@ -94,22 +97,27 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
                 results.push(strip_capture_sentinel(Val::String(s)));
             }
             PipelinePayload::Structured(d) => {
-                if crate::is_condition_false_diag(&d) {
-                    env.set_exit_code(1);
-                    has_logical_error = true;
-                    continue;
+                crate::render_stage_diag(env, &d);
+                // An engine-level error still unwinds the expansion, so a failure
+                // inside a substitution is not quietly swallowed.
+                if let crate::PipelineFailure::Hard(diag) = crate::classify_diag(d) {
+                    return Err(match diag {
+                        Some(diag) => crate::engine_error_from_diag(&diag),
+                        None => EngineError::PipelineError {
+                            message: "a pipeline stage failed".to_string(),
+                            span: None,
+                        },
+                    });
                 }
-                env.set_exit_code(1);
-                return Err(EngineError::PipelineError {
-                    message: d.to_string(),
-                    span: None,
-                });
             }
         }
     }
-    if !has_logical_error {
-        env.set_exit_code(0);
-    }
+    // A command substitution's status belongs to the command being expanded, so
+    // it is recorded for the enclosing stage rather than committed: `$?` keeps
+    // reporting the enclosing statement's last completed command until that
+    // statement finishes.
+    let nested = crate::pipeline_finalize(&outcomes, Vec::new(), env.options.read().pipefail);
+    env.record_stage_status(nested.exit_code);
     Ok(results)
 }
 
@@ -214,8 +222,8 @@ fn collect_expr_idents(expr: &Expr, idents: &mut FxHashSet<String>) {
         }
         Expr::String(parts) => {
             for part in parts {
-                if let StringPart::Expr(e) = part {
-                    collect_expr_idents(e, idents);
+                if let StringPart::Expr { expr, .. } = part {
+                    collect_expr_idents(expr, idents);
                 }
             }
         }
@@ -389,24 +397,42 @@ fn is_output_redirect(stage: &PipelineStage) -> bool {
     )
 }
 
+/// Why a pipeline could not be planned.
+///
+/// The distinction decides what the statement does next. A redirection that
+/// cannot be established is a *command-level* failure: the shell reports it and
+/// carries on with status 1, exactly as POSIX does when a redirect cannot be
+/// opened. Anything else — an invalid pipeline shape, a denied capability — is an
+/// engine-level error, which aborts the statement.
+enum PlanError {
+    Redirection(String),
+    Engine(String),
+}
+
 async fn open_output_redirect(
     path: &fshell_core::Expr,
     append: bool,
     env: &Env,
-) -> Result<Arc<tokio::sync::Mutex<tokio::fs::File>>, String> {
+) -> Result<Arc<tokio::sync::Mutex<tokio::fs::File>>, PlanError> {
     let path_val = match eval_expr(path, env).await {
         Ok(Val::String(s)) => s,
         Ok(other) => {
-            return Err(format!(
+            return Err(PlanError::Redirection(format!(
                 "redirect target must be a string path, got {:?}",
                 other
-            ));
+            )));
         }
-        Err(e) => return Err(format!("redirect path evaluation error: {e}")),
+        Err(e) => {
+            return Err(PlanError::Redirection(format!(
+                "redirect path evaluation error: {e}"
+            )));
+        }
     };
     let path_buf = env.resolve_path(&path_val);
+    // A denied capability is not a redirection that failed: it is the shell
+    // refusing to perform the operation, and it must abort.
     env.enforce_capability("write_redirect", CapAction::WriteFile(path_buf.clone()))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| PlanError::Engine(e.to_string()))?;
 
     let noclobber = env.options.read().noclobber;
     let is_dev_null = path_val == "/dev/null"
@@ -422,15 +448,21 @@ async fn open_output_redirect(
     }
     let file = options.open(&path_buf).await.map_err(|e| {
         if noclobber && !append && !is_dev_null && path_buf.exists() {
-            format!("noclobber: file '{}' already exists", path_val)
+            PlanError::Redirection(format!("noclobber: file '{}' already exists", path_val))
         } else {
-            format!("failed to open redirect target '{}': {e}", path_val)
+            PlanError::Redirection(format!(
+                "failed to open redirect target '{}': {e}",
+                path_val
+            ))
         }
     })?;
     Ok(Arc::new(tokio::sync::Mutex::new(file)))
 }
 
-async fn build_pipeline_plan(pipeline: &Pipeline, env: &Env) -> Result<Vec<PlannedStage>, String> {
+async fn build_pipeline_plan(
+    pipeline: &Pipeline,
+    env: &Env,
+) -> Result<Vec<PlannedStage>, PlanError> {
     let mut boundaries = pipeline.boundaries.clone();
     if boundaries.is_empty() && pipeline.stages.len() > 1 {
         boundaries = pipeline
@@ -460,7 +492,9 @@ async fn build_pipeline_plan(pipeline: &Pipeline, env: &Env) -> Result<Vec<Plann
         .any(|&boundary| boundary > pipeline.stages.len())
         || boundaries.windows(2).any(|window| window[0] >= window[1])
     {
-        return Err("invalid pipeline boundary metadata".to_string());
+        return Err(PlanError::Engine(
+            "invalid pipeline boundary metadata".to_string(),
+        ));
     }
 
     let mut ranges = Vec::with_capacity(boundaries.len() + 1);
@@ -500,10 +534,14 @@ async fn build_pipeline_plan(pipeline: &Pipeline, env: &Env) -> Result<Vec<Plann
             if inputs.is_empty() && outputs.is_empty() {
                 continue;
             }
-            return Err("pipeline redirection has no command stage".to_string());
+            return Err(PlanError::Engine(
+                "pipeline redirection has no command stage".to_string(),
+            ));
         }
         if operations.len() != 1 {
-            return Err("pipeline segment contains more than one command stage".to_string());
+            return Err(PlanError::Engine(
+                "pipeline segment contains more than one command stage".to_string(),
+            ));
         }
 
         let is_last_segment = segment_index + 1 == ranges.len();
@@ -685,26 +723,96 @@ async fn route_payload(
     Ok(())
 }
 
+/// One turn of [`execute_output_route`]: a payload from one of its streams, or the
+/// end of one of them.
+enum RouteInput {
+    Payload(PipelinePayload),
+    DataClosed,
+    DiagnosticsClosed,
+}
+
+/// Take the next payload from whichever of the route's streams has one.
+///
+/// `data` is the last stage's output and `diagnostics` is everything earlier
+/// stages forked off before a downstream stage could swallow it. Their relative
+/// order is not meaningful — they are different destinations' worth of output —
+/// so this is a plain select, and `Receiver::recv` is cancellation-safe.
+async fn next_route_input(
+    data: Option<&mut PipeStream>,
+    diagnostics: Option<&mut PipeStream>,
+) -> Option<RouteInput> {
+    match (data, diagnostics) {
+        (None, None) => None,
+        (Some(rx), None) => Some(match rx.recv().await {
+            Some(payload) => RouteInput::Payload(payload),
+            None => RouteInput::DataClosed,
+        }),
+        (None, Some(rx)) => Some(match rx.recv().await {
+            Some(payload) => RouteInput::Payload(payload),
+            None => RouteInput::DiagnosticsClosed,
+        }),
+        (Some(data_rx), Some(diagnostics_rx)) => Some(tokio::select! {
+            payload = data_rx.recv() => match payload {
+                Some(payload) => RouteInput::Payload(payload),
+                None => RouteInput::DataClosed,
+            },
+            payload = diagnostics_rx.recv() => match payload {
+                Some(payload) => RouteInput::Payload(payload),
+                None => RouteInput::DiagnosticsClosed,
+            },
+        }),
+    }
+}
+
 async fn execute_output_route(
     routes: OutputRoutes,
-    mut current_rx: Option<PipeStream>,
+    mut data: Option<PipeStream>,
+    mut diagnostics: Option<PipeStream>,
     out_tx: PipeSender,
     env: Env,
 ) {
-    let Some(mut rx) = current_rx.take() else {
-        return;
-    };
-    while let Some(payload) = rx.recv().await {
+    // Two streams meet at the boundary: the last stage's data, routed by payload
+    // kind, and the pipeline's diagnostics. Routing both here is what makes a
+    // redirect move text without erasing the failure it reports.
+    loop {
+        let Some(next) = next_route_input(data.as_mut(), diagnostics.as_mut()).await else {
+            break;
+        };
+        let payload = match next {
+            RouteInput::Payload(payload) => payload,
+            RouteInput::DataClosed => {
+                data = None;
+                continue;
+            }
+            RouteInput::DiagnosticsClosed => {
+                diagnostics = None;
+                continue;
+            }
+        };
         if env.pipeline_cancelled() {
             break;
         }
-        let route = match payload {
-            PipelinePayload::Structured(_) => &routes.stderr,
+        let route = match &payload {
+            PipelinePayload::Structured(diag) => {
+                // The boundary is where every diagnostic of the pipeline passes
+                // on its way out, so it is where a stage failure is recorded
+                // before routing decides what happens to the text. Redirecting a
+                // diagnostic away (`2>/dev/null`) then moves the message without
+                // erasing the failure it reports.
+                env.record_stage_failure(diag.clone());
+                &routes.stderr
+            }
             _ => &routes.stdout,
         };
         if let Err(error) = route_payload(payload, route, &out_tx).await {
-            env.report_stage_error();
-            let _ = out_tx.send(PipelinePayload::Structured(error.into())).await;
+            // A destination that cannot be written is a command-level failure:
+            // the pipeline reports it and carries on with status 1.
+            let diag = FshDiag::from(fshell_core::ShellError::new(
+                fshell_core::diagnostic::ErrorCode::RedirectionFailed,
+                error,
+            ));
+            env.record_stage_failure(diag.clone());
+            let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
             break;
         }
     }
@@ -796,7 +904,21 @@ async fn execute_pipeline_with_input_and_cancellation(
     )
     .await;
     if let Some(mut span) = span.take() {
-        span.add_attr("exit_code", pipeline_env.exit_code());
+        // The statement's finalizer has not committed yet, so what the pipeline
+        // has recorded so far is all there is to report.
+        let exit_code = pipeline_env
+            .stage
+            .as_ref()
+            .map(|stage| {
+                crate::pipeline_finalize(
+                    stage.outcomes(),
+                    Vec::new(),
+                    pipeline_env.options.read().pipefail,
+                )
+                .exit_code
+            })
+            .unwrap_or(0);
+        span.add_attr("exit_code", exit_code);
         span.finish(if result.is_ok() {
             crate::trace::SpanOutcome::Ok
         } else {
@@ -820,7 +942,21 @@ async fn execute_pipeline_inner(
     if pipeline.stages.is_empty() {
         return Ok(());
     }
-    let stages = build_pipeline_plan(pipeline, env).await?;
+    let stages = match build_pipeline_plan(pipeline, env).await {
+        Ok(stages) => stages,
+        Err(PlanError::Engine(message)) => return Err(message),
+        Err(PlanError::Redirection(message)) => {
+            // A redirection that cannot be established is a command-level failure:
+            // report it and let the statement continue with status 1, exactly as a
+            // failing stage would.
+            let diag = FshDiag::from(fshell_core::ShellError::new(
+                fshell_core::diagnostic::ErrorCode::RedirectionFailed,
+                message,
+            ));
+            let _ = tx.send(PipelinePayload::Structured(diag)).await;
+            return Ok(());
+        }
+    };
     let expected_external_stages = count_direct_external_stages(&stages, env);
     // A multi-stage foreground pipeline is one terminal job. Every external
     // process launched by its stages shares this context, and its final owner
@@ -877,6 +1013,28 @@ async fn execute_pipeline_inner(
         }};
     }
 
+    // The pipeline's ledger: one slot per command stage, plus the boundary slot
+    // the driving env writes to. Only the planner knows how many command stages
+    // there really are.
+    let outcomes = match env.stage.as_ref() {
+        Some(stage) => stage.outcomes().clone(),
+        None => crate::execution::PipelineOutcomes::new(),
+    };
+    outcomes.set_stages(
+        stages
+            .iter()
+            .filter(|planned| matches!(planned, PlannedStage::Ast { .. }))
+            .count(),
+    );
+
+    // Diagnostics travel on their own channel rather than in the data stream: a
+    // failure marker must reach the pipeline's diagnostic destination even when a
+    // later stage never reads its input. Every hop forks one off below; the
+    // output-route stage (or the caller's stream, when no route is planned) is
+    // where they come back together.
+    let (diag_tx, diag_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
+    let mut diag_rx = Some(diag_rx);
+
     for (stage_index, planned_stage) in stages.into_iter().enumerate() {
         if let Some(span) = stage_span.take() {
             span.finish(crate::trace::SpanOutcome::Cancelled);
@@ -900,17 +1058,32 @@ async fn execute_pipeline_inner(
         stage_span = env
             .trace
             .span(env.trace_context, "pipeline.stage", env.trace_mode, attrs);
-        let (stage_tx, stage_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
+        let (stage_tx, mut stage_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
         let mut env_clone = env.clone();
         env_clone.pipeline_job = stage_pipeline_job.clone();
+        // Every stage records into its own slot; the output-route stage records
+        // as the pipeline's boundary.
+        let stage_slot = match &planned_stage {
+            PlannedStage::Ast { .. } => crate::execution::Slot::Stage(stage_index),
+            PlannedStage::OutputRoute { .. } => crate::execution::Slot::Boundary,
+        };
+        env_clone.attach_stage(outcomes.clone(), stage_slot);
         let (stage_clone, is_last) = match planned_stage {
             PlannedStage::Ast { stage, is_last } => (Some(stage), is_last),
             PlannedStage::OutputRoute { routes, is_last } => {
                 let out_tx = if is_last { tx.clone() } else { stage_tx };
                 let current_rx_for_route = current_rx.take();
+                let diagnostics_for_route = diag_rx.take();
                 let env_for_route = env_clone.clone();
                 spawn_stage!(async move {
-                    execute_output_route(routes, current_rx_for_route, out_tx, env_for_route).await;
+                    execute_output_route(
+                        routes,
+                        current_rx_for_route,
+                        diagnostics_for_route,
+                        out_tx,
+                        env_for_route,
+                    )
+                    .await;
                 });
                 current_rx = Some(stage_rx);
                 continue;
@@ -1216,8 +1389,21 @@ async fn execute_pipeline_inner(
                         }
 
                         let mut evaluated_args = Vec::new();
+                        // Source quoting per argument, kept beside the values
+                        // rather than inside them: quoting describes the word,
+                        // not the value, so it has no place on `Val`. `None`
+                        // marks an argument with no source word of its own.
+                        let mut word_origins: Vec<Option<crate::word::ExpandedWord>> =
+                            Vec::with_capacity(args.len());
                         for arg in args {
-                            evaluated_args.push(eval_expr(&arg, &env_clone).await?);
+                            if let Expr::String(parts) = arg.unpack() {
+                                let word = crate::eval::eval_word(parts, &env_clone).await?;
+                                evaluated_args.push(Val::String(word.text()));
+                                word_origins.push(Some(word));
+                            } else {
+                                evaluated_args.push(eval_expr(&arg, &env_clone).await?);
+                                word_origins.push(None);
+                            }
                         }
 
                         fn has_glob_or_braces(args: &[Val]) -> bool {
@@ -1239,13 +1425,22 @@ async fn execute_pipeline_inner(
                             evaluated_args
                         } else if has_glob_or_braces(&evaluated_args) {
                             let env_for_glob = env_clone.clone();
+                            let words_for_glob = word_origins.clone();
                             tokio::task::spawn_blocking(move || {
-                                expand_globs(evaluated_args, &env_for_glob)
+                                crate::glob::expand_args_with_words(
+                                    evaluated_args,
+                                    &words_for_glob,
+                                    &env_for_glob,
+                                )
                             })
                             .await
                             .map_err(|e| format!("Glob expansion task failed: {}", e))??
                         } else {
-                            expand_globs(evaluated_args, &env_clone)?
+                            crate::glob::expand_args_with_words(
+                                evaluated_args,
+                                &word_origins,
+                                &env_clone,
+                            )?
                         };
                         // Helper to restore env values after command execution
                         fn restore_inline_env(
@@ -1718,18 +1913,20 @@ async fn execute_pipeline_inner(
                                 )
                                 .await
                                 {
-                                    Ok(()) => {
-                                        if env_clone.is_last_stage {
-                                            let is_pipefail = env_clone.options.read().pipefail;
-                                            if !is_pipefail || env_clone.exit_code() == 0 {
-                                                env_clone.set_exit_code(0);
-                                            }
-                                        }
-                                    }
+                                    Ok(()) => env_clone.record_stage_status(0),
                                     Err(e) => {
-                                        let _ = cancel.send(true);
-                                        env_clone.report_stage_error();
                                         let diag = FshDiag::new(e);
+                                        // A command-level failure — a reported one, or
+                                        // a logical `false` — is a *status*, not an
+                                        // abort: the rest of the pipeline still runs,
+                                        // and cancelling it would make the outcome
+                                        // depend on which stage got there first.
+                                        if diag.reported_status().is_none()
+                                            && !diag.is_condition_false()
+                                        {
+                                            let _ = cancel.send(true);
+                                        }
+                                        env_clone.record_stage_failure(diag.clone());
                                         let _ =
                                             out_tx.send(PipelinePayload::Structured(diag)).await;
                                     }
@@ -1751,18 +1948,16 @@ async fn execute_pipeline_inner(
                                     out_tx.clone(),
                                     handler_span,
                                 ) {
-                                    Ok(()) => {
-                                        if env_clone.is_last_stage {
-                                            let is_pipefail = env_clone.options.read().pipefail;
-                                            if !is_pipefail || env_clone.exit_code() == 0 {
-                                                env_clone.set_exit_code(0);
-                                            }
-                                        }
-                                    }
+                                    Ok(()) => env_clone.record_stage_status(0),
                                     Err(e) => {
-                                        let _ = cancel.send(true);
-                                        env_clone.report_stage_error();
                                         let diag = FshDiag::new(e);
+                                        // See the async arm: a status is not an abort.
+                                        if diag.reported_status().is_none()
+                                            && !diag.is_condition_false()
+                                        {
+                                            let _ = cancel.send(true);
+                                        }
+                                        env_clone.record_stage_failure(diag.clone());
                                         let _ =
                                             out_tx.blocking_send(PipelinePayload::Structured(diag));
                                     }
@@ -1790,19 +1985,19 @@ async fn execute_pipeline_inner(
                                 )
                                 .await
                                 {
-                                    let _ = cancel.send(true);
-                                    let code = if e.code == fshell_core::ErrorCode::CommandNotFound
-                                    {
-                                        127
-                                    } else {
-                                        1
-                                    };
-                                    env_clone.report_stage_error_code(code);
-                                    let _ = out_tx
-                                        .send(PipelinePayload::Structured(
-                                            fshell_core::diagnostic::FshDiag::from(e),
-                                        ))
-                                        .await;
+                                    let diag = fshell_core::diagnostic::FshDiag::from(e);
+                                    // A command that could not be found is a *reported*
+                                    // failure: POSIX keeps running the rest of the
+                                    // pipeline and lets its last stage decide the
+                                    // status, so only an engine-level failure stops it.
+                                    if diag.reported_status().is_none() {
+                                        let _ = cancel.send(true);
+                                    }
+                                    env_clone.report_stage_error_code(
+                                        diag.reported_status().unwrap_or(1),
+                                    );
+                                    env_clone.record_stage_failure(diag.clone());
+                                    let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
                                 }
                                 // Async fallbacks own stage completion, including
                                 // process I/O draining. Restore inline variables
@@ -1826,16 +2021,12 @@ async fn execute_pipeline_inner(
                                     has_next,
                                     handler_span,
                                 ) {
-                                    let code = if e.code == fshell_core::ErrorCode::CommandNotFound
-                                    {
-                                        127
-                                    } else {
-                                        1
-                                    };
-                                    env_clone.report_stage_error_code(code);
-                                    let _ = out_tx.blocking_send(PipelinePayload::Structured(
-                                        fshell_core::diagnostic::FshDiag::from(e),
-                                    ));
+                                    let diag = fshell_core::diagnostic::FshDiag::from(e);
+                                    env_clone.report_stage_error_code(
+                                        diag.reported_status().unwrap_or(1),
+                                    );
+                                    env_clone.record_stage_failure(diag.clone());
+                                    let _ = out_tx.blocking_send(PipelinePayload::Structured(diag));
                                 }
                                 // Restore inline env vars
                                 restore_inline_env(&env_clone, saved_env_values, saved_top_values);
@@ -3033,13 +3224,15 @@ async fn execute_pipeline_inner(
                     let mut file = match opts.open(&path_buf).await {
                         Ok(f) => f,
                         Err(e) => {
-                            env_clone.report_stage_error();
-                            let _ = out_tx
-                                .send(PipelinePayload::Structured(
-                                    format!("failed to open redirect target '{}': {}", path_val, e)
-                                        .into(),
-                                ))
-                                .await;
+                            // A destination that cannot be written is a
+                            // command-level failure, so the statement continues with
+                            // status 1 rather than unwinding.
+                            let diag = FshDiag::from(fshell_core::ShellError::new(
+                                fshell_core::diagnostic::ErrorCode::RedirectionFailed,
+                                format!("failed to open redirect target '{}': {}", path_val, e),
+                            ));
+                            env_clone.record_stage_failure(diag.clone());
+                            let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
                             return;
                         }
                     };
@@ -3229,12 +3422,15 @@ async fn execute_pipeline_inner(
                             }
                         }
                         Err(e) => {
-                            env_clone.report_stage_error();
-                            let _ = out_tx
-                                .send(PipelinePayload::Structured(
-                                    format!("< {}: {}", path_str, e).into(),
-                                ))
-                                .await;
+                            // A redirection that cannot be performed is a
+                            // command-level failure (POSIX status 1), not an engine
+                            // error: the statement carries on with that status.
+                            let diag = FshDiag::from(fshell_core::ShellError::new(
+                                fshell_core::diagnostic::ErrorCode::RedirectionFailed,
+                                format!("< {}: {}", path_str, e),
+                            ));
+                            env_clone.record_stage_failure(diag.clone());
+                            let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
                         }
                     }
                 });
@@ -3310,7 +3506,49 @@ async fn execute_pipeline_inner(
                 });
             }
         }
-        current_rx = Some(stage_rx);
+        // This stage's output reaches the next consumer as data only: diagnostics
+        // are forked onto the diagnostic channel here, before anything downstream
+        // can consume or drop them. Redirection still decides where that text
+        // goes — at the route stage — but never whether the failure happened.
+        if !is_last {
+            let (data_tx, data_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
+            let fork_diag_tx = diag_tx.clone();
+            spawn_stage!(async move {
+                while let Some(payload) = stage_rx.recv().await {
+                    let sent = match payload {
+                        PipelinePayload::Structured(diag) => {
+                            fork_diag_tx.send(PipelinePayload::Structured(diag)).await
+                        }
+                        data => data_tx.send(data).await,
+                    };
+                    if sent.is_err() {
+                        break;
+                    }
+                }
+            });
+            current_rx = Some(data_rx);
+        } else {
+            current_rx = Some(stage_rx);
+        }
+    }
+
+    // The drivers below are the only senders once the loop is done; holding this
+    // handle open would keep the diagnostic stream from ever closing, and every
+    // consumer of it would wait forever.
+    drop(diag_tx);
+
+    // No output boundary was planned, so the diagnostics go to the default
+    // destination — the stream the caller drains, which is where a route stage
+    // would have sent them anyway.
+    if let Some(mut diagnostics) = diag_rx {
+        let default_tx = tx.clone();
+        spawn_stage!(async move {
+            while let Some(payload) = diagnostics.recv().await {
+                if default_tx.send(payload).await.is_err() {
+                    break;
+                }
+            }
+        });
     }
     join_pipeline_stages(stage_tasks, env, pipeline_job.as_ref()).await
 }
@@ -3422,8 +3660,10 @@ pub async fn run_script(input: &str, env: &Env) -> Result<Flow, EngineError> {
 }
 
 async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
+    let mode = env.options.read().interp_mode;
     // Explicit POSIX mode bypasses the native parser entirely.
-    if env.options.read().interp_mode == crate::frontend::InterpMode::Posix {
+    if mode == crate::frontend::InterpMode::Posix {
+        crate::frontend::trace_engine("posix", crate::frontend::reason::EXPLICIT_POSIX);
         return crate::frontend::run_posix(input, env).await;
     }
 
@@ -3439,6 +3679,28 @@ async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
             return Err(e.into());
         }
     };
+
+    // Native parsed it, so normally native runs it. In auto mode, first ask
+    // whether this is input native accepts but cannot give POSIX meaning: if so
+    // POSIX takes it. This happens strictly at the parse boundary, so nothing
+    // has executed and choosing POSIX cannot double-run a side effect.
+    if mode == crate::frontend::InterpMode::Auto
+        && crate::posix_handler().is_some()
+        && let Some(requirement) = crate::compat::required_posix_semantics(&stmts)
+    {
+        let reason = crate::frontend::reason::native_incompatible(requirement.label());
+        crate::frontend::trace_engine("posix", &reason);
+        return crate::frontend::run_posix(input, env).await;
+    }
+
+    // Otherwise native owns it: `--native` is a user choice, while in auto mode
+    // it is a capability judgement.
+    let reason = if mode == crate::frontend::InterpMode::Native {
+        crate::frontend::reason::EXPLICIT_NATIVE
+    } else {
+        crate::frontend::reason::NATIVE_SAFE
+    };
+    crate::frontend::trace_engine("native", reason);
 
     let (noexec, verbose) = {
         let opts = env.options.read();
@@ -3556,9 +3818,16 @@ pub(crate) fn run_script_stmt<'a>(
             Stmt::Expr(expr) => {
                 if let Expr::Pipeline(pipeline) = expr.unpack() {
                     let pipefail = env.options.read().pipefail;
-                    env.set_exit_code(0);
-                    let mut rx = spawn_pipeline_stream(pipeline, env);
-                    let mut errors: Vec<crate::PipelineFailure> = Vec::new();
+                    // Start this pipeline's status accumulator. It is scratch,
+                    // not `$?`: the committed status survives until the
+                    // finalizer below replaces it, so expanding `$?` anywhere in
+                    // this pipeline still reads the previously completed
+                    // command.
+                    let outcomes = crate::execution::PipelineOutcomes::new();
+                    let mut pipeline_env = env.clone();
+                    pipeline_env.attach_stage(outcomes.clone(), crate::execution::Slot::Boundary);
+                    let mut rx = spawn_pipeline_stream(pipeline, &pipeline_env);
+                    let mut failures: Vec<crate::PipelineFailure> = Vec::new();
                     while let Some(payload) = rx.recv().await {
                         match payload {
                             PipelinePayload::Data(v) => {
@@ -3569,11 +3838,8 @@ pub(crate) fn run_script_stmt<'a>(
                                 let _ = std::io::stdout().write_all(&b);
                             }
                             PipelinePayload::Structured(d) => {
-                                if crate::is_condition_false_diag(&d) {
-                                    errors.push(PipelineFailure::ConditionFalse);
-                                } else {
-                                    errors.push(PipelineFailure::Hard(d));
-                                }
+                                crate::render_stage_diag(env, &d);
+                                failures.push(crate::classify_diag(d));
                             }
                         }
                     }
@@ -3583,9 +3849,14 @@ pub(crate) fn run_script_stmt<'a>(
                         env.set_exit_code(code as i64);
                         return Ok(Flow::Exit(code));
                     }
-                    let last_ec = env.exit_code();
-                    let outcome = crate::pipeline_finalize(errors, last_ec, pipefail);
+                    let outcome = crate::pipeline_finalize(&outcomes, failures, pipefail);
                     return crate::apply_pipeline_outcome(env, outcome);
+                } else if matches!(expr.unpack(), Expr::If { .. }) {
+                    // A composite statement publishes the status of the statement it
+                    // executed last, and evaluating it as a *value* would discard
+                    // both that status and its control flow (`return`/`exit`).
+                    let (flow, _) = crate::eval::eval_if_stmt(expr, env).await?;
+                    return Ok(flow);
                 } else {
                     let val = eval_expr(expr, env).await?;
                     if val != Val::Null && !matches!(val, Val::Bool(_)) {
@@ -3606,7 +3877,10 @@ pub(crate) fn run_script_stmt<'a>(
             _ => {
                 match eval_stmt(stmt, env, false).await {
                     Ok(Flow::Normal) => {
-                        env.set_exit_code(0);
+                        // A statement that published a status of its own — a
+                        // composite's body, a command — keeps it; one that has no
+                        // status completes successfully.
+                        crate::eval::publish_completion(stmt, env);
                     }
                     Ok(Flow::ConditionFalse) => {
                         env.set_exit_code(1);

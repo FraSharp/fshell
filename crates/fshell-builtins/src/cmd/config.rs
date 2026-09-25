@@ -1387,12 +1387,12 @@ pub fn format_expr(expr: &fshell_core::Expr) -> String {
             s.push('"');
             for part in parts {
                 match part {
-                    fshell_core::StringPart::Lit(l) => {
-                        s.push_str(&l.replace('\\', "\\\\").replace('"', "\\\""));
+                    fshell_core::StringPart::Lit { text, .. } => {
+                        s.push_str(&text.replace('\\', "\\\\").replace('"', "\\\""));
                     }
-                    fshell_core::StringPart::Expr(e) => {
+                    fshell_core::StringPart::Expr { expr, .. } => {
                         s.push('{');
-                        s.push_str(&format_expr(e));
+                        s.push_str(&format_expr(expr));
                         s.push('}');
                     }
                 }
@@ -1485,10 +1485,10 @@ pub fn format_expr(expr: &fshell_core::Expr) -> String {
             s.push_str("\"\"\"");
             for part in parts {
                 match part {
-                    fshell_core::StringPart::Lit(l) => s.push_str(l),
-                    fshell_core::StringPart::Expr(e) => {
+                    fshell_core::StringPart::Lit { text, .. } => s.push_str(text),
+                    fshell_core::StringPart::Expr { expr, .. } => {
                         s.push('{');
-                        s.push_str(&format_expr(e));
+                        s.push_str(&format_expr(expr));
                         s.push('}');
                     }
                 }
