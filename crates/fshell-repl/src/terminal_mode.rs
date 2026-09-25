@@ -15,13 +15,13 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
-pub(crate) struct FullscreenTerminalGuard {
+pub struct FullscreenTerminalGuard {
     raw_mode_was_enabled: bool,
     cursor_was_hidden: bool,
 }
 
 impl FullscreenTerminalGuard {
-    pub(crate) fn enter(hide_cursor: bool) -> io::Result<Self> {
+    pub fn enter(hide_cursor: bool) -> io::Result<Self> {
         let raw_mode_was_enabled = terminal::is_raw_mode_enabled()?;
         if !raw_mode_was_enabled {
             terminal::enable_raw_mode()?;
