@@ -1,24 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-//! Session-owned capability prompts.
-//!
-//! Capability checks are synchronous because they can run in any engine
-//! command. FTUI therefore services their channel from one long-lived task,
-//! rather than creating a receiver per prompt-loop iteration. The task owns
-//! the temporary cooked-mode transition and restores raw mode on every exit,
-//! including cancellation.
+//! Session-owned capability prompts rendering non-destructive floating modals.
 
-use std::io::{self, Write};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 
-use fshell_engine::{CapPromptRequest, CapPromptResponse, Env};
+use crate::terminal_mode::FullscreenTerminalGuard;
+use crate::tui::components::modal_dialog;
+use crate::tui::theme;
+use fshell_engine::{CapAction, CapPromptRequest, CapPromptResponse, Env};
+use fshell_terminal::input::{
+    CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers,
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use tokio::task::JoinHandle;
-
-use super::raw;
 
 pub struct CapabilityPromptTask {
     handle: Option<JoinHandle<()>>,
@@ -27,11 +29,6 @@ pub struct CapabilityPromptTask {
 
 impl CapabilityPromptTask {
     /// Start the single prompt worker for this shell session.
-    ///
-    /// The receiver is taken exactly once from the environment. If another
-    /// owner already claimed it (or this environment has no prompt channel),
-    /// the worker exits immediately and the engine's normal timeout behavior
-    /// remains the safe fallback.
     pub fn spawn(env: &Env) -> Self {
         let receiver = env.caps.cap_prompt_rx.lock().take();
         let env = env.clone();
@@ -43,8 +40,6 @@ impl CapabilityPromptTask {
             };
             while let Some(request) = receiver.recv().await {
                 let response = handle_request(&env, &request, worker_session_active.clone()).await;
-                // The engine may have timed out while input was being read;
-                // dropping the response is then the correct outcome.
                 let _ = request.response_tx.send(response);
             }
         });
@@ -69,100 +64,160 @@ async fn handle_request(
     request: &CapPromptRequest,
     session_active: Arc<AtomicBool>,
 ) -> CapPromptResponse {
-    let Ok(_cooked_mode) = CookedModeGuard::enter(session_active.clone()) else {
+    if fshell_engine::is_test_mode() {
         return CapPromptResponse::Deny;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let stdin_fd = std::io::stdin().as_raw_fd();
+        if unsafe { libc::isatty(stdin_fd) } == 0 {
+            return CapPromptResponse::Deny;
+        }
+    }
+
+    let (action_name, target_desc) = match &request.action {
+        CapAction::ReadDir(p) => ("Read Directory", p.display().to_string()),
+        CapAction::WriteDir(p) => ("Write Directory", p.display().to_string()),
+        CapAction::ReadFile(p) => ("Read File", p.display().to_string()),
+        CapAction::WriteFile(p) => ("Write File", p.display().to_string()),
+        CapAction::Network(host) => ("Network Access", host.clone()),
+        CapAction::ReadEnv(var) => ("Read Env Var", var.clone()),
+        CapAction::WriteEnv(var) => ("Write Env Var", var.clone()),
+        CapAction::ProcessSpawn => ("Spawn Subprocess", "Child process execution".to_string()),
     };
 
-    eprint!(
-        "\r\n[fshell] Allow '{}' to {:?}? [y/N/a] ",
-        request.cmd_name, request.action
-    );
-    let _ = io::stderr().flush();
-
+    let theme = env.active_theme();
+    let cmd_name = request.cmd_name.clone();
     let input_active = session_active.clone();
-    let line = tokio::task::spawn_blocking(move || read_line_while_active(&input_active))
-        .await
-        .unwrap_or(None)
-        .unwrap_or_default();
 
-    match line.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => CapPromptResponse::GrantOnce,
-        "a" | "always" => {
-            env.caps
-                .caps
-                .write()
-                .grant(request.action.to_resource_handle());
-            CapPromptResponse::GrantAlways
-        }
-        _ => CapPromptResponse::Deny,
-    }
-}
-
-/// Read one cooked-mode input line without leaving an uninterruptible reader
-/// behind when the prompt task is cancelled. Reading one byte at a time avoids
-/// consuming a second pasted line that belongs to the main REPL prompt.
-fn read_line_while_active(active: &AtomicBool) -> Option<String> {
-    let mut bytes = Vec::new();
-    loop {
-        if !active.load(Ordering::Acquire) {
-            return None;
+    let response = tokio::task::spawn_blocking(move || {
+        if !input_active.load(Ordering::Acquire) {
+            return CapPromptResponse::Deny;
         }
 
-        let mut pollfd = libc::pollfd {
-            fd: libc::STDIN_FILENO,
-            events: libc::POLLIN,
-            revents: 0,
+        let _guard = match FullscreenTerminalGuard::enter(true) {
+            Ok(g) => g,
+            Err(_) => return CapPromptResponse::Deny,
         };
-        let result = unsafe { libc::poll(&mut pollfd, 1, 50) };
-        if result < 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                continue;
+
+        let backend = CrosstermBackend::new(std::io::stdout());
+        let mut terminal = match Terminal::new(backend) {
+            Ok(t) => t,
+            Err(_) => return CapPromptResponse::Deny,
+        };
+        let _ = terminal.clear();
+
+        let mut input = CrosstermEventSource::new();
+
+        loop {
+            if !input_active.load(Ordering::Acquire) {
+                return CapPromptResponse::Deny;
             }
-            return None;
-        }
-        if result == 0 {
-            continue;
-        }
-        if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-            return None;
-        }
 
-        let mut byte = [0_u8; 1];
-        let count = unsafe {
-            libc::read(
-                libc::STDIN_FILENO,
-                byte.as_mut_ptr().cast::<libc::c_void>(),
-                byte.len(),
-            )
-        };
-        if count <= 0 {
-            return None;
+            let draw_res = terminal.draw(|frame| {
+                let size = frame.area();
+                let modal_area = modal_dialog::centered_fixed(62, 13, size);
+                let inner = modal_dialog::render_modal_frame(
+                    modal_area,
+                    frame.buffer_mut(),
+                    &theme,
+                    "Security Capability Request",
+                );
+
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(2),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                    ])
+                    .split(inner);
+
+                let label_style = theme::muted_style(&theme);
+                let val_style = theme::title_style(&theme);
+
+                let cmd_line = Line::from(vec![
+                    Span::styled("  Command:  ", label_style),
+                    Span::styled(&cmd_name, val_style),
+                ]);
+                let act_line = Line::from(vec![
+                    Span::styled("  Action:   ", label_style),
+                    Span::styled(action_name, theme::status_warn_style(&theme)),
+                ]);
+                let tgt_line = Line::from(vec![
+                    Span::styled("  Target:   ", label_style),
+                    Span::styled(target_desc.as_str(), theme::to_style(&theme.syntax.string)),
+                ]);
+
+                let expl_line1 = Line::from(Span::styled(
+                    "  This command attempted an action not permitted",
+                    label_style,
+                ));
+                let expl_line2 = Line::from(Span::styled(
+                    "  in strict mode or without granted capability.",
+                    label_style,
+                ));
+
+                let hotkey_line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("[y] ", theme::key_hint_key_style(&theme)),
+                    Span::raw("Grant Once   "),
+                    Span::styled("[a] ", theme::key_hint_key_style(&theme)),
+                    Span::raw("Always Grant   "),
+                    Span::styled("[Esc/n] ", theme::key_hint_key_style(&theme)),
+                    Span::raw("Deny"),
+                ]);
+
+                frame.render_widget(Paragraph::new(cmd_line), chunks[1]);
+                frame.render_widget(Paragraph::new(act_line), chunks[2]);
+                frame.render_widget(Paragraph::new(tgt_line), chunks[3]);
+                frame.render_widget(Paragraph::new(vec![expl_line1, expl_line2]), chunks[5]);
+                frame.render_widget(Paragraph::new(hotkey_line), chunks[7]);
+            });
+
+            if draw_res.is_err() {
+                return CapPromptResponse::Deny;
+            }
+
+            let key = match input.poll(std::time::Duration::from_millis(100)) {
+                Ok(InputPoll::Event(InputEvent::Key(key))) => key,
+                Ok(InputPoll::Event(_) | InputPoll::Timeout) => continue,
+                Ok(InputPoll::Closed) | Err(_) => return CapPromptResponse::Deny,
+            };
+
+            match key.key {
+                Key::Character('y') | Key::Character('Y') => {
+                    return CapPromptResponse::GrantOnce;
+                }
+                Key::Character('a') | Key::Character('A') => {
+                    return CapPromptResponse::GrantAlways;
+                }
+                Key::Character('n') | Key::Character('N') | Key::Escape => {
+                    return CapPromptResponse::Deny;
+                }
+                Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
+                    return CapPromptResponse::Deny;
+                }
+                _ => {}
+            }
         }
-        bytes.push(byte[0]);
-        if byte[0] == b'\n' || byte[0] == b'\r' {
-            return Some(String::from_utf8_lossy(&bytes).into_owned());
-        }
+    })
+    .await
+    .unwrap_or(CapPromptResponse::Deny);
+
+    if response == CapPromptResponse::GrantAlways {
+        env.caps
+            .caps
+            .write()
+            .grant(request.action.to_resource_handle());
     }
-}
 
-/// Re-enters raw mode if the prompt task is cancelled while waiting for
-/// terminal input. This makes terminal restoration independent of the async
-/// task's cancellation timing.
-impl CookedModeGuard {
-    fn enter(session_active: Arc<AtomicBool>) -> io::Result<Self> {
-        raw::enter_cooked_mode()?;
-        Ok(Self { session_active })
-    }
-}
-
-struct CookedModeGuard {
-    session_active: Arc<AtomicBool>,
-}
-
-impl Drop for CookedModeGuard {
-    fn drop(&mut self) {
-        if self.session_active.load(Ordering::Acquire) {
-            let _ = raw::enter_raw_mode();
-        }
-    }
+    response
 }

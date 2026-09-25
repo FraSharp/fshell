@@ -11,11 +11,36 @@ use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 use ustr::ustr;
 
-fn show_text_pager(text: &str) {
-    use std::io::Write;
+fn apply_horizontal_offset(
+    spans: Vec<ratatui::text::Span<'static>>,
+    offset_x: usize,
+) -> Vec<ratatui::text::Span<'static>> {
+    if offset_x == 0 {
+        return spans;
+    }
+    let mut skipped = 0;
+    let mut result = Vec::new();
+    for span in spans {
+        let char_count = span.content.chars().count();
+        if skipped + char_count <= offset_x {
+            skipped += char_count;
+            continue;
+        }
+        let to_skip = offset_x.saturating_sub(skipped);
+        let remaining: String = span.content.chars().skip(to_skip).collect();
+        skipped += char_count;
+        result.push(ratatui::text::Span::styled(remaining, span.style));
+    }
+    result
+}
 
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.is_empty() {
+pub fn show_text_pager(text: &str) {
+    show_text_pager_with_theme(text, &fshell_core::theme::Theme::default_theme());
+}
+
+pub fn show_text_pager_with_theme(text: &str, theme: &fshell_core::theme::Theme) {
+    let raw_lines: Vec<&str> = text.lines().collect();
+    if raw_lines.is_empty() {
         return;
     }
 
@@ -34,201 +59,249 @@ fn show_text_pager(text: &str) {
             return;
         }
     };
+
+    let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+    let mut terminal = match ratatui::Terminal::new(backend) {
+        Ok(t) => t,
+        Err(_) => {
+            print!("{}", text);
+            return;
+        }
+    };
+    let _ = terminal.clear();
+
     let mut input = CrosstermEventSource::new();
-
-    let mut stdout = std::io::stdout();
-
-    let mut offset: usize = 0;
-    let mut search_term = String::new();
+    let mut offset_y: usize = 0;
+    let mut offset_x: usize = 0;
+    let mut show_line_numbers = false;
+    let mut search_bar = crate::tui::components::SearchBarState::new();
     let mut searching = false;
     let mut matches: Vec<usize> = Vec::new();
     let mut match_idx: usize = 0;
 
+    let line_count = raw_lines.len();
+
     loop {
-        let (_, height) = crossterm::terminal::size().unwrap_or((80, 24));
-        let visible = (height as usize).saturating_sub(2); // 2 lines for status bar
+        let mut visible_height = 20usize;
 
-        if offset + visible > lines.len() {
-            offset = lines.len().saturating_sub(visible);
-        }
+        let draw_res = terminal.draw(|frame| {
+            let size = frame.area();
+            if size.width < 10 || size.height < 3 {
+                return;
+            }
 
-        let mut buf = String::new();
-        buf.push_str("\x1b[2J\x1b[H");
-
-        for (i, line) in lines.iter().enumerate().skip(offset).take(visible) {
-            if !matches.is_empty() && matches.contains(&i) {
-                buf.push_str(&highlight_match(line, &search_term));
+            let constraints = if searching {
+                vec![
+                    ratatui::layout::Constraint::Min(2),
+                    ratatui::layout::Constraint::Length(1),
+                    ratatui::layout::Constraint::Length(1),
+                ]
             } else {
-                buf.push_str(line);
+                vec![
+                    ratatui::layout::Constraint::Min(2),
+                    ratatui::layout::Constraint::Length(1),
+                ]
+            };
+
+            let chunks = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
+                .constraints(constraints)
+                .split(size);
+
+            let content_area = chunks[0];
+            visible_height = content_area.height as usize;
+
+            if offset_y + visible_height > line_count {
+                offset_y = line_count.saturating_sub(visible_height);
             }
-            buf.push_str("\r\n");
-        }
 
-        // Fill remaining lines to keep status bar at bottom
-        let drawn = visible.min(lines.len().saturating_sub(offset));
-        for _ in drawn..visible {
-            buf.push_str("\r\n");
-        }
+            let max_digits = format!("{}", line_count).len();
+            let mut formatted_lines = Vec::new();
 
-        // --- Status bar ---
-        let pct = if lines.len() > visible {
-            (offset * 100 / (lines.len() - visible)).min(100)
-        } else {
-            100
-        };
-        let line_info = format!("{}:{}", offset + 1, lines.len());
+            for (idx_rel, line_str) in raw_lines
+                .iter()
+                .skip(offset_y)
+                .take(visible_height)
+                .enumerate()
+            {
+                let line_idx = offset_y + idx_rel;
+                let mut line_spans = Vec::new();
 
-        if searching {
-            // Search bar: inverted background
-            buf.push_str("\x1b[48;5;236m\x1b[38;5;15m");
-            let _ = write!(
-                buf,
-                " /{}{}",
-                search_term,
-                if search_term.is_empty() { "" } else { " " }
-            );
-            if !search_term.is_empty() {
-                if !matches.is_empty() {
-                    let _ = write!(
-                        buf,
-                        "\x1b[48;5;22m\x1b[38;5;82m [{}/{}] \x1b[48;5;236m\x1b[38;5;15m",
-                        match_idx + 1,
-                        matches.len()
-                    );
-                } else {
-                    buf.push_str(
-                        "\x1b[48;5;52m\x1b[38;5;9m (no matches) \x1b[48;5;236m\x1b[38;5;15m",
-                    );
+                if show_line_numbers {
+                    let num_str = format!("{:>width$} │ ", line_idx + 1, width = max_digits);
+                    line_spans.push(ratatui::text::Span::styled(
+                        num_str,
+                        crate::tui::theme::muted_style(theme),
+                    ));
                 }
+
+                let line_text = if !search_bar.query.is_empty() {
+                    highlight_match(line_str, &search_bar.query)
+                } else {
+                    line_str.to_string()
+                };
+
+                let content_spans = crate::ftui::ansi::ansi_to_spans(&line_text);
+                let trimmed_spans = apply_horizontal_offset(content_spans, offset_x);
+                line_spans.extend(trimmed_spans);
+
+                formatted_lines.push(ratatui::text::Line::from(line_spans));
             }
-            // Right-align the keybindings
-            let hint =
-                " \x1b[38;5;245m[Enter]\x1b[38;5;15m done \x1b[38;5;245m[Esc]\x1b[38;5;15m clear ";
-            buf.push_str(hint);
-            buf.push_str("\x1b[0m\x1b[K\r\n");
-        } else {
-            // Normal status bar: styled with keybindings
-            buf.push_str("\x1b[48;5;236m\x1b[38;5;15m");
 
-            // Left: scroll percentage + line position
-            let _ = write!(
-                buf,
-                " \x1b[38;5;82m{:>3}%\x1b[38;5;15m | {} ",
-                pct, line_info
-            );
+            frame.render_widget(ratatui::widgets::Paragraph::new(formatted_lines), content_area);
 
-            // Center/Right: keybinding hints
-            let hint = " \x1b[38;5;245m[/]\x1b[38;5;15msearch \x1b[38;5;245m[n]\x1b[38;5;15mnext \x1b[38;5;245m[N]\x1b[38;5;15mprev \x1b[38;5;245m[g]\x1b[38;5;15mtop \x1b[38;5;245m[G]\x1b[38;5;15mbot \x1b[38;5;245m[q]\x1b[38;5;15mquit".to_string();
-            buf.push_str(&hint);
+            let mut scroll_state = crate::tui::components::ScrollState::new();
+            scroll_state.update(line_count, visible_height);
+            scroll_state.offset = offset_y;
+            scroll_state.render_scrollbar(content_area, frame.buffer_mut(), theme);
 
-            if !search_term.is_empty() && !matches.is_empty() {
-                let _ = write!(
-                    buf,
-                    " \x1b[48;5;22m\x1b[38;5;82m [{}/{}] \x1b[48;5;236m",
-                    match_idx + 1,
-                    matches.len()
+            let footer_chunk = if searching {
+                search_bar.render(
+                    chunks[1],
+                    frame.buffer_mut(),
+                    theme,
+                    " / ",
+                    "Type to search...",
+                    true,
                 );
-            }
+                chunks[2]
+            } else {
+                chunks[1]
+            };
 
-            buf.push_str("\x1b[0m\x1b[K\r\n");
+            let pct = if line_count > visible_height {
+                (offset_y * 100 / line_count.saturating_sub(visible_height)).min(100)
+            } else {
+                100
+            };
+            let status_text = format!("{:>3}% │ {}:{} (col {})", pct, offset_y + 1, line_count, offset_x + 1);
+
+            let hints: &[crate::tui::components::KeyHint] = if searching {
+                &[
+                    crate::tui::components::KeyHint::new("Enter", "Done"),
+                    crate::tui::components::KeyHint::new("Esc", "Cancel"),
+                ]
+            } else {
+                &[
+                    crate::tui::components::KeyHint::new("/", "Search"),
+                    crate::tui::components::KeyHint::new("n/N", "Next/Prev"),
+                    crate::tui::components::KeyHint::new("h/l", "Pan"),
+                    crate::tui::components::KeyHint::new("#", "Numbers"),
+                    crate::tui::components::KeyHint::new("g/G", "Top/Bot"),
+                    crate::tui::components::KeyHint::new("q", "Quit"),
+                ]
+            };
+
+            let status_span = if searching {
+                if !search_bar.query.is_empty() {
+                    if !matches.is_empty() {
+                        ratatui::text::Span::styled(
+                            format!(" Match {}/{} ", match_idx + 1, matches.len()),
+                            crate::tui::theme::status_ok_style(theme),
+                        )
+                    } else {
+                        ratatui::text::Span::styled(
+                            " No matches ",
+                            crate::tui::theme::status_error_style(theme),
+                        )
+                    }
+                } else {
+                    ratatui::text::Span::styled(" Search Mode ", crate::tui::theme::title_style(theme))
+                }
+            } else {
+                ratatui::text::Span::styled(status_text, crate::tui::theme::title_style(theme))
+            };
+
+            crate::tui::components::StatusFooter::new(theme, hints)
+                .with_status(status_span)
+                .render(footer_chunk, frame.buffer_mut());
+        });
+
+        if draw_res.is_err() {
+            break;
         }
-
-        // --- Search query line (only shown in search mode) ---
-        if searching {
-            buf.push_str("\x1b[48;5;236m\x1b[38;5;245m");
-            buf.push_str(" Type to search, [Enter] to confirm, [Esc] to cancel");
-            buf.push_str("\x1b[0m\x1b[K");
-        }
-
-        let _ = write!(stdout, "{}", buf);
-        let _ = stdout.flush();
 
         let key = match input.poll(std::time::Duration::from_millis(100)) {
             Ok(InputPoll::Event(InputEvent::Key(key))) => key,
             Ok(InputPoll::Event(_) | InputPoll::Timeout) => continue,
             Ok(InputPoll::Closed) | Err(_) => break,
         };
+
         if searching {
             match key.key {
-                Key::Character(c) => {
-                    search_term.push(c);
-                    let q = search_term.to_lowercase();
-                    matches = lines
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, l)| {
-                            crate::ftui::ansi::strip_ansi_codes(l)
-                                .to_lowercase()
-                                .contains(&q)
-                        })
-                        .map(|(i, _)| i)
-                        .collect();
-                    if !matches.is_empty() {
-                        match_idx = 0;
-                        offset = matches[0].saturating_sub(visible / 3);
-                    }
-                }
-                Key::Backspace => {
-                    search_term.pop();
-                    let q = search_term.to_lowercase();
-                    matches = lines
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, l)| {
-                            crate::ftui::ansi::strip_ansi_codes(l)
-                                .to_lowercase()
-                                .contains(&q)
-                        })
-                        .map(|(i, _)| i)
-                        .collect();
-                    if !matches.is_empty() {
-                        match_idx = 0;
-                        offset = matches[0].saturating_sub(visible / 3);
-                    }
-                }
                 Key::Enter => {
                     searching = false;
-                    if !matches.is_empty() {
-                        offset = matches[0].saturating_sub(visible / 3);
-                        match_idx = 0;
-                    }
                 }
                 Key::Escape => {
                     searching = false;
-                    search_term.clear();
+                    search_bar.clear();
                     matches.clear();
                 }
-                _ => {}
+                _ => {
+                    if search_bar.handle_key(&key) {
+                        let q = search_bar.query.to_lowercase();
+                        matches = raw_lines
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, l)| {
+                                crate::ftui::ansi::strip_ansi_codes(l)
+                                    .to_lowercase()
+                                    .contains(&q)
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        if !matches.is_empty() {
+                            match_idx = 0;
+                            offset_y = matches[0].saturating_sub(visible_height / 3);
+                        }
+                    }
+                }
             }
         } else {
             match key.key {
                 Key::Character('q') | Key::Escape => break,
-                Key::Up | Key::Character('k') if offset > 0 => {
-                    offset = offset.saturating_sub(1);
+                Key::Character('c') if key.modifiers.contains(fshell_terminal::input::Modifiers::CONTROL) => break,
+                Key::Up | Key::Character('k') => {
+                    offset_y = offset_y.saturating_sub(1);
                 }
-                Key::Down | Key::Character('j') if offset + visible < lines.len() => {
-                    offset += 1;
+                Key::Down | Key::Character('j') => {
+                    if offset_y + 1 < line_count {
+                        offset_y += 1;
+                    }
+                }
+                Key::Left | Key::Character('h') => {
+                    offset_x = offset_x.saturating_sub(4);
+                }
+                Key::Right | Key::Character('l') => {
+                    offset_x = offset_x.saturating_add(4);
+                }
+                Key::PageUp | Key::Character('u') if key.modifiers.contains(fshell_terminal::input::Modifiers::CONTROL) => {
+                    offset_y = offset_y.saturating_sub(visible_height);
                 }
                 Key::PageUp => {
-                    offset = offset.saturating_sub(visible);
+                    offset_y = offset_y.saturating_sub(visible_height);
+                }
+                Key::PageDown | Key::Character('d') if key.modifiers.contains(fshell_terminal::input::Modifiers::CONTROL) => {
+                    offset_y = (offset_y + visible_height).min(line_count.saturating_sub(1));
                 }
                 Key::PageDown => {
-                    offset = std::cmp::min(offset + visible, lines.len().saturating_sub(visible));
+                    offset_y = (offset_y + visible_height).min(line_count.saturating_sub(1));
                 }
                 Key::Home | Key::Character('g') => {
-                    offset = 0;
+                    offset_y = 0;
                 }
                 Key::End | Key::Character('G') => {
-                    offset = lines.len().saturating_sub(visible);
+                    offset_y = line_count.saturating_sub(visible_height);
+                }
+                Key::Character('#') => {
+                    show_line_numbers = !show_line_numbers;
                 }
                 Key::Character('/') => {
                     searching = true;
-                    search_term.clear();
-                    matches.clear();
                 }
                 Key::Character('n') if !matches.is_empty() => {
                     match_idx = (match_idx + 1) % matches.len();
-                    offset = matches[match_idx].saturating_sub(visible / 3);
+                    offset_y = matches[match_idx].saturating_sub(visible_height / 3);
                 }
                 Key::Character('N') if !matches.is_empty() => {
                     match_idx = if match_idx == 0 {
@@ -236,7 +309,7 @@ fn show_text_pager(text: &str) {
                     } else {
                         match_idx - 1
                     };
-                    offset = matches[match_idx].saturating_sub(visible / 3);
+                    offset_y = matches[match_idx].saturating_sub(visible_height / 3);
                 }
                 _ => {}
             }
@@ -328,7 +401,7 @@ pub fn print_compact_names(list: &[Val], theme: &fshell_core::theme::Theme) {
     let is_terminal = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
     let needs_pager = is_terminal && out.lines().count() >= term_height.saturating_sub(4) as usize;
     if needs_pager {
-        show_text_pager(&out);
+        show_text_pager_with_theme(&out, theme);
     } else {
         print!("{}", out);
     }
@@ -348,7 +421,7 @@ pub fn print_value_beautifully(val: &Val, theme: &fshell_core::theme::Theme) {
     let text = render_val_to_string(val, theme);
 
     if needs_pager {
-        show_text_pager(&text);
+        show_text_pager_with_theme(&text, theme);
     } else {
         print!("{}", text);
     }

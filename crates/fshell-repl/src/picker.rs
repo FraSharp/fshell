@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+//! Modern, flicker-free interactive fuzzy pickers built on Ratatui.
+
 use crate::fuzzy::{FuzzyKind, PreparedQuery, fuzzy_score_prepared};
 use crate::terminal_mode::FullscreenTerminalGuard;
-use crossterm::{
-    cursor::{Hide, MoveTo, Show},
-    execute,
-    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, Clear, ClearType},
-};
+use crate::tui::components::{KeyHint, ScrollState, SearchBarState, StatusFooter, modal_dialog};
+use crate::tui::theme;
 use fshell_core::lock::Mutex;
-use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers};
-use std::io::{Write, stdout};
+use fshell_core::theme::Theme;
+use fshell_terminal::input::{
+    CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers,
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
+use std::io::stdout;
 use std::path::PathBuf;
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
 
 struct GitPickerCachedData {
     pwd: String,
@@ -25,28 +32,29 @@ struct GitPickerCachedData {
 static GIT_PICKER_CACHE: Mutex<Option<GitPickerCachedData>> = Mutex::new(None);
 const GIT_PICKER_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+#[derive(Debug, Clone)]
 pub struct PickerItem {
     pub value: String,
     pub display: String,
 }
 
+enum PickerModal {
+    None,
+    ConfirmDelete {
+        session_name: String,
+        item_value: String,
+    },
+    Rename {
+        session_name: String,
+        item_value: String,
+        input: SearchBarState,
+    },
+}
+
 pub struct Picker {
     prompt: String,
     items: Vec<PickerItem>,
-}
-
-fn truncate_str_to_width(s: &str, max_width: usize) -> String {
-    let mut width = 0;
-    let mut res = String::new();
-    for c in s.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if width + w > max_width {
-            break;
-        }
-        width += w;
-        res.push(c);
-    }
-    res
+    theme: Theme,
 }
 
 impl Picker {
@@ -54,185 +62,335 @@ impl Picker {
         Self {
             prompt: prompt.to_string(),
             items,
+            theme: Theme::default_theme(),
+        }
+    }
+
+    pub fn with_theme(prompt: &str, items: Vec<PickerItem>, theme: Theme) -> Self {
+        Self {
+            prompt: prompt.to_string(),
+            items,
+            theme,
         }
     }
 
     pub fn run(&mut self) -> Result<Option<String>, String> {
-        let _guard = FullscreenTerminalGuard::enter(true).map_err(|e| e.to_string())?;
-        let mut stdout = stdout();
+        if fshell_engine::is_test_mode() {
+            return Ok(None);
+        }
 
-        let mut query = String::new();
-        let mut selected_idx = 0;
-        let mut scroll_offset = 0;
-        let mut input = CrosstermEventSource::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let stdin_fd = std::io::stdin().as_raw_fd();
+            if unsafe { libc::isatty(stdin_fd) } == 0 {
+                return Ok(None);
+            }
+        }
+
+        let _guard = FullscreenTerminalGuard::enter(true).map_err(|e| e.to_string())?;
+        let backend = CrosstermBackend::new(stdout());
+        let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+        terminal.clear().map_err(|e| e.to_string())?;
+
+        let mut search_bar = SearchBarState::new();
+        let mut selected_idx = 0usize;
+        let mut scroll_state = ScrollState::new();
+        let mut input_source = CrosstermEventSource::new();
+        let mut modal = PickerModal::None;
 
         let result = loop {
-            // Filter items based on subsequence matching and rank by score
-            let filtered = fuzzy_filter(&self.items, &query);
+            let filtered = fuzzy_filter(&self.items, &search_bar.query);
 
-            // Adjust selection bounds
             if filtered.is_empty() {
                 selected_idx = 0;
             } else if selected_idx >= filtered.len() {
-                selected_idx = filtered.len() - 1;
+                selected_idx = filtered.len().saturating_sub(1);
             }
 
-            // Draw UI
-            let (cols, rows) = terminal::size().unwrap_or((80, 24));
-            let max_visible = (rows as usize).saturating_sub(4);
+            // Draw frame
+            let prompt_name = self.prompt.trim_end_matches(':');
+            let is_sessions = self.prompt == "sessions:";
 
-            // Keep selected index visible (scroll offset)
-            if selected_idx < scroll_offset {
-                scroll_offset = selected_idx;
-            } else if selected_idx >= scroll_offset + max_visible {
-                scroll_offset = selected_idx + 1 - max_visible;
-            }
+            terminal
+                .draw(|frame| {
+                    let size = frame.area();
+                    if size.width < 10 || size.height < 4 {
+                        return;
+                    }
 
-            // Clear screen
-            execute!(stdout, MoveTo(0, 0), Clear(ClearType::All)).map_err(|e| e.to_string())?;
+                    // Main vertical layout: Search box (3 lines), Items list (flex), Footer (1 line)
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(3),
+                            Constraint::Min(2),
+                            Constraint::Length(1),
+                        ])
+                        .split(size);
 
-            // Print Header/Prompt
-            execute!(
-                stdout,
-                Print(format!("> {} {}\r\n", self.prompt, query)),
-                Print(format!(
-                    "  ({}/{} matches)\r\n\r\n",
-                    filtered.len(),
-                    self.items.len()
-                ))
-            )
-            .map_err(|e| e.to_string())?;
+                    // 1. Search Box
+                    let match_count_info = format!(" {}/{} ", filtered.len(), self.items.len());
+                    let search_block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(theme::border_focused_style(&self.theme))
+                        .title(format!(" Select {prompt_name} "))
+                        .title_style(theme::title_style(&self.theme));
 
-            // Render visible items
-            let visible_items = filtered
-                .iter()
-                .skip(scroll_offset)
-                .take(max_visible)
-                .enumerate();
+                    let search_inner = search_block.inner(chunks[0]);
+                    frame.render_widget(search_block, chunks[0]);
 
-            let max_item_w = (cols as usize).saturating_sub(4);
-            for (i, item) in visible_items {
-                let is_selected = scroll_offset + i == selected_idx;
-                let display_line = truncate_str_to_width(&item.display, max_item_w);
-                if is_selected {
-                    execute!(
-                        stdout,
-                        SetForegroundColor(Color::Black),
-                        SetBackgroundColor(Color::Cyan),
-                        Print(format!("~> {}\r\n", display_line)),
-                        ResetColor
-                    )
-                    .map_err(|e| e.to_string())?;
-                } else {
-                    execute!(stdout, Print(format!("   {}\r\n", display_line)))
-                        .map_err(|e| e.to_string())?;
-                }
-            }
+                    // Render right-aligned count tag inside search header
+                    let count_width = match_count_info.width() as u16;
+                    if chunks[0].width > count_width + 4 {
+                        let count_area = Rect::new(
+                            chunks[0].x + chunks[0].width.saturating_sub(count_width + 2),
+                            chunks[0].y,
+                            count_width,
+                            1,
+                        );
+                        frame.render_widget(
+                            Paragraph::new(Span::styled(
+                                match_count_info,
+                                theme::muted_style(&self.theme),
+                            )),
+                            count_area,
+                        );
+                    }
 
-            stdout.flush().map_err(|e| e.to_string())?;
+                    search_bar.render(
+                        search_inner,
+                        frame.buffer_mut(),
+                        &self.theme,
+                        "> ",
+                        "Type to filter...",
+                        matches!(modal, PickerModal::None),
+                    );
 
-            // Read keypresses
-            if fshell_engine::is_test_mode() {
-                break None;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::AsRawFd;
-                let stdin_fd = std::io::stdin().as_raw_fd();
-                if unsafe { libc::isatty(stdin_fd) } == 0 {
-                    break None;
-                }
-            }
-            let key = match input
-                .poll(std::time::Duration::from_millis(200))
+                    // 2. Results List
+                    let list_block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(theme::border_style(&self.theme));
+                    let list_inner = list_block.inner(chunks[1]);
+                    frame.render_widget(list_block, chunks[1]);
+
+                    let visible_height = list_inner.height as usize;
+                    scroll_state.update(filtered.len(), visible_height);
+                    scroll_state.ensure_visible(selected_idx);
+
+                    let list_items: Vec<ListItem> = filtered
+                        .iter()
+                        .skip(scroll_state.offset)
+                        .take(visible_height)
+                        .enumerate()
+                        .map(|(offset_i, item)| {
+                            let item_idx = scroll_state.offset + offset_i;
+                            let is_selected = item_idx == selected_idx;
+
+                            let mut spans = Vec::new();
+                            if is_selected {
+                                spans.push(Span::styled(
+                                    "❯ ",
+                                    theme::title_style(&self.theme),
+                                ));
+                            } else {
+                                spans.push(Span::raw("  "));
+                            }
+
+                            // Render item text with match highlight
+                            let query_lower = search_bar.query.to_lowercase();
+                            if !query_lower.is_empty() {
+                                let item_text = &item.display;
+                                let mut last_idx = 0;
+                                let lower = item_text.to_lowercase();
+                                if let Some(found_idx) = lower.find(&query_lower) {
+                                    if found_idx > 0 {
+                                        spans.push(Span::raw(&item_text[..found_idx]));
+                                    }
+                                    let match_end = found_idx + query_lower.len();
+                                    spans.push(Span::styled(
+                                        &item_text[found_idx..match_end],
+                                        theme::match_highlight_style(&self.theme),
+                                    ));
+                                    if match_end < item_text.len() {
+                                        spans.push(Span::raw(&item_text[match_end..]));
+                                    }
+                                    last_idx = item_text.len();
+                                }
+                                if last_idx == 0 {
+                                    spans.push(Span::raw(item_text));
+                                }
+                            } else {
+                                spans.push(Span::raw(&item.display));
+                            }
+
+                            let row_style = if is_selected {
+                                theme::selected_style(&self.theme)
+                            } else {
+                                ratatui::style::Style::default()
+                            };
+
+                            ListItem::new(Line::from(spans)).style(row_style)
+                        })
+                        .collect();
+
+                    frame.render_widget(List::new(list_items), list_inner);
+                    scroll_state.render_scrollbar(list_inner, frame.buffer_mut(), &self.theme);
+
+                    // 3. Status Footer
+                    let hints: &[KeyHint] = if is_sessions {
+                        &[
+                            KeyHint::new("Enter", "Select"),
+                            KeyHint::new("↑/↓", "Navigate"),
+                            KeyHint::new("d", "Delete"),
+                            KeyHint::new("r", "Rename"),
+                            KeyHint::new("Esc", "Cancel"),
+                        ]
+                    } else {
+                        &[
+                            KeyHint::new("Enter", "Select"),
+                            KeyHint::new("↑/↓", "Navigate"),
+                            KeyHint::new("Esc", "Cancel"),
+                        ]
+                    };
+
+                    StatusFooter::new(&self.theme, hints).render(chunks[2], frame.buffer_mut());
+
+                    // 4. Modals (if active)
+                    match &mut modal {
+                        PickerModal::None => {}
+                        PickerModal::ConfirmDelete { session_name, .. } => {
+                            let dialog_area = modal_dialog::centered_fixed(50, 7, size);
+                            let inner = modal_dialog::render_modal_frame(
+                                dialog_area,
+                                frame.buffer_mut(),
+                                &self.theme,
+                                "Confirm Deletion",
+                            );
+
+                            let msg = format!("Delete session '{session_name}'?");
+                            let lines = vec![
+                                Line::from(Span::styled(msg, theme::status_warn_style(&self.theme))),
+                                Line::raw(""),
+                                Line::from(vec![
+                                    Span::styled("[y/Enter] ", theme::key_hint_key_style(&self.theme)),
+                                    Span::raw("Confirm   "),
+                                    Span::styled("[n/Esc] ", theme::key_hint_key_style(&self.theme)),
+                                    Span::raw("Cancel"),
+                                ]),
+                            ];
+                            frame.render_widget(Paragraph::new(lines), inner);
+                        }
+                        PickerModal::Rename {
+                            session_name,
+                            input,
+                            ..
+                        } => {
+                            let dialog_area = modal_dialog::centered_fixed(60, 7, size);
+                            let inner = modal_dialog::render_modal_frame(
+                                dialog_area,
+                                frame.buffer_mut(),
+                                &self.theme,
+                                "Rename Session",
+                            );
+
+                            let msg = format!("New name for '{session_name}':");
+                            let rename_chunks = Layout::default()
+                                .direction(Direction::Vertical)
+                                .constraints([
+                                    Constraint::Length(1),
+                                    Constraint::Length(1),
+                                    Constraint::Length(1),
+                                ])
+                                .split(inner);
+
+                            frame.render_widget(
+                                Paragraph::new(Span::styled(
+                                    msg,
+                                    theme::title_style(&self.theme),
+                                )),
+                                rename_chunks[0],
+                            );
+
+                            input.render(
+                                rename_chunks[1],
+                                frame.buffer_mut(),
+                                &self.theme,
+                                "Name: ",
+                                "Enter new session name",
+                                true,
+                            );
+
+                            let hint_line = Line::from(vec![
+                                Span::styled("[Enter] ", theme::key_hint_key_style(&self.theme)),
+                                Span::raw("Save   "),
+                                Span::styled("[Esc] ", theme::key_hint_key_style(&self.theme)),
+                                Span::raw("Cancel"),
+                            ]);
+                            frame.render_widget(Paragraph::new(hint_line), rename_chunks[2]);
+                        }
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+
+            // Read keyboard input
+            let key = match input_source
+                .poll(std::time::Duration::from_millis(150))
                 .map_err(|e| e.to_string())?
             {
                 InputPoll::Event(InputEvent::Key(key)) => key,
                 InputPoll::Event(_) | InputPoll::Timeout => continue,
                 InputPoll::Closed => break None,
             };
-            {
-                match key.key {
-                    Key::Escape => break None,
-                    Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
-                        break None;
-                    }
-                    Key::Character('g') if key.modifiers.contains(Modifiers::CONTROL) => {
-                        break None;
-                    }
-                    Key::Enter => {
-                        if !filtered.is_empty() {
-                            break Some(filtered[selected_idx].value.clone());
-                        } else {
-                            break None;
-                        }
-                    }
-                    Key::Up => {
-                        selected_idx = selected_idx.saturating_sub(1);
-                    }
-                    Key::Down if !filtered.is_empty() && selected_idx < filtered.len() - 1 => {
-                        selected_idx += 1;
-                    }
-                    Key::Character('d') | Key::Character('D')
-                        if self.prompt == "sessions:" && !filtered.is_empty() =>
-                    {
-                        let item_value = filtered[selected_idx].value.clone();
-                        if item_value != "new" {
-                            let path = std::path::PathBuf::from(&item_value);
-                            let filename = path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|s| s.trim_end_matches(".json"))
-                                .unwrap_or("unknown");
 
-                            let confirm_msg = format!("! Delete session {}? (y/N): ", filename);
-                            if let Ok(ans) = draw_prompt(&mut stdout, &confirm_msg, &mut input) {
-                                let trimmed = ans.trim().to_lowercase();
-                                if trimmed == "y" || trimmed == "yes" {
-                                    let json_path = path.clone();
-                                    let log_path = path.with_extension("log");
-                                    let _ = std::fs::remove_file(json_path);
-                                    let _ = std::fs::remove_file(log_path);
+            // Modal input routing
+            match &mut modal {
+                PickerModal::ConfirmDelete { item_value, .. } => {
+                    match key.key {
+                        Key::Character('y') | Key::Character('Y') | Key::Enter => {
+                            let path = PathBuf::from(&item_value);
+                            let json_path = path.clone();
+                            let log_path = path.with_extension("log");
+                            let _ = std::fs::remove_file(json_path);
+                            let _ = std::fs::remove_file(log_path);
 
-                                    if let Some(pos) =
-                                        self.items.iter().position(|it| it.value == item_value)
-                                    {
-                                        self.items.remove(pos);
-                                    }
-                                    if selected_idx >= self.items.len().saturating_sub(1) {
-                                        selected_idx = self.items.len().saturating_sub(1);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Key::Character('r') | Key::Character('R')
-                        if self.prompt == "sessions:" && !filtered.is_empty() =>
-                    {
-                        let item_value = filtered[selected_idx].value.clone();
-                        if item_value != "new" {
-                            let path = std::path::PathBuf::from(&item_value);
-                            let filename = path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|s| s.trim_end_matches(".json"))
-                                .unwrap_or("unknown");
-
-                            let rename_msg = format!("Enter new name for session {}: ", filename);
-                            if let Ok(new_name) = draw_prompt(&mut stdout, &rename_msg, &mut input)
+                            if let Some(pos) =
+                                self.items.iter().position(|it| it.value == *item_value)
                             {
-                                let new_name = new_name.trim();
-                                if !new_name.is_empty()
-                                    && let Ok(content) = std::fs::read_to_string(&path)
+                                self.items.remove(pos);
+                            }
+                            modal = PickerModal::None;
+                            continue;
+                        }
+                        Key::Character('n') | Key::Character('N') | Key::Escape => {
+                            modal = PickerModal::None;
+                            continue;
+                        }
+                        Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
+                            modal = PickerModal::None;
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                }
+                PickerModal::Rename {
+                    item_value, input, ..
+                } => {
+                    match key.key {
+                        Key::Enter => {
+                            let new_name = input.query.trim().to_string();
+                            if !new_name.is_empty() {
+                                let path = PathBuf::from(&item_value);
+                                if let Ok(content) = std::fs::read_to_string(&path)
                                     && let Ok(mut state) = serde_json::from_str::<
                                         fshell_engine::handoff::HandoffState,
-                                    >(
-                                        &content
-                                    )
+                                    >(&content)
                                 {
                                     state.vars.insert(
                                         "FSH_SESSION_NAME".to_string(),
-                                        fshell_core::Val::String(new_name.to_string()),
+                                        fshell_core::Val::String(new_name.clone()),
                                     );
                                     if let Ok(serialized) = serde_json::to_string_pretty(&state) {
                                         let _ = std::fs::write(&path, &serialized);
@@ -260,92 +418,115 @@ impl Picker {
                                     );
 
                                     if let Some(pos) =
-                                        self.items.iter().position(|it| it.value == item_value)
+                                        self.items.iter().position(|it| it.value == *item_value)
                                     {
                                         self.items[pos].display = display;
                                     }
                                 }
                             }
+                            modal = PickerModal::None;
+                            continue;
+                        }
+                        Key::Escape => {
+                            modal = PickerModal::None;
+                            continue;
+                        }
+                        Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
+                            modal = PickerModal::None;
+                            continue;
+                        }
+                        _ => {
+                            input.handle_key(&key);
+                            continue;
                         }
                     }
-                    Key::Character(c) => {
-                        query.push(c);
+                }
+                PickerModal::None => {}
+            }
+
+            // Normal picker input
+            match key.key {
+                Key::Escape => break None,
+                Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => break None,
+                Key::Character('g') if key.modifiers.contains(Modifiers::CONTROL) => break None,
+                Key::Enter => {
+                    if !filtered.is_empty() {
+                        break Some(filtered[selected_idx].value.clone());
+                    } else {
+                        break None;
                     }
-                    Key::Backspace => {
-                        query.pop();
+                }
+                Key::Up | Key::Character('p') if key.modifiers.contains(Modifiers::CONTROL) => {
+                    selected_idx = selected_idx.saturating_sub(1);
+                }
+                Key::Up => {
+                    selected_idx = selected_idx.saturating_sub(1);
+                }
+                Key::Down | Key::Character('n') if key.modifiers.contains(Modifiers::CONTROL) => {
+                    if !filtered.is_empty() && selected_idx < filtered.len().saturating_sub(1) {
+                        selected_idx += 1;
                     }
-                    _ => {}
+                }
+                Key::Down => {
+                    if !filtered.is_empty() && selected_idx < filtered.len().saturating_sub(1) {
+                        selected_idx += 1;
+                    }
+                }
+                Key::PageUp => {
+                    selected_idx = selected_idx.saturating_sub(10);
+                }
+                Key::PageDown => {
+                    if !filtered.is_empty() {
+                        selected_idx = (selected_idx + 10).min(filtered.len().saturating_sub(1));
+                    }
+                }
+                Key::Character('d')
+                    if is_sessions && search_bar.query.is_empty() && !filtered.is_empty() =>
+                {
+                    let item_value = filtered[selected_idx].value.clone();
+                    if item_value != "new" {
+                        let path = PathBuf::from(&item_value);
+                        let filename = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.trim_end_matches(".json"))
+                            .unwrap_or("unknown")
+                            .to_string();
+
+                        modal = PickerModal::ConfirmDelete {
+                            session_name: filename,
+                            item_value,
+                        };
+                    }
+                }
+                Key::Character('r')
+                    if is_sessions && search_bar.query.is_empty() && !filtered.is_empty() =>
+                {
+                    let item_value = filtered[selected_idx].value.clone();
+                    if item_value != "new" {
+                        let path = PathBuf::from(&item_value);
+                        let filename = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.trim_end_matches(".json"))
+                            .unwrap_or("unknown")
+                            .to_string();
+
+                        modal = PickerModal::Rename {
+                            session_name: filename,
+                            item_value,
+                            input: SearchBarState::new(),
+                        };
+                    }
+                }
+                _ => {
+                    search_bar.handle_key(&key);
                 }
             }
         };
 
         Ok(result)
     }
-}
-
-fn draw_prompt(
-    stdout: &mut std::io::Stdout,
-    message: &str,
-    input_source: &mut impl fshell_terminal::input::EventSource,
-) -> Result<String, String> {
-    let (_cols, rows) = terminal::size().unwrap_or((80, 24));
-    execute!(
-        stdout,
-        MoveTo(0, rows - 1),
-        Clear(ClearType::CurrentLine),
-        SetForegroundColor(Color::Yellow),
-        Print(message),
-        SetForegroundColor(Color::White),
-        Show,
-        ResetColor
-    )
-    .map_err(|e| e.to_string())?;
-    let _ = stdout.flush();
-
-    let mut input = String::new();
-    loop {
-        if fshell_engine::is_test_mode() {
-            break;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let stdin_fd = std::io::stdin().as_raw_fd();
-            if unsafe { libc::isatty(stdin_fd) } == 0 {
-                break;
-            }
-        }
-        let key = match input_source
-            .poll(std::time::Duration::from_millis(200))
-            .map_err(|e| e.to_string())?
-        {
-            InputPoll::Event(InputEvent::Key(key)) => key,
-            InputPoll::Event(_) | InputPoll::Timeout => continue,
-            InputPoll::Closed => return Err("terminal input closed".into()),
-        };
-        {
-            match key.key {
-                Key::Enter => break,
-                Key::Escape => {
-                    input.clear();
-                    break;
-                }
-                Key::Character(c) => {
-                    input.push(c);
-                    execute!(stdout, Print(c)).map_err(|e| e.to_string())?;
-                    let _ = stdout.flush();
-                }
-                Key::Backspace if !input.is_empty() => {
-                    input.pop();
-                    execute!(stdout, Print("\u{0008} \u{0008}")).map_err(|e| e.to_string())?;
-                    let _ = stdout.flush();
-                }
-                _ => {}
-            }
-        }
-    }
-    execute!(stdout, Hide).map_err(|e| e.to_string())?;
-    Ok(input)
 }
 
 fn fuzzy_filter<'a>(items: &'a [PickerItem], query: &str) -> Vec<&'a PickerItem> {
