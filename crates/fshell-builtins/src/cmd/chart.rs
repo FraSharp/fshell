@@ -735,10 +735,9 @@ fn render_histogram(
 mod tests {
     use super::*;
     use fshell_core::FxIndexMap;
-    use fxhash::FxBuildHasher;
 
     fn make_test_record(user: &str, cpu: f64) -> Val {
-        let mut m = FxIndexMap::with_hasher(FxBuildHasher::default());
+        let mut m = FxIndexMap::default();
         m.insert(ustr("user"), Val::String(user.to_string()));
         m.insert(ustr("cpu"), Val::Float(cpu));
         Val::Map(m)

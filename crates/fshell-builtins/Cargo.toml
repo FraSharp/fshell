@@ -26,6 +26,7 @@ fshell-engine = { path = "../fshell-engine" }
 fshell-semantic = { path = "../fshell-semantic" }
 fshell-render = { path = "../fshell-render" }
 tokio = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 miette = { workspace = true }
 thiserror = { workspace = true }

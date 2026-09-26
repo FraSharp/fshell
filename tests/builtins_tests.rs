@@ -1446,3 +1446,91 @@ async fn test_compgen_builtin() {
     }
     assert!(builtins.contains(&"which".to_string()));
 }
+
+#[tokio::test]
+async fn test_select_builtin_args() {
+    let env = setup_test_env();
+    let mut guard = EnvVarGuard::new();
+    guard.set("FSH_TEST_SELECT_INDEX", "2");
+
+    let mut parser = Parser::new("select foo bar baz");
+    let stmts = parser.parse_statements().unwrap();
+    assert_eq!(stmts.len(), 1);
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        match res {
+            Val::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0], Val::String("baz".to_string()));
+            }
+            Val::String(s) => {
+                assert_eq!(s, "baz");
+            }
+            other => panic!("Expected selected item, got {:?}", other),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_select_builtin_pipeline() {
+    let env = setup_test_env();
+    let mut guard = EnvVarGuard::new();
+    guard.set("FSH_TEST_SELECT_INDEX", "1");
+
+    env.vars.write().insert(
+        "items".to_string(),
+        Val::List(vec![
+            Val::String("apple".into()),
+            Val::String("banana".into()),
+            Val::String("cherry".into()),
+        ]),
+    );
+
+    let mut parser = Parser::new("$items | select");
+    let stmts = parser.parse_statements().unwrap();
+    assert_eq!(stmts.len(), 1);
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        match res {
+            Val::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0], Val::String("banana".to_string()));
+            }
+            Val::String(s) => {
+                assert_eq!(s, "banana");
+            }
+            other => panic!("Expected selected item, got {:?}", other),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_select_builtin_multi_pipeline() {
+    let env = setup_test_env();
+    let mut guard = EnvVarGuard::new();
+    guard.set("FSH_TEST_SELECT_INDICES", "0,2");
+
+    env.vars.write().insert(
+        "items".to_string(),
+        Val::List(vec![
+            Val::String("apple".into()),
+            Val::String("banana".into()),
+            Val::String("cherry".into()),
+        ]),
+    );
+
+    let mut parser = Parser::new("$items | select -m");
+    let stmts = parser.parse_statements().unwrap();
+    assert_eq!(stmts.len(), 1);
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        match res {
+            Val::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], Val::String("apple".to_string()));
+                assert_eq!(items[1], Val::String("cherry".to_string()));
+            }
+            other => panic!("Expected list of selected items, got {:?}", other),
+        }
+    }
+}
