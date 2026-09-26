@@ -648,8 +648,9 @@ impl RedirectionContext {
                         line
                     };
                     if here_doc.requires_expansion {
+                        let escaped = escape_quotes_for_heredoc(trimmed);
                         let expanded = expand_word(
-                            &format!("\"{}\"", trimmed.replace('\\', "\\\\").replace('"', "\\\"")),
+                            &format!("\"{escaped}\""),
                             env,
                             &ExpansionConfig {
                                 do_glob: false,
@@ -768,6 +769,33 @@ fn unsupported_descriptor(fd: i32) -> PosixError {
         message: format!("redirection of file descriptor {fd} is not supported (only 0, 1 and 2)"),
         span: None,
     })
+}
+
+/// Escape double quotes for wrapping an expanding heredoc line in `"..."`.
+///
+/// In POSIX heredoc (IEEE Std 1003.1-2017, section 2.7.4), backslash retains its
+/// escape meaning only before `$`, `` ` ``, `\`, and newline. This precisely matches
+/// double-quoted string escape rules, except that heredocs do not treat `"` as a
+/// delimiter. We therefore only escape `"` (unless already escaped), preserving
+/// literal `\$`, `\\`, etc.
+fn escape_quotes_for_heredoc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            out.push('\\');
+            if let Some(&next) = chars.peek() {
+                out.push(next);
+                chars.next();
+            }
+        } else if c == '"' {
+            out.push('\\');
+            out.push('"');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Write to a shared redirect handle.
@@ -2641,8 +2669,16 @@ async fn run_external_command(
     let _fg_guard = PosixForegroundGuard::new(env, child_pid, cmd_name, is_interactive);
 
     let stdin_bytes = effective_stdin.map(<[u8]>::to_vec);
-    let (status, captured_stdout) =
-        finish_child(child, cmd_name, &mut io_cfg, stdin_bytes, stderr_into_pipe, env, child_pid).await?;
+    let (status, captured_stdout) = finish_child(
+        child,
+        cmd_name,
+        &mut io_cfg,
+        stdin_bytes,
+        stderr_into_pipe,
+        env,
+        child_pid,
+    )
+    .await?;
 
     let code = match status.code() {
         Some(c) => c,
@@ -2659,7 +2695,9 @@ async fn run_external_command(
     env.set_exit_code(code as i64);
 
     if code == 130 || env.pipeline_cancelled() {
-        env.job_control.sigint_pending.store(false, std::sync::atomic::Ordering::SeqCst);
+        env.job_control
+            .sigint_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         return Err(PosixError::Interrupted);
     }
 
@@ -2949,7 +2987,16 @@ async fn run_child_shell(
 
     let stdin_bytes = io_cfg.stdin_bytes.take();
     let child_pid = child.id().map(|id| id as i32);
-    let result = finish_child(child, "subshell", &mut io_cfg, stdin_bytes, None, env, child_pid).await;
+    let result = finish_child(
+        child,
+        "subshell",
+        &mut io_cfg,
+        stdin_bytes,
+        None,
+        env,
+        child_pid,
+    )
+    .await;
     for file in &launch.temp_files {
         let _ = std::fs::remove_file(file);
     }
@@ -3109,7 +3156,8 @@ mod tests {
             .sigint_pending
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let parsed = crate::parse_posix_script("while true; do :; done").expect("parse should succeed");
+        let parsed =
+            crate::parse_posix_script("while true; do :; done").expect("parse should succeed");
         let result = eval_source_stream(&parsed, &env, &EvalConfig::default(), false).await;
         assert!(matches!(result, Err(EngineError::Interrupted { .. })));
         assert_eq!(env.exit_code(), 130);

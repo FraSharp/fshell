@@ -754,12 +754,15 @@ async fn test_redirection_binds_to_the_correct_pipeline_segment() {
     let left = ctx.temp_path().join("left.txt");
     let right = ctx.temp_path().join("right.txt");
 
-    ctx.eval_script(&format!("printf left > \"{}\" | cat", left.display()))
+    ctx.eval_script(&format!("printf 'left\\n' > \"{}\" | cat", left.display()))
         .await
         .expect("redirect before pipe should belong to the left command");
-    ctx.eval_script(&format!("printf right | > \"{}\" cat", right.display()))
-        .await
-        .expect("redirect after pipe should belong to the right command");
+    ctx.eval_script(&format!(
+        "printf 'right\\n' | > \"{}\" cat",
+        right.display()
+    ))
+    .await
+    .expect("redirect after pipe should belong to the right command");
 
     assert_eq!(std::fs::read_to_string(left).unwrap(), "left\n");
     assert_eq!(std::fs::read_to_string(right).unwrap(), "right\n");

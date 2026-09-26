@@ -136,10 +136,7 @@ pub enum EngineError {
     },
 
     #[error("Interrupted by signal")]
-    #[diagnostic(
-        code = "FSH-RT-002",
-        help("The command was interrupted by Ctrl+C.")
-    )]
+    #[diagnostic(code = "FSH-RT-002", help("The command was interrupted by Ctrl+C."))]
     Interrupted {
         #[label("interrupted here")]
         span: Option<SourceSpan>,

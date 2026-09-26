@@ -799,7 +799,9 @@ async fn execute_output_route(
                 // before routing decides what happens to the text. Redirecting a
                 // diagnostic away (`2>/dev/null`) then moves the message without
                 // erasing the failure it reports.
-                env.record_stage_failure(diag.clone());
+                if diag.reported_status().is_some() || diag.is_condition_false() {
+                    env.record_stage_failure(diag.clone());
+                }
                 &routes.stderr
             }
             _ => &routes.stdout,
@@ -1919,17 +1921,16 @@ async fn execute_pipeline_inner(
                                 {
                                     Ok(()) => env_clone.record_stage_status(0),
                                     Err(e) => {
-                                        let diag = FshDiag::new(e);
-                                        // A command-level failure — a reported one, or
-                                        // a logical `false` — is a *status*, not an
-                                        // abort: the rest of the pipeline still runs,
-                                        // and cancelling it would make the outcome
-                                        // depend on which stage got there first.
-                                        if diag.reported_status().is_none()
-                                            && !diag.is_condition_false()
-                                        {
+                                        let is_hard = !matches!(
+                                            e.code,
+                                            fshell_core::diagnostic::ErrorCode::CommandNotFound
+                                                | fshell_core::diagnostic::ErrorCode::CommandNotExecutable
+                                                | fshell_core::diagnostic::ErrorCode::RedirectionFailed
+                                        );
+                                        if is_hard {
                                             let _ = cancel.send(true);
                                         }
+                                        let diag = FshDiag::new(e);
                                         env_clone.record_stage_failure(diag.clone());
                                         let _ =
                                             out_tx.send(PipelinePayload::Structured(diag)).await;
@@ -1954,13 +1955,16 @@ async fn execute_pipeline_inner(
                                 ) {
                                     Ok(()) => env_clone.record_stage_status(0),
                                     Err(e) => {
-                                        let diag = FshDiag::new(e);
-                                        // See the async arm: a status is not an abort.
-                                        if diag.reported_status().is_none()
-                                            && !diag.is_condition_false()
-                                        {
+                                        let is_hard = !matches!(
+                                            e.code,
+                                            fshell_core::diagnostic::ErrorCode::CommandNotFound
+                                                | fshell_core::diagnostic::ErrorCode::CommandNotExecutable
+                                                | fshell_core::diagnostic::ErrorCode::RedirectionFailed
+                                        );
+                                        if is_hard {
                                             let _ = cancel.send(true);
                                         }
+                                        let diag = FshDiag::new(e);
                                         env_clone.record_stage_failure(diag.clone());
                                         let _ =
                                             out_tx.blocking_send(PipelinePayload::Structured(diag));

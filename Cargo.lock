@@ -1067,6 +1067,7 @@ dependencies = [
  "fshell-sandbox",
  "fshell-semantic",
  "fshell-terminal",
+ "futures",
  "getrandom 0.3.4",
  "indexmap",
  "libc",
@@ -1325,7 +1326,9 @@ dependencies = [
  "futures",
  "libc",
  "portable-pty",
+ "ratatui",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

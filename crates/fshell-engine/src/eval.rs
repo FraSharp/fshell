@@ -1542,7 +1542,9 @@ pub(crate) async fn eval_loop_body(body: &[Stmt], env: &Env) -> Result<Flow, Eng
             Ok(Flow::Normal) => {
                 publish_completion(stmt, env);
                 if env.exit_code() == 130 {
-                    return Err(check_sigint(env).err().unwrap_or(EngineError::Interrupted { span: None }));
+                    return Err(check_sigint(env)
+                        .err()
+                        .unwrap_or(EngineError::Interrupted { span: None }));
                 }
                 check_sigint(env)?;
             }
@@ -2886,9 +2888,20 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::Background(stmt) => {
+            let cmd_str = match stmt.as_ref() {
+                Stmt::Expr(expr) => crate::format::format_expr(expr),
+                Stmt::Spanned { stmt: inner, .. } => match &**inner {
+                    Stmt::Expr(expr) => crate::format::format_expr(expr),
+                    other => format!("{:?}", other),
+                },
+                other => format!("{:?}", other),
+            };
+            if crate::background::spawn_background(&cmd_str, env).is_ok() {
+                return Ok(Flow::Normal);
+            }
+
             let stmt = stmt.clone();
             let env = env.begin_invocation();
-            let cmd_str = format!("{:?}", stmt);
             let job_id = env.background_count.fetch_add(1, Ordering::Relaxed) as usize + 1;
 
             // Register a virtual job entry so `jobs` shows it

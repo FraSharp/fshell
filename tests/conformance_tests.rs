@@ -1089,6 +1089,17 @@ fn dispatch_cases() -> Vec<Case> {
              command list inside a command substitution",
             &[Engine::Native],
         ),
+        Case::posix(
+            "dispatch/substitution-accepts-an-assignment",
+            "echo \"[$(PATH=/tmp)]\"",
+        )
+        .engines(&[Engine::Native])
+        .known_failure(
+            "native-substitution-parser-rejects-an-assignment",
+            "`$(PATH=/tmp)` fails to parse in the native engine, where POSIX allows an \
+             assignment to be the whole command of a substitution",
+            &[Engine::Native],
+        ),
         Case::posix("dispatch/printf-format-reuse", "printf '%s\\n' a b c")
             .engines(&[Engine::Native, Engine::Auto])
             .expect_engine(Engine::Native),
