@@ -4,21 +4,17 @@
 //! Modern, two-pane interactive help reference browser built on Ratatui.
 
 use crate::help::{HelpTopic, TOPICS};
-use crossterm::{
-    cursor::{Hide, Show},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
 use fshell_core::ShellError;
 use fshell_core::theme::{Theme, ThemeColor};
 use fshell_engine::Env;
 use fshell_terminal::input::{
     CrosstermEventSource, InputEvent, InputPoll, Key, KeyAction, Modifiers,
 };
+use fshell_terminal::session::{
+    TerminalDevice, TerminalMode, TerminalSession, TerminalSessionOptions,
+};
 use nucleo_matcher::{Config, Matcher, Utf32String};
 use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -27,30 +23,7 @@ use ratatui::{
         ScrollbarOrientation, ScrollbarState, StatefulWidget,
     },
 };
-use std::io;
 use unicode_width::UnicodeWidthStr;
-
-struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
-}
-
-impl TerminalGuard {
-    fn new() -> Result<Self, String> {
-        enable_raw_mode().map_err(|e| e.to_string())?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, Hide).map_err(|e| e.to_string())?;
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
-        Ok(Self { terminal })
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
-        let _ = disable_raw_mode();
-    }
-}
 
 fn to_color(c: &ThemeColor) -> Color {
     let (r, g, b) = c.to_rgb();
@@ -142,18 +115,21 @@ pub fn run_tui(env: &Env) -> Result<(), ShellError> {
         return Ok(());
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let stdin_fd = std::io::stdin().as_raw_fd();
-        if unsafe { libc::isatty(stdin_fd) } == 0 {
-            return Ok(());
-        }
-    }
+    let device = match TerminalDevice::auto() {
+        Ok(dev) => dev,
+        Err(_) => return Ok(()),
+    };
 
-    let mut guard = TerminalGuard::new().map_err(ShellError::from)?;
-    guard
-        .terminal
+    let options = TerminalSessionOptions {
+        mode: TerminalMode::Fullscreen,
+        hide_cursor: true,
+        ..Default::default()
+    };
+
+    let mut session =
+        TerminalSession::enter(device, options).map_err(|e| ShellError::from(e.to_string()))?;
+    session
+        .terminal_mut()
         .clear()
         .map_err(|e| ShellError::from(e.to_string()))?;
 
@@ -186,8 +162,8 @@ pub fn run_tui(env: &Env) -> Result<(), ShellError> {
             .unwrap_or_else(|| vec![Line::from("No topic selected.")]);
         let total_doc_lines = doc_lines.len();
 
-        guard
-            .terminal
+        session
+            .terminal_mut()
             .draw(|f| {
                 let size = f.area();
                 if size.width < 10 || size.height < 6 {

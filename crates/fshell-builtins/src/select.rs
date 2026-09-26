@@ -14,14 +14,19 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{
+    Block, BorderType, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, StatefulWidget,
+};
 use unicode_width::UnicodeWidthStr;
 
 use fshell_core::diagnostic::ErrorCode;
 use fshell_core::theme::{Theme, ThemeColor};
 use fshell_core::{ShellError, Val};
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
-use fshell_terminal::input::{CrosstermEventStream, InputEvent, Key, KeyAction, Modifiers};
+use fshell_terminal::input::{
+    CrosstermEventStream, InputEvent, Key, KeyAction, Modifiers, MouseAction,
+};
 use fshell_terminal::runner::{AppFlow, ShellTuiApp, run_tui};
 use fshell_terminal::session::{
     TerminalDevice, TerminalMode, TerminalSession, TerminalSessionOptions,
@@ -111,11 +116,14 @@ pub struct SelectApp<'a> {
     pub query: String,
     pub selected_idx: usize,
     pub scroll_offset: usize,
+    cached_filtered: Vec<usize>,
+    filter_dirty: bool,
 }
 
 impl<'a> SelectApp<'a> {
     pub fn new(prompt: &'a str, initial_items: Vec<Val>, theme: &'a Theme, multi: bool) -> Self {
-        let items = initial_items.into_iter().map(SelectItem::new).collect();
+        let items: Vec<SelectItem> = initial_items.into_iter().map(SelectItem::new).collect();
+        let cached_filtered = (0..items.len()).collect();
         Self {
             prompt,
             items,
@@ -124,10 +132,19 @@ impl<'a> SelectApp<'a> {
             query: String::new(),
             selected_idx: 0,
             scroll_offset: 0,
+            cached_filtered,
+            filter_dirty: false,
         }
     }
 
-    pub fn filtered_indices(&self) -> Vec<usize> {
+    pub fn ensure_filtered(&mut self) {
+        if self.filter_dirty {
+            self.cached_filtered = self.compute_filtered();
+            self.filter_dirty = false;
+        }
+    }
+
+    fn compute_filtered(&self) -> Vec<usize> {
         if self.query.is_empty() {
             return (0..self.items.len()).collect();
         }
@@ -155,6 +172,14 @@ impl<'a> SelectApp<'a> {
         scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
         scored.into_iter().map(|(i, _)| i).collect()
     }
+
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if !self.filter_dirty {
+            self.cached_filtered.clone()
+        } else {
+            self.compute_filtered()
+        }
+    }
 }
 
 impl<'a> ShellTuiApp for SelectApp<'a> {
@@ -165,127 +190,172 @@ impl<'a> ShellTuiApp for SelectApp<'a> {
         match msg {
             SelectMessage::Item(val) => {
                 self.items.push(SelectItem::new(val));
+                self.filter_dirty = true;
                 AppFlow::Continue
             }
             SelectMessage::StreamEnded => AppFlow::Ignore,
-            SelectMessage::Input(event) => {
-                let key = match event {
-                    InputEvent::Key(key) => key,
-                    _ => return AppFlow::Ignore,
-                };
-
-                if key.action == KeyAction::Release {
-                    return AppFlow::Ignore;
+            SelectMessage::Input(event) => match event {
+                InputEvent::Mouse(mouse) => {
+                    self.ensure_filtered();
+                    let filtered_len = self.cached_filtered.len();
+                    match mouse.action {
+                        MouseAction::ScrollUp => {
+                            if filtered_len > 0 {
+                                self.selected_idx = self.selected_idx.saturating_sub(3);
+                            }
+                            AppFlow::Continue
+                        }
+                        MouseAction::ScrollDown => {
+                            if filtered_len > 0 {
+                                self.selected_idx =
+                                    (self.selected_idx + 3).min(filtered_len.saturating_sub(1));
+                            }
+                            AppFlow::Continue
+                        }
+                        _ => AppFlow::Ignore,
+                    }
                 }
-
-                let filtered = self.filtered_indices();
-
-                match key.key {
-                    Key::Escape => AppFlow::Break(Vec::new()),
-                    Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
-                        AppFlow::Break(Vec::new())
+                InputEvent::Key(key) => {
+                    if key.action == KeyAction::Release {
+                        return AppFlow::Ignore;
                     }
-                    Key::Character('g') if key.modifiers.contains(Modifiers::CONTROL) => {
-                        AppFlow::Break(Vec::new())
-                    }
-                    Key::Enter => {
-                        if filtered.is_empty() {
-                            return AppFlow::Break(Vec::new());
+
+                    self.ensure_filtered();
+                    let filtered_len = self.cached_filtered.len();
+                    let target_idx = if filtered_len > 0 {
+                        Some(self.cached_filtered[self.selected_idx.min(filtered_len - 1)])
+                    } else {
+                        None
+                    };
+
+                    match key.key {
+                        Key::Escape => AppFlow::Break(Vec::new()),
+                        Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
+                            AppFlow::Break(Vec::new())
                         }
-                        if self.multi {
-                            let checked: Vec<Val> = self
-                                .items
-                                .iter()
-                                .filter(|it| it.checked)
-                                .map(|it| it.value.clone())
-                                .collect();
-                            if !checked.is_empty() {
-                                return AppFlow::Break(checked);
+                        Key::Character('g') if key.modifiers.contains(Modifiers::CONTROL) => {
+                            AppFlow::Break(Vec::new())
+                        }
+                        Key::Enter => {
+                            let Some(idx) = target_idx else {
+                                return AppFlow::Break(Vec::new());
+                            };
+                            if self.multi {
+                                let checked: Vec<Val> = self
+                                    .items
+                                    .iter()
+                                    .filter(|it| it.checked)
+                                    .map(|it| it.value.clone())
+                                    .collect();
+                                if !checked.is_empty() {
+                                    return AppFlow::Break(checked);
+                                }
                             }
-                            let target_idx = filtered[self.selected_idx.min(filtered.len() - 1)];
-                            AppFlow::Break(vec![self.items[target_idx].value.clone()])
-                        } else {
-                            let target_idx = filtered[self.selected_idx.min(filtered.len() - 1)];
-                            AppFlow::Break(vec![self.items[target_idx].value.clone()])
+                            AppFlow::Break(vec![self.items[idx].value.clone()])
                         }
-                    }
-                    Key::Character(' ') if self.multi => {
-                        if !filtered.is_empty() {
-                            let target_idx = filtered[self.selected_idx.min(filtered.len() - 1)];
-                            self.items[target_idx].checked = !self.items[target_idx].checked;
-                            if self.selected_idx + 1 < filtered.len() {
+                        Key::Character(' ') | Key::Tab if self.multi => {
+                            if let Some(idx) = target_idx {
+                                self.items[idx].checked = !self.items[idx].checked;
+                                if self.selected_idx + 1 < filtered_len {
+                                    self.selected_idx += 1;
+                                }
+                                AppFlow::Continue
+                            } else {
+                                AppFlow::Ignore
+                            }
+                        }
+                        Key::Up | Key::Character('p')
+                            if key.modifiers.contains(Modifiers::CONTROL) =>
+                        {
+                            self.selected_idx = self.selected_idx.saturating_sub(1);
+                            AppFlow::Continue
+                        }
+                        Key::Up => {
+                            self.selected_idx = self.selected_idx.saturating_sub(1);
+                            AppFlow::Continue
+                        }
+                        Key::Down | Key::Character('n')
+                            if key.modifiers.contains(Modifiers::CONTROL) =>
+                        {
+                            if filtered_len > 0 && self.selected_idx + 1 < filtered_len {
                                 self.selected_idx += 1;
                             }
                             AppFlow::Continue
-                        } else {
-                            AppFlow::Ignore
                         }
-                    }
-                    Key::Tab if self.multi => {
-                        if !filtered.is_empty() {
-                            let target_idx = filtered[self.selected_idx.min(filtered.len() - 1)];
-                            self.items[target_idx].checked = !self.items[target_idx].checked;
-                            if self.selected_idx + 1 < filtered.len() {
+                        Key::Down => {
+                            if filtered_len > 0 && self.selected_idx + 1 < filtered_len {
                                 self.selected_idx += 1;
                             }
                             AppFlow::Continue
-                        } else {
-                            AppFlow::Ignore
                         }
-                    }
-                    Key::Up | Key::Character('p') if key.modifiers.contains(Modifiers::CONTROL) => {
-                        self.selected_idx = self.selected_idx.saturating_sub(1);
-                        AppFlow::Continue
-                    }
-                    Key::Up => {
-                        self.selected_idx = self.selected_idx.saturating_sub(1);
-                        AppFlow::Continue
-                    }
-                    Key::Down | Key::Character('n')
-                        if key.modifiers.contains(Modifiers::CONTROL) =>
-                    {
-                        if !filtered.is_empty() && self.selected_idx + 1 < filtered.len() {
-                            self.selected_idx += 1;
-                        }
-                        AppFlow::Continue
-                    }
-                    Key::Down => {
-                        if !filtered.is_empty() && self.selected_idx + 1 < filtered.len() {
-                            self.selected_idx += 1;
-                        }
-                        AppFlow::Continue
-                    }
-                    Key::PageUp => {
-                        self.selected_idx = self.selected_idx.saturating_sub(10);
-                        AppFlow::Continue
-                    }
-                    Key::PageDown => {
-                        if !filtered.is_empty() {
-                            self.selected_idx = (self.selected_idx + 10).min(filtered.len() - 1);
-                        }
-                        AppFlow::Continue
-                    }
-                    Key::Backspace => {
-                        if self.query.pop().is_some() {
+                        Key::Home | Key::Character('a')
+                            if key.modifiers.contains(Modifiers::CONTROL) =>
+                        {
                             self.selected_idx = 0;
                             AppFlow::Continue
-                        } else {
-                            AppFlow::Ignore
                         }
+                        Key::Home => {
+                            self.selected_idx = 0;
+                            AppFlow::Continue
+                        }
+                        Key::End | Key::Character('e')
+                            if key.modifiers.contains(Modifiers::CONTROL) =>
+                        {
+                            self.selected_idx = filtered_len.saturating_sub(1);
+                            AppFlow::Continue
+                        }
+                        Key::End => {
+                            self.selected_idx = filtered_len.saturating_sub(1);
+                            AppFlow::Continue
+                        }
+                        Key::PageUp => {
+                            self.selected_idx = self.selected_idx.saturating_sub(10);
+                            AppFlow::Continue
+                        }
+                        Key::PageDown => {
+                            if filtered_len > 0 {
+                                self.selected_idx =
+                                    (self.selected_idx + 10).min(filtered_len.saturating_sub(1));
+                            }
+                            AppFlow::Continue
+                        }
+                        Key::Backspace => {
+                            if self.query.pop().is_some() {
+                                self.filter_dirty = true;
+                                self.selected_idx = 0;
+                                AppFlow::Continue
+                            } else {
+                                AppFlow::Ignore
+                            }
+                        }
+                        Key::Character('w') if key.modifiers.contains(Modifiers::CONTROL) => {
+                            let trimmed = self.query.trim_end();
+                            if let Some(pos) = trimmed.rfind(' ') {
+                                self.query.truncate(pos + 1);
+                            } else {
+                                self.query.clear();
+                            }
+                            self.filter_dirty = true;
+                            self.selected_idx = 0;
+                            AppFlow::Continue
+                        }
+                        Key::Character('u') if key.modifiers.contains(Modifiers::CONTROL) => {
+                            self.query.clear();
+                            self.filter_dirty = true;
+                            self.selected_idx = 0;
+                            AppFlow::Continue
+                        }
+                        Key::Character(c) => {
+                            self.query.push(c);
+                            self.filter_dirty = true;
+                            self.selected_idx = 0;
+                            AppFlow::Continue
+                        }
+                        _ => AppFlow::Ignore,
                     }
-                    Key::Character('u') if key.modifiers.contains(Modifiers::CONTROL) => {
-                        self.query.clear();
-                        self.selected_idx = 0;
-                        AppFlow::Continue
-                    }
-                    Key::Character(c) => {
-                        self.query.push(c);
-                        self.selected_idx = 0;
-                        AppFlow::Continue
-                    }
-                    _ => AppFlow::Ignore,
                 }
-            }
+                _ => AppFlow::Ignore,
+            },
         }
     }
 
@@ -294,7 +364,8 @@ impl<'a> ShellTuiApp for SelectApp<'a> {
             return;
         }
 
-        let filtered = self.filtered_indices();
+        self.ensure_filtered();
+        let filtered = self.cached_filtered.clone();
         if filtered.is_empty() {
             self.selected_idx = 0;
         } else if self.selected_idx >= filtered.len() {
@@ -475,6 +546,25 @@ impl<'a> ShellTuiApp for SelectApp<'a> {
             .collect();
 
         frame.render_widget(List::new(list_items), list_inner);
+
+        if filtered.len() > visible_height && chunks[1].width > 2 && chunks[1].height > 2 {
+            let scrollbar_area = Rect::new(
+                chunks[1].x + chunks[1].width.saturating_sub(1),
+                chunks[1].y + 1,
+                1,
+                chunks[1].height.saturating_sub(2),
+            );
+            let mut sbar_state = ScrollbarState::new(filtered.len()).position(self.selected_idx);
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .thumb_symbol("┃")
+                .style(Style::default().fg(border_color))
+                .thumb_style(Style::default().fg(title_color))
+                .render(scrollbar_area, frame.buffer_mut(), &mut sbar_state);
+        }
 
         // 3. Footer / Key hints
         let footer_spans = if self.multi {
@@ -765,6 +855,7 @@ async fn run_select_task(
     let options = TerminalSessionOptions {
         mode,
         hide_cursor: true,
+        enable_mouse: true,
         ..Default::default()
     };
 
@@ -995,5 +1086,92 @@ mod tests {
                 app.render(frame, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn test_select_app_home_end_and_ctrl_w() {
+        use fshell_terminal::input::MouseEvent;
+
+        let items: Vec<Val> = (0..20)
+            .map(|i| Val::String(format!("item_{:02}", i)))
+            .collect();
+        let theme = Theme::default_theme();
+        let mut app = SelectApp::new("Pick:", items, &theme, false);
+
+        // Jump to End
+        app.handle_message(SelectMessage::Input(InputEvent::Key(KeyEvent::new(
+            Key::End,
+            Modifiers::empty(),
+        ))));
+        assert_eq!(app.selected_idx, 19);
+
+        // Jump to Home
+        app.handle_message(SelectMessage::Input(InputEvent::Key(KeyEvent::new(
+            Key::Home,
+            Modifiers::empty(),
+        ))));
+        assert_eq!(app.selected_idx, 0);
+
+        // Jump to End with Ctrl-E
+        let mut ctrl = Modifiers::empty();
+        ctrl |= Modifiers::CONTROL;
+        app.handle_message(SelectMessage::Input(InputEvent::Key(KeyEvent::new(
+            Key::Character('e'),
+            ctrl,
+        ))));
+        assert_eq!(app.selected_idx, 19);
+
+        // Jump to Home with Ctrl-A
+        app.handle_message(SelectMessage::Input(InputEvent::Key(KeyEvent::new(
+            Key::Character('a'),
+            ctrl,
+        ))));
+        assert_eq!(app.selected_idx, 0);
+
+        // Mouse scroll down (scrolls by 3)
+        app.handle_message(SelectMessage::Input(InputEvent::Mouse(MouseEvent {
+            action: MouseAction::ScrollDown,
+            column: 10,
+            row: 5,
+        })));
+        assert_eq!(app.selected_idx, 3);
+
+        // Mouse scroll up
+        app.handle_message(SelectMessage::Input(InputEvent::Mouse(MouseEvent {
+            action: MouseAction::ScrollUp,
+            column: 10,
+            row: 5,
+        })));
+        assert_eq!(app.selected_idx, 0);
+
+        // Type multiple words
+        for c in "foo bar baz".chars() {
+            app.handle_message(SelectMessage::Input(InputEvent::Key(KeyEvent::new(
+                Key::Character(c),
+                Modifiers::empty(),
+            ))));
+        }
+        assert_eq!(app.query, "foo bar baz");
+
+        // Ctrl-W kill word: deletes "baz", leaving "foo bar "
+        app.handle_message(SelectMessage::Input(InputEvent::Key(KeyEvent::new(
+            Key::Character('w'),
+            ctrl,
+        ))));
+        assert_eq!(app.query, "foo bar ");
+
+        // Another Ctrl-W: deletes "bar ", leaving "foo "
+        app.handle_message(SelectMessage::Input(InputEvent::Key(KeyEvent::new(
+            Key::Character('w'),
+            ctrl,
+        ))));
+        assert_eq!(app.query, "foo ");
+
+        // Another Ctrl-W: deletes "foo ", leaving empty
+        app.handle_message(SelectMessage::Input(InputEvent::Key(KeyEvent::new(
+            Key::Character('w'),
+            ctrl,
+        ))));
+        assert_eq!(app.query, "");
     }
 }
