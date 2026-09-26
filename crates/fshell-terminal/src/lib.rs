@@ -1,6 +1,14 @@
-//! Fshell-owned terminal input semantics backed by Crossterm.
+//! Fshell-owned terminal runtime boundary.
 //!
-//! This crate owns event acquisition and normalization. Terminal-mode
-//! lifetimes and Ratatui rendering remain with their existing owners.
+//! Owns terminal input normalization, process-level lifecycle guards,
+//! scoped terminal sessions (fullscreen and inline), and the unified TUI runner.
 
 pub mod input;
+pub mod lifecycle;
+pub mod runner;
+pub mod session;
+
+pub use input::*;
+pub use lifecycle::*;
+pub use runner::*;
+pub use session::*;

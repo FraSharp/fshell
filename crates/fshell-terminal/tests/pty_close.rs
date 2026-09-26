@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![allow(clippy::panic, clippy::unwrap_used)]
 
 use std::io::Read;
 use std::sync::mpsc;

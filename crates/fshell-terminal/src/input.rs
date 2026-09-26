@@ -349,6 +349,41 @@ impl CrosstermEventStream {
     }
 }
 
+impl futures::Stream for CrosstermEventStream {
+    type Item = InputEvent;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        if self.closed {
+            return std::task::Poll::Ready(None);
+        }
+
+        loop {
+            match std::pin::Pin::new(&mut self.stream).poll_next(cx) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(None) => {
+                    self.closed = true;
+                    return std::task::Poll::Ready(None);
+                }
+                std::task::Poll::Ready(Some(Err(error))) => {
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    self.closed = true;
+                    return std::task::Poll::Ready(None);
+                }
+                std::task::Poll::Ready(Some(Ok(event))) => {
+                    if let Some(event) = map_event(event) {
+                        return std::task::Poll::Ready(Some(event));
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn map_event(event: CrosstermEvent) -> Option<InputEvent> {
     match event {
         CrosstermEvent::Key(key) => {
@@ -438,6 +473,7 @@ fn map_button(button: event::MouseButton) -> MouseButton {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::collections::VecDeque;
 
@@ -477,10 +513,10 @@ mod tests {
     }
 
     fn clone_io_result<T: Clone>(result: &io::Result<T>) -> io::Result<T> {
-        result
-            .as_ref()
-            .map(Clone::clone)
-            .map_err(|error| io::Error::new(error.kind(), error.to_string()))
+        match result {
+            Ok(val) => Ok(val.clone()),
+            Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
+        }
     }
 
     #[test]

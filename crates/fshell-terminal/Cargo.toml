@@ -11,10 +11,12 @@ repository.workspace = true
 crossterm = { workspace = true, features = ["event-stream"] }
 futures = { workspace = true }
 thiserror = { workspace = true }
+ratatui = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
-libc = { workspace = true }
 portable-pty = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true
