@@ -43,6 +43,12 @@ pub struct DataGridState {
     pub filter_query: String,
     pub active_column_idx: usize,
     pub col_offset: usize,
+    pub cached_indices: Option<Vec<usize>>,
+    pub cached_widths: Option<Vec<usize>>,
+    pub cached_is_numeric: Option<Vec<bool>>,
+    last_query: String,
+    last_sort: Option<(String, SortDirection)>,
+    last_item_count: usize,
 }
 
 impl DataGridState {
@@ -50,6 +56,27 @@ impl DataGridState {
         let mut s = Self::default();
         s.table_state.select(Some(0));
         s
+    }
+
+    pub fn ensure_indices(&mut self, items: &[Val]) -> &[usize] {
+        if self.cached_indices.is_none()
+            || self.last_query != self.filter_query
+            || self.last_sort != self.sort_column
+            || self.last_item_count != items.len()
+        {
+            let indices = DataGrid::filter_and_sort_indices(
+                items,
+                &self.filter_query,
+                self.sort_column.as_ref(),
+            );
+            self.cached_indices = Some(indices);
+            self.cached_widths = None;
+            self.cached_is_numeric = None;
+            self.last_query = self.filter_query.clone();
+            self.last_sort = self.sort_column.clone();
+            self.last_item_count = items.len();
+        }
+        self.cached_indices.as_deref().unwrap_or(&[])
     }
 
     pub fn selected(&self) -> usize {
@@ -236,12 +263,8 @@ impl<'a> DataGrid<'a> {
     }
 
     /// Filter and sort rows according to state.
-    pub fn prepare_rows(&self, _columns: &[String]) -> Vec<&'a Val> {
-        let indices = Self::filter_and_sort_indices(
-            self.items,
-            &self.state.filter_query,
-            self.state.sort_column.as_ref(),
-        );
+    pub fn prepare_rows(&mut self, _columns: &[String]) -> Vec<&'a Val> {
+        let indices = self.state.ensure_indices(self.items).to_vec();
         indices.into_iter().map(|idx| &self.items[idx]).collect()
     }
 
@@ -255,8 +278,8 @@ impl<'a> DataGrid<'a> {
             return;
         }
 
-        let rows = self.prepare_rows(&columns);
-        let total_rows = rows.len();
+        let indices = self.state.ensure_indices(self.items).to_vec();
+        let total_rows = indices.len();
 
         // Check if selected row is valid
         if let Some(sel) = self.state.table_state.selected() {
@@ -267,26 +290,36 @@ impl<'a> DataGrid<'a> {
             }
         }
 
-        // Determine column widths and alignments
-        let mut widths: Vec<usize> = columns.iter().map(|c| c.width().max(6)).collect();
+        // Determine column widths and alignments (sample first 100 rows)
+        let (widths, is_numeric) = if let (Some(w), Some(num)) =
+            (&self.state.cached_widths, &self.state.cached_is_numeric)
+        {
+            (w.clone(), num.clone())
+        } else {
+            let mut widths: Vec<usize> = columns.iter().map(|c| c.width().max(6)).collect();
+            let mut is_numeric = vec![true; columns.len()];
 
-        let mut is_numeric = vec![true; columns.len()];
-
-        for item in &rows {
-            if let Val::Map(map) = item {
-                for (i, col) in columns.iter().enumerate() {
-                    if let Some(v) = map.get(&ustr(col)) {
-                        let text = v.to_text();
-                        widths[i] = widths[i].max(text.width());
-                        if !matches!(v, Val::Int(_) | Val::Float(_)) {
+            for &idx in indices.iter().take(100) {
+                if let Some(Val::Map(map)) = self.items.get(idx) {
+                    for (i, col) in columns.iter().enumerate() {
+                        if let Some(v) = map.get(&ustr(col)) {
+                            let text = v.to_text();
+                            widths[i] = widths[i].max(text.width().min(60));
+                            if !matches!(v, Val::Int(_) | Val::Float(_)) {
+                                is_numeric[i] = false;
+                            }
+                        } else {
                             is_numeric[i] = false;
                         }
-                    } else {
-                        is_numeric[i] = false;
                     }
                 }
             }
-        }
+            self.state.cached_widths = Some(widths.clone());
+            self.state.cached_is_numeric = Some(is_numeric.clone());
+            (widths, is_numeric)
+        };
+
+        let rows: Vec<&Val> = indices.iter().map(|&idx| &self.items[idx]).collect();
 
         // Header cells
         let header_cells = columns.iter().enumerate().map(|(idx, col)| {

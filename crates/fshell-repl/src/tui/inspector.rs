@@ -59,11 +59,7 @@ pub fn run_table_inspector(items: Vec<Val>, title: &str, theme: &Theme) -> Resul
         }
 
         // Prepare row indices according to current search/sort
-        let filtered_indices = DataGrid::filter_and_sort_indices(
-            &items,
-            &state.filter_query,
-            state.sort_column.as_ref(),
-        );
+        let filtered_indices = state.ensure_indices(&items).to_vec();
         let total_rows = filtered_indices.len();
 
         let draw_res = terminal.draw(|f| {
