@@ -1084,6 +1084,17 @@ fn dispatch_cases() -> Vec<Case> {
             &[Engine::Native],
         ),
         Case::posix(
+            "dispatch/substitution-accepts-and-or",
+            "emit --stdout \"x=$(emit --stdout a && emit --stdout b)y\"",
+        )
+        .engines(&[Engine::Native])
+        .known_failure(
+            "native-substitution-parser-rejects-and-or",
+            "`$(a && b)` fails to parse in the native engine, where POSIX allows an \
+             and-or list inside a command substitution",
+            &[Engine::Native],
+        ),
+        Case::posix(
             "dispatch/substitution-accepts-an-assignment",
             "echo \"[$(PATH=/tmp)]\"",
         )
