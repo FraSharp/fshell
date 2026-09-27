@@ -1806,6 +1806,53 @@ async fn execute_pipeline_inner(
                                                         return;
                                                     }
                                                 }
+                                            } else if let Expr::Pipeline(pipeline)
+                                            | Expr::InlinePipeline(pipeline) =
+                                                expr.unpack()
+                                            {
+                                                // A pipeline in statement position runs
+                                                // and writes to the function's own output
+                                                // stream, exactly as it does at the top
+                                                // level. Evaluating it as a value would
+                                                // capture the output, so every command but
+                                                // the last would be discarded — and a
+                                                // later `return` would suppress the ones
+                                                // before it.
+                                                let mut rx =
+                                                    crate::spawn_pipeline_stream(pipeline, &fn_env);
+                                                while let Some(payload) = rx.recv().await {
+                                                    match payload {
+                                                        PipelinePayload::Data(v) => {
+                                                            let _ = out_tx
+                                                                .send(PipelinePayload::Data(v))
+                                                                .await;
+                                                        }
+                                                        PipelinePayload::Bytes(b) => {
+                                                            let _ = out_tx
+                                                                .send(PipelinePayload::Bytes(b))
+                                                                .await;
+                                                        }
+                                                        PipelinePayload::Structured(d) => {
+                                                            env_clone.report_stage_error();
+                                                            let _ = out_tx
+                                                                .send(PipelinePayload::Structured(
+                                                                    d,
+                                                                ))
+                                                                .await;
+                                                        }
+                                                    }
+                                                }
+                                                // A nested stage may have requested `exit`;
+                                                // leave the request for the statement
+                                                // driver rather than continuing the body.
+                                                if env_clone
+                                                    .job_control
+                                                    .exit_request
+                                                    .lock()
+                                                    .is_some()
+                                                {
+                                                    return;
+                                                }
                                             } else {
                                                 match eval_expr(expr, &fn_env).await {
                                                     Ok(v) => last_val = Some(v),

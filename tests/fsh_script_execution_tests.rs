@@ -29,6 +29,46 @@ let vol2 = compute_volume 10 2 3
 }
 
 #[tokio::test]
+async fn test_fsh_script_function_body_runs_each_command() {
+    // Every pipeline statement in a function body runs, in order. Previously
+    // each one was evaluated as a captured value, so all but the last were
+    // discarded, and a later `return` suppressed output that came before it.
+    let plain = FshCmd::new()
+        .cmd(
+            r#"fn emit() {
+    echo "first"
+    echo "second"
+}
+emit
+"#,
+        )
+        .run()
+        .unwrap();
+    plain
+        .assert_success()
+        .assert_stdout_trimmed_eq("first\nsecond");
+
+    let with_return = FshCmd::new()
+        .cmd(
+            r#"fn emit() {
+    echo "first"
+    echo "second"
+    return 0
+}
+emit
+"#,
+        )
+        .run()
+        .unwrap();
+    with_return.assert_success();
+    assert!(
+        with_return.stdout.contains("first\nsecond"),
+        "a later `return` suppressed earlier output: {:?}",
+        with_return.stdout
+    );
+}
+
+#[tokio::test]
 async fn test_fsh_script_loops_break_continue() {
     let env = setup_test_env();
     let script = r#"
