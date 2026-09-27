@@ -40,6 +40,57 @@ impl<'a> Drop for ErrexitRestoreGuard<'a> {
     }
 }
 
+/// What evaluating an expression produced.
+///
+/// A value expression yields `Value`. An `if` used as a value can contain a
+/// control transfer (`return`, `break`, `continue`, `exit`); a transfer is not
+/// a value, so it propagates outward as one of the unwinding variants until a
+/// statement or function boundary consumes it. Keeping it in the `Ok` channel —
+/// as `Flow` does for statements — keeps it out of `Err`, so error handling
+/// (`try`/`catch`, rendering, `$last_error`) can never mistake a control
+/// transfer for a failure.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExprOutcome {
+    Value(Val),
+    Break,
+    Continue,
+    Return(Val),
+    Exit(i32),
+}
+
+impl ExprOutcome {
+    /// The value, if this outcome is a value rather than a control transfer.
+    pub fn value(self) -> Option<Val> {
+        match self {
+            ExprOutcome::Value(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The control transfer as a `Flow`; a value outcome is `Flow::Normal`.
+    pub fn into_flow(self) -> Flow {
+        match self {
+            ExprOutcome::Value(_) => Flow::Normal,
+            ExprOutcome::Break => Flow::Break,
+            ExprOutcome::Continue => Flow::Continue,
+            ExprOutcome::Return(v) => Flow::Return(v),
+            ExprOutcome::Exit(c) => Flow::Exit(c),
+        }
+    }
+}
+
+/// Lift a statement `Flow` into the expression evaluator's outcome. Callers only
+/// reach this for unwinding flows; `Normal`/`ConditionFalse` carry no transfer.
+fn flow_into_outcome(flow: Flow) -> ExprOutcome {
+    match flow {
+        Flow::Break => ExprOutcome::Break,
+        Flow::Continue => ExprOutcome::Continue,
+        Flow::Return(v) => ExprOutcome::Return(v),
+        Flow::Exit(c) => ExprOutcome::Exit(c),
+        Flow::Normal | Flow::ConditionFalse => ExprOutcome::Value(Val::Null),
+    }
+}
+
 fn stmt_label(stmt: &Stmt) -> String {
     match stmt {
         Stmt::Local { name, .. } => format!("local {name}"),
@@ -342,6 +393,29 @@ macro_rules! eval_sync_val {
 macro_rules! eval_async_val {
     ($expr:expr, $env:expr) => {
         eval_expr($expr, $env).await?
+    };
+}
+
+/// Evaluate a sub-expression inside the flow-aware evaluator (`eval_expr_flow`),
+/// propagating a control transfer outward instead of mistaking it for a value.
+macro_rules! eval_async_flow {
+    ($expr:expr, $env:expr) => {
+        match eval_expr_flow($expr, $env).await? {
+            ExprOutcome::Value(v) => v,
+            other => return Ok(other),
+        }
+    };
+}
+
+/// Evaluate a statement's right-hand side, unwinding when the expression
+/// transfers control — `let x = if c { return 1 } else { 2 }` must return, not
+/// bind `x`.
+macro_rules! eval_rhs {
+    ($expr:expr, $env:expr) => {
+        match eval_expr_flow($expr, $env).await? {
+            ExprOutcome::Value(v) => v,
+            other => return Ok(other.into_flow()),
+        }
     };
 }
 
@@ -914,18 +988,24 @@ pub(crate) async fn eval_if_stmt(expr: &Expr, env: &Env) -> Result<(Flow, Val), 
         else_body,
     } = expr.unpack()
     else {
-        return Ok((Flow::Normal, eval_expr(expr, env).await?));
+        return Ok(match eval_expr_flow(expr, env).await? {
+            ExprOutcome::Value(v) => (Flow::Normal, v),
+            other => (other.into_flow(), Val::Null),
+        });
     };
 
     let old_errexit = env.options.read().errexit;
     if old_errexit {
         env.options.write().errexit = false;
     }
-    let cond_res = eval_expr(condition, env).await;
+    let cond_res = eval_expr_flow(condition, env).await;
     if old_errexit {
         env.options.write().errexit = true;
     }
-    let is_truthy = val_to_bool(&cond_res?)?;
+    let is_truthy = match cond_res? {
+        ExprOutcome::Value(v) => val_to_bool(&v)?,
+        other => return Ok((other.into_flow(), Val::Null)),
+    };
 
     let body = if is_truthy {
         then_body
@@ -951,8 +1031,13 @@ pub(crate) async fn eval_if_stmt(expr: &Expr, env: &Env) -> Result<(Flow, Val), 
             // not an expression to capture: it runs as a statement, which is what
             // publishes its status.
             Stmt::Expr(e) if !matches!(e.unpack(), Expr::Pipeline(_) | Expr::InlinePipeline(_)) => {
-                result = eval_expr(e, env).await?;
-                Flow::Normal
+                match eval_expr_flow(e, env).await? {
+                    ExprOutcome::Value(v) => {
+                        result = v;
+                        Flow::Normal
+                    }
+                    other => return Ok((other.into_flow(), result)),
+                }
             }
             other => eval_stmt(other, env, false).await?,
         };
@@ -964,13 +1049,41 @@ pub(crate) async fn eval_if_stmt(expr: &Expr, env: &Env) -> Result<(Flow, Val), 
     Ok((Flow::Normal, result))
 }
 
-/// Core expression evaluator.
+/// Evaluate an expression to a value.
+///
+/// This is the value-context entry point: a control transfer has no destination
+/// here, so `exit` records its request for the statement driver, and any other
+/// transfer is reported rather than silently dropped. Statement and function
+/// evaluators use `eval_expr_flow` so a transfer can unwind instead.
 pub fn eval_expr<'a>(
     expr: &'a Expr,
     env: &'a Env,
 ) -> Pin<Box<dyn Future<Output = Result<Val, EngineError>> + Send + 'a>> {
+    Box::pin(async move {
+        match eval_expr_flow(expr, env).await? {
+            ExprOutcome::Value(v) => Ok(v),
+            ExprOutcome::Exit(code) => {
+                *env.job_control.exit_request.lock() = Some(code);
+                Ok(Val::Null)
+            }
+            ExprOutcome::Return(_) | ExprOutcome::Break | ExprOutcome::Continue => {
+                Err(EngineError::Generic {
+                    message: "control flow transfer used where a value was expected".to_string(),
+                    span: None,
+                })
+            }
+        }
+    })
+}
+
+/// Evaluate an expression to its outcome, carrying any control transfer in the
+/// `Ok` channel so it can unwind through nested value expressions.
+pub fn eval_expr_flow<'a>(
+    expr: &'a Expr,
+    env: &'a Env,
+) -> Pin<Box<dyn Future<Output = Result<ExprOutcome, EngineError>> + Send + 'a>> {
     if let Some(res) = try_eval_sync(expr, env) {
-        return Box::pin(async move { res });
+        return Box::pin(async move { res.map(ExprOutcome::Value) });
     }
     // Iterative handling for deeply nested Spanned wrappers (e.g. (((42))) ) to avoid stack overflow.
     let mut spans = Vec::new();
@@ -981,7 +1094,7 @@ pub fn eval_expr<'a>(
     }
     if !spans.is_empty() {
         return Box::pin(async move {
-            let res = eval_expr(cur, env).await;
+            let res = eval_expr_flow(cur, env).await;
             res.map_err(|mut err| {
                 for span in spans.into_iter().rev() {
                     if err.span().is_none() {
@@ -995,28 +1108,28 @@ pub fn eval_expr<'a>(
     Box::pin(async move {
         match cur {
             Expr::Spanned { .. } => unreachable!("Spanned should have been stripped"),
-            Expr::Null => Ok(Val::Null),
-            Expr::Bool(b) => Ok(Val::Bool(*b)),
-            Expr::Int(i) => Ok(Val::Int(*i)),
-            Expr::Float(f) => Ok(Val::Float(*f)),
-            Expr::Ident(name) => Ok(resolve_ident_value(name, env)),
+            Expr::Null => Ok(ExprOutcome::Value(Val::Null)),
+            Expr::Bool(b) => Ok(ExprOutcome::Value(Val::Bool(*b))),
+            Expr::Int(i) => Ok(ExprOutcome::Value(Val::Int(*i))),
+            Expr::Float(f) => Ok(ExprOutcome::Value(Val::Float(*f))),
+            Expr::Ident(name) => Ok(ExprOutcome::Value(resolve_ident_value(name, env))),
             Expr::String(parts) => {
-                let res = interp_string!(parts, env, eval_async_val);
-                Ok(Val::String(res))
+                let res = interp_string!(parts, env, eval_async_flow);
+                Ok(ExprOutcome::Value(Val::String(res)))
             }
             Expr::List(exprs) => {
-                let vals = build_list!(exprs, env, eval_async_val);
-                Ok(Val::List(vals))
+                let vals = build_list!(exprs, env, eval_async_flow);
+                Ok(ExprOutcome::Value(Val::List(vals)))
             }
             Expr::Map(pairs) => {
-                let map = build_map!(pairs, env, eval_async_val);
-                Ok(Val::Map(map))
+                let map = build_map!(pairs, env, eval_async_flow);
+                Ok(ExprOutcome::Value(Val::Map(map)))
             }
             Expr::Variable(name) => {
                 if let Some(ref locals) = env.local_vars
                     && let Some(val) = locals.get(name)
                 {
-                    return Ok(val);
+                    return Ok(ExprOutcome::Value(val));
                 }
                 let mut found_cell = None;
                 if env
@@ -1031,50 +1144,52 @@ pub fn eval_expr<'a>(
                     }
                 }
                 if let Some(val) = found_cell {
-                    Ok(val)
+                    Ok(ExprOutcome::Value(val))
                 } else {
-                    lookup_variable_fallback(name, env)
+                    lookup_variable_fallback(name, env).map(ExprOutcome::Value)
                 }
             }
             // Unary boolean negation `!expr`
             Expr::Not(inner) => {
                 let _guard = ErrexitRestoreGuard::new(env)?;
-                let v = eval_async_val!(inner, env);
+                let v = eval_async_flow!(inner, env);
                 let b = val_to_bool(&v)?;
-                Ok(Val::Bool(!b))
+                Ok(ExprOutcome::Value(Val::Bool(!b)))
             }
             Expr::BinaryOp { op, lhs, rhs } => {
                 if *op == BinOp::And || *op == BinOp::Or {
-                    let l = eval_async_val!(lhs, env);
+                    let l = eval_async_flow!(lhs, env);
                     let b = val_to_bool(&l)?;
                     if *op == BinOp::And && !b {
-                        return Ok(Val::Bool(false));
+                        return Ok(ExprOutcome::Value(Val::Bool(false)));
                     }
                     if *op == BinOp::Or && b {
-                        return Ok(Val::Bool(true));
+                        return Ok(ExprOutcome::Value(Val::Bool(true)));
                     }
-                    let r = eval_async_val!(rhs, env);
-                    return eval_binop(*op, l, r);
+                    let r = eval_async_flow!(rhs, env);
+                    return eval_binop(*op, l, r).map(ExprOutcome::Value);
                 }
-                let l = eval_async_val!(lhs, env);
-                let r = eval_async_val!(rhs, env);
-                eval_binop(*op, l, r)
+                let l = eval_async_flow!(lhs, env);
+                let r = eval_async_flow!(rhs, env);
+                eval_binop(*op, l, r).map(ExprOutcome::Value)
             }
             Expr::MemberAccess { expr, member } => {
-                let val = eval_async_val!(expr, env);
-                member_access_dispatch(val, member)
+                let val = eval_async_flow!(expr, env);
+                member_access_dispatch(val, member).map(ExprOutcome::Value)
             }
             Expr::Pipeline(pipeline) => {
                 let results = collect_pipeline(pipeline, env).await?;
-                Ok(Val::List(results))
+                Ok(ExprOutcome::Value(Val::List(results)))
             }
             Expr::InlinePipeline(pipeline) => {
                 let results = collect_pipeline(pipeline, env).await?;
-                Ok(Val::List(results))
+                Ok(ExprOutcome::Value(Val::List(results)))
             }
             Expr::VarWithModifier { name, modifier } => {
-                let val = eval_expr(&Expr::Variable(name.clone()), env).await?;
-                apply_modifier_async(name, val, modifier, env).await
+                let val = eval_async_flow!(&Expr::Variable(name.clone()), env);
+                apply_modifier_async(name, val, modifier, env)
+                    .await
+                    .map(ExprOutcome::Value)
             }
             Expr::ProcessSubst {
                 direction,
@@ -1094,7 +1209,9 @@ pub fn eval_expr<'a>(
                         .map_err(|e| EngineError::from(format!("process substitution: {}", e)))?;
                     let temp_path = tmp.into_temp_path();
                     env.temp_files.lock().push(temp_path);
-                    Ok(Val::String(path.to_string_lossy().to_string()))
+                    Ok(ExprOutcome::Value(Val::String(
+                        path.to_string_lossy().to_string(),
+                    )))
                 }
                 ProcessSubstDirection::Output => {
                     // `>(pipeline)` hands the command a writable path; the
@@ -1149,7 +1266,9 @@ pub fn eval_expr<'a>(
                         let _ = pipe.await;
                     });
 
-                    Ok(Val::String(fifo.to_string_lossy().to_string()))
+                    Ok(ExprOutcome::Value(Val::String(
+                        fifo.to_string_lossy().to_string(),
+                    )))
                 }
             },
             Expr::If {
@@ -1165,53 +1284,61 @@ pub fn eval_expr<'a>(
                     let mut opts = env.options.write();
                     opts.errexit = false;
                 }
-                let cond_res = eval_expr(condition, env).await;
+                let cond_res = eval_expr_flow(condition, env).await;
                 if old_errexit {
                     let mut opts = env.options.write();
                     opts.errexit = true;
                 }
-                let cond_val = cond_res?;
+                let cond_val = match cond_res? {
+                    ExprOutcome::Value(v) => v,
+                    other => return Ok(other),
+                };
                 let is_truthy = val_to_bool(&cond_val)?;
                 let body = if is_truthy {
                     then_body
                 } else if let Some(else_body) = else_body {
                     else_body
                 } else {
-                    return Ok(Val::Null);
+                    return Ok(ExprOutcome::Value(Val::Null));
                 };
+                // The value path for `if` (e.g. `let x = if c { 1 } else { 2 }`):
+                // a value expression in the body supplies the result, and a
+                // control transfer — from the body itself or from a statement in
+                // it — propagates out to the enclosing function or statement
+                // rather than being dropped.
                 let mut result = Val::Null;
                 for stmt in body {
                     match stmt.unpack() {
                         Stmt::Expr(e) => {
-                            result = eval_expr(e, env).await?;
+                            result = match eval_expr_flow(e, env).await? {
+                                ExprOutcome::Value(v) => v,
+                                other => return Ok(other),
+                            };
                         }
-                        other => {
-                            eval_stmt(other, env, false).await?;
-                        }
+                        other => match eval_stmt(other, env, false).await? {
+                            Flow::Normal => {}
+                            flow => return Ok(flow_into_outcome(flow)),
+                        },
                     }
                 }
-                Ok(result)
+                Ok(ExprOutcome::Value(result))
             }
 
-            // NOTE: this arm is the *value* path for `if` (e.g. `let x = if c
-            // { 1 } else { 2 }`). Where an `if` appears as a statement —
-            // including the top level of a function body — `eval_if_stmt` is
-            // used instead so `return`/`exit`/`break` inside it propagate.
-            Expr::AnsiCQuote(s) => Ok(Val::String(parse_ansi_c_quote(s))),
-            Expr::RawMultiLineString(s) => Ok(Val::String(s.clone())),
+            Expr::AnsiCQuote(s) => Ok(ExprOutcome::Value(Val::String(parse_ansi_c_quote(s)))),
+            Expr::RawMultiLineString(s) => Ok(ExprOutcome::Value(Val::String(s.clone()))),
             Expr::MultiLineString { parts, .. } => {
-                let res = interp_string!(parts, env, eval_async_val);
-                Ok(Val::String(res))
+                let res = interp_string!(parts, env, eval_async_flow);
+                Ok(ExprOutcome::Value(Val::String(res)))
             }
             Expr::ArithmeticExpansion(inner) => {
-                let val = eval_async_val!(inner, env);
+                let val = eval_async_flow!(inner, env);
                 match &val {
-                    Val::Int(_) | Val::Float(_) => Ok(val),
+                    Val::Int(_) | Val::Float(_) => Ok(ExprOutcome::Value(val)),
                     Val::String(s) => {
                         if let Ok(i) = s.trim().parse::<i64>() {
-                            Ok(Val::Int(i))
+                            Ok(ExprOutcome::Value(Val::Int(i)))
                         } else if let Ok(f) = s.trim().parse::<f64>() {
-                            Ok(Val::Float(f))
+                            Ok(ExprOutcome::Value(Val::Float(f)))
                         } else {
                             Err(EngineError::from(format!(
                                 "arithmetic expansion: cannot coerce '{}' to number",
@@ -1966,7 +2093,7 @@ async fn eval_stmt_inner(
         Stmt::Spanned { .. } => unreachable!("Spanned should have been stripped"),
         Stmt::Local { name, expr } => {
             let val = if let Some(expr) = expr {
-                eval_expr(expr, env).await?
+                eval_rhs!(expr, env)
             } else {
                 Val::Null
             };
@@ -1979,7 +2106,7 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::Let { name, expr } => {
-            let val = eval_expr(expr, env).await?;
+            let val = eval_rhs!(expr, env);
             if let Some(ref locals) = env.local_vars
                 && locals.update(name, val.clone())
             {
@@ -1989,7 +2116,7 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::Assign { name, expr } => {
-            let val = eval_expr(expr, env).await?;
+            let val = eval_rhs!(expr, env);
             if let Some(ref locals) = env.local_vars
                 && locals.update(name, val.clone())
             {
@@ -2008,7 +2135,7 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::Update { name, op, expr } => {
-            let val = eval_expr(expr, env).await?;
+            let val = eval_rhs!(expr, env);
             if let Some(ref locals) = env.local_vars
                 && let Some(current) = locals.get(name)
             {
@@ -2098,7 +2225,7 @@ async fn eval_stmt_inner(
                 else_body,
             } = expr.unpack()
             {
-                let cond_val = eval_expr(condition, env).await?;
+                let cond_val = eval_rhs!(condition, env);
                 let is_truthy = val_to_bool(&cond_val)?;
                 let body = if is_truthy {
                     then_body
@@ -2158,7 +2285,7 @@ async fn eval_stmt_inner(
                 let outcome = crate::pipeline_finalize(&outcomes, failures, pipefail);
                 return crate::apply_pipeline_outcome(env, outcome);
             } else {
-                let val = eval_expr(expr, env).await?;
+                let val = eval_rhs!(expr, env);
                 let exit_code = match &val {
                     Val::Bool(false) => 1,
                     _ => 0,
@@ -2220,7 +2347,7 @@ async fn eval_stmt_inner(
             // grants.
             let mut scoped = env.caps.caps.read().clone();
             for cap_expr in caps {
-                let val = eval_expr(cap_expr, env).await?;
+                let val = eval_rhs!(cap_expr, env);
                 match val {
                     Val::Capability(handle) => scoped.grant(handle),
                     Val::List(list) => {
@@ -2298,7 +2425,7 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::Match { expr, arms } => {
-            let val = eval_expr(expr, env).await?;
+            let val = eval_rhs!(expr, env);
             let mut matched = false;
             for arm in arms {
                 let mut bindings: FxHashMap<String, Val> = FxHashMap::default();
@@ -2324,7 +2451,7 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::Source { path, bash } => {
-            let path_val = eval_expr(path, env).await?;
+            let path_val = eval_rhs!(path, env);
             let path_str = match path_val {
                 Val::String(s) => s,
                 other => {
@@ -2546,12 +2673,15 @@ async fn eval_stmt_inner(
                         let mut opts = env.options.write();
                         opts.errexit = false;
                     }
-                    let cond_res = eval_expr(condition, env).await;
+                    let cond_res = eval_expr_flow(condition, env).await;
                     if old_errexit {
                         let mut opts = env.options.write();
                         opts.errexit = true;
                     }
-                    cond_res?
+                    match cond_res? {
+                        ExprOutcome::Value(v) => v,
+                        other => return Ok(other.into_flow()),
+                    }
                 };
                 if !val_to_bool(&cond_val)? {
                     break;
@@ -2570,7 +2700,7 @@ async fn eval_stmt_inner(
         Stmt::For { var, iter, body } => {
             // A loop that runs no iteration completed successfully.
             env.set_exit_code(0);
-            let iterable = eval_expr(iter, env).await?;
+            let iterable = eval_rhs!(iter, env);
             let items = match iterable {
                 Val::List(items) => items,
                 Val::String(s) => {
@@ -2618,13 +2748,13 @@ async fn eval_stmt_inner(
         Stmt::Continue => Ok(Flow::Continue),
         // Return signal
         Stmt::Return(expr) => {
-            let val = eval_expr(expr, env).await?;
+            let val = eval_rhs!(expr, env);
             Ok(Flow::Return(val))
         }
         // Exit signal — propagates through all frames, only caught by REPL loop
         Stmt::Exit(expr) => {
             let code = if let Some(expr) = expr {
-                let val = eval_expr(expr, env).await?;
+                let val = eval_rhs!(expr, env);
                 match val {
                     Val::Int(i) => i as i32,
                     Val::Float(f) => f as i32,
@@ -2698,7 +2828,7 @@ async fn eval_stmt_inner(
 
                     match stmt.unpack() {
                         Stmt::Expr(expr) => {
-                            let val = eval_expr(expr, env).await?;
+                            let val = eval_rhs!(expr, env);
                             match val {
                                 Val::List(list) => {
                                     if list.is_empty() {

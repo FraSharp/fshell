@@ -3706,10 +3706,10 @@ pub mod tests;
 pub mod word;
 
 pub use eval::{
-    eval_expr, eval_stmt, get_path_executables, get_path_executables_at, invalidate_path_cache,
-    is_external_command, is_external_command_at, is_external_command_cached,
-    is_external_command_cached_at, normalize_path_for_cwd, resolve_cached_command_path,
-    resolve_cached_command_path_at, warmup_path_cache,
+    ExprOutcome, eval_expr, eval_expr_flow, eval_stmt, get_path_executables,
+    get_path_executables_at, invalidate_path_cache, is_external_command, is_external_command_at,
+    is_external_command_cached, is_external_command_cached_at, normalize_path_for_cwd,
+    resolve_cached_command_path, resolve_cached_command_path_at, warmup_path_cache,
 };
 pub use format::{cmp_vals, format_expr, format_pipeline};
 pub use glob::expand_globs;

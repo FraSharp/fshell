@@ -4,10 +4,11 @@
 use crate::Flow;
 use crate::eval::{json_value_to_val, val_to_json_value};
 use crate::{
-    CapAction, EngineError, Env, LocalScope, PendingSuggestion, PipeSender, PipeStream,
-    PipelinePayload, SuggestionMode, cmp_vals, decode_csv_input, eval_expr, eval_stmt,
-    expand_alias_with_args, get_suggested_command, is_external_command_at, pipeline_channel_size,
-    render_bar_chart, render_table, run_boundary_operator,
+    CapAction, EngineError, Env, ExprOutcome, LocalScope, PendingSuggestion, PipeSender,
+    PipeStream, PipelinePayload, SuggestionMode, cmp_vals, decode_csv_input, eval_expr,
+    eval_expr_flow, eval_stmt, expand_alias_with_args, get_suggested_command,
+    is_external_command_at, pipeline_channel_size, render_bar_chart, render_table,
+    run_boundary_operator,
 };
 use fshell_core::ShellError;
 use fshell_core::lock::{Mutex, RwLock};
@@ -1854,8 +1855,44 @@ async fn execute_pipeline_inner(
                                                     return;
                                                 }
                                             } else {
-                                                match eval_expr(expr, &fn_env).await {
-                                                    Ok(v) => last_val = Some(v),
+                                                match eval_expr_flow(expr, &fn_env).await {
+                                                    Ok(ExprOutcome::Value(v)) => last_val = Some(v),
+                                                    Ok(other) => match other.into_flow() {
+                                                        Flow::Return(ret) => {
+                                                            last_val = Some(ret);
+                                                            break 'fn_body;
+                                                        }
+                                                        Flow::Exit(code) => {
+                                                            *env_clone
+                                                                .job_control
+                                                                .exit_request
+                                                                .lock() = Some(code);
+                                                            return;
+                                                        }
+                                                        flow => {
+                                                            env_clone.report_stage_error();
+                                                            let msg = flow
+                                                                .stray_message()
+                                                                .unwrap_or_else(|| {
+                                                                    "control flow".to_string()
+                                                                });
+                                                            let diag =
+                                                                fshell_core::diagnostic::FshDiag::from(
+                                                                    fshell_core::ShellError::new(
+                                                                        fshell_core::diagnostic::ErrorCode::InternalError,
+                                                                        format!(
+                                                                            "stray `{msg}` in pipeline function"
+                                                                        ),
+                                                                    ),
+                                                                );
+                                                            let _ = out_tx
+                                                                .send(PipelinePayload::Structured(
+                                                                    diag,
+                                                                ))
+                                                                .await;
+                                                            return;
+                                                        }
+                                                    },
                                                     Err(e) => {
                                                         env_clone.report_stage_error();
                                                         let diag =
@@ -3981,7 +4018,10 @@ pub(crate) fn run_script_stmt<'a>(
                     let (flow, _) = crate::eval::eval_if_stmt(expr, env).await?;
                     return Ok(flow);
                 } else {
-                    let val = eval_expr(expr, env).await?;
+                    let val = match eval_expr_flow(expr, env).await? {
+                        ExprOutcome::Value(v) => v,
+                        other => return Ok(other.into_flow()),
+                    };
                     if val != Val::Null && !matches!(val, Val::Bool(_)) {
                         println!("{}", val.to_text());
                     }

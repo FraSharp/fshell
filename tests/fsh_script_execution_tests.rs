@@ -69,6 +69,68 @@ emit
 }
 
 #[tokio::test]
+async fn test_fsh_script_return_inside_if_expression_unwinds() {
+    // An `if` used as a value must let `return` unwind. Previously the transfer
+    // was silently dropped and the function fell through to `return 0`.
+    let env = setup_test_env();
+    let script = r#"
+fn g() {
+    let x = if true { return 7 } else { 2 }
+    return 0
+}
+let r = g
+"#;
+    run_script(script, &env).await.unwrap();
+    assert_eq!(
+        env.vars.read().get("r").cloned(),
+        Some(Val::List(vec![Val::Int(7)]))
+    );
+}
+
+#[tokio::test]
+async fn test_fsh_script_control_flow_unwinds_through_nested_value_expression() {
+    let env = setup_test_env();
+    let script = r#"
+fn g() {
+    let x = 1 + (if true { return 41 } else { 2 })
+    return 0
+}
+let r = g
+"#;
+    run_script(script, &env).await.unwrap();
+    assert_eq!(
+        env.vars.read().get("r").cloned(),
+        Some(Val::List(vec![Val::Int(41)]))
+    );
+}
+
+#[tokio::test]
+async fn test_fsh_script_break_inside_if_expression_breaks_loop() {
+    let env = setup_test_env();
+    let script = r#"
+let total = 0
+for i in [1, 2, 3] {
+    let ignored = if $i == 2 { break } else { 0 }
+    total = ($total + $i)
+}
+"#;
+    run_script(script, &env).await.unwrap();
+    assert_eq!(env.vars.read().get("total").cloned(), Some(Val::Int(1)));
+}
+
+#[tokio::test]
+async fn test_fsh_script_exit_inside_if_expression_exits() {
+    let env = setup_test_env();
+    let script = r#"
+let x = if true { exit 9 } else { 2 }
+let after = 1
+"#;
+    let flow = run_script(script, &env).await.unwrap();
+    assert!(matches!(flow, fshell_engine::Flow::Exit(9)), "got {flow:?}");
+    assert_eq!(env.vars.read().get("after").cloned(), None);
+}
+
+#[tokio::test]
 async fn test_fsh_script_loops_break_continue() {
     let env = setup_test_env();
     let script = r#"

@@ -576,6 +576,17 @@ if cpu > 80.0 {
 }
 ```
 
+`if` is also an expression, so a branch value can be bound directly:
+
+```fsh
+let label = if $ready { "up" } else { "down" }
+```
+
+a `return`, `break`, `continue` or `exit` inside an `if` leaves the enclosing
+function or loop the same way whether the `if` is a statement or an expression.
+it is never swallowed by the conditional, including when the `if` is nested
+inside a larger expression.
+
 ### `while` loops
 
 ```fsh
