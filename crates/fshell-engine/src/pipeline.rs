@@ -1739,8 +1739,26 @@ async fn execute_pipeline_inner(
                                     }
                                     local_map.insert(param.name.clone(), arg_val);
                                 }
-                                let fn_env = env_clone
+                                let mut fn_env = env_clone
                                     .push_scope(Arc::new(fshell_core::RwLock::new(local_map)));
+                                // Route every command in the body — including
+                                // those nested in control flow — to the
+                                // function's own output stream. An unbounded
+                                // channel feeds a forwarder so a command never
+                                // blocks on the bounded stage channel while the
+                                // body is still running.
+                                let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+                                let forward = {
+                                    let out_tx = out_tx.clone();
+                                    tokio::spawn(async move {
+                                        while let Some(payload) = body_rx.recv().await {
+                                            if out_tx.send(payload).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    })
+                                };
+                                fn_env.output = Some(body_tx);
                                 let mut last_val: Option<Val> = None;
                                 'fn_body: for s in &body {
                                     match s.unpack() {
@@ -1757,13 +1775,9 @@ async fn execute_pipeline_inner(
                                                         last_val = Some(ret);
                                                         break 'fn_body;
                                                     }
-                                                    Ok((Flow::ConditionFalse, _)) => {
-                                                        report_function_condition_false(
-                                                            &env_clone, &out_tx,
-                                                        )
-                                                        .await;
-                                                        return;
-                                                    }
+                                                    // A false result is the branch's
+                                                    // status, not a function error.
+                                                    Ok((Flow::ConditionFalse, _)) => {}
                                                     Ok((Flow::Exit(code), _)) => {
                                                         // `exit` inside a function must end
                                                         // the script, not error: record it
@@ -1793,52 +1807,53 @@ async fn execute_pipeline_inner(
                                             | Expr::InlinePipeline(pipeline) =
                                                 expr.unpack()
                                             {
-                                                // A pipeline in statement position runs
-                                                // and writes to the function's own output
-                                                // stream, exactly as it does at the top
-                                                // level. Evaluating it as a value would
-                                                // capture the output, so every command but
-                                                // the last would be discarded — and a
-                                                // later `return` would suppress the ones
-                                                // before it.
-                                                let mut rx =
-                                                    crate::spawn_pipeline_stream(pipeline, &fn_env);
-                                                while let Some(payload) = rx.recv().await {
-                                                    match payload {
-                                                        PipelinePayload::Data(v) => {
-                                                            let _ = out_tx
-                                                                .send(PipelinePayload::Data(v))
-                                                                .await;
-                                                        }
-                                                        PipelinePayload::Bytes(b) => {
-                                                            let _ = out_tx
-                                                                .send(PipelinePayload::Bytes(b))
-                                                                .await;
-                                                        }
-                                                        PipelinePayload::Structured(d) => {
-                                                            env_clone.report_stage_error();
-                                                            let _ = out_tx
-                                                                .send(PipelinePayload::Structured(
-                                                                    d,
-                                                                ))
-                                                                .await;
-                                                        }
-                                                    }
-                                                }
-                                                // A nested stage may have requested `exit`;
-                                                // leave the request for the statement
-                                                // driver rather than continuing the body.
-                                                if env_clone
-                                                    .job_control
-                                                    .exit_request
-                                                    .lock()
-                                                    .is_some()
+                                                // Run the pipeline the way the
+                                                // top-level driver does: it routes
+                                                // output to the function's stream and
+                                                // publishes its status, so `$?` after
+                                                // a command in a function matches the
+                                                // top level.
+                                                match crate::pipeline::run_pipeline_statement(
+                                                    pipeline, &fn_env,
+                                                )
+                                                .await
                                                 {
-                                                    return;
+                                                    Ok(Flow::Normal) | Ok(Flow::ConditionFalse) => {
+                                                    }
+                                                    Ok(Flow::Exit(code)) => {
+                                                        *env_clone
+                                                            .job_control
+                                                            .exit_request
+                                                            .lock() = Some(code);
+                                                        return;
+                                                    }
+                                                    Ok(flow) => {
+                                                        report_function_stray(
+                                                            &env_clone, &out_tx, flow,
+                                                        )
+                                                        .await;
+                                                        return;
+                                                    }
+                                                    Err(e) => {
+                                                        report_function_error(
+                                                            &env_clone, &out_tx, e,
+                                                        )
+                                                        .await;
+                                                        return;
+                                                    }
                                                 }
                                             } else {
                                                 match eval_expr_flow(expr, &fn_env).await {
-                                                    Ok(ExprOutcome::Value(v)) => last_val = Some(v),
+                                                    // A bare value publishes the
+                                                    // same 0/1 status it does at the
+                                                    // top level (`false` is 1).
+                                                    Ok(ExprOutcome::Value(v)) => {
+                                                        fn_env.set_exit_code(match &v {
+                                                            Val::Bool(false) => 1,
+                                                            _ => 0,
+                                                        });
+                                                        last_val = Some(v);
+                                                    }
                                                     Ok(other) => match other.into_flow() {
                                                         Flow::Return(ret) => {
                                                             last_val = Some(ret);
@@ -1875,13 +1890,9 @@ async fn execute_pipeline_inner(
                                                 last_val = Some(ret);
                                                 break 'fn_body;
                                             }
-                                            Ok(Flow::ConditionFalse) => {
-                                                report_function_condition_false(
-                                                    &env_clone, &out_tx,
-                                                )
-                                                .await;
-                                                return;
-                                            }
+                                            // A false result is the command's
+                                            // status, not a function error.
+                                            Ok(Flow::ConditionFalse) => {}
                                             Ok(Flow::Exit(code)) => {
                                                 // `exit` inside a function ends the script.
                                                 *env_clone.job_control.exit_request.lock() =
@@ -1916,16 +1927,29 @@ async fn execute_pipeline_inner(
                                     let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
                                     return;
                                 }
-                                // Forward the function's value to the pipeline. A
-                                // command that produced nothing has no value, so an
-                                // empty list is not forwarded: it would reach the
+                                // Emit the function's value only when the call
+                                // captures it: a bare call produces the body's
+                                // output, not the return value. A command that
+                                // produced nothing has no value, so an empty list
+                                // is not forwarded either: it would reach the
                                 // caller as a blank line.
-                                if let Some(v) = last_val
+                                if fn_env.is_captured
+                                    && let Some(v) = last_val
                                     && v != Val::Null
                                     && !matches!(&v, Val::List(items) if items.is_empty())
+                                    && let Some(tx) = &fn_env.output
                                 {
-                                    let _ = out_tx.send(PipelinePayload::Data(Arc::new(v))).await;
+                                    let _ = tx.send(PipelinePayload::Data(Arc::new(v)));
                                 }
+                                // The function's status is its last command's, so
+                                // the caller sees it in `$?`.
+                                let fn_status = fn_env.exit_code();
+                                // Close the body's sink and let the forwarder
+                                // flush before the stage completes, so no output
+                                // is lost and ordering is preserved.
+                                drop(fn_env);
+                                let _ = forward.await;
+                                env_clone.record_stage_status(fn_status);
                                 // Restore inline env vars
                                 restore_inline_env(&env_clone, saved_env_values, saved_top_values);
                             });
@@ -3878,13 +3902,6 @@ async fn report_function_stray(env: &Env, out_tx: &PipeSender, flow: Flow) {
         fshell_core::diagnostic::ErrorCode::InternalError,
         format!("stray `{msg}` in pipeline function"),
     ));
-    let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
-}
-
-/// Report a logical-false outcome from a function body as a status-1 failure.
-async fn report_function_condition_false(env: &Env, out_tx: &PipeSender) {
-    env.report_stage_error_code(1);
-    let diag = fshell_core::diagnostic::FshDiag::from(fshell_core::ShellError::condition_false());
     let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
 }
 

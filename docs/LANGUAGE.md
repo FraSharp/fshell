@@ -558,6 +558,10 @@ fn start_service(cfg: { host: String, port: Int, .. }) {
 - `return <expr>` stops function execution and returns the given `Val`.
 - otherwise a function returns the value of its last expression; a function
   whose body has no value expression returns `Val::Null`.
+- a function's exit status is its last command's, exactly as at the top level,
+  so `$?` after a call reflects what the body last ran.
+- the returned value is not printed by a bare call; only a call whose result is
+  used (`let x = f`) receives it. the body's own command output is unaffected.
 - calls are arity-checked: passing the wrong number of arguments is an error.
 - a declared return type (`-> T`) is validated against the returned value.
 - functions execute in their own local scope (`local_vars`), which is linked to the enclosing scope: parameters stay visible inside loop bodies and pipeline stages, and updating a parameter inside a block remains visible after it.

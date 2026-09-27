@@ -1,0 +1,4 @@
+ok=0
+bad=1
+captured=[42]
+bare-ok
