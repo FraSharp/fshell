@@ -3,7 +3,8 @@
 
 use crate::val_type_precedence;
 use fshell_core::{
-    BinOp, Expr, ParamModifier, PipelineStage, ProcessSubstDirection, SerializationFormat, Val,
+    BinOp, Expr, ParamModifier, PipelineStage, ProcessSubstDirection, SerializationFormat, Stmt,
+    Val,
 };
 
 pub fn cmp_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
@@ -227,6 +228,16 @@ pub fn format_expr(expr: &Expr) -> String {
         }
         Expr::Pipeline(p) => format_pipeline(p),
         Expr::InlinePipeline(p) => format!("$| {} |", format_pipeline(p)),
+        Expr::Substitution(stmts) => {
+            let body: Vec<String> = stmts
+                .iter()
+                .map(|s| match s.unpack() {
+                    Stmt::Expr(e) => format_expr(e),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            format!("$({})", body.join("; "))
+        }
         Expr::VarWithModifier { name, modifier } => match modifier {
             ParamModifier::Tail => format!("${{{}:t}}", name),
             ParamModifier::Head => format!("${{{}:h}}", name),

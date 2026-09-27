@@ -1617,45 +1617,20 @@ impl Parser {
     /// Called after `$` has been consumed, with `(` as the current char.
     pub(crate) fn parse_cmd_substitution(&mut self) -> Result<Expr, ParseError> {
         self.next_char(); // consume (
-        self.skip_whitespace();
+        // Parse the body as a statement list terminated by `)`, so a redirection,
+        // a command list, an and-or list, or an assignment inside `$(...)` is
+        // accepted the way POSIX allows.
+        let stmts = self.parse_statements_until(')')?;
 
-        let mut stages = Vec::new();
-
-        loop {
-            if self.peek() == Some(')') {
-                // Empty $( )
-                self.next_char(); // consume )
-                break;
-            }
-            stages.push(self.parse_next_stage(stages.is_empty())?);
-            self.skip_whitespace();
-            // Trailing redirections for this stage, e.g. `$(ls > /dev/null)`,
-            // which POSIX allows inside a command substitution.
-            while let Some(r) = self.parse_redirect()? {
-                stages.push(r);
-                self.skip_whitespace();
-            }
-
-            if self.peek() == Some(')') {
-                self.next_char();
-                break;
-            }
-            if self.peek() == Some('|') {
-                self.next_char(); // consume | as stage separator
-                self.skip_whitespace();
-                if self.peek() == Some(')') {
-                    self.next_char(); // consume ) — trailing | before )
-                    break;
-                }
-                continue;
-            }
-            return Err(ParseError::SyntaxError {
-                message: "expected ) to close command substitution".to_string(),
-                span: self.current_span(),
-            });
+        // A single pipeline keeps the inline-pipeline representation, so the
+        // meaning of `$(cmd)` and `$(cmd | cmd)` is unchanged.
+        if stmts.len() == 1
+            && let Stmt::Expr(e) = stmts[0].unpack()
+            && let Expr::Pipeline(pipeline) = e.unpack()
+        {
+            return Ok(Expr::InlinePipeline(pipeline.clone()));
         }
-
-        Ok(Expr::InlinePipeline(Pipeline::new(stages)))
+        Ok(Expr::Substitution(stmts))
     }
 
     /// Parse `<(pipeline)` or `>(pipeline)` process substitution.

@@ -94,6 +94,9 @@ pub struct Parser {
     /// conditions, ...); at statement level they keep their shell meaning of
     /// chaining on the previous command's exit status.
     bool_ops: bool,
+    /// The character that ends the statement list currently being parsed. `}`
+    /// for a block; `)` while parsing a `$(...)` statement list.
+    statement_terminator: char,
     recursion_depth: std::cell::Cell<usize>,
 }
 

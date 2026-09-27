@@ -239,6 +239,9 @@ fn visit_expr(expr: &Expr, found: &mut Option<PosixRequirement>) {
         Expr::Pipeline(pipeline) | Expr::InlinePipeline(pipeline) => {
             visit_pipeline(pipeline, found)
         }
+        // The body is a statement list; the commands inside it are native, but
+        // their words can still carry a POSIX-only form.
+        Expr::Substitution(stmts) => visit_stmts(stmts, found),
         Expr::If {
             condition,
             then_body,

@@ -857,17 +857,31 @@ impl Parser {
     }
 
     pub(crate) fn parse_block_statements(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        self.parse_statements_until('}')
+    }
+
+    /// Parse a statement list terminated by `terminator`, which is consumed: `}`
+    /// for a block, `)` for the statement list inside `$(...)`.
+    pub(crate) fn parse_statements_until(
+        &mut self,
+        terminator: char,
+    ) -> Result<Vec<Stmt>, ParseError> {
         let span = self.current_span();
         let _guard = crate::parser::RecursionGuard::new(&self.recursion_depth, span)?;
-        stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+        let saved = self.statement_terminator;
+        self.statement_terminator = terminator;
+        let res = stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
             self.parse_block_statements_inner()
-        })
+        });
+        self.statement_terminator = saved;
+        res
     }
 
     fn parse_block_statements_inner(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        let terminator = self.statement_terminator;
         let mut stmts = Vec::new();
         self.skip_whitespace();
-        while !self.is_eof() && self.peek() != Some('}') {
+        while !self.is_eof() && self.peek() != Some(terminator) {
             if self.peek() == Some(';') {
                 self.next_char();
                 self.skip_whitespace();
@@ -896,7 +910,7 @@ impl Parser {
                 self.skip_whitespace();
             }
         }
-        self.expect('}')?;
+        self.expect(terminator)?;
         Ok(stmts)
     }
 
@@ -913,10 +927,9 @@ impl Parser {
             self.skip_whitespace();
         }
 
-        if !matches!(
-            self.peek(),
-            None | Some('|') | Some(';') | Some('}') | Some('\n')
-        ) {
+        if !matches!(self.peek(), None | Some('|') | Some(';') | Some('\n'))
+            && self.peek() != Some(self.statement_terminator)
+        {
             stages.push(self.parse_pipeline_stage()?);
             self.skip_whitespace();
             while let Some(r) = self.parse_redirect()? {

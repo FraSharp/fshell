@@ -1437,6 +1437,7 @@ pub fn format_expr(expr: &fshell_core::Expr) -> String {
         }
         fshell_core::Expr::Pipeline(p) => format_pipeline(p),
         fshell_core::Expr::InlinePipeline(p) => format!("$| {}", format_pipeline(p)),
+        fshell_core::Expr::Substitution(_) => "$(...)".to_string(),
         fshell_core::Expr::VarWithModifier { name, modifier } => {
             let mod_str = match modifier {
                 fshell_core::ParamModifier::Tail => ":t".to_string(),

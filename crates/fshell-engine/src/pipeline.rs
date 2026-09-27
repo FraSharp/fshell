@@ -3937,6 +3937,12 @@ pub(crate) async fn run_pipeline_statement(
     let mut rx = spawn_pipeline_stream(pipeline, &pipeline_env);
     let mut failures: Vec<crate::PipelineFailure> = Vec::new();
     while let Some(payload) = rx.recv().await {
+        // With a sink set, the output belongs to the caller (a captured
+        // substitution): forward it there instead of writing to stdout.
+        if let Some(sink) = &env.output {
+            let _ = sink.send(payload);
+            continue;
+        }
         match payload {
             PipelinePayload::Data(v) => crate::eval::write_val_stdout(&v),
             PipelinePayload::Bytes(b) => {

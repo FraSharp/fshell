@@ -1085,6 +1085,11 @@ pub struct Env {
     /// state, so nothing another stage does can change it.
     stage: Option<StageSlot>,
     pub is_captured: bool,
+    /// When set, a statement's pipeline output is sent here instead of being
+    /// written to process stdout. Used to capture the output of a
+    /// `$(...)` statement list. Unbounded so a producer never blocks on a
+    /// consumer that is not draining yet.
+    pub output: Option<tokio::sync::mpsc::UnboundedSender<PipelinePayload>>,
     pub completions: Arc<RwLock<fshell_hash::FxHashMap<String, fshell_core::CommandCompletion>>>,
     pub ast_cache: Arc<RwLock<crate::ast_cache::AstCache>>,
     pub(crate) suggestion_cache: Arc<Mutex<Option<crate::glob::SuggestionCache>>>,
@@ -2027,6 +2032,7 @@ impl Env {
             is_last_stage: false,
             stage: None,
             is_captured: false,
+            output: None,
             completions: Arc::new(RwLock::new(fshell_hash::FxHashMap::default())),
             ast_cache: Arc::new(RwLock::new(crate::ast_cache::AstCache::new(64))),
             suggestion_cache: Arc::new(Mutex::new(None)),
@@ -2201,6 +2207,7 @@ impl Env {
             is_last_stage: false,
             stage: None,
             is_captured: false,
+            output: None,
             completions: Arc::new(RwLock::new(fshell_hash::FxHashMap::default())),
             ast_cache: Arc::new(RwLock::new(crate::ast_cache::AstCache::new(64))),
             suggestion_cache: Arc::new(Mutex::new(None)),
@@ -2309,6 +2316,7 @@ impl Env {
             is_last_stage: self.is_last_stage,
             stage: self.stage.clone(),
             is_captured: self.is_captured,
+            output: self.output.clone(),
             completions: self.completions.clone(),
             ast_cache: self.ast_cache.clone(),
             suggestion_cache: self.suggestion_cache.clone(),

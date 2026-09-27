@@ -29,6 +29,10 @@ pub enum Expr {
     Pipeline(Pipeline),
     /// A captured inline pipeline: $| cmd1 | cmd2 | — returns captured Val output.
     InlinePipeline(Pipeline),
+    /// A command substitution whose body is a statement list, e.g. `$(a; b)` or
+    /// `$(a && b)`. Evaluated in a captured environment; the collected output is
+    /// the value. A single-pipeline body stays an [`Expr::InlinePipeline`].
+    Substitution(Vec<Stmt>),
     /// Parameter expansion with modifier: ${var:t}, ${var:h}, ${var:r}, ${var:e}
     VarWithModifier {
         name: String,

@@ -22,6 +22,7 @@ impl Parser {
             cmd_arg_mode: false,
             is_subsequent_stage: false,
             bool_ops: false,
+            statement_terminator: '}',
             recursion_depth: std::cell::Cell::new(0),
         }
     }

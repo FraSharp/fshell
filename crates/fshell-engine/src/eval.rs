@@ -200,6 +200,7 @@ fn expr_label(expr: &Expr) -> String {
         Expr::RawMultiLineString(_) => "'''...'''".into(),
         Expr::MultiLineString { .. } => "\"\"\"...\"\"\"".into(),
         Expr::InlinePipeline(_) => "$| ... |".into(),
+        Expr::Substitution(_) => "$(...)".into(),
         Expr::Spanned { expr: e, .. } => expr_label(e),
     }
 }
@@ -440,7 +441,7 @@ macro_rules! interp_word {
                         other
                             if matches!(
                                 expr.unpack(),
-                                Expr::Pipeline(_) | Expr::InlinePipeline(_)
+                                Expr::Pipeline(_) | Expr::InlinePipeline(_) | Expr::Substitution(_)
                             ) =>
                         {
                             substitution_text(&other)
@@ -1184,6 +1185,41 @@ pub fn eval_expr_flow<'a>(
                 let results = collect_pipeline(pipeline, env).await?;
                 Ok(ExprOutcome::Value(Val::List(results)))
             }
+            Expr::Substitution(stmts) => {
+                // Run the body against a captured child environment: pipeline
+                // output is collected rather than written to stdout, and the
+                // collected values are the substitution's value.
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut sub_env = env.clone();
+                sub_env.is_captured = true;
+                sub_env.output = Some(tx);
+                let mut results = Vec::new();
+                let mut hard: Option<EngineError> = None;
+                for stmt in stmts {
+                    match eval_stmt(stmt, &sub_env, false).await {
+                        Ok(Flow::Normal) | Ok(Flow::ConditionFalse) => {}
+                        // `exit` ends the substitution's subshell, not the shell.
+                        Ok(Flow::Exit(code)) => {
+                            env.set_exit_code(code as i64);
+                            break;
+                        }
+                        Ok(flow) => return Ok(flow_into_outcome(flow)),
+                        Err(e) => {
+                            hard = Some(e);
+                            break;
+                        }
+                    }
+                    drain_captured(&mut rx, &mut results, env, &mut hard);
+                    if hard.is_some() {
+                        break;
+                    }
+                }
+                drain_captured(&mut rx, &mut results, env, &mut hard);
+                if let Some(e) = hard {
+                    return Err(e);
+                }
+                Ok(ExprOutcome::Value(Val::List(results)))
+            }
             Expr::VarWithModifier { name, modifier } => {
                 let val = eval_async_flow!(&Expr::Variable(name.clone()), env);
                 apply_modifier_async(name, val, modifier, env)
@@ -1353,6 +1389,48 @@ pub fn eval_expr_flow<'a>(
             }
         }
     })
+}
+
+/// Drain a captured `$(...)` statement list's output into `out`, recording the
+/// first hard stage failure in `hard`.
+fn drain_captured(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<PipelinePayload>,
+    out: &mut Vec<Val>,
+    env: &Env,
+    hard: &mut Option<EngineError>,
+) {
+    while let Ok(payload) = rx.try_recv() {
+        match payload {
+            // Each item is a substitution fragment and is joined with a newline
+            // when rendered, so a trailing newline on the fragment would double.
+            PipelinePayload::Data(v) => {
+                let val = (*v).clone();
+                out.push(match val {
+                    Val::String(s) => Val::String(s.trim_end_matches('\n').to_string()),
+                    other => other,
+                });
+            }
+            PipelinePayload::Bytes(b) => out.push(Val::String(
+                String::from_utf8_lossy(&b)
+                    .trim_end_matches('\n')
+                    .to_string(),
+            )),
+            PipelinePayload::Structured(d) => {
+                crate::render_stage_diag(env, &d);
+                if let crate::PipelineFailure::Hard(diag) = crate::classify_diag(d)
+                    && hard.is_none()
+                {
+                    *hard = Some(match diag {
+                        Some(diag) => crate::engine_error_from_diag(&diag),
+                        None => EngineError::PipelineError {
+                            message: "a pipeline stage failed".to_string(),
+                            span: None,
+                        },
+                    });
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn parse_ansi_c_quote(s: &str) -> String {

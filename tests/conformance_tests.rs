@@ -1065,8 +1065,9 @@ fn dispatch_cases() -> Vec<Case> {
         )
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native),
-        // The native substitution parser accepts a redirection inside `$(...)`,
-        // but not yet a second command or an assignment, where POSIX allows both.
+        // Native command substitution parses its body as a statement list, so a
+        // redirection, a command list, an and-or list and an assignment are all
+        // accepted the way POSIX allows.
         Case::posix(
             "dispatch/substitution-accepts-a-redirection",
             "emit --stdout \"x=$(ls > /dev/null)y\"",
@@ -1076,35 +1077,17 @@ fn dispatch_cases() -> Vec<Case> {
             "dispatch/substitution-accepts-two-commands",
             "emit --stdout \"x=$(emit --stdout a; emit --stdout b)y\"",
         )
-        .engines(&[Engine::Native])
-        .known_failure(
-            "native-substitution-parser-rejects-a-list",
-            "`$(a; b)` fails to parse in the native engine, where POSIX allows a \
-             command list inside a command substitution",
-            &[Engine::Native],
-        ),
+        .engines(&[Engine::Native]),
         Case::posix(
             "dispatch/substitution-accepts-and-or",
             "emit --stdout \"x=$(emit --stdout a && emit --stdout b)y\"",
         )
-        .engines(&[Engine::Native])
-        .known_failure(
-            "native-substitution-parser-rejects-and-or",
-            "`$(a && b)` fails to parse in the native engine, where POSIX allows an \
-             and-or list inside a command substitution",
-            &[Engine::Native],
-        ),
+        .engines(&[Engine::Native]),
         Case::posix(
             "dispatch/substitution-accepts-an-assignment",
             "echo \"[$(PATH=/tmp)]\"",
         )
-        .engines(&[Engine::Native])
-        .known_failure(
-            "native-substitution-parser-rejects-an-assignment",
-            "`$(PATH=/tmp)` fails to parse in the native engine, where POSIX allows an \
-             assignment to be the whole command of a substitution",
-            &[Engine::Native],
-        ),
+        .engines(&[Engine::Native]),
         Case::posix("dispatch/printf-format-reuse", "printf '%s\\n' a b c")
             .engines(&[Engine::Native, Engine::Auto])
             .expect_engine(Engine::Native),

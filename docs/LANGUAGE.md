@@ -395,6 +395,10 @@ fshell provides three syntax forms to capture pipeline output into a value:
    ```fsh
    let branch = $(git rev-parse --abbrev-ref HEAD)
    ```
+   the body is a statement list, so a redirection, a command list (`;`), an
+   and-or list (`&&`/`||`) and an assignment are all accepted
+   (`$(cd "$dir" && pwd)`). trailing newlines on the captured output are
+   stripped, as in posix.
 3. **backtick substitution `` `...` ``**: posix-compatible shorthand:
    ```fsh
    let now = `date +%s`
