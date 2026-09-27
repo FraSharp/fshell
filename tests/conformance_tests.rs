@@ -1065,19 +1065,13 @@ fn dispatch_cases() -> Vec<Case> {
         )
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native),
-        // The native substitution parser accepts neither a redirection nor a
-        // second command inside `$(...)`, where POSIX allows both.
+        // The native substitution parser accepts a redirection inside `$(...)`,
+        // but not yet a second command or an assignment, where POSIX allows both.
         Case::posix(
             "dispatch/substitution-accepts-a-redirection",
             "emit --stdout \"x=$(ls > /dev/null)y\"",
         )
-        .engines(&[Engine::Native])
-        .known_failure(
-            "native-substitution-parser-rejects-redirection",
-            "`$(ls > /dev/null)` fails to parse in the native engine, where POSIX \
-             allows a redirection inside a command substitution",
-            &[Engine::Native],
-        ),
+        .engines(&[Engine::Native]),
         Case::posix(
             "dispatch/substitution-accepts-two-commands",
             "emit --stdout \"x=$(emit --stdout a; emit --stdout b)y\"",

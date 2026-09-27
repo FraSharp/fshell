@@ -1629,6 +1629,12 @@ impl Parser {
             }
             stages.push(self.parse_next_stage(stages.is_empty())?);
             self.skip_whitespace();
+            // Trailing redirections for this stage, e.g. `$(ls > /dev/null)`,
+            // which POSIX allows inside a command substitution.
+            while let Some(r) = self.parse_redirect()? {
+                stages.push(r);
+                self.skip_whitespace();
+            }
 
             if self.peek() == Some(')') {
                 self.next_char();
