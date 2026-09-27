@@ -1196,18 +1196,35 @@ pub fn eval_expr_flow<'a>(
                 let mut results = Vec::new();
                 let mut hard: Option<EngineError> = None;
                 for stmt in stmts {
-                    match eval_stmt(stmt, &sub_env, false).await {
-                        Ok(Flow::Normal) | Ok(Flow::ConditionFalse) => {}
-                        // `exit` ends the substitution's subshell, not the shell.
-                        Ok(Flow::Exit(code)) => {
-                            env.set_exit_code(code as i64);
-                            break;
+                    match stmt.unpack() {
+                        // A bare value expression — a literal such as `true`, an
+                        // arithmetic expression, an `if` used as a value — is the
+                        // substitution's value directly; a command writes to the
+                        // sink and is collected by the drain below.
+                        Stmt::Expr(e)
+                            if !matches!(
+                                e.unpack(),
+                                Expr::Pipeline(_) | Expr::InlinePipeline(_)
+                            ) =>
+                        {
+                            match eval_expr_flow(e, &sub_env).await? {
+                                ExprOutcome::Value(v) => results.push(v),
+                                other => return Ok(other),
+                            }
                         }
-                        Ok(flow) => return Ok(flow_into_outcome(flow)),
-                        Err(e) => {
-                            hard = Some(e);
-                            break;
-                        }
+                        _ => match eval_stmt(stmt, &sub_env, false).await {
+                            Ok(Flow::Normal) | Ok(Flow::ConditionFalse) => {}
+                            // `exit` ends the substitution's subshell, not the shell.
+                            Ok(Flow::Exit(code)) => {
+                                env.set_exit_code(code as i64);
+                                break;
+                            }
+                            Ok(flow) => return Ok(flow_into_outcome(flow)),
+                            Err(e) => {
+                                hard = Some(e);
+                                break;
+                            }
+                        },
                     }
                     drain_captured(&mut rx, &mut results, env, &mut hard);
                     if hard.is_some() {
