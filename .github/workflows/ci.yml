@@ -39,6 +39,9 @@ jobs:
         run: cargo build --target ${{ matrix.target }}
       - name: Test
         run: cargo test --target ${{ matrix.target }}
+      - name: Native Language Baseline
+        if: matrix.os == 'ubuntu-latest'
+        run: FSH_BIN="target/${{ matrix.target }}/debug/fsh" scripts/fsh-language-baseline.sh
       - name: Check Fuzz Targets
         if: matrix.os == 'ubuntu-latest'
         run: cargo check -p fshell-fuzz
