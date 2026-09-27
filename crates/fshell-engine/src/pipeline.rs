@@ -1745,10 +1745,10 @@ async fn execute_pipeline_inner(
                                 'fn_body: for s in &body {
                                     match s.unpack() {
                                         Stmt::Expr(expr) => {
-                                            // An `if` in statement position must let
-                                            // `return`/`exit`/`break` out of its body;
-                                            // `eval_expr` (the value path) would drop
-                                            // them.
+                                            // An `if` in statement position also
+                                            // publishes its branch's status, which the
+                                            // value path does not; `eval_if_stmt`
+                                            // returns the branch's flow and value.
                                             if matches!(expr.unpack(), Expr::If { .. }) {
                                                 match crate::eval::eval_if_stmt(expr, &fn_env).await
                                                 {

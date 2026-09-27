@@ -972,13 +972,12 @@ fn member_access_dispatch(val: Val, member: &str) -> Result<Val, EngineError> {
     }
 }
 
-/// Evaluate an `if` that appears in statement position, returning both the
-/// control flow produced by its body and the value of the taken branch.
+/// Evaluate an `if` in statement position, returning both the control flow its
+/// body produced and the value of the taken branch.
 ///
-/// `eval_expr` evaluates `if` as a value and therefore discards control flow,
-/// which is why `return` inside an `if` at the top level of a function body used
-/// to be silently swallowed. Function bodies (and other statement contexts) use
-/// this instead; the value is still captured so `if` can be a function's last
+/// `eval_expr_flow` already lets a transfer out of an `if` used as a value; this
+/// is the statement shape, which additionally reports each body statement's
+/// status and captures the branch's value so `if` can be a function's last
 /// expression.
 #[async_recursion::async_recursion]
 pub(crate) async fn eval_if_stmt(expr: &Expr, env: &Env) -> Result<(Flow, Val), EngineError> {
