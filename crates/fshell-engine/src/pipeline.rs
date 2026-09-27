@@ -3916,6 +3916,50 @@ async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
     Ok(Flow::Normal)
 }
 
+/// Run a pipeline in statement position: stream its output to stdout, honour a
+/// nested `exit` request, and report the pipeline's own status as a `Flow`.
+///
+/// The top-level statement drivers share this so their pipeline semantics cannot
+/// drift. A pipeline here prints output rather than capturing it — capturing
+/// would set `is_captured` and silently discard the output.
+pub(crate) async fn run_pipeline_statement(
+    pipeline: &Pipeline,
+    env: &Env,
+) -> Result<Flow, EngineError> {
+    // The pipeline's stages record into this ledger, on a clone so a pipeline
+    // nested inside it cannot displace their slots. It is scratch, not `$?`: the
+    // committed status survives until the finalizer replaces it, so expansion
+    // during this pipeline still reads the previously completed command.
+    let outcomes = crate::execution::PipelineOutcomes::new();
+    let mut pipeline_env = env.clone();
+    pipeline_env.attach_stage(outcomes.clone(), crate::execution::Slot::Boundary);
+
+    let mut rx = spawn_pipeline_stream(pipeline, &pipeline_env);
+    let mut failures: Vec<crate::PipelineFailure> = Vec::new();
+    while let Some(payload) = rx.recv().await {
+        match payload {
+            PipelinePayload::Data(v) => crate::eval::write_val_stdout(&v),
+            PipelinePayload::Bytes(b) => {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&b);
+            }
+            PipelinePayload::Structured(d) => {
+                crate::render_stage_diag(env, &d);
+                failures.push(crate::classify_diag(d));
+            }
+        }
+    }
+    // A spawned stage (e.g. a user function) may have called `exit`; it cannot
+    // return `Flow::Exit` itself, so honour its request now.
+    if let Some(code) = env.job_control.exit_request.lock().take() {
+        env.set_exit_code(code as i64);
+        return Ok(Flow::Exit(code));
+    }
+    let pipefail = env.options.read().pipefail;
+    let outcome = crate::pipeline_finalize(&outcomes, failures, pipefail);
+    crate::apply_pipeline_outcome(env, outcome)
+}
+
 pub(crate) fn run_script_stmt<'a>(
     stmt: &'a Stmt,
     env: &'a Env,
@@ -3977,40 +4021,7 @@ pub(crate) fn run_script_stmt<'a>(
             }
             Stmt::Expr(expr) => {
                 if let Expr::Pipeline(pipeline) = expr.unpack() {
-                    let pipefail = env.options.read().pipefail;
-                    // Start this pipeline's status accumulator. It is scratch,
-                    // not `$?`: the committed status survives until the
-                    // finalizer below replaces it, so expanding `$?` anywhere in
-                    // this pipeline still reads the previously completed
-                    // command.
-                    let outcomes = crate::execution::PipelineOutcomes::new();
-                    let mut pipeline_env = env.clone();
-                    pipeline_env.attach_stage(outcomes.clone(), crate::execution::Slot::Boundary);
-                    let mut rx = spawn_pipeline_stream(pipeline, &pipeline_env);
-                    let mut failures: Vec<crate::PipelineFailure> = Vec::new();
-                    while let Some(payload) = rx.recv().await {
-                        match payload {
-                            PipelinePayload::Data(v) => {
-                                crate::eval::write_val_stdout(&v);
-                            }
-                            PipelinePayload::Bytes(b) => {
-                                use std::io::Write;
-                                let _ = std::io::stdout().write_all(&b);
-                            }
-                            PipelinePayload::Structured(d) => {
-                                crate::render_stage_diag(env, &d);
-                                failures.push(crate::classify_diag(d));
-                            }
-                        }
-                    }
-                    // Honour an `exit` requested from inside a spawned stage
-                    // (e.g. a user function) before the normal finalize.
-                    if let Some(code) = env.job_control.exit_request.lock().take() {
-                        env.set_exit_code(code as i64);
-                        return Ok(Flow::Exit(code));
-                    }
-                    let outcome = crate::pipeline_finalize(&outcomes, failures, pipefail);
-                    return crate::apply_pipeline_outcome(env, outcome);
+                    return run_pipeline_statement(pipeline, env).await;
                 } else if matches!(expr.unpack(), Expr::If { .. }) {
                     // A composite statement publishes the status of the statement it
                     // executed last, and evaluating it as a *value* would discard

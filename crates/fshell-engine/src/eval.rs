@@ -4,7 +4,7 @@
 use crate::profiler::{ProfilerCategory, ProfilerState};
 use crate::{
     BuiltinHandler, EngineError, Env, Flow, IS_TRUSTED_CONTEXT, PipelinePayload, ReactiveEvent,
-    collect_pipeline, dispatch_on_signal, format_pipeline, spawn_pipeline_stream,
+    collect_pipeline, dispatch_on_signal, format_pipeline,
 };
 use fshell_core::diagnostic::FshDiag;
 use fshell_core::{
@@ -2240,49 +2240,7 @@ async fn eval_stmt_inner(
                 if let Some(result) = try_run_startup_builtin(pipeline, env).await {
                     return result;
                 }
-
-                // Start this pipeline's status accumulator so the finalizer
-                // below reads this pipeline's own exit status rather than a
-                // value left by a prior statement. It is scratch, not `$?`: the
-                // committed status survives until the finalizer replaces it, so
-                // expansion during this pipeline still sees the previously
-                // completed command.
-                //
-                // The pipeline's stages record into this ledger, on a clone so a
-                // pipeline nested inside it cannot displace their slots.
-                let outcomes = crate::execution::PipelineOutcomes::new();
-                let mut pipeline_env = env.clone();
-                pipeline_env.attach_stage(outcomes.clone(), crate::execution::Slot::Boundary);
-
-                // Pipeline expressions must print output (like run_script_stmt does),
-                // not capture it. collect_pipeline would set is_captured=true and
-                // silently discard output.
-                let mut rx = spawn_pipeline_stream(pipeline, &pipeline_env);
-                let mut failures: Vec<crate::PipelineFailure> = Vec::new();
-                while let Some(payload) = rx.recv().await {
-                    match payload {
-                        PipelinePayload::Data(v) => {
-                            crate::eval::write_val_stdout(&v);
-                        }
-                        PipelinePayload::Bytes(b) => {
-                            use std::io::Write;
-                            let _ = std::io::stdout().write_all(&b);
-                        }
-                        PipelinePayload::Structured(d) => {
-                            crate::render_stage_diag(env, &d);
-                            failures.push(crate::classify_diag(d));
-                        }
-                    }
-                }
-                // A spawned stage (e.g. a user function) may have called `exit`;
-                // it cannot return `Flow::Exit` itself, so honour its request now.
-                if let Some(code) = env.job_control.exit_request.lock().take() {
-                    env.set_exit_code(code as i64);
-                    return Ok(Flow::Exit(code));
-                }
-                let pipefail = env.options.read().pipefail;
-                let outcome = crate::pipeline_finalize(&outcomes, failures, pipefail);
-                return crate::apply_pipeline_outcome(env, outcome);
+                return crate::pipeline::run_pipeline_statement(pipeline, env).await;
             } else {
                 let val = eval_rhs!(expr, env);
                 let exit_code = match &val {
