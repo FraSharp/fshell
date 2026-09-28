@@ -1661,9 +1661,9 @@ Fuzzy search (--search/-s) matches against topic name, summary, and description.
     HelpTopic {
         name: "extract",
         category: HelpCategory::Builtin,
-        summary: "Universal archive extraction utility",
-        description: "Extract compressed archive files automatically detecting format via magic bytes and extensions. Supports .zip, .tar, .tar.gz, .tgz, .tbz2, .tar.xz, and .txz formats. Enforces filesystem read/write and process-spawn capabilities.",
-        syntax: "extract <archive-file>",
+        summary: "Bounded, format-agnostic archive extraction",
+        description: "Extract an archive to the current or an existing target directory using libarchive. Detects formats from file contents (including zip, tar, 7z, rar and common compression). Requires archive-read and destination-write capabilities, not process-spawn. Never overwrites existing files. Unsafe paths, special entries and excessive expanded sizes are rejected; encrypted or multi-volume input is not supported.",
+        syntax: "extract [-C DIR] [--max-bytes N] [--max-entries N] <archive-file>",
         examples: &[
             HelpExample {
                 input: "extract backup.tar.gz",

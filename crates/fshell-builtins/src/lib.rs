@@ -46,6 +46,8 @@ pub use cmd::bind::*;
 pub use cmd::config::*;
 pub use cmd::env::*;
 pub use cmd::explain::*;
+#[cfg(feature = "extract")]
+pub use cmd::extract::*;
 pub use cmd::frecency::*;
 pub use cmd::fs::*;
 pub use cmd::jobs::*;
@@ -101,7 +103,6 @@ pub fn init(env: &Env) {
         ("cd".to_string(), Arc::new(cd_builtin)),
         ("z".to_string(), Arc::new(z_builtin)),
         ("zi".to_string(), Arc::new(zi_builtin)),
-        ("extract".to_string(), Arc::new(extract_builtin)),
         ("head".to_string(), Arc::new(head_builtin)),
         ("tail".to_string(), Arc::new(tail_builtin)),
         ("uniq".to_string(), Arc::new(uniq_builtin)),
@@ -166,6 +167,9 @@ pub fn init(env: &Env) {
         ("sql".to_string(), Arc::new(sql_stub)),
         ("chart".to_string(), Arc::new(cmd::chart::chart_builtin)),
     ];
+
+    #[cfg(feature = "extract")]
+    entries.push(("extract".to_string(), Arc::new(extract_builtin)));
 
     #[cfg(feature = "ff")]
     entries.push(("ff".to_string(), Arc::new(ff::ff_builtin)));

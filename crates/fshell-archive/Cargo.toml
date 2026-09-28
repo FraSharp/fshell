@@ -1,0 +1,21 @@
+[package]
+name = "fshell-archive"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Bounded, capability-relative archive extraction for fshell"
+repository.workspace = true
+
+[dependencies]
+cap-std = "3.4"
+fshell-hash = { workspace = true }
+getrandom = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+bindgen = "0.72"
+pkg-config = "0.3"
+
+[lints]
+workspace = true

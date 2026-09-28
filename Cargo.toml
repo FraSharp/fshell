@@ -6,6 +6,7 @@ members = [
     "crates/fshell-engine",
     "crates/fshell-semantic",
     "crates/fshell-builtins",
+    "crates/fshell-archive",
     "crates/fshell-bridge",
     "crates/fshell-repl",
     "crates/fshell-ls",
@@ -125,6 +126,7 @@ fshell-posix = { workspace = true }
 
 [workspace.dependencies]
 fshell-hash = { path = "crates/fshell-hash" }
+fshell-archive = { path = "crates/fshell-archive" }
 fshell-posix = { path = "crates/fshell-posix" }
 strip-ansi-escapes = "0.2.1"
 tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "net", "signal", "process", "fs", "time", "io-util", "io-std", "sync", "macros"] }

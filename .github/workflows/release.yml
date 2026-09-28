@@ -15,36 +15,42 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            runner: ubuntu-latest
             arch: x86_64
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
+            runner: ubuntu-24.04-arm
             arch: aarch64
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
+            runner: macos-15-intel
             arch: x86_64
             target: x86_64-apple-darwin
           - os: macos-latest
+            runner: macos-latest
             arch: aarch64
             target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install archive build dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y clang libclang-dev pkg-config libarchive-dev zlib1g-dev libbz2-dev liblzma-dev libzstd-dev liblz4-dev libb2-dev libxml2-dev libssl-dev libacl1-dev
+      - name: Install archive build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install pkg-config libarchive libb2 xz zstd lz4
       - run: rustup target add ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      - name: Verify portable archive linkage
+        run: scripts/check-archive-linkage.sh target/${{ matrix.target }}/release/fsh
       - name: Package
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf "fsh-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" fsh
+          tar czf "fsh-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" fsh -C "$GITHUB_WORKSPACE" LICENSE docs/licenses
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:

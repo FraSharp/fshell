@@ -17,7 +17,7 @@ chart = []
 notify = []
 ff = []
 replace = []
-extract = []
+extract = ["dep:fshell-archive"]
 
 [dependencies]
 fshell-core = { path = "../fshell-core" }
@@ -40,6 +40,7 @@ crossterm = { workspace = true }
 fshell-terminal = { workspace = true }
 fshell-ls = { path = "../fshell-ls" }
 fshell-hash = { workspace = true }
+fshell-archive = { workspace = true, optional = true }
 bytes = { workspace = true }
 toml_edit = { workspace = true }
 walkdir = { workspace = true }

@@ -15,6 +15,7 @@ this document describes fshell's security architecture: capability-based authori
   - [tier 0: interactive auto-grant (default)](#tier-0-interactive-auto-grant-default)
   - [tier 1: scoped explicit elevation (`with caps`)](#tier-1-scoped-explicit-elevation-with-caps)
   - [tier 2: strict mode (`--strict`)](#tier-2-strict-mode---strict)
+- [in-process archive extraction](#in-process-archive-extraction)
 - [kernel subprocess sandboxing (`fshell-sandbox`)](#kernel-subprocess-sandboxing-fshell-sandbox)
   - [linux: landlock security](#linux-landlock-security)
   - [macos: seatbelt / sbpl](#macos-seatbelt--sbpl)
@@ -146,6 +147,12 @@ curl is requesting ProcessSpawn.
 ```
 
 ---
+
+## in-process archive extraction
+
+`extract` is a native builtin, not a subprocess: it requires `ReadFile` for the archive and `WriteDir` for the existing destination, but not `ProcessSpawn`. The libarchive reader receives only an already-open file descriptor and is configured with in-process decoders; libarchive's disk writer and external-program filters are not used. Entries are decoded into a private staging tree under a destination directory handle. Before publication, the extractor rejects absolute and parent-traversing paths, links that leave the extracted tree, special files, duplicate entries, existing-file conflicts, and archives exceeding the decoded-byte or entry limits. No single transaction can atomically publish multiple top-level paths, so an I/O failure *during publication* can leave earlier paths in place.
+
+This is not a kernel sandbox for libarchive itself. The native decoder remains part of fshell's memory-safety attack surface: keep the system libarchive and codecs updated, rebuild fsh after security updates, and treat untrusted archives cautiously. Released binaries statically link these libraries; upgrading an installed library alone does **not** patch an existing release binary. The byte and entry budgets limit extraction output, not every possible allocation inside a codec.
 
 ## kernel subprocess sandboxing (`fshell-sandbox`)
 

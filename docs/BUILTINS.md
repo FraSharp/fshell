@@ -154,11 +154,15 @@ files src | filter name ~ r"\.rs$" | map name size
 - `uniq`: filters adjacent duplicate values from the stream.
 
 ### `extract`
-auto-detects archive format (`.tar.gz`, `.tar.bz2`, `.zip`, `.7z`, `.tar.xz`) and extracts it into the target directory in a single command.
+Decodes archives with the statically linked libarchive backend. It identifies containers and compression from file contents (ZIP, tar, 7z, RAR/RAR5, cpio, CAB, ISO, XAR and supported filters such as gzip, bzip2, xz, zstd and lz4); support for particular codecs inside an archive depends on libarchive. A standalone compressed stream (such as `notes.txt.xz`) is written as `notes.txt`; if its name has no recognized compression suffix, `.unpacked` is appended.
 
 ```fsh
-extract bundle.tar.gz
+extract bundle.tar.gz                       # into the current directory
+extract -C ./unpacked bundle.7z             # into an existing directory
+extract --max-bytes 32212254720 big.tar.zst # raise the expanded-byte budget
 ```
+
+Syntax: `extract [-C DIR | --directory DIR] [--max-bytes N] [--max-entries N] [--] <archive>`. Exactly one archive is accepted. The default limits are 16 GiB decoded data and 100,000 entries. This native builtin needs read permission on the archive and write permission on the destination, **not** process-spawn permission; external decompressors are not run. Extraction is staged before publishing, so malformed archives and budget failures leave the destination unchanged. Existing paths are never overwritten. Files, directories, safe relative symlinks and hardlinks to files in the same archive are supported; path escapes and special devices are rejected. Ownership, ACLs, extended attributes and setuid/setgid bits are not restored. Publication into an existing directory is not atomic as a group: an I/O error during publication may leave earlier entries. Encrypted and multi-volume archives are not supported by this interface.
 
 ---
 

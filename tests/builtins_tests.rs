@@ -325,9 +325,15 @@ async fn test_integration_extract_builtin_capabilities() {
         caps.held.clear();
         caps.strict_mode = true; // enable strict mode so capability checks enforce
     }
-    let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-    let archive = tmp.join("test_archive.zip");
-    std::fs::write(&archive, b"PK\x03\x04mock_zip_content").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = tmp.path().join("test_archive.zip");
+    let output = tmp.path().join("output");
+    std::fs::create_dir(&output).unwrap();
+    std::fs::write(&archive, include_bytes!("fixtures/archives/hello.zip")).unwrap();
+    // Normalize /var -> /private/var on macOS before issuing exact capabilities.
+    let archive = archive.canonicalize().unwrap();
+    let output = output.canonicalize().unwrap();
+    env.set_cwd(output.clone());
 
     // Call extract without capabilities first -> should fail with permission error
     let (tx, _rx) = tokio::sync::mpsc::channel(100);
@@ -344,7 +350,7 @@ async fn test_integration_extract_builtin_capabilities() {
     );
     assert!(res.unwrap_err().message.contains("Capability denied"));
 
-    // Grant read capability to the archive path but NOT write capability to destination or process-spawn
+    // Grant read capability to the archive path but NOT write capability to destination
     {
         let mut caps = env.caps.caps.write();
         caps.grant(ResourceHandle::ReadFile(archive.clone()));
@@ -363,33 +369,57 @@ async fn test_integration_extract_builtin_capabilities() {
     );
     assert!(res.unwrap_err().message.contains("Capability denied"));
 
-    // Grant write capability to destination PWD but NOT process-spawn
-    let pwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
-    {
-        let mut caps = env.caps.caps.write();
-        caps.grant(ResourceHandle::WriteDir(pwd));
-    }
+    // A grant for PWD does not authorize an explicit -C elsewhere.
+    env.caps
+        .caps
+        .write()
+        .grant(ResourceHandle::WriteDir(output.clone()));
+    let other = tmp.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    let other = other.canonicalize().unwrap();
     let (tx, _rx) = tokio::sync::mpsc::channel(100);
-    let res = fshell_builtins::extract_builtin(
+    let denied = fshell_builtins::extract_builtin(
         None,
-        vec![Val::String(archive.to_string_lossy().to_string())],
+        vec![
+            Val::String("-C".into()),
+            Val::String(other.to_string_lossy().to_string()),
+            Val::String(archive.to_string_lossy().to_string()),
+        ],
         &env,
         tx,
         None,
     );
-    match res {
-        Ok(_) => panic!("should fail due to missing process-spawn capability"),
-        Err(err) => {
-            assert!(
-                err.message.contains("process-spawn capability is required"),
-                "Expected process-spawn error, but got: {}",
-                err.message
-            );
-        }
-    }
+    assert!(denied.is_err());
+    assert!(denied.unwrap_err().message.contains("Capability denied"));
+    assert!(!other.join("sub/hello.txt").exists());
 
-    // Cleanup
-    let _ = std::fs::remove_file(&archive);
+    // Native extraction needs only read/write capabilities, not process-spawn.
+    // The archive is genuine: this checks both the permissions and the output.
+    let (tx, _rx) = tokio::sync::mpsc::channel(100);
+    let worker_env = env.clone();
+    tokio::task::spawn_blocking(move || {
+        fshell_builtins::extract_builtin(
+            None,
+            vec![Val::String(archive.to_string_lossy().to_string())],
+            &worker_env,
+            tx,
+            None,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        std::fs::read(output.join("sub/hello.txt")).unwrap(),
+        b"hello archive\n"
+    );
+    assert!(
+        !env.caps
+            .caps
+            .read()
+            .held
+            .contains(&ResourceHandle::ProcessSpawn)
+    );
 }
 
 #[tokio::test]

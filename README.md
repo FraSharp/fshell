@@ -51,6 +51,8 @@ structured like nushell, familiar like zsh, clean like rust.
 
 ### installation
 
+The default build includes native archive extraction. Building it requires `pkg-config`, Clang/libclang, libarchive 3.6+ development headers and a static `libarchive.a`, plus static liblzma, libzstd, liblz4 and libb2 libraries. On Ubuntu, install `clang libclang-dev pkg-config libarchive-dev liblzma-dev libzstd-dev liblz4-dev libb2-dev` and the other development packages listed in `.github/workflows/ci.yml`. On macOS, run `brew install pkg-config libarchive libb2 xz zstd lz4`; the build discovers Homebrew's keg-only libarchive automatically. For a build without `extract` or these dependencies, use `cargo build --release --no-default-features`.
+
 #### with cargo (recommended)
 
 ```bash

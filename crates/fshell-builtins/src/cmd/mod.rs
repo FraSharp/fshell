@@ -6,6 +6,8 @@ pub mod chart;
 pub mod config;
 pub mod env;
 pub mod explain;
+#[cfg(feature = "extract")]
+pub mod extract;
 pub mod frecency;
 pub mod fs;
 pub mod hash;

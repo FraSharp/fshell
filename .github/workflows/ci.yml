@@ -32,11 +32,21 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: rustup target add ${{ matrix.target }}
+      - name: Install archive build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev pkg-config libarchive-dev zlib1g-dev libbz2-dev liblzma-dev libzstd-dev liblz4-dev libb2-dev libxml2-dev libssl-dev libacl1-dev
+      - name: Install archive build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install pkg-config libarchive libb2 xz zstd lz4
       - name: Format Check
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --check
       - name: Build
         run: cargo build --target ${{ matrix.target }}
+      - name: Verify portable archive linkage
+        run: scripts/check-archive-linkage.sh target/${{ matrix.target }}/debug/fsh
       - name: Test
         run: cargo test --target ${{ matrix.target }}
       - name: Native Language Baseline
