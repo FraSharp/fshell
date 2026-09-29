@@ -23,6 +23,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm     # native ARM64 Linux (no qemu/cross toolchain)
             target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel       # native Intel macOS
+            target: x86_64-apple-darwin
           - os: macos-latest         # native ARM64 macOS
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}

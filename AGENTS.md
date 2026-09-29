@@ -27,10 +27,10 @@ Process-level benchmarks are shell scripts under root `benches/` (`benches/proce
 ## CI / Release
 
 - **CI** (`.github/workflows/ci.yml`): fmt check → build → test → `clippy --all-targets -D warnings` → `cargo audit`, on push/PR to `main`.
-- **Matrix:** x86_64 Linux, aarch64 macOS (native) + aarch64 Linux cross-compile — the cross target **runs tests under QEMU**, it does not skip them.
-- **Release** (`.github/workflows/release.yml`): on `v*` tags, release builds for 4 targets (x86_64+aarch64 × Linux+macOS). Its packaging step still tars `fshell` and `libfshell_hook.*`, which are no longer built — stale.
-- **clippy cross-platform trap:** CI lints on Ubuntu (`mode_t = u32`). `unnecessary_cast` fires there for `libc::S_* as u32` but not on macOS (`mode_t = u16`). Verify with `cargo clippy --target x86_64-unknown-linux-gnu` or add `#[allow(clippy::unnecessary_cast)]`.
-- Root `[workspace.lints.clippy]` (`unwrap_used = warn`, `panic = warn`, `expect_used = allow`); **every crate inherits it** via `[lints] workspace = true`, so `clippy --all-targets -- -D warnings` currently fails on `unwrap()`/`panic!` in test and bench code (pre-existing, not gated).
+- **Matrix:** x86_64 Linux, native aarch64 Linux, native x86_64 macOS, and native aarch64 macOS.
+- **Release** (`.github/workflows/release.yml`): on `v*` tags, builds and packages `fsh` for 4 targets (x86_64+aarch64 × Linux+macOS), along with `LICENSE` and `docs/licenses`.
+- **clippy cross-platform trap:** Linux `mode_t` is `u32`; macOS `mode_t` is `u16`. Filesystem modules use a narrow `#[allow(clippy::unnecessary_cast)]` where casts are needed across both platforms.
+- Root `[workspace.lints.clippy]` (`unwrap_used = warn`, `panic = warn`, `expect_used = allow`); every crate inherits it via `[lints] workspace = true`. Since CI runs `clippy --all-targets -- -D warnings`, new `unwrap()`/`panic!` calls in tests and benches fail the lint check.
 
 ## Commit messages
 

@@ -23,8 +23,7 @@ impl FullscreenTerminalGuard {
             hide_cursor,
             ..Default::default()
         };
-        let session =
-            TerminalSession::enter(device, options).map_err(io::Error::other)?;
+        let session = TerminalSession::enter(device, options).map_err(io::Error::other)?;
         Ok(Self { _session: session })
     }
 }
