@@ -941,7 +941,7 @@ async fn eval_pipeline_stream(
                     span: None,
                 })
             })??;
-            if code != 0 && pipefail_code.is_none() {
+            if code != 0 {
                 pipefail_code = Some(code);
             }
             if is_last {

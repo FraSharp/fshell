@@ -329,6 +329,13 @@ fn composition_cases() -> Vec<Case> {
             "emit --exit 3 | emit --exit 0; emit --stdout \"rc=$?\"",
         )
         .features(&["compose", "pipeline", "exit_status"]),
+        // With pipefail, choose the rightmost failing stage, not the first one.
+        Case::posix_only(
+            "compose/pipefail-uses-rightmost-failure",
+            "set -o pipefail; emit --exit 3 | emit --exit 7 | emit --exit 0; emit --stdout \"rc=$?\"",
+        )
+        .bash_only()
+        .features(&["compose", "pipeline", "pipefail", "exit_status"]),
         Case::posix_only("compose/subshell-runs", "(emit --stdout sub)")
             .features(&["compose", "subshell"]),
         Case::posix_only(
