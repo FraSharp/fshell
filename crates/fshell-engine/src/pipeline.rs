@@ -1972,12 +1972,13 @@ async fn execute_pipeline_inner(
                                 {
                                     Ok(()) => env_clone.record_stage_status(0),
                                     Err(e) => {
-                                        let is_hard = !matches!(
-                                            e.code,
-                                            fshell_core::diagnostic::ErrorCode::CommandNotFound
-                                                | fshell_core::diagnostic::ErrorCode::CommandNotExecutable
-                                                | fshell_core::diagnostic::ErrorCode::RedirectionFailed
-                                        );
+                                        let is_hard = !e.is_condition_false()
+                                            && !matches!(
+                                                e.code,
+                                                fshell_core::diagnostic::ErrorCode::CommandNotFound
+                                                    | fshell_core::diagnostic::ErrorCode::CommandNotExecutable
+                                                    | fshell_core::diagnostic::ErrorCode::RedirectionFailed
+                                            );
                                         if is_hard {
                                             let _ = cancel.send(true);
                                         }
@@ -2006,12 +2007,13 @@ async fn execute_pipeline_inner(
                                 ) {
                                     Ok(()) => env_clone.record_stage_status(0),
                                     Err(e) => {
-                                        let is_hard = !matches!(
-                                            e.code,
-                                            fshell_core::diagnostic::ErrorCode::CommandNotFound
-                                                | fshell_core::diagnostic::ErrorCode::CommandNotExecutable
-                                                | fshell_core::diagnostic::ErrorCode::RedirectionFailed
-                                        );
+                                        let is_hard = !e.is_condition_false()
+                                            && !matches!(
+                                                e.code,
+                                                fshell_core::diagnostic::ErrorCode::CommandNotFound
+                                                    | fshell_core::diagnostic::ErrorCode::CommandNotExecutable
+                                                    | fshell_core::diagnostic::ErrorCode::RedirectionFailed
+                                            );
                                         if is_hard {
                                             let _ = cancel.send(true);
                                         }
