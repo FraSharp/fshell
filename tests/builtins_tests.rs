@@ -405,6 +405,7 @@ async fn test_integration_extract_builtin_capabilities() {
             tx,
             None,
         )
+        .map_err(|error| error.message)
     })
     .await
     .unwrap()
