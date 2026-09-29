@@ -5,6 +5,7 @@
 !/Cargo.lock
 !/build.rs
 !/README.md
+!/CONTRIBUTING.md
 !/LICENSE
 !/COPYING
 !/fuzz/

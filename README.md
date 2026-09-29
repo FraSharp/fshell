@@ -476,6 +476,8 @@ if something on this list matters to you, open an issue — contributions are mo
 
 ## contributing & test suite
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, CI, and pull-request guidance.
+
 ```bash
 # build release binary
 cargo build --release
