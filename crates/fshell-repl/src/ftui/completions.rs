@@ -2,16 +2,17 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::FshellCompleter;
+use crate::autocomplete::ranking::{RankedCompletion, rank_candidates};
 use crate::autocomplete::{Completer, CompletionCandidate, CompletionKind, TextSpan};
 use crate::theme_ext::ThemeColorRatatui;
 use fshell_core::theme::{CompletionsTheme, Theme};
 use fshell_engine::Env;
 use lscolors::{LsColors, Style as LsStyle};
-use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config as NucleoConfig, Matcher, Utf32String};
+use nucleo_matcher::{Config as NucleoConfig, Matcher};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier as StyleModifier, Style};
 use ratatui::text::{Line, Span};
+use std::ops::Range;
 use std::sync::Arc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -204,10 +205,84 @@ pub fn render_highlighted_spans(
     spans
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompletionLayoutMode {
-    List,
-    Grid { cols: usize, col_width: usize },
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayRow {
+    Header(String),
+    Suggestion { candidate_index: usize },
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletionSession {
+    pub replacement_range: Range<usize>,
+    pub query: String,
+    pub candidates: Vec<RankedCompletion>,
+    pub selected: usize,
+    pub display_rows: Vec<DisplayRow>,
+}
+
+impl CompletionSession {
+    pub fn new(
+        candidates: Vec<RankedCompletion>,
+        query: String,
+        replacement_range: Range<usize>,
+    ) -> Self {
+        let display_rows = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, _)| DisplayRow::Suggestion { candidate_index: i })
+            .collect();
+        Self {
+            replacement_range,
+            query,
+            candidates,
+            selected: 0,
+            display_rows,
+        }
+    }
+
+    pub fn selected_candidate(&self) -> Option<&RankedCompletion> {
+        self.candidates.get(self.selected)
+    }
+
+    pub fn selected_row_index(&self) -> usize {
+        self.display_rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Suggestion { candidate_index } if *candidate_index == self.selected))
+            .unwrap_or(0)
+    }
+
+    pub fn select_next(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.candidates.len();
+    }
+
+    pub fn select_prev(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        if self.selected == 0 {
+            self.selected = self.candidates.len() - 1;
+        } else {
+            self.selected -= 1;
+        }
+    }
+
+    pub fn page_down(&mut self, page_size: usize) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        let next = self.selected.saturating_add(page_size.max(1));
+        self.selected = next.min(self.candidates.len().saturating_sub(1));
+    }
+
+    pub fn page_up(&mut self, page_size: usize) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        self.selected = self.selected.saturating_sub(page_size.max(1));
+    }
 }
 
 impl From<CompletionKind> for CompletionCategory {
@@ -231,109 +306,17 @@ impl From<CompletionKind> for CompletionCategory {
     }
 }
 
-/// A categorized suggestion with its group info
-#[derive(Debug, Clone)]
-pub struct CategorizedSuggestion {
-    pub suggestion: CompletionCandidate,
-    pub category: CompletionCategory,
-}
-
-impl CategorizedSuggestion {
-    fn from_suggestion(s: CompletionCandidate) -> Self {
-        let cat = CompletionCategory::from(s.kind);
-        Self {
-            suggestion: s,
-            category: cat,
-        }
-    }
-}
-
 fn categorize(s: &CompletionCandidate) -> CompletionCategory {
     CompletionCategory::from(s.kind)
 }
 
-/// A grouped list of categorized suggestions with index tracking
-#[derive(Debug, Clone)]
-pub struct GroupedSuggestions {
-    pub groups: Vec<CompletionCategory>,
-    pub items: Vec<CategorizedSuggestion>,
-    /// Flat index-to-group mapping (which group each item belongs to)
-    pub group_indices: Vec<usize>,
-}
-
-impl GroupedSuggestions {
-    fn new(raw: Vec<CompletionCandidate>) -> Self {
-        let mut items: Vec<CategorizedSuggestion> = raw
-            .into_iter()
-            .map(CategorizedSuggestion::from_suggestion)
-            .collect();
-
-        // Sort: directories first, then files, then everything else
-        items.sort_by(|a, b| {
-            let order = |cat: &CompletionCategory| -> u8 {
-                match cat {
-                    CompletionCategory::Directory => 0,
-                    CompletionCategory::File => 1,
-                    _ => 2,
-                }
-            };
-            order(&a.category).cmp(&order(&b.category))
-        });
-
-        // Build group ordering: collect unique categories in order of first appearance
-        let mut seen_cats = Vec::new();
-        for item in &items {
-            if !seen_cats.contains(&item.category) {
-                seen_cats.push(item.category);
-            }
-        }
-
-        // Build flat group_indices: for each item, which group index it belongs to
-        let group_indices: Vec<usize> = items
-            .iter()
-            .map(|item| {
-                seen_cats
-                    .iter()
-                    .position(|c| *c == item.category)
-                    .unwrap_or(0)
-            })
-            .collect();
-
-        Self {
-            groups: seen_cats,
-            items,
-            group_indices,
-        }
-    }
-
-    pub fn total_items(&self) -> usize {
-        self.items.len()
-    }
-
-    /// Get the number of items in each group
-    pub fn group_sizes(&self) -> Vec<usize> {
-        let mut sizes = vec![0usize; self.groups.len()];
-        for gi in &self.group_indices {
-            if *gi < sizes.len() {
-                sizes[*gi] += 1;
-            }
-        }
-        sizes
-    }
-
-    /// Get the display line count including group headers
-    pub fn display_lines(&self) -> usize {
-        let sizes = self.group_sizes();
-        sizes.iter().sum::<usize>() + self.groups.len() // +1 per group for header
-    }
-}
-
 pub struct CompletionsManager {
     completer: FshellCompleter,
-    pub suggestions: Vec<CompletionCandidate>,
-    pub grouped: Option<GroupedSuggestions>,
+    pub session: Option<CompletionSession>,
     /// Full unfiltered suggestion list from the completer (never mutated by filter)
     pub all_suggestions: Vec<CompletionCandidate>,
+    /// Kept for backwards compatibility and test convenience
+    pub suggestions: Vec<CompletionCandidate>,
     /// Current partial word being filtered against
     pub filter_query: String,
     /// Reusable nucleo matcher instance
@@ -352,9 +335,9 @@ impl CompletionsManager {
     pub fn new(env: Env) -> Self {
         Self {
             completer: FshellCompleter { env },
-            suggestions: Vec::new(),
-            grouped: None,
+            session: None,
             all_suggestions: Vec::new(),
+            suggestions: Vec::new(),
             filter_query: String::new(),
             nucleo_matcher: Matcher::new(NucleoConfig::DEFAULT),
             selected_idx: 0,
@@ -450,33 +433,7 @@ impl CompletionsManager {
             .unwrap_or(line.len());
 
         // Call our FshellCompleter backend
-        let mut raw_suggestions = self.completer.complete(line, cursor_byte);
-
-        // Smart sorting: prefix matches first, then by length
-        let last_word = line[..cursor_byte]
-            .split(|c: char| c.is_whitespace() || c == '|' || c == '>' || c == '<')
-            .next_back()
-            .unwrap_or("");
-
-        if !last_word.is_empty() {
-            let last_word_lower = last_word.to_lowercase();
-            raw_suggestions.sort_by(|a, b| {
-                let a_val = a.value.to_lowercase();
-                let b_val = b.value.to_lowercase();
-
-                let a_exact = a_val.starts_with(&last_word_lower);
-                let b_exact = b_val.starts_with(&last_word_lower);
-
-                if a_exact && !b_exact {
-                    std::cmp::Ordering::Less
-                } else if !a_exact && b_exact {
-                    std::cmp::Ordering::Greater
-                } else {
-                    a_val.len().cmp(&b_val.len())
-                }
-            });
-        }
-
+        let raw_suggestions = self.completer.complete(line, cursor_byte);
         self.all_suggestions = raw_suggestions;
 
         // Apply fuzzy filter against the current partial word
@@ -497,159 +454,85 @@ impl CompletionsManager {
     }
 
     pub fn select_next(&mut self) {
-        if self.suggestions.is_empty() {
-            return;
+        if let Some(ref mut s) = self.session {
+            s.select_next();
+            self.selected_idx = s.selected;
+        } else if !self.suggestions.is_empty() {
+            self.selected_idx = (self.selected_idx + 1) % self.suggestions.len();
         }
-        self.selected_idx = (self.selected_idx + 1) % self.suggestions.len();
     }
 
     pub fn select_prev(&mut self) {
-        if self.suggestions.is_empty() {
-            return;
-        }
-        if self.selected_idx == 0 {
-            self.selected_idx = self.suggestions.len() - 1;
-        } else {
-            self.selected_idx -= 1;
-        }
-    }
-
-    pub fn select_down(&mut self, cols: usize) {
-        if self.suggestions.is_empty() {
-            return;
-        }
-        if cols <= 1 {
-            self.select_next();
-        } else {
-            let next = self.selected_idx + cols;
-            if next < self.suggestions.len() {
-                self.selected_idx = next;
+        if let Some(ref mut s) = self.session {
+            s.select_prev();
+            self.selected_idx = s.selected;
+        } else if !self.suggestions.is_empty() {
+            if self.selected_idx == 0 {
+                self.selected_idx = self.suggestions.len() - 1;
             } else {
-                self.selected_idx %= cols;
+                self.selected_idx -= 1;
             }
-        }
-    }
-
-    pub fn select_up(&mut self, cols: usize) {
-        if self.suggestions.is_empty() {
-            return;
-        }
-        if cols <= 1 {
-            self.select_prev();
-        } else if self.selected_idx >= cols {
-            self.selected_idx -= cols;
-        } else {
-            let mut target = self.selected_idx;
-            while target + cols < self.suggestions.len() {
-                target += cols;
-            }
-            self.selected_idx = target;
         }
     }
 
     /// Fuzzy-filter `all_suggestions` against `partial` word, updating
-    /// `suggestions` and `grouped`. Computes fuzzy match indices for live highlighting.
+    /// `suggestions` and `session`. Computes fuzzy match indices for live highlighting.
     pub fn filter(&mut self, partial: &str) {
         self.prefix_accepted = false;
         self.filter_query = partial.to_string();
-        if partial.is_empty() {
-            self.suggestions = self.all_suggestions.clone();
-            self.grouped = if self.all_suggestions.is_empty() {
-                None
-            } else {
-                let grouped = GroupedSuggestions::new(self.all_suggestions.clone());
-                self.suggestions = grouped
-                    .items
-                    .iter()
-                    .map(|ci| ci.suggestion.clone())
-                    .collect();
-                Some(grouped)
-            };
-            if self.selected_idx >= self.suggestions.len() {
-                self.selected_idx = 0;
-            }
-            if self.suggestions.is_empty() {
-                self.visible = false;
-            }
-            return;
-        }
 
-        let pattern = Pattern::new(
+        let recent = crate::history::get_recent_commands_cached();
+        let ranked = rank_candidates(
+            self.all_suggestions.clone(),
             partial,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
+            &mut self.nucleo_matcher,
+            Some(&recent),
         );
 
-        // Score all items, keep only those that match, and record matched character indices
-        let mut scored: Vec<(u32, usize, CompletionCandidate)> = self
-            .all_suggestions
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                let haystack = Utf32String::from(s.value.as_str());
-                let mut indices = Vec::new();
-                let score =
-                    pattern.indices(haystack.slice(..), &mut self.nucleo_matcher, &mut indices)?;
-                let mut suggestion = s.clone();
-                indices.sort_unstable();
-                suggestion.match_indices =
-                    Some(indices.into_iter().map(|idx| idx as usize).collect());
-                Some((score, i, suggestion))
-            })
-            .collect();
-
-        // Sort by: 1) prefix match (starts with partial), 2) score descending, 3) original index
-        let partial_lower = partial.to_lowercase();
-        scored.sort_by(|a, b| {
-            let a_val = a.2.value.to_lowercase();
-            let b_val = b.2.value.to_lowercase();
-            let a_prefix = a_val.starts_with(&partial_lower);
-            let b_prefix = b_val.starts_with(&partial_lower);
-            b_prefix
-                .cmp(&a_prefix)
-                .then_with(|| b.0.cmp(&a.0))
-                .then_with(|| a.1.cmp(&b.1))
-        });
-
-        self.suggestions = scored.into_iter().map(|(_, _, s)| s).collect();
-
-        self.grouped = if self.suggestions.is_empty() {
-            None
+        let replacement_range = if let Some(first) = ranked.first() {
+            first.candidate.span.start..first.candidate.span.end
         } else {
-            let grouped = GroupedSuggestions::new(self.suggestions.clone());
-            self.suggestions = grouped
-                .items
-                .iter()
-                .map(|ci| ci.suggestion.clone())
-                .collect();
-            Some(grouped)
+            0..0
         };
+
+        self.suggestions = ranked.iter().map(|r| r.candidate.clone()).collect();
+        let session = CompletionSession::new(ranked, partial.to_string(), replacement_range);
+        self.session = Some(session);
 
         if self.suggestions.is_empty() {
             self.visible = false;
-        }
-
-        if self.selected_idx >= self.suggestions.len() {
             self.selected_idx = 0;
+            self.scroll_offset = 0;
+        } else {
+            if self.selected_idx >= self.suggestions.len() {
+                self.selected_idx = 0;
+                self.scroll_offset = 0;
+            }
+            if let Some(ref mut s) = self.session {
+                s.selected = self.selected_idx;
+            }
         }
     }
 
     /// Advance selection by `page_size` visible display lines
     pub fn page_down(&mut self, page_size: usize) {
-        if self.suggestions.is_empty() {
-            return;
+        if let Some(ref mut s) = self.session {
+            s.page_down(page_size);
+            self.selected_idx = s.selected;
+        } else if !self.suggestions.is_empty() {
+            let next = self.selected_idx.saturating_add(page_size.max(1));
+            self.selected_idx = next.min(self.suggestions.len().saturating_sub(1));
         }
-        let next = self.selected_idx.saturating_add(page_size.max(1));
-        self.selected_idx = next.min(self.suggestions.len().saturating_sub(1));
     }
 
     /// Move selection backward by `page_size` visible display lines
     pub fn page_up(&mut self, page_size: usize) {
-        if self.suggestions.is_empty() {
-            return;
+        if let Some(ref mut s) = self.session {
+            s.page_up(page_size);
+            self.selected_idx = s.selected;
+        } else if !self.suggestions.is_empty() {
+            self.selected_idx = self.selected_idx.saturating_sub(page_size.max(1));
         }
-        self.selected_idx = self.selected_idx.saturating_sub(page_size.max(1));
     }
 
     pub fn get_selected_suggestion(&self) -> Option<&CompletionCandidate> {
@@ -660,16 +543,26 @@ impl CompletionsManager {
         }
     }
 
-    /// Resolve a mouse position inside the rendered popup to a suggestion.
-    ///
-    /// The popup renderer emits item rows only; category metadata is used for
-    /// styling and sorting, not as additional display rows. Keeping this
-    /// mapping beside the renderer prevents input handling from inventing
-    /// header rows that are not actually on screen.
+    pub fn filter_query(&self) -> &str {
+        &self.filter_query
+    }
+
+    pub fn is_all_files_or_dirs(&self) -> bool {
+        if self.suggestions.is_empty() {
+            return false;
+        }
+        self.suggestions.iter().all(|s| {
+            matches!(
+                categorize(s),
+                CompletionCategory::Directory | CompletionCategory::File
+            )
+        })
+    }
+
+    /// Resolve a mouse position inside the rendered popup to a suggestion index.
     pub fn suggestion_index_at(
         &self,
         area: Rect,
-        layout: CompletionLayoutMode,
         scroll_offset: usize,
         column: u16,
         row: u16,
@@ -686,28 +579,33 @@ impl CompletionsManager {
             return None;
         }
 
-        let display_row = scroll_offset + row.saturating_sub(inner_y) as usize;
-        let index = match layout {
-            CompletionLayoutMode::List => display_row,
-            CompletionLayoutMode::Grid { cols, col_width } => {
-                if cols == 0 || col_width == 0 {
-                    return None;
-                }
-                let display_col = column.saturating_sub(inner_x) as usize / col_width;
-                if display_col >= cols {
-                    return None;
-                }
-                display_row.saturating_mul(cols).saturating_add(display_col)
-            }
-        };
+        let has_footer = area.height >= 6;
+        let visible_rows = if has_footer {
+            area.height.saturating_sub(4)
+        } else {
+            area.height.saturating_sub(2)
+        } as usize;
 
-        (index < self.suggestions.len()).then_some(index)
+        let rel_y = row.saturating_sub(inner_y) as usize;
+        if rel_y >= visible_rows {
+            return None;
+        }
+
+        let display_idx = scroll_offset.saturating_add(rel_y);
+        if let Some(ref s) = self.session {
+            match s.display_rows.get(display_idx) {
+                Some(DisplayRow::Suggestion { candidate_index }) => Some(*candidate_index),
+                Some(DisplayRow::Header(_)) | None => None,
+            }
+        } else {
+            (display_idx < self.suggestions.len()).then_some(display_idx)
+        }
     }
 
     pub fn clear(&mut self) {
         self.suggestions.clear();
         self.all_suggestions.clear();
-        self.grouped = None;
+        self.session = None;
         self.selected_idx = 0;
         self.scroll_offset = 0;
         self.visible = false;
@@ -726,59 +624,6 @@ impl CompletionsManager {
         } else {
             self.clear();
         }
-    }
-
-    /// Compute whether to display in Grid mode or List mode based on contents and popup width
-    pub fn compute_layout_mode(&self, area_width: u16) -> CompletionLayoutMode {
-        if self.suggestions.is_empty() {
-            return CompletionLayoutMode::List;
-        }
-
-        // Check if suggestions have long sentence documentation (e.g. flags or command docs)
-        let has_long_descriptions = self.suggestions.iter().any(|s| {
-            let cat = categorize(s);
-            if matches!(
-                cat,
-                CompletionCategory::Directory | CompletionCategory::File
-            ) {
-                return false;
-            }
-            if let Some(ref d) = s.description {
-                !d.is_empty() && d.len() > 14
-            } else {
-                false
-            }
-        });
-
-        if has_long_descriptions || self.suggestions.len() < 3 {
-            return CompletionLayoutMode::List;
-        }
-
-        let max_val_len = self
-            .suggestions
-            .iter()
-            .map(|s| s.value.width())
-            .max()
-            .unwrap_or(10);
-
-        let cell_width = (max_val_len + 4).max(14);
-        let usable_width = area_width.saturating_sub(2) as usize;
-
-        let possible_cols = (usable_width / cell_width).clamp(1, 5);
-        if possible_cols >= 2 {
-            let col_w = usable_width / possible_cols;
-            CompletionLayoutMode::Grid {
-                cols: possible_cols,
-                col_width: col_w,
-            }
-        } else {
-            CompletionLayoutMode::List
-        }
-    }
-
-    /// Map a raw suggestion index to its display row index
-    pub fn flat_index_of(&self, raw_idx: usize) -> usize {
-        raw_idx
     }
 
     /// Compute the longest common prefix among all suggestion values
@@ -806,213 +651,75 @@ impl CompletionsManager {
         }
     }
 
-    /// Render the popup content using adaptive dual-mode layout (Grid or List).
-    #[allow(clippy::type_complexity)]
+    /// Render the popup content using adaptive 1D command-palette layout.
     pub fn render_popup(
         &self,
         area_width: u16,
         visible_lines: usize,
-    ) -> (
-        Vec<(
-            Option<CompletionCategory>,
-            Vec<ratatui::widgets::ListItem<'static>>,
-        )>,
-        usize, /* total display rows */
-    ) {
+    ) -> (Vec<ratatui::widgets::ListItem<'static>>, usize) {
         if self.suggestions.is_empty() {
             return (Vec::new(), 0);
         }
 
-        let layout = self.compute_layout_mode(area_width);
-        match layout {
-            CompletionLayoutMode::List => self.render_list_popup(area_width, visible_lines),
-            CompletionLayoutMode::Grid { cols, col_width } => {
-                self.render_grid_popup(visible_lines, cols, col_width)
-            }
-        }
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn render_list_popup(
-        &self,
-        area_width: u16,
-        visible_lines: usize,
-    ) -> (
-        Vec<(
-            Option<CompletionCategory>,
-            Vec<ratatui::widgets::ListItem<'static>>,
-        )>,
-        usize,
-    ) {
-        let total_items = self.suggestions.len();
-        let total_display = total_items;
-
-        let vis_start = self.scroll_offset.min(total_items);
-        let vis_end = (self.scroll_offset + visible_lines).min(total_items);
-
-        let max_desc_width = if area_width > 70 {
-            ((area_width as f64) * 0.40).min(38.0) as usize
+        let total_rows = if let Some(ref s) = self.session {
+            s.display_rows.len()
         } else {
-            ((area_width as usize).saturating_sub(24) / 2).clamp(12, 22)
+            self.suggestions.len()
         };
-        let max_value_width = (area_width as usize).saturating_sub(max_desc_width + 12);
-
-        let mut sections = Vec::new();
-        let mut current_cat = None;
-        let mut current_items = Vec::new();
-
-        for i in vis_start..vis_end {
-            let s = &self.suggestions[i];
-            let cat = categorize(s);
-            if current_cat != Some(cat) {
-                if !current_items.is_empty() {
-                    sections.push((current_cat, std::mem::take(&mut current_items)));
-                }
-                current_cat = Some(cat);
-            }
-            let is_selected = i == self.selected_idx;
-            let item = self.render_list_item(s, cat, is_selected, max_value_width, max_desc_width);
-            current_items.push(item);
-        }
-
-        if !current_items.is_empty() {
-            sections.push((current_cat, current_items));
-        }
-
-        (sections, total_display)
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn render_grid_popup(
-        &self,
-        visible_lines: usize,
-        cols: usize,
-        col_width: usize,
-    ) -> (
-        Vec<(
-            Option<CompletionCategory>,
-            Vec<ratatui::widgets::ListItem<'static>>,
-        )>,
-        usize,
-    ) {
-        let total_items = self.suggestions.len();
-        let total_rows = total_items.div_ceil(cols);
 
         let vis_start = self.scroll_offset.min(total_rows);
         let vis_end = (self.scroll_offset + visible_lines).min(total_rows);
 
+        let inner_width = (area_width as usize).saturating_sub(2);
         let mut list_items = Vec::with_capacity(vis_end.saturating_sub(vis_start));
 
-        for r in vis_start..vis_end {
-            let mut spans = Vec::new();
-            for c in 0..cols {
-                let idx = r * cols + c;
-                if idx < total_items {
-                    let s = &self.suggestions[idx];
-                    let cat = categorize(s);
-                    let is_selected = idx == self.selected_idx;
-                    let cell_spans = self.render_grid_cell(s, cat, is_selected, col_width);
-                    spans.extend(cell_spans);
-                } else {
-                    spans.push(Span::raw(" ".repeat(col_width)));
+        for row_idx in vis_start..vis_end {
+            let row_type = if let Some(ref s) = self.session {
+                s.display_rows.get(row_idx)
+            } else {
+                None
+            };
+
+            match row_type {
+                Some(DisplayRow::Header(title)) => {
+                    let header_str = truncate_by_width(title, inner_width.saturating_sub(2));
+                    list_items.push(ratatui::widgets::ListItem::new(Line::from(Span::styled(
+                        format!(" ── {header_str} ──"),
+                        self.theme.status.muted.to_style_dim(),
+                    ))));
+                }
+                Some(DisplayRow::Suggestion { candidate_index }) => {
+                    if let Some(s) = self.suggestions.get(*candidate_index) {
+                        let is_selected = *candidate_index == self.selected_idx;
+                        let item = self.render_adaptive_row(s, is_selected, inner_width);
+                        list_items.push(item);
+                    }
+                }
+                None => {
+                    if let Some(s) = self.suggestions.get(row_idx) {
+                        let is_selected = row_idx == self.selected_idx;
+                        let item = self.render_adaptive_row(s, is_selected, inner_width);
+                        list_items.push(item);
+                    }
                 }
             }
-            list_items.push(ratatui::widgets::ListItem::new(Line::from(spans)));
         }
 
-        (vec![(None, list_items)], total_rows)
+        (list_items, total_rows)
     }
 
-    fn render_grid_cell(
+    fn render_adaptive_row(
         &self,
         suggestion: &CompletionCandidate,
-        category: CompletionCategory,
         is_selected: bool,
-        col_width: usize,
-    ) -> Vec<Span<'static>> {
-        let t = &self.theme;
-        let selection_bg = t.widgets.item_selected_bg.to_ratatui_color();
-        let selection_fg = t.widgets.item_selected_fg.to_ratatui_color();
-
-        let base_bg = if is_selected {
-            Style::default().bg(selection_bg)
-        } else {
-            Style::default()
-        };
-
-        let indicator = if is_selected {
-            Span::styled(
-                "▸ ",
-                Style::default()
-                    .bg(selection_bg)
-                    .fg(selection_fg)
-                    .add_modifier(StyleModifier::BOLD),
-            )
-        } else {
-            Span::raw("  ")
-        };
-
-        let base_val_style = if is_selected {
-            Style::default()
-                .bg(selection_bg)
-                .fg(selection_fg)
-                .add_modifier(StyleModifier::BOLD)
-        } else {
-            match category {
-                CompletionCategory::Directory | CompletionCategory::File => {
-                    if let Some(ls) = self.lscolors.style_for_path(&suggestion.value) {
-                        self.convert_lscolors_style(ls, false)
-                    } else {
-                        category.value_style(&t.completions)
-                    }
-                }
-                _ => category.value_style(&t.completions),
-            }
-        };
-
-        let highlight_style = if is_selected {
-            Style::default()
-                .bg(selection_bg)
-                .fg(selection_fg)
-                .add_modifier(StyleModifier::BOLD | StyleModifier::UNDERLINED)
-        } else {
-            base_val_style.add_modifier(StyleModifier::BOLD | StyleModifier::UNDERLINED)
-        };
-
-        let max_val_w = col_width.saturating_sub(3);
-        let display_val = if suggestion.value.width() > max_val_w && max_val_w > 3 {
-            truncate_by_width(&suggestion.value, max_val_w)
-        } else {
-            suggestion.value.clone()
-        };
-        let val_w = display_val.width();
-
-        let val_spans = render_highlighted_spans(
-            &display_val,
-            suggestion.match_indices.as_deref(),
-            base_val_style,
-            highlight_style,
-        );
-
-        let pad_w = col_width.saturating_sub(2 + val_w);
-        let pad_span = Span::styled(" ".repeat(pad_w), base_bg);
-
-        let mut out = vec![indicator];
-        out.extend(val_spans);
-        out.push(pad_span);
-        out
-    }
-
-    fn render_list_item(
-        &self,
-        suggestion: &CompletionCandidate,
-        category: CompletionCategory,
-        is_selected: bool,
-        max_value_width: usize,
-        max_desc_width: usize,
+        inner_width: usize,
     ) -> ratatui::widgets::ListItem<'static> {
-        let value = &suggestion.value;
         let t = &self.theme;
+        let category = categorize(suggestion);
+        let is_file_or_dir = matches!(
+            category,
+            CompletionCategory::Directory | CompletionCategory::File
+        );
 
         let selection_bg = t.widgets.item_selected_bg.to_ratatui_color();
         let selection_fg = t.widgets.item_selected_fg.to_ratatui_color();
@@ -1040,99 +747,195 @@ impl CompletionsManager {
                 .bg(selection_bg)
                 .fg(selection_fg)
                 .add_modifier(StyleModifier::BOLD)
-        } else {
-            match category {
-                CompletionCategory::Directory | CompletionCategory::File => {
-                    if let Some(ls) = self.lscolors.style_for_path(value) {
-                        self.convert_lscolors_style(ls, false)
-                    } else {
-                        category.value_style(&t.completions)
-                    }
-                }
-                _ => category.value_style(&t.completions),
+        } else if is_file_or_dir {
+            if let Some(ls) = self.lscolors.style_for_path(&suggestion.value) {
+                self.convert_lscolors_style(ls, false)
+            } else {
+                category.value_style(&t.completions)
             }
+        } else {
+            category.value_style(&t.completions)
         };
 
         let highlight_style = if is_selected {
             Style::default()
                 .bg(selection_bg)
-                .fg(selection_fg)
+                .fg(t.syntax.keyword.to_ratatui_color())
                 .add_modifier(StyleModifier::BOLD | StyleModifier::UNDERLINED)
         } else {
-            base_val_style.add_modifier(StyleModifier::BOLD | StyleModifier::UNDERLINED)
+            t.syntax
+                .keyword
+                .to_style_bold()
+                .add_modifier(StyleModifier::UNDERLINED)
         };
 
-        let display_val = if value.width() > max_value_width && max_value_width > 5 {
-            truncate_by_width(value, max_value_width.saturating_sub(1))
-        } else {
-            value.clone()
+        let avail = inner_width.saturating_sub(2);
+
+        let kind_str = match category {
+            CompletionCategory::Directory => "dir".to_string(),
+            CompletionCategory::File => {
+                let path = std::path::Path::new(&suggestion.value);
+                if let Ok(meta) = std::fs::symlink_metadata(path) {
+                    if meta.is_symlink() {
+                        "symlink".to_string()
+                    } else {
+                        format_file_size(meta.len())
+                    }
+                } else {
+                    "file".to_string()
+                }
+            }
+            CompletionCategory::Command => "command".to_string(),
+            CompletionCategory::Builtin => "builtin".to_string(),
+            CompletionCategory::Alias => "alias".to_string(),
+            CompletionCategory::Function => "fn".to_string(),
+            CompletionCategory::Variable => "var".to_string(),
+            CompletionCategory::Flag => "flag".to_string(),
+            CompletionCategory::Pipeline => "pipe".to_string(),
+            CompletionCategory::Keyword => "keyword".to_string(),
+            CompletionCategory::Job => "job".to_string(),
+            CompletionCategory::History => "history".to_string(),
+            CompletionCategory::Ref => "branch".to_string(),
         };
-        let display_width = display_val.width();
-
-        let val_spans = render_highlighted_spans(
-            &display_val,
-            suggestion.match_indices.as_deref(),
-            base_val_style,
-            highlight_style,
-        );
-
-        let mut spans = vec![indicator];
-        spans.extend(val_spans);
 
         let desc_opt = match &suggestion.description {
-            Some(desc) if !desc.is_empty() && desc != "Directory" && desc != "File" => {
-                Some(truncate_by_width(desc, max_desc_width))
-            }
-            _ => match category {
-                CompletionCategory::Directory => {
-                    let path = std::path::Path::new(value);
-                    if path.join(".git").exists() {
-                        Some("git repo".to_string())
-                    } else if let Ok(rd) = std::fs::read_dir(path) {
-                        let count = rd.count();
-                        Some(format!("{count} items"))
-                    } else {
-                        Some("dir".to_string())
-                    }
-                }
-                CompletionCategory::File => {
-                    let path = std::path::Path::new(value);
-                    if let Ok(meta) = std::fs::symlink_metadata(path) {
-                        if meta.is_symlink() {
-                            if let Ok(target) = std::fs::read_link(path) {
-                                Some(truncate_by_width(
-                                    &format!("-> {}", target.display()),
-                                    max_desc_width,
-                                ))
-                            } else {
-                                Some("symlink".to_string())
-                            }
-                        } else {
-                            Some(format_file_size(meta.len()))
-                        }
-                    } else {
-                        Some("file".to_string())
-                    }
-                }
-                _ => Some(category.label().to_string()),
-            },
+            Some(d) if !d.is_empty() && d != "Directory" && d != "File" => Some(d.as_str()),
+            _ => None,
         };
 
-        if let Some(desc_text) = desc_opt {
-            let pad_needed = max_value_width.saturating_sub(display_width);
-            let spacing = " ".repeat(pad_needed.max(2));
+        let mut spans = vec![indicator];
 
-            let desc_text_style = if is_selected {
+        if is_file_or_dir {
+            let kind_w = kind_str.width();
+            let max_val_w = avail.saturating_sub(kind_w + 2);
+            let display_val = if suggestion.value.width() > max_val_w && max_val_w > 4 {
+                truncate_by_width(&suggestion.value, max_val_w)
+            } else {
+                suggestion.value.clone()
+            };
+            let val_w = display_val.width();
+            let pad_w = avail.saturating_sub(val_w + kind_w);
+
+            let val_spans = render_highlighted_spans(
+                &display_val,
+                suggestion.match_indices.as_deref(),
+                base_val_style,
+                highlight_style,
+            );
+            spans.extend(val_spans);
+
+            if avail >= 25 {
+                spans.push(Span::styled(" ".repeat(pad_w.max(1)), base_bg));
+                let kind_style = if is_selected {
+                    Style::default()
+                        .bg(selection_bg)
+                        .fg(selection_fg)
+                        .add_modifier(StyleModifier::DIM)
+                } else {
+                    t.status.muted.to_style_dim()
+                };
+                spans.push(Span::styled(kind_str, kind_style));
+            }
+        } else if avail < 30 {
+            let display_val = if suggestion.value.width() > avail && avail > 4 {
+                truncate_by_width(&suggestion.value, avail)
+            } else {
+                suggestion.value.clone()
+            };
+            let val_spans = render_highlighted_spans(
+                &display_val,
+                suggestion.match_indices.as_deref(),
+                base_val_style,
+                highlight_style,
+            );
+            spans.extend(val_spans);
+        } else if avail < 55 {
+            let kind_col_w = 10;
+            let max_val_w = avail.saturating_sub(kind_col_w + 2);
+            let display_val = if suggestion.value.width() > max_val_w && max_val_w > 4 {
+                truncate_by_width(&suggestion.value, max_val_w)
+            } else {
+                suggestion.value.clone()
+            };
+            let val_w = display_val.width();
+            let pad_w = avail.saturating_sub(val_w + kind_str.width());
+
+            let val_spans = render_highlighted_spans(
+                &display_val,
+                suggestion.match_indices.as_deref(),
+                base_val_style,
+                highlight_style,
+            );
+            spans.extend(val_spans);
+            spans.push(Span::styled(" ".repeat(pad_w.max(1)), base_bg));
+
+            let kind_style = if is_selected {
                 Style::default()
                     .bg(selection_bg)
                     .fg(selection_fg)
                     .add_modifier(StyleModifier::DIM)
             } else {
-                t.completions.description.to_style_dim()
+                category.badge_style(&t.completions)
             };
+            spans.push(Span::styled(kind_str, kind_style));
+        } else {
+            let val_col_w = 18.min(avail / 3);
+            let kind_col_w = 11;
+            let desc_col_w = avail.saturating_sub(val_col_w + kind_col_w + 2);
 
-            spans.push(Span::styled(spacing, base_bg));
-            spans.push(Span::styled(desc_text, desc_text_style));
+            let display_val = if suggestion.value.width() > val_col_w.saturating_sub(1) {
+                truncate_by_width(&suggestion.value, val_col_w.saturating_sub(1))
+            } else {
+                suggestion.value.clone()
+            };
+            let val_w = display_val.width();
+            let val_pad = val_col_w.saturating_sub(val_w);
+
+            let val_spans = render_highlighted_spans(
+                &display_val,
+                suggestion.match_indices.as_deref(),
+                base_val_style,
+                highlight_style,
+            );
+            spans.extend(val_spans);
+            spans.push(Span::styled(" ".repeat(val_pad.max(1)), base_bg));
+
+            let kind_pad = kind_col_w.saturating_sub(kind_str.width());
+            let kind_style = if is_selected {
+                Style::default()
+                    .bg(selection_bg)
+                    .fg(selection_fg)
+                    .add_modifier(StyleModifier::DIM)
+            } else {
+                category.badge_style(&t.completions)
+            };
+            spans.push(Span::styled(kind_str, kind_style));
+            spans.push(Span::styled(" ".repeat(kind_pad.max(1)), base_bg));
+
+            if let Some(desc) = desc_opt {
+                let display_desc = if desc.width() > desc_col_w {
+                    truncate_by_width(desc, desc_col_w)
+                } else {
+                    desc.to_string()
+                };
+                let desc_style = if is_selected {
+                    Style::default()
+                        .bg(selection_bg)
+                        .fg(selection_fg)
+                        .add_modifier(StyleModifier::DIM)
+                } else {
+                    t.completions.description.to_style_dim()
+                };
+                spans.push(Span::styled(display_desc, desc_style));
+            }
+        }
+
+        let current_width: usize = spans.iter().map(|s| s.width()).sum();
+        if current_width < inner_width {
+            spans.push(Span::styled(
+                " ".repeat(inner_width - current_width),
+                base_bg,
+            ));
         }
 
         ratatui::widgets::ListItem::new(Line::from(spans).style(base_bg))
@@ -1379,26 +1182,24 @@ mod tests {
             })
             .collect();
 
-        let area = Rect::new(2, 3, 20, 5);
-        assert_eq!(
-            mgr.suggestion_index_at(area, CompletionLayoutMode::List, 0, 3, 4),
-            Some(0)
-        );
-        assert_eq!(
-            mgr.suggestion_index_at(area, CompletionLayoutMode::List, 1, 3, 4),
-            Some(1)
-        );
-        assert_eq!(
-            mgr.suggestion_index_at(area, CompletionLayoutMode::List, 0, 2, 4),
-            None
-        );
+        // Standard area with height 7 (has footer, visible_rows = 7 - 4 = 3)
+        let area = Rect::new(2, 3, 20, 7);
+        assert_eq!(mgr.suggestion_index_at(area, 0, 3, 4), Some(0));
+        assert_eq!(mgr.suggestion_index_at(area, 0, 3, 5), Some(1));
+        assert_eq!(mgr.suggestion_index_at(area, 0, 3, 6), Some(2));
+        assert_eq!(mgr.suggestion_index_at(area, 0, 3, 7), None); // divider
+        assert_eq!(mgr.suggestion_index_at(area, 0, 3, 8), None); // footer
+        // Scroll offset
+        assert_eq!(mgr.suggestion_index_at(area, 1, 3, 4), Some(1));
+        // Outside bounds (left border, right border)
+        assert_eq!(mgr.suggestion_index_at(area, 0, 2, 4), None);
+        assert_eq!(mgr.suggestion_index_at(area, 0, 21, 4), None);
 
-        let grid = CompletionLayoutMode::Grid {
-            cols: 2,
-            col_width: 5,
-        };
-        assert_eq!(mgr.suggestion_index_at(area, grid, 0, 3, 4), Some(0));
-        assert_eq!(mgr.suggestion_index_at(area, grid, 0, 8, 4), Some(1));
-        assert_eq!(mgr.suggestion_index_at(area, grid, 0, 3, 5), Some(2));
+        // Small area with height 5 (< 6, no footer, visible_rows = 5 - 2 = 3)
+        let small_area = Rect::new(2, 3, 20, 5);
+        assert_eq!(mgr.suggestion_index_at(small_area, 0, 3, 4), Some(0));
+        assert_eq!(mgr.suggestion_index_at(small_area, 0, 3, 5), Some(1));
+        assert_eq!(mgr.suggestion_index_at(small_area, 0, 3, 6), Some(2));
+        assert_eq!(mgr.suggestion_index_at(small_area, 0, 3, 7), None);
     }
 }

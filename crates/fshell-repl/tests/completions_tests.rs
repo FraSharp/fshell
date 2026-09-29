@@ -1221,3 +1221,137 @@ async fn test_first_selected_completion_candidate_available_for_enter() {
     env.set_cwd(orig_cwd);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[tokio::test]
+async fn test_non_prefix_fuzzy_matching_for_builtins() {
+    let mut c = make_completer();
+    let results = c.complete("cnt", 3);
+    assert!(
+        results.iter().any(|s| s.value == "count"),
+        "fuzzy query 'cnt' should match builtin 'count', got: {:?}",
+        results.iter().map(|s| &s.value).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_exact_match_beats_fuzzy_and_ranking_survives() {
+    let mut c = make_completer();
+    let results = c.complete("ls", 2);
+    assert!(!results.is_empty());
+    assert_eq!(results[0].value, "ls", "exact match must rank first");
+
+    let mut mgr = fshell_repl::ftui::completions::CompletionsManager::new(c.env.clone());
+    mgr.update("ls", 2, true);
+    assert!(!mgr.suggestions.is_empty());
+    assert_eq!(
+        mgr.suggestions[0].value, "ls",
+        "authoritative ranking must survive manager filtering without category re-sorting"
+    );
+}
+
+#[tokio::test]
+async fn test_fuzzy_match_indices_computed() {
+    let mut c = make_completer();
+    let results = c.complete("cnt", 3);
+    let count_cand = results
+        .iter()
+        .find(|s| s.value == "count")
+        .expect("count found");
+    assert!(
+        count_cand.match_indices.is_some(),
+        "matched characters must have indices for UI highlighting"
+    );
+}
+
+#[tokio::test]
+async fn test_completion_session_and_display_rows_model() {
+    let c = make_completer();
+    let mut mgr = fshell_repl::ftui::completions::CompletionsManager::new(c.env.clone());
+    mgr.update("gi", 2, true);
+
+    let session = mgr.session.as_ref().expect("session must be active");
+    assert_eq!(
+        session.display_rows.len(),
+        mgr.suggestions.len(),
+        "display rows count must match candidate count"
+    );
+    assert_eq!(session.selected, 0);
+    assert_eq!(session.selected_row_index(), 0);
+
+    // Navigate next
+    mgr.select_next();
+    assert_eq!(mgr.selected_idx, 1);
+    let s2 = mgr.session.as_ref().unwrap();
+    assert_eq!(s2.selected, 1);
+    assert_eq!(s2.selected_row_index(), 1);
+
+    // Navigate prev wraps around to last
+    mgr.select_prev();
+    assert_eq!(mgr.selected_idx, 0);
+    mgr.select_prev();
+    assert_eq!(mgr.selected_idx, mgr.suggestions.len() - 1);
+}
+
+#[tokio::test]
+async fn test_mouse_mapping_matches_session_rows_and_footer() {
+    let c = make_completer();
+    let mut mgr = fshell_repl::ftui::completions::CompletionsManager::new(c.env.clone());
+    mgr.suggestions = vec![
+        CompletionCandidate::new(
+            "one".to_string(),
+            CompletionKind::ExternalCommand,
+            TextSpan::new(0, 3),
+        ),
+        CompletionCandidate::new(
+            "two".to_string(),
+            CompletionKind::ExternalCommand,
+            TextSpan::new(0, 3),
+        ),
+        CompletionCandidate::new(
+            "three".to_string(),
+            CompletionKind::ExternalCommand,
+            TextSpan::new(0, 5),
+        ),
+    ];
+    let ranked = fshell_repl::autocomplete::ranking::rank_candidates(
+        mgr.suggestions.clone(),
+        "",
+        &mut nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT),
+        None,
+    );
+    mgr.session = Some(fshell_repl::ftui::completions::CompletionSession::new(
+        ranked,
+        String::new(),
+        0..0,
+    ));
+
+    // Area height 7: inner_y = 4, visible_rows = 7 - 4 = 3
+    let area = ratatui::layout::Rect::new(2, 3, 30, 7);
+    assert_eq!(mgr.suggestion_index_at(area, 0, 3, 4), Some(0));
+    assert_eq!(mgr.suggestion_index_at(area, 0, 3, 5), Some(1));
+    assert_eq!(mgr.suggestion_index_at(area, 0, 3, 6), Some(2));
+    assert_eq!(mgr.suggestion_index_at(area, 0, 3, 7), None); // divider line
+    assert_eq!(mgr.suggestion_index_at(area, 0, 3, 8), None); // footer line
+}
+
+#[tokio::test]
+async fn test_adaptive_row_rendering_width_tiers() {
+    let c = make_completer();
+    let mut mgr = fshell_repl::ftui::completions::CompletionsManager::new(c.env.clone());
+    mgr.update("git", 3, true);
+
+    // Wide tier (80 cols): renders without panic and returns rows
+    let (wide_items, total_wide) = mgr.render_popup(80, 5);
+    assert!(!wide_items.is_empty());
+    assert_eq!(total_wide, mgr.suggestions.len());
+
+    // Medium tier (45 cols): renders without panic
+    let (med_items, total_med) = mgr.render_popup(45, 5);
+    assert!(!med_items.is_empty());
+    assert_eq!(total_med, mgr.suggestions.len());
+
+    // Narrow tier (25 cols): renders without panic
+    let (narrow_items, total_narrow) = mgr.render_popup(25, 5);
+    assert!(!narrow_items.is_empty());
+    assert_eq!(total_narrow, mgr.suggestions.len());
+}

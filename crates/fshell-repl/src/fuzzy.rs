@@ -74,10 +74,25 @@ pub fn fuzzy_score(query: &str, candidate: &str, kind: FuzzyKind) -> Option<isiz
     fuzzy_score_prepared(&prepared, candidate, kind)
 }
 
-fn is_subsequence(query: &str, text: &str) -> bool {
+pub fn is_subsequence(query: &str, text: &str) -> bool {
     let mut query_chars = query.chars();
     let mut next_char = query_chars.next();
     for c in text.chars() {
+        if let Some(qc) = next_char {
+            if c == qc {
+                next_char = query_chars.next();
+            }
+        } else {
+            return true;
+        }
+    }
+    next_char.is_none()
+}
+
+pub fn is_subsequence_case_insensitive(query: &str, text: &str) -> bool {
+    let mut query_chars = query.chars().flat_map(|c| c.to_lowercase());
+    let mut next_char = query_chars.next();
+    for c in text.chars().flat_map(|c| c.to_lowercase()) {
         if let Some(qc) = next_char {
             if c == qc {
                 next_char = query_chars.next();

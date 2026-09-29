@@ -7,12 +7,14 @@ pub mod carapace;
 pub mod custom;
 pub mod files;
 pub mod help;
+pub mod ranking;
 pub mod types;
 
 pub use self::carapace::*;
 pub use self::custom::*;
 pub use self::files::*;
 pub use self::help::*;
+pub use self::ranking::*;
 pub use self::types::*;
 
 use crate::fuzzy;
@@ -442,19 +444,14 @@ impl Completer for FshellCompleter {
             let cmd = stmt[0];
             let flags = builtin_flags(cmd);
             if !flags.is_empty() {
-                suggestions.extend(
-                    flags
-                        .iter()
-                        .filter(|(flag, _)| flag.starts_with(last_word))
-                        .map(|(flag, desc)| {
-                            CompletionCandidate::new(
-                                *flag,
-                                CompletionKind::Flag,
-                                TextSpan::new(pos.saturating_sub(last_word.len()), pos),
-                            )
-                            .with_description(*desc)
-                        }),
-                );
+                suggestions.extend(flags.iter().map(|(flag, desc)| {
+                    CompletionCandidate::new(
+                        *flag,
+                        CompletionKind::Flag,
+                        TextSpan::new(pos.saturating_sub(last_word.len()), pos),
+                    )
+                    .with_description(*desc)
+                }));
             }
         }
 
@@ -465,29 +462,29 @@ impl Completer for FshellCompleter {
             if !is_builtin {
                 if let Some(flags) = get_completions(cmd) {
                     for flag in &flags {
-                        let flag_str = flag.long.as_deref().or(flag.short.as_deref()).unwrap_or("");
-                        if flag_str.starts_with(last_word) {
-                            let value = flag
-                                .long
-                                .as_deref()
-                                .or(flag.short.as_deref())
-                                .unwrap_or("")
-                                .to_string();
-                            let final_val = if flag.has_arg {
-                                format!("{} ", value)
-                            } else {
-                                value
-                            };
-                            let mut cand = CompletionCandidate::new(
-                                final_val,
-                                CompletionKind::Flag,
-                                TextSpan::new(pos.saturating_sub(last_word.len()), pos),
-                            );
-                            if let Some(d) = &flag.desc {
-                                cand = cand.with_description(d.clone());
-                            }
-                            suggestions.push(cand);
+                        let value = flag
+                            .long
+                            .as_deref()
+                            .or(flag.short.as_deref())
+                            .unwrap_or("")
+                            .to_string();
+                        if value.is_empty() {
+                            continue;
                         }
+                        let final_val = if flag.has_arg {
+                            format!("{} ", value)
+                        } else {
+                            value
+                        };
+                        let mut cand = CompletionCandidate::new(
+                            final_val,
+                            CompletionKind::Flag,
+                            TextSpan::new(pos.saturating_sub(last_word.len()), pos),
+                        );
+                        if let Some(d) = &flag.desc {
+                            cand = cand.with_description(d.clone());
+                        }
+                        suggestions.push(cand);
                     }
                 } else {
                     queue_background_parse(cmd);
@@ -499,16 +496,14 @@ impl Completer for FshellCompleter {
         if stmt.len() >= 2 && stmt[stmt.len() - 2] == "help" && !last_word.starts_with('-') {
             let topics = fshell_builtins::help::help_topics();
             for topic in topics {
-                if topic.name.starts_with(&last_word_lower) {
-                    suggestions.push(
-                        CompletionCandidate::new(
-                            topic.name.to_string(),
-                            CompletionKind::HelpTopic,
-                            TextSpan::new(pos.saturating_sub(last_word.len()), pos),
-                        )
-                        .with_description(topic.summary),
-                    );
-                }
+                suggestions.push(
+                    CompletionCandidate::new(
+                        topic.name.to_string(),
+                        CompletionKind::HelpTopic,
+                        TextSpan::new(pos.saturating_sub(last_word.len()), pos),
+                    )
+                    .with_description(topic.summary),
+                );
             }
             let categories = [
                 ("builtins", "Browse built-in commands"),
@@ -518,17 +513,17 @@ impl Completer for FshellCompleter {
                 ("concepts", "Browse shell concepts"),
             ];
             for (name, desc) in &categories {
-                if name.starts_with(&last_word_lower) {
-                    suggestions.push(
-                        CompletionCandidate::new(
-                            *name,
-                            CompletionKind::HelpTopic,
-                            TextSpan::new(pos.saturating_sub(last_word.len()), pos),
-                        )
-                        .with_description(*desc),
-                    );
-                }
+                suggestions.push(
+                    CompletionCandidate::new(
+                        *name,
+                        CompletionKind::HelpTopic,
+                        TextSpan::new(pos.saturating_sub(last_word.len()), pos),
+                    )
+                    .with_description(*desc),
+                );
             }
+            let recent_commands = history::get_recent_commands_cached();
+            rank_suggestions(&mut suggestions, last_word, &recent_commands);
             return suggestions;
         }
 
@@ -536,8 +531,10 @@ impl Completer for FshellCompleter {
         if git_branch_context(stmt) {
             let branches = git_branches_cached(&self.env);
             let tags = git_tags_cached();
+            let mut count = 0;
             for branch in branches.iter().chain(tags.iter()) {
-                if branch.starts_with(last_word) {
+                if last_word.is_empty() || fuzzy::is_subsequence_case_insensitive(last_word, branch)
+                {
                     suggestions.push(
                         CompletionCandidate::new(
                             branch.clone(),
@@ -546,9 +543,15 @@ impl Completer for FshellCompleter {
                         )
                         .with_description("git branch/tag"),
                     );
+                    count += 1;
+                    if count >= 500 {
+                        break;
+                    }
                 }
             }
             if !suggestions.is_empty() {
+                let recent_commands = history::get_recent_commands_cached();
+                rank_suggestions(&mut suggestions, last_word, &recent_commands);
                 return suggestions;
             }
         }
@@ -590,41 +593,34 @@ impl Completer for FshellCompleter {
         if stmt.len() <= 1 {
             let aliases = self.env.get_all_aliases();
             for (name, expansion) in &aliases {
-                if name.starts_with(&last_word_lower) {
-                    suggestions.push(
-                        CompletionCandidate::new(
-                            name.clone(),
-                            CompletionKind::UserFunction,
-                            TextSpan::new(pos.saturating_sub(last_word.len()), pos),
-                        )
-                        .with_description(format!("-> {}", expansion)),
-                    );
-                }
+                suggestions.push(
+                    CompletionCandidate::new(
+                        name.clone(),
+                        CompletionKind::UserFunction,
+                        TextSpan::new(pos.saturating_sub(last_word.len()), pos),
+                    )
+                    .with_description(format!("-> {}", expansion)),
+                );
             }
         }
 
         // Registered builtins
-        for b in builtins {
-            if b.starts_with(&last_word_lower) {
-                let desc = command_description(&b).unwrap_or("Built-in command");
-                suggestions.push(
-                    CompletionCandidate::new(
-                        b.clone(),
-                        CompletionKind::Builtin,
-                        TextSpan::new(pos.saturating_sub(last_word.len()), pos),
-                    )
-                    .with_description(desc),
-                );
-            }
+        for b in &builtins {
+            let desc = command_description(b).unwrap_or("Built-in command");
+            suggestions.push(
+                CompletionCandidate::new(
+                    b.clone(),
+                    CompletionKind::Builtin,
+                    TextSpan::new(pos.saturating_sub(last_word.len()), pos),
+                )
+                .with_description(desc),
+            );
         }
 
         // Common external commands (first word of the statement)
         if stmt.len() <= 1 {
             for (cmd, desc) in COMMON_EXTERNAL_COMMANDS {
-                if cmd.starts_with(&last_word_lower) {
-                    if suggestions.iter().any(|s| s.value == *cmd) {
-                        continue;
-                    }
+                if !suggestions.iter().any(|s| s.value == *cmd) {
                     suggestions.push(
                         CompletionCandidate::new(
                             *cmd,
@@ -648,11 +644,12 @@ impl Completer for FshellCompleter {
             };
             let candidates =
                 fshell_engine::get_path_executables_at(env_path.as_deref(), &self.env.cwd());
+            let mut count = 0;
             for exe in candidates {
-                if exe.to_lowercase().starts_with(&last_word_lower) {
-                    if suggestions.iter().any(|s| s.value == exe) {
-                        continue;
-                    }
+                if suggestions.iter().any(|s| s.value == exe) {
+                    continue;
+                }
+                if fuzzy::is_subsequence_case_insensitive(&last_word_lower, &exe) {
                     let desc = command_description(&exe).unwrap_or("[ext] executable");
                     suggestions.push(
                         CompletionCandidate::new(
@@ -662,6 +659,10 @@ impl Completer for FshellCompleter {
                         )
                         .with_description(desc),
                     );
+                    count += 1;
+                    if count >= 500 {
+                        break;
+                    }
                 }
             }
         }
@@ -696,60 +697,54 @@ impl Completer for FshellCompleter {
             "@yaml", "@msgpack", "@text", "@csv", "@table", "@bar", "@inspect",
         ];
         for op in &pipe_operators {
-            if op.starts_with(&last_word_lower) {
-                let desc = match *op {
-                    "filter" => "Filter pipeline items",
-                    "map" => "Map/transform pipeline items",
-                    "sort" => "Sort pipeline items",
-                    "grep" => "Grep text within pipeline items",
-                    "count" => "Count pipeline items",
-                    "limit" => "Limit pipeline output",
-                    "explore" => "Interactively explore structured data",
-                    "chart" => "Draw inline bar charts and histograms",
-                    "@inspect" => "Interactive fullscreen data inspector",
-                    _ => "Pipeline boundary format",
-                };
-                suggestions.push(
-                    CompletionCandidate::new(
-                        *op,
-                        CompletionKind::PipeOperator,
-                        TextSpan::new(pos.saturating_sub(last_word.len()), pos),
-                    )
-                    .with_description(desc),
-                );
-            }
+            let desc = match *op {
+                "filter" => "Filter pipeline items",
+                "map" => "Map/transform pipeline items",
+                "sort" => "Sort pipeline items",
+                "grep" => "Grep text within pipeline items",
+                "count" => "Count pipeline items",
+                "limit" => "Limit pipeline output",
+                "explore" => "Interactively explore structured data",
+                "chart" => "Draw inline bar charts and histograms",
+                "@inspect" => "Interactive fullscreen data inspector",
+                _ => "Pipeline boundary format",
+            };
+            suggestions.push(
+                CompletionCandidate::new(
+                    *op,
+                    CompletionKind::PipeOperator,
+                    TextSpan::new(pos.saturating_sub(last_word.len()), pos),
+                )
+                .with_description(desc),
+            );
         }
 
         let common_keywords = [
             "let", "fn", "match", "try", "catch", "with", "caps", "true", "false", "null", "unsafe",
         ];
         for kw in &common_keywords {
-            if kw.starts_with(&last_word_lower) {
-                suggestions.push(
-                    CompletionCandidate::new(
-                        *kw,
-                        CompletionKind::Keyword,
-                        TextSpan::new(pos.saturating_sub(last_word.len()), pos),
-                    )
-                    .with_description("Keyword"),
-                );
-            }
+            suggestions.push(
+                CompletionCandidate::new(
+                    *kw,
+                    CompletionKind::Keyword,
+                    TextSpan::new(pos.saturating_sub(last_word.len()), pos),
+                )
+                .with_description("Keyword"),
+            );
         }
 
         // User-defined functions
         {
             let fns = self.env.fns.read();
             for name in fns.keys() {
-                if name.starts_with(&last_word_lower) {
-                    suggestions.push(
-                        CompletionCandidate::new(
-                            name.clone(),
-                            CompletionKind::UserFunction,
-                            TextSpan::new(pos.saturating_sub(last_word.len()), pos),
-                        )
-                        .with_description("User-defined function"),
-                    );
-                }
+                suggestions.push(
+                    CompletionCandidate::new(
+                        name.clone(),
+                        CompletionKind::UserFunction,
+                        TextSpan::new(pos.saturating_sub(last_word.len()), pos),
+                    )
+                    .with_description("User-defined function"),
+                );
             }
         }
 
@@ -759,8 +754,11 @@ impl Completer for FshellCompleter {
             let target_prefix = last_word_lower
                 .strip_prefix('$')
                 .unwrap_or(&last_word_lower);
+            let mut count = 0;
             for k in (*vars).keys() {
-                if k.to_lowercase().starts_with(target_prefix) {
+                if target_prefix.is_empty()
+                    || fuzzy::is_subsequence_case_insensitive(target_prefix, k)
+                {
                     suggestions.push(
                         CompletionCandidate::new(
                             format!("${}", k),
@@ -769,8 +767,18 @@ impl Completer for FshellCompleter {
                         )
                         .with_description("Environment variable"),
                     );
+                    count += 1;
+                    if count >= 500 {
+                        break;
+                    }
                 }
             }
+        }
+
+        // In command position, also offer files/executables in current directory
+        if stmt.len() <= 1 {
+            let files = complete_files_at(last_word, pos, &self.env.cwd());
+            suggestions.extend(files);
         }
 
         if suggestions.is_empty() {
@@ -825,54 +833,14 @@ fn rank_suggestions(
     query: &str,
     recent_commands: &std::collections::HashSet<String>,
 ) {
-    if suggestions.is_empty() {
-        return;
-    }
-
-    let kind = fuzzy::choose_kind(suggestions.len());
-    let prepared = fuzzy::PreparedQuery::new(query);
-    let mut scored: Vec<(isize, usize, CompletionCandidate)> = suggestions
-        .drain(..)
-        .enumerate()
-        .filter_map(|(i, s)| {
-            let val_for_match = s.value.trim_end_matches(' ').to_owned();
-            fuzzy::fuzzy_score_prepared(&prepared, &val_for_match, kind).map(|score| {
-                let boost = if recent_commands.contains(&val_for_match) {
-                    500
-                } else {
-                    0
-                };
-                (score + boost, i, s)
-            })
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-
-    {
-        let mut seen = Vec::<String>::new();
-        scored.retain(|(_, _, s)| {
-            let trimmed = s.value.trim_end_matches(' ');
-            if seen.iter().any(|v| v == trimmed) {
-                false
-            } else {
-                seen.push(trimmed.to_owned());
-                true
-            }
-        });
-    }
-    scored.truncate(fuzzy::MAX_RESULTS);
-
-    scored.sort_by_key(|a| a.2.kind);
-
-    *suggestions = scored
-        .into_iter()
-        .map(|(_, _, mut s)| {
-            let val_for_match = s.value.trim_end_matches(' ');
-            s.match_indices = compute_match_indices(query, val_for_match);
-            s
-        })
-        .collect();
+    let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+    let ranked = rank_candidates(
+        std::mem::take(suggestions),
+        query,
+        &mut matcher,
+        Some(recent_commands),
+    );
+    *suggestions = ranked.into_iter().map(|r| r.candidate).collect();
 }
 
 /// True when a word ends a statement/command such that the next word begins a

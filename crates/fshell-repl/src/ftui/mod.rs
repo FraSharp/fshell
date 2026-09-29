@@ -350,9 +350,7 @@ pub async fn run_ftui_repl(
         let mut eof_pending = false;
 
         cpu_dbg!("--- entering input_loop ---");
-        // 2. Interactive input entry loop
-        let mut completion_popup: Option<(Rect, crate::ftui::completions::CompletionLayoutMode)> =
-            None;
+        let mut completion_popup: Option<Rect> = None;
         'input_loop: loop {
             input_iter += 1;
 
@@ -652,10 +650,30 @@ pub async fn run_ftui_repl(
                         }
                     }
 
-                    // Inline gray hint (fish-style): hidden when the completion popup is visible
-                    // so the user doesn't see duplicate ghost + popup for the same suffix.
+                    // Derived ghost text: when completion popup is visible and cursor is at end of line,
+                    // project the suffix of the currently selected candidate directly after the cursor.
+                    // The TextBuffer is never mutated until acceptance.
                     if comp_mgr.visible {
                         current_hint.clear();
+                        if !in_continuation
+                            && text_buf.cursor() == text_buf.len()
+                            && !text_buf.is_empty()
+                            && let Some(sel) = comp_mgr.get_selected_suggestion()
+                        {
+                            let query = comp_mgr.filter_query();
+                            let val = &sel.value;
+                            if !query.is_empty()
+                                && val.to_lowercase().starts_with(&query.to_lowercase())
+                            {
+                                let suffix = &val[query.len()..];
+                                if !suffix.is_empty() {
+                                    text_line_spans.push(Span::styled(
+                                        suffix.to_string(),
+                                        theme.status.muted.to_style_dim(),
+                                    ));
+                                }
+                            }
+                        }
                     } else if !in_continuation
                         && text_buf.cursor() == text_buf.len()
                         && !text_buf.is_empty()
@@ -1253,40 +1271,32 @@ pub async fn run_ftui_repl(
                                 let total_items = comp_mgr.suggestions.len();
                                 let max_w = size.width.saturating_sub(2);
 
-                                let test_layout = comp_mgr.compute_layout_mode(max_w);
-                                let is_grid = matches!(
-                                    test_layout,
-                                    crate::ftui::completions::CompletionLayoutMode::Grid { .. }
-                                );
-                                let show_sidecar = size.width >= 90 && !is_grid;
-
-                                let (list_w, sidecar_w, total_popup_w) = if show_sidecar {
-                                    let total_w = ((size.width as f64 * 0.75) as u16).clamp(70, 110).min(max_w);
-                                    let l_w = (total_w * 55 / 100).max(42);
-                                    let s_w = total_w.saturating_sub(l_w);
-                                    (l_w, s_w, total_w)
+                                let popup_w = if size.width >= 100 {
+                                    ((size.width as f64 * 0.65) as u16).clamp(55, 80).min(max_w)
+                                } else if size.width >= 60 {
+                                    ((size.width as f64 * 0.75) as u16).clamp(45, 65).min(max_w)
                                 } else {
-                                    let p_w = if size.width >= 120 {
-                                        ((size.width as f64 * 0.5) as u16).clamp(50, 75).min(max_w)
-                                    } else {
-                                        (size.width / 2 + size.width / 4).clamp(40, 65).min(max_w)
-                                    };
-                                    (p_w, 0, p_w)
+                                    max_w
                                 };
 
                                 let visual_cursor_col =
                                     cursor_col.saturating_sub(text_scroll_offset);
                                 let popup_x = (prompt_len + visual_cursor_col as u16)
-                                    .min(size.width.saturating_sub(total_popup_w).saturating_sub(1));
+                                    .min(size.width.saturating_sub(popup_w).saturating_sub(1));
 
                                 // Drop-up vs drop-down geometry resolution
                                 let prompt_cursor_y = prompt_line.y;
-                                let space_below = size.height.saturating_sub(prompt_cursor_y + prompt_h);
+                                let space_below =
+                                    size.height.saturating_sub(prompt_cursor_y + prompt_h);
                                 let space_above = prompt_cursor_y;
                                 let render_upward = space_below < 8 && space_above > space_below;
 
                                 let popup_budget_h = 10u16
-                                    .min(if render_upward { space_above } else { space_below })
+                                    .min(if render_upward {
+                                        space_above
+                                    } else {
+                                        space_below
+                                    })
                                     .max(4);
                                 let comp_h = popup_budget_h;
                                 let popup_y = if render_upward {
@@ -1295,28 +1305,19 @@ pub async fn run_ftui_repl(
                                     prompt_cursor_y + prompt_h
                                 };
 
-                                let comp_area = Rect::new(popup_x, popup_y, total_popup_w, comp_h);
+                                let comp_area = Rect::new(popup_x, popup_y, popup_w, comp_h);
                                 f.render_widget(Clear, comp_area);
+                                completion_popup = Some(comp_area);
 
-                                let list_area = if show_sidecar {
-                                    Rect::new(comp_area.x, comp_area.y, list_w, comp_area.height)
+                                let has_footer = comp_h >= 6;
+                                let visible_rows = if has_footer {
+                                    comp_h.saturating_sub(4)
                                 } else {
-                                    comp_area
-                                };
+                                    comp_h.saturating_sub(2)
+                                }
+                                .max(1) as usize;
 
-                                let layout = comp_mgr.compute_layout_mode(list_w);
-                                completion_popup = Some((comp_area, layout));
-                                let selected_row = match layout {
-                                    crate::ftui::completions::CompletionLayoutMode::Grid {
-                                        cols,
-                                        ..
-                                    } => comp_mgr.selected_idx / cols,
-                                    crate::ftui::completions::CompletionLayoutMode::List => {
-                                        comp_mgr.selected_idx
-                                    }
-                                };
-
-                                let visible_rows = comp_h.saturating_sub(2).max(1) as usize;
+                                let selected_row = comp_mgr.selected_idx;
                                 if selected_row >= comp_mgr.scroll_offset + visible_rows {
                                     comp_mgr.scroll_offset =
                                         selected_row.saturating_sub(visible_rows).saturating_add(1);
@@ -1324,37 +1325,14 @@ pub async fn run_ftui_repl(
                                     comp_mgr.scroll_offset = selected_row;
                                 }
 
-                                let render_width = list_area.width;
-                                let (sections, total_display) =
-                                    comp_mgr.render_popup(render_width, visible_rows);
+                                let (list_items, total_display) =
+                                    comp_mgr.render_popup(popup_w, visible_rows);
 
-                                let mut list_items: Vec<ListItem> = Vec::new();
-                                let has_sections = sections.len() > 1;
-                                for (cat_opt, items) in &sections {
-                                    if has_sections && let Some(cat) = cat_opt {
-                                        let cat_label = format!("── {} ────────────────────────────────────────────────────────", cat.name());
-                                        let header_str = crate::ftui::completions::truncate_by_width(
-                                            &cat_label,
-                                            list_area.width.saturating_sub(4) as usize,
-                                        );
-                                        list_items.push(ListItem::new(Line::from(Span::styled(
-                                            format!(" {}", header_str),
-                                            theme.status.muted.to_style_dim(),
-                                        ))));
-                                    }
-                                    for item in items {
-                                        list_items.push(item.clone());
-                                    }
-                                }
-
-                                let category_header = if is_grid {
-                                    " Files & Dirs "
-                                } else {
-                                    " Completions "
-                                };
+                                let is_files = comp_mgr.is_all_files_or_dirs();
+                                let header_label = if is_files { "Files" } else { "Completions" };
                                 let title_text = format!(
-                                    "{}({}/{}) ",
-                                    category_header,
+                                    " {} ({}/{}) ",
+                                    header_label,
                                     comp_mgr.selected_idx + 1,
                                     total_items,
                                 );
@@ -1369,43 +1347,38 @@ pub async fn run_ftui_repl(
                                     ))
                                     .title_alignment(ratatui::layout::Alignment::Left);
 
-                                if is_grid {
-                                    if let Some(s) = comp_mgr.get_selected_suggestion() {
-                                        if let Some(desc) = &s.description {
-                                            if !desc.is_empty()
-                                                && desc != "Directory"
-                                                && desc != "File"
-                                            {
-                                                let bottom_text =
-                                                    format!(" {} ({}) ", s.value, desc);
-                                                comp_block = comp_block.title_bottom(Span::styled(
-                                                    bottom_text,
-                                                    theme.status.muted.to_style_dim(),
-                                                ));
-                                            }
-                                        }
-                                    }
+                                if !has_footer {
+                                    comp_block = comp_block.title_bottom(Span::styled(
+                                        " ↑↓ Tab ↵ ",
+                                        theme.status.muted.to_style_dim(),
+                                    ));
                                 }
+
+                                f.render_widget(comp_block, comp_area);
+
+                                let items_area = Rect::new(
+                                    comp_area.x + 1,
+                                    comp_area.y + 1,
+                                    comp_area.width.saturating_sub(2),
+                                    visible_rows as u16,
+                                );
 
                                 if total_display > visible_rows {
                                     let inner_list_area = Rect::new(
-                                        list_area.x,
-                                        list_area.y,
-                                        list_area.width.saturating_sub(1),
-                                        list_area.height,
+                                        items_area.x,
+                                        items_area.y,
+                                        items_area.width.saturating_sub(1),
+                                        items_area.height,
                                     );
                                     let scroll_area = Rect::new(
-                                        list_area.x + list_area.width.saturating_sub(1),
-                                        list_area.y.saturating_add(1),
+                                        items_area.x + items_area.width.saturating_sub(1),
+                                        items_area.y,
                                         1,
-                                        list_area.height.saturating_sub(2),
+                                        items_area.height,
                                     );
                                     let mut scrollbar_state =
                                         ScrollbarState::new(total_display).position(selected_row);
-                                    f.render_widget(
-                                        List::new(list_items).block(comp_block),
-                                        inner_list_area,
-                                    );
+                                    f.render_widget(List::new(list_items), inner_list_area);
                                     f.render_stateful_widget(
                                         Scrollbar::default()
                                             .orientation(ScrollbarOrientation::VerticalRight)
@@ -1419,72 +1392,88 @@ pub async fn run_ftui_repl(
                                         &mut scrollbar_state,
                                     );
                                 } else {
-                                    f.render_widget(
-                                        List::new(list_items).block(comp_block),
-                                        list_area,
-                                    );
+                                    f.render_widget(List::new(list_items), items_area);
                                 }
 
-                                // Sidecar documentation preview
-                                if show_sidecar && sidecar_w > 0 {
-                                    let doc_area = Rect::new(
-                                        comp_area.x + list_w,
-                                        comp_area.y,
-                                        sidecar_w,
-                                        comp_area.height,
+                                if has_footer {
+                                    let divider_y = comp_area.y + 1 + visible_rows as u16;
+                                    let footer_y = divider_y + 1;
+
+                                    let divider_w = comp_area.width.saturating_sub(2) as usize;
+                                    let divider_str = format!("├{}┤", "─".repeat(divider_w));
+                                    let divider_rect =
+                                        Rect::new(comp_area.x, divider_y, comp_area.width, 1);
+                                    f.render_widget(
+                                        Paragraph::new(divider_str)
+                                            .style(theme.status.muted.to_style_dim()),
+                                        divider_rect,
                                     );
-                                    let doc_block = Block::default()
-                                        .borders(Borders::ALL)
-                                        .border_type(BorderType::Rounded)
-                                        .border_style(theme.status.muted.to_style_dim())
-                                        .title(" Documentation ")
-                                        .title_style(theme.widgets.title.to_style_bold());
 
-                                    let mut doc_lines = Vec::new();
+                                    let mut footer_left = String::new();
                                     if let Some(s) = comp_mgr.get_selected_suggestion() {
-                                        doc_lines.push(Line::from(Span::styled(
-                                            &s.value,
-                                            theme.widgets.title.to_style_bold(),
-                                        )));
-
-                                        if let Some(topic) = fshell_builtins::help::find_topic(&s.value) {
-                                            doc_lines.push(Line::raw(""));
-                                            doc_lines.push(Line::from(Span::styled(
-                                                topic.summary,
-                                                theme.widgets.foreground.to_style(),
-                                            )));
+                                        if let Some(topic) =
+                                            fshell_builtins::help::find_topic(&s.value)
+                                        {
                                             if !topic.syntax.is_empty() {
-                                                doc_lines.push(Line::raw(""));
-                                                doc_lines.push(Line::from(Span::styled(
-                                                    "Syntax:",
-                                                    theme.syntax.keyword.to_style_bold(),
-                                                )));
-                                                doc_lines.push(Line::from(Span::styled(
-                                                    format!("  {}", topic.syntax),
-                                                    theme.syntax.string.to_style(),
-                                                )));
-                                            }
-                                            if !topic.description.is_empty() {
-                                                doc_lines.push(Line::raw(""));
-                                                for l in topic.description.lines().take(4) {
-                                                    doc_lines.push(Line::from(Span::styled(
-                                                        l,
-                                                        theme.status.muted.to_style(),
-                                                    )));
-                                                }
+                                                footer_left = topic.syntax.to_string();
+                                            } else {
+                                                footer_left = topic.summary.to_string();
                                             }
                                         } else if let Some(desc) = &s.description {
-                                            if !desc.is_empty() {
-                                                doc_lines.push(Line::raw(""));
-                                                doc_lines.push(Line::from(Span::styled(
-                                                    desc.as_str(),
-                                                    theme.widgets.foreground.to_style(),
-                                                )));
+                                            if !desc.is_empty()
+                                                && desc != "Directory"
+                                                && desc != "File"
+                                            {
+                                                footer_left = format!("{} — {}", s.value, desc);
+                                            } else {
+                                                footer_left = s.value.clone();
                                             }
+                                        } else {
+                                            footer_left = s.value.clone();
                                         }
                                     }
 
-                                    f.render_widget(Paragraph::new(doc_lines).block(doc_block), doc_area);
+                                    let key_hints = if popup_w >= 65 {
+                                        "↑↓ select  Tab next  ↵ use"
+                                    } else if popup_w >= 45 {
+                                        "↑↓ Tab ↵"
+                                    } else {
+                                        ""
+                                    };
+
+                                    let inner_w = comp_area.width.saturating_sub(2) as usize;
+                                    let hints_w = key_hints.len();
+                                    let max_left_w = inner_w.saturating_sub(hints_w + 3);
+                                    let display_left = if footer_left.len() > max_left_w {
+                                        crate::ftui::completions::truncate_by_width(
+                                            &footer_left,
+                                            max_left_w,
+                                        )
+                                    } else {
+                                        footer_left
+                                    };
+                                    let pad_needed =
+                                        inner_w.saturating_sub(display_left.len() + hints_w);
+
+                                    let footer_spans = vec![
+                                        Span::styled(
+                                            display_left,
+                                            theme.widgets.foreground.to_style(),
+                                        ),
+                                        Span::raw(" ".repeat(pad_needed.max(1))),
+                                        Span::styled(key_hints, theme.status.muted.to_style_dim()),
+                                    ];
+
+                                    let footer_rect = Rect::new(
+                                        comp_area.x + 1,
+                                        footer_y,
+                                        comp_area.width.saturating_sub(2),
+                                        1,
+                                    );
+                                    f.render_widget(
+                                        Paragraph::new(Line::from(footer_spans)),
+                                        footer_rect,
+                                    );
                                 }
                             } else if comp_mgr.visible {
                                 let empty_msg = Span::styled(
@@ -1829,15 +1818,16 @@ pub async fn run_ftui_repl(
                             MouseAction::ScrollDown => {
                                 if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
                                     comp_mgr.select_next();
-                                    if let Some(ref _grp) = comp_mgr.grouped {
-                                        let visible_rows =
-                                            (current_viewport_height.saturating_sub(2)).max(1)
-                                                as usize;
-                                        let flat_idx =
-                                            comp_mgr.flat_index_of(comp_mgr.selected_idx);
-                                        if flat_idx >= comp_mgr.scroll_offset + visible_rows {
-                                            comp_mgr.scroll_offset = flat_idx + 1 - visible_rows;
-                                        }
+                                    let visible_rows = if current_viewport_height >= 6 {
+                                        current_viewport_height.saturating_sub(4)
+                                    } else {
+                                        current_viewport_height.saturating_sub(2)
+                                    }
+                                    .max(1)
+                                        as usize;
+                                    let sel_row = comp_mgr.selected_idx;
+                                    if sel_row >= comp_mgr.scroll_offset + visible_rows {
+                                        comp_mgr.scroll_offset = sel_row + 1 - visible_rows;
                                     }
                                     redraw = true;
                                 } else if history_mgr.active {
@@ -1853,12 +1843,9 @@ pub async fn run_ftui_repl(
                             MouseAction::ScrollUp => {
                                 if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
                                     comp_mgr.select_prev();
-                                    if let Some(ref _grp) = comp_mgr.grouped {
-                                        let flat_idx =
-                                            comp_mgr.flat_index_of(comp_mgr.selected_idx);
-                                        if flat_idx < comp_mgr.scroll_offset {
-                                            comp_mgr.scroll_offset = flat_idx;
-                                        }
+                                    let sel_row = comp_mgr.selected_idx;
+                                    if sel_row < comp_mgr.scroll_offset {
+                                        comp_mgr.scroll_offset = sel_row;
                                     }
                                     redraw = true;
                                 } else if history_mgr.active {
@@ -1873,10 +1860,9 @@ pub async fn run_ftui_repl(
                             }
                             MouseAction::Down(MouseButton::Left) => {
                                 if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
-                                    if let Some((popup_area, layout)) = completion_popup
+                                    if let Some(popup_area) = completion_popup
                                         && let Some(index) = comp_mgr.suggestion_index_at(
                                             popup_area,
-                                            layout,
                                             comp_mgr.scroll_offset,
                                             column,
                                             row,
@@ -2185,88 +2171,51 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             Key::Down => {
-                                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                                let layout = comp_mgr.compute_layout_mode(term_w);
-                                match layout {
-                                    crate::ftui::completions::CompletionLayoutMode::Grid {
-                                        cols,
-                                        ..
-                                    } => {
-                                        comp_mgr.select_down(cols);
-                                    }
-                                    crate::ftui::completions::CompletionLayoutMode::List => {
-                                        comp_mgr.select_next();
-                                    }
-                                }
+                                comp_mgr.select_next();
                                 redraw = true;
                                 continue;
                             }
                             Key::Up => {
-                                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                                let layout = comp_mgr.compute_layout_mode(term_w);
-                                match layout {
-                                    crate::ftui::completions::CompletionLayoutMode::Grid {
-                                        cols,
-                                        ..
-                                    } => {
-                                        comp_mgr.select_up(cols);
-                                    }
-                                    crate::ftui::completions::CompletionLayoutMode::List => {
-                                        comp_mgr.select_prev();
-                                    }
-                                }
+                                comp_mgr.select_prev();
                                 redraw = true;
                                 continue;
                             }
                             Key::PageDown => {
                                 let page_size =
-                                    (current_viewport_height.saturating_sub(2)).max(1) as usize;
+                                    (current_viewport_height.saturating_sub(4)).max(1) as usize;
                                 comp_mgr.page_down(page_size);
                                 redraw = true;
                                 continue;
                             }
                             Key::PageUp => {
                                 let page_size =
-                                    (current_viewport_height.saturating_sub(2)).max(1) as usize;
+                                    (current_viewport_height.saturating_sub(4)).max(1) as usize;
                                 comp_mgr.page_up(page_size);
                                 redraw = true;
                                 continue;
                             }
                             Key::Right => {
-                                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                                let layout = comp_mgr.compute_layout_mode(term_w);
-                                match layout {
-                                    crate::ftui::completions::CompletionLayoutMode::Grid {
-                                        ..
-                                    } => {
-                                        comp_mgr.select_next();
+                                if text_buf.cursor() == text_buf.len() {
+                                    if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
+                                        let line = text_buf.text().clone();
+                                        apply_completion(&mut text_buf, &line, &s);
                                     }
-                                    crate::ftui::completions::CompletionLayoutMode::List => {
-                                        if let Some(s) = comp_mgr.get_selected_suggestion().cloned()
-                                        {
-                                            let line = text_buf.text().clone();
-                                            apply_completion(&mut text_buf, &line, &s);
-                                        }
-                                        comp_mgr.refresh_after_completion(
-                                            &text_buf.text(),
-                                            text_buf.cursor(),
-                                        );
-                                    }
+                                    comp_mgr.refresh_after_completion(
+                                        &text_buf.text(),
+                                        text_buf.cursor(),
+                                    );
+                                } else {
+                                    text_buf.move_right();
+                                    comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
                                 }
                                 redraw = true;
                                 continue;
                             }
                             Key::Left => {
-                                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                                let layout = comp_mgr.compute_layout_mode(term_w);
-                                if matches!(
-                                    layout,
-                                    crate::ftui::completions::CompletionLayoutMode::Grid { .. }
-                                ) {
-                                    comp_mgr.select_prev();
-                                    redraw = true;
-                                    continue;
-                                }
+                                text_buf.move_left();
+                                comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                                redraw = true;
+                                continue;
                             }
                             Key::Enter => {
                                 if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
@@ -2275,23 +2224,6 @@ pub async fn run_ftui_repl(
                                 }
                                 comp_mgr
                                     .refresh_after_completion(&text_buf.text(), text_buf.cursor());
-                                redraw = true;
-                                continue;
-                            }
-                            Key::Character(' ') => {
-                                if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
-                                    let line = text_buf.text().clone();
-                                    apply_completion(&mut text_buf, &line, &s);
-                                    if !s.value.ends_with('/') {
-                                        text_buf.insert_char(' ');
-                                        comp_mgr.clear();
-                                    } else {
-                                        comp_mgr.refresh_after_completion(
-                                            &text_buf.text(),
-                                            text_buf.cursor(),
-                                        );
-                                    }
-                                }
                                 redraw = true;
                                 continue;
                             }
