@@ -39,7 +39,7 @@ pub fn truncate_by_width(s: &str, max_width: usize) -> String {
 }
 
 /// Format byte length into human-readable size string.
-fn format_file_size(len: u64) -> String {
+pub fn format_file_size(len: u64) -> String {
     if len < 1024 {
         format!("{len} B")
     } else if len < 1024 * 1024 {
@@ -49,6 +49,20 @@ fn format_file_size(len: u64) -> String {
     } else {
         format!("{:.1} GB", len as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+/// Layout mode kind chosen by completion context
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionLayoutKind {
+    List,
+    Grid,
+}
+
+/// Resolved concrete layout configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionLayout {
+    List,
+    Grid { cols: usize, col_width: usize },
 }
 
 /// Category groups for rendering completions with clean textual badges
@@ -209,6 +223,7 @@ pub fn render_highlighted_spans(
 pub enum DisplayRow {
     Header(String),
     Suggestion { candidate_index: usize },
+    GridRow { candidate_indices: Vec<usize> },
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +232,7 @@ pub struct CompletionSession {
     pub query: String,
     pub candidates: Vec<RankedCompletion>,
     pub selected: usize,
+    pub layout: CompletionLayout,
     pub display_rows: Vec<DisplayRow>,
 }
 
@@ -225,17 +241,31 @@ impl CompletionSession {
         candidates: Vec<RankedCompletion>,
         query: String,
         replacement_range: Range<usize>,
+        layout: CompletionLayout,
     ) -> Self {
-        let display_rows = candidates
-            .iter()
-            .enumerate()
-            .map(|(i, _)| DisplayRow::Suggestion { candidate_index: i })
-            .collect();
+        let display_rows = match layout {
+            CompletionLayout::List => candidates
+                .iter()
+                .enumerate()
+                .map(|(i, _)| DisplayRow::Suggestion { candidate_index: i })
+                .collect(),
+            CompletionLayout::Grid { cols, .. } => {
+                let cols = cols.max(1);
+                (0..candidates.len())
+                    .collect::<Vec<_>>()
+                    .chunks(cols)
+                    .map(|chunk| DisplayRow::GridRow {
+                        candidate_indices: chunk.to_vec(),
+                    })
+                    .collect()
+            }
+        };
         Self {
             replacement_range,
             query,
             candidates,
             selected: 0,
+            layout,
             display_rows,
         }
     }
@@ -245,10 +275,22 @@ impl CompletionSession {
     }
 
     pub fn selected_row_index(&self) -> usize {
-        self.display_rows
-            .iter()
-            .position(|r| matches!(r, DisplayRow::Suggestion { candidate_index } if *candidate_index == self.selected))
-            .unwrap_or(0)
+        match self.layout {
+            CompletionLayout::List => self
+                .display_rows
+                .iter()
+                .position(|r| {
+                    matches!(
+                        r,
+                        DisplayRow::Suggestion { candidate_index } if *candidate_index == self.selected
+                    )
+                })
+                .unwrap_or(0),
+            CompletionLayout::Grid { cols, .. } => {
+                let cols = cols.max(1);
+                self.selected / cols
+            }
+        }
     }
 
     pub fn select_next(&mut self) {
@@ -269,20 +311,110 @@ impl CompletionSession {
         }
     }
 
+    pub fn select_down(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        match self.layout {
+            CompletionLayout::List => self.select_next(),
+            CompletionLayout::Grid { cols, .. } => {
+                let cols = cols.max(1);
+                let next = self.selected + cols;
+                if next < self.candidates.len() {
+                    self.selected = next;
+                } else {
+                    self.selected %= cols;
+                }
+            }
+        }
+    }
+
+    pub fn select_up(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        match self.layout {
+            CompletionLayout::List => self.select_prev(),
+            CompletionLayout::Grid { cols, .. } => {
+                let cols = cols.max(1);
+                if self.selected >= cols {
+                    self.selected -= cols;
+                } else {
+                    let col = self.selected % cols;
+                    let total = self.candidates.len();
+                    let last_row_start = (total / cols) * cols;
+                    let target = last_row_start + col;
+                    if target < total {
+                        self.selected = target;
+                    } else if last_row_start >= cols {
+                        self.selected = target - cols;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn select_right(&mut self) {
+        self.select_next();
+    }
+
+    pub fn select_left(&mut self) {
+        self.select_prev();
+    }
+
     pub fn page_down(&mut self, page_size: usize) {
         if self.candidates.is_empty() {
             return;
         }
-        let next = self.selected.saturating_add(page_size.max(1));
-        self.selected = next.min(self.candidates.len().saturating_sub(1));
+        match self.layout {
+            CompletionLayout::List => {
+                let next = self.selected.saturating_add(page_size.max(1));
+                self.selected = next.min(self.candidates.len().saturating_sub(1));
+            }
+            CompletionLayout::Grid { cols, .. } => {
+                let cols = cols.max(1);
+                let jump = page_size.max(1) * cols;
+                let next = self.selected.saturating_add(jump);
+                self.selected = next.min(self.candidates.len().saturating_sub(1));
+            }
+        }
     }
 
     pub fn page_up(&mut self, page_size: usize) {
         if self.candidates.is_empty() {
             return;
         }
-        self.selected = self.selected.saturating_sub(page_size.max(1));
+        match self.layout {
+            CompletionLayout::List => {
+                self.selected = self.selected.saturating_sub(page_size.max(1));
+            }
+            CompletionLayout::Grid { cols, .. } => {
+                let cols = cols.max(1);
+                let jump = page_size.max(1) * cols;
+                self.selected = self.selected.saturating_sub(jump);
+            }
+        }
     }
+}
+
+/// Compute column count and column width for a grid layout based on candidate display widths.
+pub fn compute_grid_geometry(
+    candidates: &[CompletionCandidate],
+    inner_width: usize,
+) -> (usize, usize) {
+    if candidates.is_empty() || inner_width < 16 {
+        return (1, inner_width.max(1));
+    }
+    let max_val_w = candidates
+        .iter()
+        .map(|c| c.value.width())
+        .max()
+        .unwrap_or(12);
+
+    let cell_w = (max_val_w + 3).clamp(14, 32);
+    let cols = (inner_width / cell_w).max(1);
+    let col_width = (inner_width / cols).max(1);
+    (cols, col_width)
 }
 
 impl From<CompletionKind> for CompletionCategory {
@@ -306,7 +438,7 @@ impl From<CompletionKind> for CompletionCategory {
     }
 }
 
-fn categorize(s: &CompletionCandidate) -> CompletionCategory {
+pub fn categorize(s: &CompletionCandidate) -> CompletionCategory {
     CompletionCategory::from(s.kind)
 }
 
@@ -329,6 +461,8 @@ pub struct CompletionsManager {
     /// True when the longest common prefix has already been filled in by a previous Tab
     pub prefix_accepted: bool,
     pub theme: Arc<Theme>,
+    pub layout_kind: CompletionLayoutKind,
+    pub inner_width: usize,
 }
 
 impl CompletionsManager {
@@ -347,6 +481,8 @@ impl CompletionsManager {
             lscolors: LsColors::from_env().unwrap_or_default(),
             prefix_accepted: false,
             theme: Arc::new(Theme::default_theme()),
+            layout_kind: CompletionLayoutKind::List,
+            inner_width: 80,
         }
     }
 
@@ -413,6 +549,7 @@ impl CompletionsManager {
                 raw.sort_by_key(|a| a.value.to_lowercase());
                 raw.truncate(50);
 
+                self.layout_kind = CompletionLayoutKind::List;
                 self.all_suggestions = raw;
                 let partial = extract_partial_word(line, cursor_pos);
                 self.filter(partial);
@@ -435,6 +572,22 @@ impl CompletionsManager {
         // Call our FshellCompleter backend
         let raw_suggestions = self.completer.complete(line, cursor_byte);
         self.all_suggestions = raw_suggestions;
+
+        // Context-driven layout: establish layout mode upon session opening, and keep stable
+        if !self.session_active || self.session.is_none() {
+            let is_fs = !self.all_suggestions.is_empty()
+                && self.all_suggestions.iter().all(|s| {
+                    matches!(
+                        categorize(s),
+                        CompletionCategory::Directory | CompletionCategory::File
+                    )
+                });
+            self.layout_kind = if is_fs {
+                CompletionLayoutKind::Grid
+            } else {
+                CompletionLayoutKind::List
+            };
+        }
 
         // Apply fuzzy filter against the current partial word
         let partial = extract_partial_word(line, cursor_pos);
@@ -475,6 +628,50 @@ impl CompletionsManager {
         }
     }
 
+    pub fn select_down(&mut self) {
+        if let Some(ref mut s) = self.session {
+            s.select_down();
+            self.selected_idx = s.selected;
+        } else if !self.suggestions.is_empty() {
+            self.selected_idx = (self.selected_idx + 1) % self.suggestions.len();
+        }
+    }
+
+    pub fn select_up(&mut self) {
+        if let Some(ref mut s) = self.session {
+            s.select_up();
+            self.selected_idx = s.selected;
+        } else if !self.suggestions.is_empty() {
+            if self.selected_idx == 0 {
+                self.selected_idx = self.suggestions.len() - 1;
+            } else {
+                self.selected_idx -= 1;
+            }
+        }
+    }
+
+    pub fn select_left(&mut self) {
+        if let Some(ref mut s) = self.session {
+            s.select_left();
+            self.selected_idx = s.selected;
+        } else if !self.suggestions.is_empty() {
+            if self.selected_idx == 0 {
+                self.selected_idx = self.suggestions.len() - 1;
+            } else {
+                self.selected_idx -= 1;
+            }
+        }
+    }
+
+    pub fn select_right(&mut self) {
+        if let Some(ref mut s) = self.session {
+            s.select_right();
+            self.selected_idx = s.selected;
+        } else if !self.suggestions.is_empty() {
+            self.selected_idx = (self.selected_idx + 1) % self.suggestions.len();
+        }
+    }
+
     /// Fuzzy-filter `all_suggestions` against `partial` word, updating
     /// `suggestions` and `session`. Computes fuzzy match indices for live highlighting.
     pub fn filter(&mut self, partial: &str) {
@@ -496,7 +693,17 @@ impl CompletionsManager {
         };
 
         self.suggestions = ranked.iter().map(|r| r.candidate.clone()).collect();
-        let session = CompletionSession::new(ranked, partial.to_string(), replacement_range);
+
+        let layout = match self.layout_kind {
+            CompletionLayoutKind::List => CompletionLayout::List,
+            CompletionLayoutKind::Grid => {
+                let (cols, col_width) = compute_grid_geometry(&self.suggestions, self.inner_width);
+                CompletionLayout::Grid { cols, col_width }
+            }
+        };
+
+        let session =
+            CompletionSession::new(ranked, partial.to_string(), replacement_range, layout);
         self.session = Some(session);
 
         if self.suggestions.is_empty() {
@@ -592,13 +799,21 @@ impl CompletionsManager {
         }
 
         let display_idx = scroll_offset.saturating_add(rel_y);
-        if let Some(ref s) = self.session {
-            match s.display_rows.get(display_idx) {
-                Some(DisplayRow::Suggestion { candidate_index }) => Some(*candidate_index),
-                Some(DisplayRow::Header(_)) | None => None,
-            }
-        } else {
-            (display_idx < self.suggestions.len()).then_some(display_idx)
+        let Some(ref s) = self.session else {
+            return (display_idx < self.suggestions.len()).then_some(display_idx);
+        };
+
+        match s.display_rows.get(display_idx) {
+            Some(DisplayRow::Suggestion { candidate_index }) => Some(*candidate_index),
+            Some(DisplayRow::GridRow { candidate_indices }) => match s.layout {
+                CompletionLayout::Grid { col_width, .. } => {
+                    let rel_x = column.saturating_sub(inner_x) as usize;
+                    let col_idx = rel_x.checked_div(col_width).unwrap_or(0);
+                    candidate_indices.get(col_idx).copied()
+                }
+                _ => candidate_indices.first().copied(),
+            },
+            Some(DisplayRow::Header(_)) | None => None,
         }
     }
 
@@ -611,6 +826,7 @@ impl CompletionsManager {
         self.visible = false;
         self.session_active = false;
         self.prefix_accepted = false;
+        self.layout_kind = CompletionLayoutKind::List;
     }
 
     /// After a completion has been applied to the buffer, decide whether to keep
@@ -651,14 +867,37 @@ impl CompletionsManager {
         }
     }
 
-    /// Render the popup content using adaptive 1D command-palette layout.
+    /// Render the popup content using adaptive 1D or multi-column grid layout.
     pub fn render_popup(
-        &self,
+        &mut self,
         area_width: u16,
         visible_lines: usize,
     ) -> (Vec<ratatui::widgets::ListItem<'static>>, usize) {
         if self.suggestions.is_empty() {
             return (Vec::new(), 0);
+        }
+
+        let inner_width = (area_width as usize).saturating_sub(2);
+        self.inner_width = inner_width;
+
+        // Ensure session layout geometry is synchronized with current inner_width
+        if let Some(ref mut s) = self.session
+            && let CompletionLayout::Grid { cols, col_width } = s.layout
+        {
+            let (new_cols, new_col_w) = compute_grid_geometry(&self.suggestions, inner_width);
+            if new_cols != cols || new_col_w != col_width {
+                s.layout = CompletionLayout::Grid {
+                    cols: new_cols,
+                    col_width: new_col_w,
+                };
+                s.display_rows = (0..s.candidates.len())
+                    .collect::<Vec<_>>()
+                    .chunks(new_cols)
+                    .map(|chunk| DisplayRow::GridRow {
+                        candidate_indices: chunk.to_vec(),
+                    })
+                    .collect();
+            }
         }
 
         let total_rows = if let Some(ref s) = self.session {
@@ -670,7 +909,6 @@ impl CompletionsManager {
         let vis_start = self.scroll_offset.min(total_rows);
         let vis_end = (self.scroll_offset + visible_lines).min(total_rows);
 
-        let inner_width = (area_width as usize).saturating_sub(2);
         let mut list_items = Vec::with_capacity(vis_end.saturating_sub(vis_start));
 
         for row_idx in vis_start..vis_end {
@@ -687,6 +925,22 @@ impl CompletionsManager {
                         format!(" ── {header_str} ──"),
                         self.theme.status.muted.to_style_dim(),
                     ))));
+                }
+                Some(DisplayRow::GridRow { candidate_indices }) => {
+                    let (cols, col_width) = if let Some(ref s) = self.session {
+                        match s.layout {
+                            CompletionLayout::Grid { cols, col_width } => (cols, col_width),
+                            _ => (1, inner_width),
+                        }
+                    } else {
+                        (1, inner_width)
+                    };
+                    list_items.push(self.render_grid_row(
+                        candidate_indices,
+                        cols,
+                        col_width,
+                        inner_width,
+                    ));
                 }
                 Some(DisplayRow::Suggestion { candidate_index }) => {
                     if let Some(s) = self.suggestions.get(*candidate_index) {
@@ -706,6 +960,107 @@ impl CompletionsManager {
         }
 
         (list_items, total_rows)
+    }
+
+    fn render_grid_row(
+        &self,
+        candidate_indices: &[usize],
+        cols: usize,
+        col_width: usize,
+        inner_width: usize,
+    ) -> ratatui::widgets::ListItem<'static> {
+        let t = &self.theme;
+        let selection_bg = t.widgets.item_selected_bg.to_ratatui_color();
+        let selection_fg = t.widgets.item_selected_fg.to_ratatui_color();
+
+        let mut line_spans = Vec::new();
+
+        for col_idx in 0..cols {
+            let cell_cand_idx = candidate_indices.get(col_idx).copied();
+            if let Some(cand_idx) = cell_cand_idx
+                && let Some(s) = self.suggestions.get(cand_idx)
+            {
+                let is_selected = cand_idx == self.selected_idx;
+                let category = categorize(s);
+
+                let cell_bg = if is_selected {
+                    Style::default().bg(selection_bg)
+                } else {
+                    Style::default()
+                };
+
+                let indicator = if is_selected {
+                    Span::styled(
+                        "▸ ",
+                        Style::default()
+                            .bg(selection_bg)
+                            .fg(selection_fg)
+                            .add_modifier(StyleModifier::BOLD),
+                    )
+                } else {
+                    Span::styled("  ", cell_bg)
+                };
+
+                let base_val_style = if is_selected {
+                    Style::default()
+                        .bg(selection_bg)
+                        .fg(selection_fg)
+                        .add_modifier(StyleModifier::BOLD)
+                } else if let Some(ls) = self.lscolors.style_for_path(&s.value) {
+                    self.convert_lscolors_style(ls, false)
+                } else {
+                    category.value_style(&t.completions)
+                };
+
+                let highlight_style = if is_selected {
+                    Style::default()
+                        .bg(selection_bg)
+                        .fg(t.syntax.keyword.to_ratatui_color())
+                        .add_modifier(StyleModifier::BOLD | StyleModifier::UNDERLINED)
+                } else {
+                    t.syntax
+                        .keyword
+                        .to_style_bold()
+                        .add_modifier(StyleModifier::UNDERLINED)
+                };
+
+                let avail_val_w = col_width.saturating_sub(3);
+                let display_val = if s.value.width() > avail_val_w && avail_val_w > 3 {
+                    truncate_by_width(&s.value, avail_val_w)
+                } else {
+                    s.value.clone()
+                };
+
+                let val_spans = render_highlighted_spans(
+                    &display_val,
+                    s.match_indices.as_deref(),
+                    base_val_style,
+                    highlight_style,
+                );
+
+                let val_w = display_val.width();
+                let pad_w = col_width.saturating_sub(2 + val_w);
+
+                line_spans.push(indicator);
+                line_spans.extend(val_spans);
+                if pad_w > 0 {
+                    line_spans.push(Span::styled(" ".repeat(pad_w), cell_bg));
+                }
+                continue;
+            }
+
+            // Empty cell padding if fewer items than columns on the last row
+            if col_width > 0 {
+                line_spans.push(Span::raw(" ".repeat(col_width)));
+            }
+        }
+
+        let current_w: usize = line_spans.iter().map(|s| s.width()).sum();
+        if current_w < inner_width {
+            line_spans.push(Span::raw(" ".repeat(inner_width - current_w)));
+        }
+
+        ratatui::widgets::ListItem::new(Line::from(line_spans))
     }
 
     fn render_adaptive_row(
@@ -1201,5 +1556,61 @@ mod tests {
         assert_eq!(mgr.suggestion_index_at(small_area, 0, 3, 5), Some(1));
         assert_eq!(mgr.suggestion_index_at(small_area, 0, 3, 6), Some(2));
         assert_eq!(mgr.suggestion_index_at(small_area, 0, 3, 7), None);
+    }
+
+    #[test]
+    fn test_grid_layout_selection_and_mouse_mapping() {
+        let env = fshell_engine::Env::new();
+        let mut mgr = CompletionsManager::new(env);
+        let candidates: Vec<CompletionCandidate> = (0..6)
+            .map(|i| {
+                CompletionCandidate::new(
+                    format!("file_{i}.txt"),
+                    CompletionKind::File,
+                    TextSpan::new(0, 10),
+                )
+            })
+            .collect();
+
+        mgr.suggestions = candidates.clone();
+        let ranked = crate::autocomplete::ranking::rank_candidates(
+            candidates,
+            "",
+            &mut nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT),
+            None,
+        );
+        let layout = CompletionLayout::Grid {
+            cols: 2,
+            col_width: 15,
+        };
+        let session = CompletionSession::new(ranked, String::new(), 0..0, layout);
+        mgr.session = Some(session);
+
+        assert_eq!(mgr.session.as_ref().unwrap().display_rows.len(), 3);
+        assert_eq!(mgr.session.as_ref().unwrap().selected_row_index(), 0);
+
+        // 2D navigation
+        mgr.select_down();
+        assert_eq!(mgr.selected_idx, 2);
+        assert_eq!(mgr.session.as_ref().unwrap().selected_row_index(), 1);
+
+        mgr.select_right();
+        assert_eq!(mgr.selected_idx, 3);
+        assert_eq!(mgr.session.as_ref().unwrap().selected_row_index(), 1);
+
+        mgr.select_up();
+        assert_eq!(mgr.selected_idx, 1);
+        assert_eq!(mgr.session.as_ref().unwrap().selected_row_index(), 0);
+
+        mgr.select_left();
+        assert_eq!(mgr.selected_idx, 0);
+
+        // Mouse mapping on grid
+        let area = Rect::new(2, 3, 34, 7);
+        assert_eq!(mgr.suggestion_index_at(area, 0, 3, 4), Some(0));
+        assert_eq!(mgr.suggestion_index_at(area, 0, 10, 4), Some(0));
+        assert_eq!(mgr.suggestion_index_at(area, 0, 18, 4), Some(1));
+        assert_eq!(mgr.suggestion_index_at(area, 0, 3, 5), Some(2));
+        assert_eq!(mgr.suggestion_index_at(area, 0, 18, 5), Some(3));
     }
 }

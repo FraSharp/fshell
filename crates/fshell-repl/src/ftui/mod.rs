@@ -1271,7 +1271,24 @@ pub async fn run_ftui_repl(
                                 let total_items = comp_mgr.suggestions.len();
                                 let max_w = size.width.saturating_sub(2);
 
-                                let popup_w = if size.width >= 100 {
+                                let is_grid = matches!(
+                                    comp_mgr.session.as_ref().map(|s| s.layout),
+                                    Some(crate::ftui::completions::CompletionLayout::Grid { .. })
+                                );
+
+                                let popup_w = if is_grid {
+                                    if size.width >= 120 {
+                                        ((size.width as f64 * 0.90) as u16)
+                                            .clamp(70, 140)
+                                            .min(max_w)
+                                    } else if size.width >= 70 {
+                                        ((size.width as f64 * 0.92) as u16)
+                                            .clamp(50, 100)
+                                            .min(max_w)
+                                    } else {
+                                        max_w
+                                    }
+                                } else if size.width >= 100 {
                                     ((size.width as f64 * 0.65) as u16).clamp(55, 80).min(max_w)
                                 } else if size.width >= 60 {
                                     ((size.width as f64 * 0.75) as u16).clamp(45, 65).min(max_w)
@@ -1289,16 +1306,23 @@ pub async fn run_ftui_repl(
                                 let space_below =
                                     size.height.saturating_sub(prompt_cursor_y + prompt_h);
                                 let space_above = prompt_cursor_y;
-                                let render_upward = space_below < 8 && space_above > space_below;
+                                let render_upward = space_below < 6 && space_above > space_below;
 
-                                let popup_budget_h = 10u16
-                                    .min(if render_upward {
-                                        space_above
-                                    } else {
-                                        space_below
-                                    })
-                                    .max(4);
-                                let comp_h = popup_budget_h;
+                                let needed_rows = comp_mgr
+                                    .session
+                                    .as_ref()
+                                    .map(|s| s.display_rows.len())
+                                    .unwrap_or(comp_mgr.suggestions.len());
+                                let chrome_lines = 4u16; // 2 for borders, 2 for footer divider + content
+                                let needed_h = (needed_rows as u16).saturating_add(chrome_lines);
+
+                                let available_space = if render_upward {
+                                    space_above
+                                } else {
+                                    space_below
+                                };
+                                let max_budget_h = available_space.clamp(4, 18);
+                                let comp_h = needed_h.clamp(4, max_budget_h);
                                 let popup_y = if render_upward {
                                     prompt_cursor_y.saturating_sub(comp_h)
                                 } else {
@@ -1317,7 +1341,11 @@ pub async fn run_ftui_repl(
                                 }
                                 .max(1) as usize;
 
-                                let selected_row = comp_mgr.selected_idx;
+                                let selected_row = comp_mgr
+                                    .session
+                                    .as_ref()
+                                    .map(|s| s.selected_row_index())
+                                    .unwrap_or(comp_mgr.selected_idx);
                                 if selected_row >= comp_mgr.scroll_offset + visible_rows {
                                     comp_mgr.scroll_offset =
                                         selected_row.saturating_sub(visible_rows).saturating_add(1);
@@ -1348,8 +1376,13 @@ pub async fn run_ftui_repl(
                                     .title_alignment(ratatui::layout::Alignment::Left);
 
                                 if !has_footer {
+                                    let hints = if is_grid {
+                                        " ↑↓←→ Tab ↵ "
+                                    } else {
+                                        " ↑↓ Tab ↵ "
+                                    };
                                     comp_block = comp_block.title_bottom(Span::styled(
-                                        " ↑↓ Tab ↵ ",
+                                        hints,
                                         theme.status.muted.to_style_dim(),
                                     ));
                                 }
@@ -1411,7 +1444,50 @@ pub async fn run_ftui_repl(
 
                                     let mut footer_left = String::new();
                                     if let Some(s) = comp_mgr.get_selected_suggestion() {
-                                        if let Some(topic) =
+                                        let category = crate::ftui::completions::categorize(s);
+                                        if matches!(
+                                            category,
+                                            crate::ftui::completions::CompletionCategory::Directory
+                                                | crate::ftui::completions::CompletionCategory::File
+                                        ) {
+                                            let path = std::path::Path::new(&s.value);
+                                            if let Ok(meta) = std::fs::symlink_metadata(path) {
+                                                if meta.is_symlink() {
+                                                    if let Ok(target) = std::fs::read_link(path) {
+                                                        footer_left = format!(
+                                                            "{} -> {} (symlink)",
+                                                            s.value,
+                                                            target.display()
+                                                        );
+                                                    } else {
+                                                        footer_left =
+                                                            format!("{} (symlink)", s.value);
+                                                    }
+                                                } else if meta.is_dir() {
+                                                    if let Ok(rd) = std::fs::read_dir(path) {
+                                                        let count = rd.count();
+                                                        footer_left = format!(
+                                                            "{} — {} item{} (dir)",
+                                                            s.value,
+                                                            count,
+                                                            if count == 1 { "" } else { "s" }
+                                                        );
+                                                    } else {
+                                                        footer_left = format!("{} (dir)", s.value);
+                                                    }
+                                                } else {
+                                                    footer_left = format!(
+                                                        "{} — {} (file)",
+                                                        s.value,
+                                                        crate::ftui::completions::format_file_size(
+                                                            meta.len()
+                                                        )
+                                                    );
+                                                }
+                                            } else {
+                                                footer_left = s.value.clone();
+                                            }
+                                        } else if let Some(topic) =
                                             fshell_builtins::help::find_topic(&s.value)
                                         {
                                             if !topic.syntax.is_empty() {
@@ -1433,7 +1509,15 @@ pub async fn run_ftui_repl(
                                         }
                                     }
 
-                                    let key_hints = if popup_w >= 65 {
+                                    let key_hints = if is_grid {
+                                        if popup_w >= 65 {
+                                            "↑↓←→ select  Tab next  ↵ use"
+                                        } else if popup_w >= 45 {
+                                            "↑↓←→ Tab ↵"
+                                        } else {
+                                            ""
+                                        }
+                                    } else if popup_w >= 65 {
                                         "↑↓ select  Tab next  ↵ use"
                                     } else if popup_w >= 45 {
                                         "↑↓ Tab ↵"
@@ -2146,6 +2230,11 @@ pub async fn run_ftui_repl(
                     }
 
                     if comp_mgr.visible {
+                        let is_grid = matches!(
+                            comp_mgr.session.as_ref().map(|s| s.layout),
+                            Some(crate::ftui::completions::CompletionLayout::Grid { .. })
+                        );
+
                         match key.key {
                             Key::Escape => {
                                 comp_mgr.clear();
@@ -2171,12 +2260,20 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             Key::Down => {
-                                comp_mgr.select_next();
+                                if is_grid {
+                                    comp_mgr.select_down();
+                                } else {
+                                    comp_mgr.select_next();
+                                }
                                 redraw = true;
                                 continue;
                             }
                             Key::Up => {
-                                comp_mgr.select_prev();
+                                if is_grid {
+                                    comp_mgr.select_up();
+                                } else {
+                                    comp_mgr.select_prev();
+                                }
                                 redraw = true;
                                 continue;
                             }
@@ -2195,7 +2292,11 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             Key::Right => {
-                                if text_buf.cursor() == text_buf.len() {
+                                if is_grid {
+                                    comp_mgr.select_right();
+                                    redraw = true;
+                                    continue;
+                                } else if text_buf.cursor() == text_buf.len() {
                                     if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
                                         let line = text_buf.text().clone();
                                         apply_completion(&mut text_buf, &line, &s);
@@ -2212,8 +2313,12 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             Key::Left => {
-                                text_buf.move_left();
-                                comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                                if is_grid {
+                                    comp_mgr.select_left();
+                                } else {
+                                    text_buf.move_left();
+                                    comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                                }
                                 redraw = true;
                                 continue;
                             }

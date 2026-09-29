@@ -1323,6 +1323,7 @@ async fn test_mouse_mapping_matches_session_rows_and_footer() {
         ranked,
         String::new(),
         0..0,
+        fshell_repl::ftui::completions::CompletionLayout::List,
     ));
 
     // Area height 7: inner_y = 4, visible_rows = 7 - 4 = 3
@@ -1354,4 +1355,91 @@ async fn test_adaptive_row_rendering_width_tiers() {
     let (narrow_items, total_narrow) = mgr.render_popup(25, 5);
     assert!(!narrow_items.is_empty());
     assert_eq!(total_narrow, mgr.suggestions.len());
+}
+
+#[tokio::test]
+async fn test_filesystem_completions_use_grid_layout_and_multi_column_geometry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for i in 0..30 {
+        let f = tmp.path().join(format!("item_{:02}.txt", i));
+        std::fs::write(&f, "hello").expect("write file");
+    }
+
+    let c = make_completer();
+    let mut mgr = fshell_repl::ftui::completions::CompletionsManager::new(c.env.clone());
+    let prefix = format!("cat {}/", tmp.path().display());
+    mgr.update(&prefix, prefix.len(), true);
+
+    assert!(mgr.visible);
+    assert_eq!(mgr.suggestions.len(), 30);
+    assert_eq!(
+        mgr.layout_kind,
+        fshell_repl::ftui::completions::CompletionLayoutKind::Grid
+    );
+
+    let session = mgr.session.as_ref().expect("active session");
+    match session.layout {
+        fshell_repl::ftui::completions::CompletionLayout::Grid { cols, col_width } => {
+            assert!(cols >= 2, "Expected multiple columns, got {}", cols);
+            assert!(col_width >= 14, "Expected reasonable column width");
+            // 30 items with >= 2 columns should have significantly fewer than 30 display rows
+            assert!(session.display_rows.len() <= 15);
+            assert_eq!(session.display_rows.len(), 30_usize.div_ceil(cols));
+        }
+        fshell_repl::ftui::completions::CompletionLayout::List => {
+            panic!("Expected Grid layout for filesystem completions");
+        }
+    }
+
+    // Test 2D navigation
+    let cols = match session.layout {
+        fshell_repl::ftui::completions::CompletionLayout::Grid { cols, .. } => cols,
+        _ => unreachable!(),
+    };
+
+    assert_eq!(mgr.selected_idx, 0);
+    mgr.select_down();
+    assert_eq!(mgr.selected_idx, cols);
+    mgr.select_up();
+    assert_eq!(mgr.selected_idx, 0);
+
+    mgr.select_right();
+    assert_eq!(mgr.selected_idx, 1);
+    mgr.select_left();
+    assert_eq!(mgr.selected_idx, 0);
+}
+
+#[tokio::test]
+async fn test_layout_stability_while_typing_in_grid_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for i in 0..20 {
+        let f = tmp.path().join(format!("test_entry_{:02}.log", i));
+        std::fs::write(&f, "content").expect("write file");
+    }
+
+    let c = make_completer();
+    let mut mgr = fshell_repl::ftui::completions::CompletionsManager::new(c.env.clone());
+    let prefix = format!("ls {}/", tmp.path().display());
+    mgr.update(&prefix, prefix.len(), true);
+
+    assert_eq!(
+        mgr.layout_kind,
+        fshell_repl::ftui::completions::CompletionLayoutKind::Grid
+    );
+
+    // Simulate typing an additional character in the same session
+    let typed_query = format!("{}test_entry_0", tmp.path().display());
+    let line = format!("ls {}", typed_query);
+    mgr.update(&line, line.len(), false);
+
+    // Layout kind must stay strictly Grid — no shape-shifting while filtering!
+    assert_eq!(
+        mgr.layout_kind,
+        fshell_repl::ftui::completions::CompletionLayoutKind::Grid
+    );
+    let session = mgr.session.as_ref().expect("active session");
+    assert!(matches!(
+        session.layout,
+        fshell_repl::ftui::completions::CompletionLayout::Grid { .. }
+    ));
 }
