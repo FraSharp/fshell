@@ -427,7 +427,15 @@ pub async fn run_ftui_repl(
                     if history_mgr.active || agent_state.active || widget_explorer.active {
                         10
                     } else if comp_mgr.visible {
-                        10.min(cap)
+                        let needed_rows = comp_mgr
+                            .session
+                            .as_ref()
+                            .map(|s| s.display_rows.len())
+                            .unwrap_or(comp_mgr.suggestions.len());
+                        let chrome_lines = 4u16;
+                        let needed_h = (needed_rows as u16).saturating_add(chrome_lines);
+                        let max_cap = cap.saturating_sub(prompt_h);
+                        needed_h.clamp(4, 18).min(max_cap)
                     } else if help_visible {
                         6
                     } else {
@@ -1298,15 +1306,10 @@ pub async fn run_ftui_repl(
 
                                 let visual_cursor_col =
                                     cursor_col.saturating_sub(text_scroll_offset);
-                                let popup_x = (prompt_len + visual_cursor_col as u16)
-                                    .min(size.width.saturating_sub(popup_w).saturating_sub(1));
-
-                                // Drop-up vs drop-down geometry resolution
-                                let prompt_cursor_y = prompt_line.y;
-                                let space_below =
-                                    size.height.saturating_sub(prompt_cursor_y + prompt_h);
-                                let space_above = prompt_cursor_y;
-                                let render_upward = space_below < 6 && space_above > space_below;
+                                let popup_x = (prompt_line.x
+                                    + prompt_len
+                                    + visual_cursor_col as u16)
+                                    .clamp(f.area().x, f.area().right().saturating_sub(popup_w));
 
                                 let needed_rows = comp_mgr
                                     .session
@@ -1316,248 +1319,261 @@ pub async fn run_ftui_repl(
                                 let chrome_lines = 4u16; // 2 for borders, 2 for footer divider + content
                                 let needed_h = (needed_rows as u16).saturating_add(chrome_lines);
 
-                                let available_space = if render_upward {
-                                    space_above
+                                let comp_h = needed_h.min(popup_area.height);
+                                let popup_y = popup_area.y;
+
+                                let comp_area = Rect::new(popup_x, popup_y, popup_w, comp_h)
+                                    .intersection(f.area());
+
+                                if comp_area.height < 3 || comp_area.width < 10 {
+                                    completion_popup = None;
                                 } else {
-                                    space_below
-                                };
-                                let max_budget_h = available_space.clamp(4, 18);
-                                let comp_h = needed_h.clamp(4, max_budget_h);
-                                let popup_y = if render_upward {
-                                    prompt_cursor_y.saturating_sub(comp_h)
-                                } else {
-                                    prompt_cursor_y + prompt_h
-                                };
+                                    f.render_widget(Clear, comp_area);
+                                    completion_popup = Some(comp_area);
 
-                                let comp_area = Rect::new(popup_x, popup_y, popup_w, comp_h);
-                                f.render_widget(Clear, comp_area);
-                                completion_popup = Some(comp_area);
-
-                                let has_footer = comp_h >= 6;
-                                let visible_rows = if has_footer {
-                                    comp_h.saturating_sub(4)
-                                } else {
-                                    comp_h.saturating_sub(2)
-                                }
-                                .max(1) as usize;
-
-                                let selected_row = comp_mgr
-                                    .session
-                                    .as_ref()
-                                    .map(|s| s.selected_row_index())
-                                    .unwrap_or(comp_mgr.selected_idx);
-                                if selected_row >= comp_mgr.scroll_offset + visible_rows {
-                                    comp_mgr.scroll_offset =
-                                        selected_row.saturating_sub(visible_rows).saturating_add(1);
-                                } else if selected_row < comp_mgr.scroll_offset {
-                                    comp_mgr.scroll_offset = selected_row;
-                                }
-
-                                let (list_items, total_display) =
-                                    comp_mgr.render_popup(popup_w, visible_rows);
-
-                                let is_files = comp_mgr.is_all_files_or_dirs();
-                                let header_label = if is_files { "Files" } else { "Completions" };
-                                let title_text = format!(
-                                    " {} ({}/{}) ",
-                                    header_label,
-                                    comp_mgr.selected_idx + 1,
-                                    total_items,
-                                );
-
-                                let mut comp_block = Block::default()
-                                    .borders(Borders::ALL)
-                                    .border_type(BorderType::Rounded)
-                                    .border_style(theme.status.muted.to_style_dim())
-                                    .title(Span::styled(
-                                        title_text,
-                                        theme.status.muted.to_style_bold(),
-                                    ))
-                                    .title_alignment(ratatui::layout::Alignment::Left);
-
-                                if !has_footer {
-                                    let hints = if is_grid {
-                                        " ↑↓←→ Tab ↵ "
+                                    let has_footer = comp_area.height >= 6;
+                                    let visible_rows = if has_footer {
+                                        comp_area.height.saturating_sub(4)
                                     } else {
-                                        " ↑↓ Tab ↵ "
-                                    };
-                                    comp_block = comp_block.title_bottom(Span::styled(
-                                        hints,
-                                        theme.status.muted.to_style_dim(),
-                                    ));
-                                }
+                                        comp_area.height.saturating_sub(2)
+                                    }
+                                    .max(1)
+                                        as usize;
 
-                                f.render_widget(comp_block, comp_area);
+                                    let selected_row = comp_mgr
+                                        .session
+                                        .as_ref()
+                                        .map(|s| s.selected_row_index())
+                                        .unwrap_or(comp_mgr.selected_idx);
+                                    if selected_row >= comp_mgr.scroll_offset + visible_rows {
+                                        comp_mgr.scroll_offset = selected_row
+                                            .saturating_sub(visible_rows)
+                                            .saturating_add(1);
+                                    } else if selected_row < comp_mgr.scroll_offset {
+                                        comp_mgr.scroll_offset = selected_row;
+                                    }
 
-                                let items_area = Rect::new(
-                                    comp_area.x + 1,
-                                    comp_area.y + 1,
-                                    comp_area.width.saturating_sub(2),
-                                    visible_rows as u16,
-                                );
+                                    let (list_items, total_display) =
+                                        comp_mgr.render_popup(popup_w, visible_rows);
 
-                                if total_display > visible_rows {
-                                    let inner_list_area = Rect::new(
-                                        items_area.x,
-                                        items_area.y,
-                                        items_area.width.saturating_sub(1),
-                                        items_area.height,
-                                    );
-                                    let scroll_area = Rect::new(
-                                        items_area.x + items_area.width.saturating_sub(1),
-                                        items_area.y,
-                                        1,
-                                        items_area.height,
-                                    );
-                                    let mut scrollbar_state =
-                                        ScrollbarState::new(total_display).position(selected_row);
-                                    f.render_widget(List::new(list_items), inner_list_area);
-                                    f.render_stateful_widget(
-                                        Scrollbar::default()
-                                            .orientation(ScrollbarOrientation::VerticalRight)
-                                            .begin_symbol(None)
-                                            .end_symbol(None)
-                                            .track_symbol(Some("│"))
-                                            .thumb_symbol("┃")
-                                            .style(theme.status.muted.to_style_dim())
-                                            .thumb_style(theme.widgets.foreground.to_style_bold()),
-                                        scroll_area,
-                                        &mut scrollbar_state,
-                                    );
-                                } else {
-                                    f.render_widget(List::new(list_items), items_area);
-                                }
-
-                                if has_footer {
-                                    let divider_y = comp_area.y + 1 + visible_rows as u16;
-                                    let footer_y = divider_y + 1;
-
-                                    let divider_w = comp_area.width.saturating_sub(2) as usize;
-                                    let divider_str = format!("├{}┤", "─".repeat(divider_w));
-                                    let divider_rect =
-                                        Rect::new(comp_area.x, divider_y, comp_area.width, 1);
-                                    f.render_widget(
-                                        Paragraph::new(divider_str)
-                                            .style(theme.status.muted.to_style_dim()),
-                                        divider_rect,
+                                    let is_files = comp_mgr.is_all_files_or_dirs();
+                                    let header_label =
+                                        if is_files { "Files" } else { "Completions" };
+                                    let title_text = format!(
+                                        " {} ({}/{}) ",
+                                        header_label,
+                                        comp_mgr.selected_idx + 1,
+                                        total_items,
                                     );
 
-                                    let mut footer_left = String::new();
-                                    if let Some(s) = comp_mgr.get_selected_suggestion() {
-                                        let category = crate::ftui::completions::categorize(s);
-                                        if matches!(
+                                    let mut comp_block = Block::default()
+                                        .borders(Borders::ALL)
+                                        .border_type(BorderType::Rounded)
+                                        .border_style(theme.status.muted.to_style_dim())
+                                        .title(Span::styled(
+                                            title_text,
+                                            theme.status.muted.to_style_bold(),
+                                        ))
+                                        .title_alignment(ratatui::layout::Alignment::Left);
+
+                                    if !has_footer {
+                                        let hints = if is_grid {
+                                            " ↑↓←→ Tab ↵ "
+                                        } else {
+                                            " ↑↓ Tab ↵ "
+                                        };
+                                        comp_block = comp_block.title_bottom(Span::styled(
+                                            hints,
+                                            theme.status.muted.to_style_dim(),
+                                        ));
+                                    }
+
+                                    f.render_widget(comp_block, comp_area);
+
+                                    let items_area = Rect::new(
+                                        comp_area.x + 1,
+                                        comp_area.y + 1,
+                                        comp_area.width.saturating_sub(2),
+                                        visible_rows as u16,
+                                    );
+
+                                    if total_display > visible_rows {
+                                        let inner_list_area = Rect::new(
+                                            items_area.x,
+                                            items_area.y,
+                                            items_area.width.saturating_sub(1),
+                                            items_area.height,
+                                        );
+                                        let scroll_area = Rect::new(
+                                            items_area.x + items_area.width.saturating_sub(1),
+                                            items_area.y,
+                                            1,
+                                            items_area.height,
+                                        );
+                                        let mut scrollbar_state =
+                                            ScrollbarState::new(total_display)
+                                                .position(selected_row);
+                                        f.render_widget(List::new(list_items), inner_list_area);
+                                        f.render_stateful_widget(
+                                            Scrollbar::default()
+                                                .orientation(ScrollbarOrientation::VerticalRight)
+                                                .begin_symbol(None)
+                                                .end_symbol(None)
+                                                .track_symbol(Some("│"))
+                                                .thumb_symbol("┃")
+                                                .style(theme.status.muted.to_style_dim())
+                                                .thumb_style(
+                                                    theme.widgets.foreground.to_style_bold(),
+                                                ),
+                                            scroll_area,
+                                            &mut scrollbar_state,
+                                        );
+                                    } else {
+                                        f.render_widget(List::new(list_items), items_area);
+                                    }
+
+                                    if has_footer {
+                                        let divider_y = comp_area.y + 1 + visible_rows as u16;
+                                        let footer_y = divider_y + 1;
+
+                                        let divider_w = comp_area.width.saturating_sub(2) as usize;
+                                        let divider_str = format!("├{}┤", "─".repeat(divider_w));
+                                        let divider_rect =
+                                            Rect::new(comp_area.x, divider_y, comp_area.width, 1);
+                                        f.render_widget(
+                                            Paragraph::new(divider_str)
+                                                .style(theme.status.muted.to_style_dim()),
+                                            divider_rect,
+                                        );
+
+                                        let mut footer_left = String::new();
+                                        if let Some(s) = comp_mgr.get_selected_suggestion() {
+                                            let category = crate::ftui::completions::categorize(s);
+                                            if matches!(
                                             category,
                                             crate::ftui::completions::CompletionCategory::Directory
                                                 | crate::ftui::completions::CompletionCategory::File
                                         ) {
-                                            let path = std::path::Path::new(&s.value);
-                                            if let Ok(meta) = std::fs::symlink_metadata(path) {
-                                                if meta.is_symlink() {
-                                                    if let Ok(target) = std::fs::read_link(path) {
-                                                        footer_left = format!(
-                                                            "{} -> {} (symlink)",
-                                                            s.value,
-                                                            target.display()
-                                                        );
+                                                let path = std::path::Path::new(&s.value);
+                                                if let Ok(meta) = std::fs::symlink_metadata(path) {
+                                                    if meta.is_symlink() {
+                                                        if let Ok(target) = std::fs::read_link(path)
+                                                        {
+                                                            footer_left = format!(
+                                                                "{} -> {} (symlink)",
+                                                                s.value,
+                                                                target.display()
+                                                            );
+                                                        } else {
+                                                            footer_left =
+                                                                format!("{} (symlink)", s.value);
+                                                        }
+                                                    } else if meta.is_dir() {
+                                                        if let Ok(rd) = std::fs::read_dir(path) {
+                                                            let count = rd.count();
+                                                            footer_left = format!(
+                                                                "{} — {} item{} (dir)",
+                                                                s.value,
+                                                                count,
+                                                                if count == 1 { "" } else { "s" }
+                                                            );
+                                                        } else {
+                                                            footer_left =
+                                                                format!("{} (dir)", s.value);
+                                                        }
                                                     } else {
-                                                        footer_left =
-                                                            format!("{} (symlink)", s.value);
-                                                    }
-                                                } else if meta.is_dir() {
-                                                    if let Ok(rd) = std::fs::read_dir(path) {
-                                                        let count = rd.count();
                                                         footer_left = format!(
-                                                            "{} — {} item{} (dir)",
-                                                            s.value,
-                                                            count,
-                                                            if count == 1 { "" } else { "s" }
-                                                        );
-                                                    } else {
-                                                        footer_left = format!("{} (dir)", s.value);
-                                                    }
-                                                } else {
-                                                    footer_left = format!(
                                                         "{} — {} (file)",
                                                         s.value,
                                                         crate::ftui::completions::format_file_size(
                                                             meta.len()
                                                         )
                                                     );
+                                                    }
+                                                } else {
+                                                    footer_left = s.value.clone();
+                                                }
+                                            } else if let Some(topic) =
+                                                fshell_builtins::help::find_topic(&s.value)
+                                            {
+                                                if !topic.syntax.is_empty() {
+                                                    footer_left = topic.syntax.to_string();
+                                                } else {
+                                                    footer_left = topic.summary.to_string();
+                                                }
+                                            } else if let Some(desc) = &s.description {
+                                                if !desc.is_empty()
+                                                    && desc != "Directory"
+                                                    && desc != "File"
+                                                {
+                                                    footer_left = format!("{} — {}", s.value, desc);
+                                                } else {
+                                                    footer_left = s.value.clone();
                                                 }
                                             } else {
                                                 footer_left = s.value.clone();
                                             }
-                                        } else if let Some(topic) =
-                                            fshell_builtins::help::find_topic(&s.value)
-                                        {
-                                            if !topic.syntax.is_empty() {
-                                                footer_left = topic.syntax.to_string();
-                                            } else {
-                                                footer_left = topic.summary.to_string();
-                                            }
-                                        } else if let Some(desc) = &s.description {
-                                            if !desc.is_empty()
-                                                && desc != "Directory"
-                                                && desc != "File"
-                                            {
-                                                footer_left = format!("{} — {}", s.value, desc);
-                                            } else {
-                                                footer_left = s.value.clone();
-                                            }
-                                        } else {
-                                            footer_left = s.value.clone();
                                         }
-                                    }
 
-                                    let key_hints = if is_grid {
-                                        if popup_w >= 65 {
-                                            "↑↓←→ select  Tab next  ↵ use"
+                                        let key_hints = if is_grid {
+                                            if popup_w >= 65 {
+                                                "↑↓←→ select  Tab next  ↵ use"
+                                            } else if popup_w >= 45 {
+                                                "↑↓←→ Tab ↵"
+                                            } else {
+                                                ""
+                                            }
+                                        } else if popup_w >= 65 {
+                                            "↑↓ select  Tab next  ↵ use"
                                         } else if popup_w >= 45 {
-                                            "↑↓←→ Tab ↵"
+                                            "↑↓ Tab ↵"
                                         } else {
                                             ""
-                                        }
-                                    } else if popup_w >= 65 {
-                                        "↑↓ select  Tab next  ↵ use"
-                                    } else if popup_w >= 45 {
-                                        "↑↓ Tab ↵"
-                                    } else {
-                                        ""
-                                    };
+                                        };
 
-                                    let inner_w = comp_area.width.saturating_sub(2) as usize;
-                                    let hints_w = key_hints.len();
-                                    let max_left_w = inner_w.saturating_sub(hints_w + 3);
-                                    let display_left = if footer_left.len() > max_left_w {
-                                        crate::ftui::completions::truncate_by_width(
-                                            &footer_left,
-                                            max_left_w,
-                                        )
-                                    } else {
-                                        footer_left
-                                    };
-                                    let pad_needed =
-                                        inner_w.saturating_sub(display_left.len() + hints_w);
+                                        let inner_w = comp_area.width.saturating_sub(2) as usize;
+                                        let hints_w = UnicodeWidthStr::width(key_hints);
+                                        let max_left_w = inner_w.saturating_sub(hints_w + 3);
+                                        let display_left =
+                                            if UnicodeWidthStr::width(footer_left.as_str())
+                                                > max_left_w
+                                            {
+                                                crate::ftui::completions::truncate_by_width(
+                                                    &footer_left,
+                                                    max_left_w,
+                                                )
+                                            } else {
+                                                footer_left
+                                            };
+                                        let pad_needed = inner_w.saturating_sub(
+                                            UnicodeWidthStr::width(display_left.as_str()) + hints_w,
+                                        );
 
-                                    let footer_spans = vec![
-                                        Span::styled(
+                                        let mut footer_spans = vec![Span::styled(
                                             display_left,
                                             theme.widgets.foreground.to_style(),
-                                        ),
-                                        Span::raw(" ".repeat(pad_needed.max(1))),
-                                        Span::styled(key_hints, theme.status.muted.to_style_dim()),
-                                    ];
+                                        )];
+                                        if pad_needed > 0 {
+                                            footer_spans.push(Span::raw(" ".repeat(pad_needed)));
+                                        }
+                                        if !key_hints.is_empty() {
+                                            footer_spans.push(Span::styled(
+                                                key_hints,
+                                                theme.status.muted.to_style_dim(),
+                                            ));
+                                        }
 
-                                    let footer_rect = Rect::new(
-                                        comp_area.x + 1,
-                                        footer_y,
-                                        comp_area.width.saturating_sub(2),
-                                        1,
-                                    );
-                                    f.render_widget(
-                                        Paragraph::new(Line::from(footer_spans)),
-                                        footer_rect,
-                                    );
+                                        let footer_rect = Rect::new(
+                                            comp_area.x + 1,
+                                            footer_y,
+                                            comp_area.width.saturating_sub(2),
+                                            1,
+                                        );
+                                        f.render_widget(
+                                            Paragraph::new(Line::from(footer_spans)),
+                                            footer_rect,
+                                        );
+                                    }
                                 }
                             } else if comp_mgr.visible {
                                 let empty_msg = Span::styled(
