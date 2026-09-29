@@ -62,9 +62,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             framework_path.display()
         );
     }
+    // Static pkg-config dependency expansion can report a native archive more
+    // than once. rustc rejects repeated -l entries when one uses the
+    // `+whole-archive` modifier, so emit each such archive exactly once.
+    let mut whole_archives = std::collections::HashSet::new();
     for lib in &library.libs {
         let native = matches!(lib.as_str(), "archive" | "lzma" | "zstd" | "lz4" | "b2");
         if native {
+            if !whole_archives.insert(lib.as_str()) {
+                continue;
+            }
             let archive = format!("lib{lib}.a");
             if !paths.iter().any(|path| path.join(&archive).exists()) {
                 return Err(io::Error::other(format!(
