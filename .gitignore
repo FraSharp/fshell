@@ -1,7 +1,6 @@
 /*
 !/.gitignore
 !/.github/
-!/AGENTS.md
 !/Cargo.toml
 !/Cargo.lock
 !/build.rs
@@ -17,5 +16,3 @@
 !/vendor/
 
 **/.DS_Store
-**/.fsh/
-**/.fsh_history*
