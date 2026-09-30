@@ -118,7 +118,6 @@ fshell-hash = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
-strip-ansi-escapes = "0.2.1"
 indexmap = { workspace = true }
 ustr = { workspace = true }
 crossterm = { workspace = true }

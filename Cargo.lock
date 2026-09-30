@@ -1107,7 +1107,6 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
- "strip-ansi-escapes",
  "tempfile",
  "tokio",
  "ustr",

@@ -15,30 +15,6 @@ fn main() {
     fshell::setup_panic_hook();
 
     let args: Vec<String> = std::env::args().collect();
-    let mut is_empty_command = false;
-    let mut i = 0;
-    while i < args.len() {
-        if (args[i] == "-c" || args[i] == "--command")
-            && i + 1 < args.len()
-            && args[i + 1].trim().is_empty()
-        {
-            is_empty_command = true;
-        }
-        i += 1;
-    }
-    if is_empty_command {
-        if let Some(span) = entry.take() {
-            span.finish(fshell_engine::trace::SpanOutcome::Ok);
-        }
-        fshell_engine::trace::TraceSink::exit_process(
-            &trace,
-            trace.root_context(),
-            fshell_engine::trace::TraceMode::Startup,
-            0,
-            fshell_engine::trace::SpanOutcome::Exit,
-        );
-    }
-
     let program_name = args
         .first()
         .as_ref()

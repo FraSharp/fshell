@@ -7,7 +7,6 @@ use fshell_core::diagnostic::FshDiag;
 use fshell_engine::profiler::{ProfilerCategory, ProfilerState};
 use fshell_engine::trace::{SpanOutcome, TraceMode, TraceSink};
 use fshell_engine::{EngineError, Flow, PipelinePayload};
-use std::io::IsTerminal;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -230,12 +229,10 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
         }
         init_posix_handler();
         fshell_engine::setup_signal_handlers(env.clone());
-        if !cmd.trim().is_empty() {
-            let _g = ProfilerState::guard(&env.profiler, "populate env", ProfilerCategory::Init);
-            let mut timing = trace_span(&trace, "startup.host_environment", TraceMode::Command);
-            fshell_engine::populate_env_from_host(&env);
-            finish_span(&mut timing, SpanOutcome::Ok);
-        }
+        let _g = ProfilerState::guard(&env.profiler, "populate env", ProfilerCategory::Init);
+        let mut timing = trace_span(&trace, "startup.host_environment", TraceMode::Command);
+        fshell_engine::populate_env_from_host(&env);
+        finish_span(&mut timing, SpanOutcome::Ok);
 
         // Login / interactive semantics: even `fsh -c` can be run as
         // `fsh --login -c '...'` (e.g. via `su -` or `ssh host cmd`).
@@ -391,40 +388,24 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
     } else {
         env.with_trace_mode(TraceMode::Interactive)
     };
-    if cli.script.is_some() {
-        if fshell_engine::login::is_interactive() {
-            fshell_engine::login::bump_shlvl(&env);
-        }
-        {
-            let mut vars = env.vars.write();
-            vars.insert("FSH_LOGIN".to_string(), Val::Bool(is_login));
-        }
-        // Non-interactive `fsh script.fsh --login` should source login
-        // profiles before the script runs.  Best-effort: if this fails
-        // the script still runs with host env.
-        if is_login {
-            let mut timing = trace_span(&trace, "startup.login_environment", env.trace_mode);
-            let result = fshell_engine::login::load_login_environment(&env, true, false).await;
-            finish_span(
-                &mut timing,
-                if result.is_ok() {
-                    SpanOutcome::Ok
-                } else {
-                    SpanOutcome::Error
-                },
-            );
-        }
-    } else if !is_login {
-        // Non-login REPL will do its own login env loading inside
-        // ftui's init — but set FSH_LOGIN now so early code (handoff
-        // etc.) can inspect it.
-        {
-            let mut vars = env.vars.write();
-            vars.insert("FSH_LOGIN".to_string(), Val::Bool(false));
-        }
-    } else {
-        let mut vars = env.vars.write();
-        vars.insert("FSH_LOGIN".to_string(), Val::Bool(true));
+    if cli.script.is_some() && fshell_engine::login::is_interactive() {
+        fshell_engine::login::bump_shlvl(&env);
+    }
+    set_fsh_login_flag(&env, is_login);
+    // Non-interactive `fsh script.fsh --login` should source login profiles
+    // before the script runs. Best-effort: if this fails the script still
+    // runs with host env.
+    if cli.script.is_some() && is_login {
+        let mut timing = trace_span(&trace, "startup.login_environment", env.trace_mode);
+        let result = fshell_engine::login::load_login_environment(&env, true, false).await;
+        finish_span(
+            &mut timing,
+            if result.is_ok() {
+                SpanOutcome::Ok
+            } else {
+                SpanOutcome::Error
+            },
+        );
     }
 
     let mut timing = trace_span(&trace, "startup.host_environment", env.trace_mode);
@@ -570,20 +551,32 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
     }
 }
 
+fn set_fsh_login_flag(env: &fshell_engine::Env, is_login: bool) {
+    env.vars
+        .write()
+        .insert("FSH_LOGIN".to_string(), Val::Bool(is_login));
+}
+
+fn is_handoff_process_metadata(name: &str) -> bool {
+    matches!(
+        name,
+        "FSH_EXE"
+            | "FSH_VERSION"
+            | "FSH_FULL_VERSION"
+            | "FSH_BUILD_DATETIME"
+            | "FSH_BUILD_DATETIME_ISO"
+            | "FSH_BUILD_TIMESTAMP"
+            | "FSH_GIT_COMMIT"
+    )
+}
+
 fn restore_handoff_state(env: &fshell_engine::Env, state: fshell_engine::handoff::HandoffState) {
     {
         let mut vars = env.vars.write();
         for (k, v) in state.vars {
             // Never restore a stale build stamp from handoff — the new process's
             // exe_path/build is canonical. Handoff may be from a different binary location.
-            if k == "FSH_EXE"
-                || k == "FSH_VERSION"
-                || k == "FSH_FULL_VERSION"
-                || k == "FSH_BUILD_DATETIME"
-                || k == "FSH_BUILD_DATETIME_ISO"
-                || k == "FSH_BUILD_TIMESTAMP"
-                || k == "FSH_GIT_COMMIT"
-            {
+            if is_handoff_process_metadata(&k) {
                 continue;
             }
             vars.insert(k, v);
@@ -713,41 +706,14 @@ async fn run_ls_utility(args: &[String], trace: Arc<TraceSink>) -> i32 {
     let mut env = fshell_engine::Env::for_command_with_trace(trace);
     env.trace_mode = TraceMode::Utility;
     env.is_last_stage = true;
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelinePayload>(32);
+    // The final, uncaptured stage renders directly to stdout in `ls_builtin`.
+    // Keep the required sender alive for the duration of the call; this path
+    // does not emit pipeline payloads.
+    let (tx, _rx) = tokio::sync::mpsc::channel::<PipelinePayload>(1);
     let converted: Vec<Val> = args.iter().map(|s| Val::String(s.clone())).collect();
-    let color_always = args.iter().any(|a| a == "--color=always");
-
-    let consumer = tokio::spawn(async move {
-        while let Some(payload) = rx.recv().await {
-            match payload {
-                PipelinePayload::Data(v) => {
-                    let text = v.to_text();
-                    if !std::io::stdout().is_terminal() && !color_always {
-                        let clean = strip_ansi_escapes::strip_str(&text);
-                        println!("{}", clean);
-                    } else {
-                        println!("{}", text);
-                    }
-                }
-                PipelinePayload::Bytes(b) => {
-                    let text = String::from_utf8_lossy(&b).into_owned();
-                    println!("{}", text);
-                }
-                PipelinePayload::Structured(d) => {
-                    eprintln!("{}", d.report);
-                }
-            }
-        }
-    });
 
     match fshell_builtins::ls_builtin(None, converted, &env, tx, None) {
-        Ok(_) => match consumer.await {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("fsh: ls output consumer failed: {e}");
-                1
-            }
-        },
+        Ok(_) => 0,
         Err(e) => {
             eprintln!("ls: {}", e.message);
             1
@@ -791,6 +757,10 @@ fn init_posix_handler() {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use fshell_engine::handoff::HandoffState;
+    use fshell_engine::{Env, SuggestionMode};
+    use fshell_hash::FxHashMap;
+    use std::collections::HashSet;
 
     #[test]
     fn test_cli_help_includes_hints() {
@@ -809,6 +779,159 @@ mod tests {
         assert!(
             help_text.contains("For migration from bash/zsh/fish: see docs/MIGRATION.md"),
             "Help text should contain migration guide hint"
+        );
+    }
+
+    #[test]
+    fn cli_render_flags_map_to_shell_options() {
+        for (format, expected) in [
+            ("graphical", fshell_render::RenderFormat::Graphical),
+            ("compact", fshell_render::RenderFormat::Compact),
+            ("json", fshell_render::RenderFormat::Json),
+        ] {
+            let cli = Cli::try_parse_from(["fsh", "-c", "true", "--error-format", format])
+                .expect("valid error format should parse");
+            let env = Env::for_command();
+            apply_cli_render_options(&env, &cli);
+            assert_eq!(env.options.read().error_format, expected);
+        }
+
+        for (mode, expected) in [
+            ("blocking", SuggestionMode::Blocking),
+            ("deferred", SuggestionMode::Deferred),
+        ] {
+            let cli = Cli::try_parse_from(["fsh", "-c", "true", "--suggestion-mode", mode])
+                .expect("valid suggestion mode should parse");
+            let env = Env::for_command();
+            env.options.write().suggestion_mode = match expected {
+                SuggestionMode::Blocking => SuggestionMode::Deferred,
+                SuggestionMode::Deferred => SuggestionMode::Blocking,
+            };
+            apply_cli_render_options(&env, &cli);
+            assert_eq!(env.options.read().suggestion_mode, expected);
+        }
+    }
+
+    #[test]
+    fn login_flag_records_the_supplied_invocation_mode() {
+        let env = Env::for_command();
+
+        set_fsh_login_flag(&env, false);
+        assert_eq!(env.vars.read().get("FSH_LOGIN"), Some(&Val::Bool(false)));
+
+        set_fsh_login_flag(&env, true);
+        assert_eq!(env.vars.read().get("FSH_LOGIN"), Some(&Val::Bool(true)));
+    }
+
+    #[test]
+    fn handoff_metadata_filter_matches_only_process_owned_variables() {
+        for name in [
+            "FSH_EXE",
+            "FSH_VERSION",
+            "FSH_FULL_VERSION",
+            "FSH_BUILD_DATETIME",
+            "FSH_BUILD_DATETIME_ISO",
+            "FSH_BUILD_TIMESTAMP",
+            "FSH_GIT_COMMIT",
+        ] {
+            assert!(is_handoff_process_metadata(name), "{name}");
+        }
+        for name in ["FSH_LOGIN", "FSH_SESSION_ID", "USER_DEFINED"] {
+            assert!(!is_handoff_process_metadata(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn handoff_restore_preserves_user_state_and_replaces_stale_build_metadata() {
+        let env = Env::for_command();
+        let cwd = env.cwd().to_string_lossy().into_owned();
+        let stale_metadata = [
+            "FSH_EXE",
+            "FSH_VERSION",
+            "FSH_FULL_VERSION",
+            "FSH_BUILD_DATETIME",
+            "FSH_BUILD_DATETIME_ISO",
+            "FSH_BUILD_TIMESTAMP",
+            "FSH_GIT_COMMIT",
+        ];
+
+        let mut vars = FxHashMap::default();
+        vars.insert("RESTORED_USER_VALUE".to_string(), Val::Int(42));
+        vars.insert("FSH_SESSION_ID".to_string(), Val::String("stale".into()));
+        vars.insert("FSH_HANDOFF".to_string(), Val::Bool(false));
+        for name in stale_metadata {
+            vars.insert(name.to_string(), Val::String("stale".into()));
+        }
+
+        let mut fns = FxHashMap::default();
+        fns.insert("restored_fn".to_string(), (Vec::new(), None, Vec::new()));
+        let mut reactive_pipelines = FxHashMap::default();
+        reactive_pipelines.insert("restored_pipe".to_string(), "source".to_string());
+        let mut hooks = FxHashMap::default();
+        hooks.insert("precmd".to_string(), vec!["restored_hook".to_string()]);
+        let mut options = fshell_engine::ShellOptions::default();
+        options.error_format = fshell_render::RenderFormat::Compact;
+        options.error_color = false;
+
+        restore_handoff_state(
+            &env,
+            HandoffState {
+                vars,
+                fns,
+                caps_held: HashSet::new(),
+                caps_strict_mode: true,
+                reactive_pipelines,
+                session_id: "current-session".to_string(),
+                cwd: cwd.clone(),
+                options,
+                hooks,
+                last_exit_code: 37,
+                last_duration_secs: 0.25,
+            },
+        );
+
+        let vars = env.vars.read();
+        assert_eq!(vars.get("RESTORED_USER_VALUE"), Some(&Val::Int(42)));
+        assert_eq!(
+            vars.get("FSH_SESSION_ID"),
+            Some(&Val::String("current-session".to_string()))
+        );
+        assert_eq!(vars.get("FSH_HANDOFF"), Some(&Val::Bool(true)));
+        assert_eq!(
+            vars.get("FSH_EXE"),
+            Some(&Val::String(env.exe_path.to_string_lossy().into_owned()))
+        );
+        assert_eq!(
+            vars.get("FSH_VERSION"),
+            Some(&Val::String(fshell_engine::exe::version().to_string()))
+        );
+        assert_eq!(
+            vars.get("FSH_FULL_VERSION"),
+            Some(&Val::String(fshell_engine::exe::full_version()))
+        );
+        for name in stale_metadata {
+            assert_ne!(vars.get(name), Some(&Val::String("stale".into())), "{name}");
+        }
+        drop(vars);
+
+        assert!(env.fns.read().contains_key("restored_fn"));
+        assert!(env.is_strict_mode());
+        assert!(env.reactive.pipelines.read().contains_key("restored_pipe"));
+        assert_eq!(env.cwd().to_string_lossy(), cwd);
+        assert_eq!(
+            env.options.read().error_format,
+            fshell_render::RenderFormat::Compact
+        );
+        assert!(!env.options.read().error_color);
+        assert_eq!(
+            env.hooks.registry.read().get("precmd"),
+            Some(&vec!["restored_hook".to_string()])
+        );
+        assert_eq!(env.exit_code(), 37);
+        assert_eq!(*env.prompt.last_exit_code.read(), 37);
+        assert_eq!(
+            *env.prompt.last_duration.read(),
+            std::time::Duration::from_secs_f64(0.25)
         );
     }
 }
