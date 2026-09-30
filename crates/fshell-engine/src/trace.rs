@@ -375,8 +375,9 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0]["schema_version"], 1);
         assert_eq!(records[0]["outcome"], "ok");
-        assert_eq!(records[1]["parent_id"], parent_id.0);
+        assert_eq!(records[0]["parent_id"], parent_id.0);
         assert_eq!(records[1]["outcome"], "error");
+        assert!(records[1]["parent_id"].is_null());
         assert!(records.iter().all(|r| r["duration_ns"].as_u64().is_some()));
     }
 

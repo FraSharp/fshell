@@ -869,9 +869,11 @@ mod tests {
         reactive_pipelines.insert("restored_pipe".to_string(), "source".to_string());
         let mut hooks = FxHashMap::default();
         hooks.insert("precmd".to_string(), vec!["restored_hook".to_string()]);
-        let mut options = fshell_engine::ShellOptions::default();
-        options.error_format = fshell_render::RenderFormat::Compact;
-        options.error_color = false;
+        let options = fshell_engine::ShellOptions {
+            error_format: fshell_render::RenderFormat::Compact,
+            error_color: false,
+            ..Default::default()
+        };
 
         restore_handoff_state(
             &env,
