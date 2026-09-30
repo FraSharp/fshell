@@ -2678,6 +2678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repl_panic_recovery() {
+        let _lock = crate::history::TEST_DB_LOCK.lock().await;
         let env = fshell_engine::Env::new();
         fshell_builtins::init(&env);
         fshell_bridge::init(&env);
@@ -2742,6 +2743,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_line_generic_multiline_block() {
+        let _lock = crate::history::TEST_DB_LOCK.lock().await;
         let env = fshell_engine::Env::new();
         fshell_builtins::init(&env);
         let multiline = "let x = 10\nif true {\n    let y = 20\n    let result = $x + $y\n}";
