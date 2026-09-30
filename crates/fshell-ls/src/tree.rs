@@ -5,7 +5,7 @@ use crate::args::Config;
 use crate::colors::{BLUE, CYAN, GREEN, RESET};
 use crate::platform::get_dirent_name;
 use crate::utils::{escape_name, escape_name_cow};
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::GlobSet;
 use libc::{
     O_DIRECTORY, O_RDONLY, S_IFDIR, S_IFLNK, S_IFMT, S_IXUSR, close, closedir, dirfd, dup,
     fdopendir, fstat, fstatat, open, openat, readdir,
@@ -15,22 +15,7 @@ use std::io::{self, BufWriter, Write};
 use std::os::unix::ffi::OsStrExt;
 
 fn tree_exclude_matcher(config: &Config) -> io::Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in &config.tree_exclude {
-        let glob = Glob::new(pattern).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid tree exclusion pattern '{pattern}': {err}"),
-            )
-        })?;
-        builder.add(glob);
-    }
-    builder.build().map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("invalid tree exclusion patterns: {err}"),
-        )
-    })
+    crate::scan::build_exclude_matcher(&config.tree_exclude)
 }
 
 /// RAII guard that closes a file descriptor on drop.
@@ -335,7 +320,7 @@ where
                     })
                     .unwrap_or(libc::DT_UNKNOWN)
             };
-            if !(d_type == libc::DT_DIR && exclude.is_match(OsStr::from_bytes(name_bytes))) {
+            if !exclude.is_match(OsStr::from_bytes(name_bytes)) {
                 entries.push((start, name_bytes.len(), d_type));
             }
         }
@@ -365,41 +350,11 @@ where
             let start = arena.len();
             arena.extend_from_slice(name_bytes);
             arena.push(0);
-            if !(entry.d_type == libc::DT_DIR && exclude.is_match(OsStr::from_bytes(name_bytes))) {
+            if !exclude.is_match(OsStr::from_bytes(name_bytes)) {
                 entries.push((start, name_bytes.len(), entry.d_type));
             }
         }
     }
-
-    let mut visible_entries = Vec::with_capacity(entries.len());
-    for (start, len, d_type) in entries {
-        let name = &arena[start..start + len];
-        let is_dir = if d_type == libc::DT_DIR {
-            true
-        } else if d_type == libc::DT_UNKNOWN || (config.dereference && d_type == libc::DT_LNK) {
-            let name_ptr = unsafe { arena.as_ptr().add(start) as *const libc::c_char };
-            let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
-            let res = unsafe {
-                fstatat(
-                    fd,
-                    name_ptr,
-                    stat_buf.as_mut_ptr(),
-                    if config.dereference {
-                        0
-                    } else {
-                        libc::AT_SYMLINK_NOFOLLOW
-                    },
-                )
-            };
-            res == 0 && (unsafe { stat_buf.assume_init().st_mode } & S_IFMT) == S_IFDIR
-        } else {
-            false
-        };
-        if !(is_dir && exclude.is_match(OsStr::from_bytes(name))) {
-            visible_entries.push((start, len, d_type));
-        }
-    }
-    let mut entries = visible_entries;
 
     entries.sort_by(|&(a_start, a_len, _), &(b_start, b_len, _)| {
         arena[a_start..a_start + a_len].cmp(&arena[b_start..b_start + b_len])

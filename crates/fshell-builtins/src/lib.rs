@@ -569,6 +569,101 @@ mod tests {
         let payload = rx.recv().await;
         assert!(payload.is_some(), "expected entries from ls -v .");
     }
+
+    #[tokio::test]
+    async fn test_ls_ignore_and_exclude_flags() {
+        let _lock = CD_LOCK.lock();
+        let env = init_test_env();
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("fshell_ls_ignore_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("sub").join(".git")).unwrap();
+        std::fs::write(temp_dir.join("test_a.txt"), b"a").unwrap();
+        std::fs::write(temp_dir.join("test_b.tmp"), b"b").unwrap();
+        std::fs::write(temp_dir.join("sub").join("code.rs"), b"code").unwrap();
+        std::fs::write(temp_dir.join("sub").join(".git").join("HEAD"), b"ref").unwrap();
+
+        // 1. Direct listing with --ignore=*.tmp
+        let (tx1, mut rx1) = mpsc::channel(100);
+        ls_builtin(
+            None,
+            vec![
+                Val::String("--ignore=*.tmp".into()),
+                Val::String(temp_dir.to_str().unwrap().into()),
+            ],
+            &env,
+            tx1,
+            None,
+        )
+        .unwrap();
+
+        let mut names1 = Vec::new();
+        while let Some(PipelinePayload::Data(val)) = rx1.recv().await {
+            if let Val::Map(map) = &*val {
+                if let Some(Val::String(name)) = map.get(&ustr::ustr("name")) {
+                    names1.push(name.clone());
+                }
+            }
+        }
+        assert!(names1.contains(&"test_a.txt".to_string()));
+        assert!(!names1.contains(&"test_b.tmp".to_string()));
+
+        // 2. Direct listing with -I *.tmp
+        let (tx2, mut rx2) = mpsc::channel(100);
+        ls_builtin(
+            None,
+            vec![
+                Val::String("-I".into()),
+                Val::String("*.tmp".into()),
+                Val::String(temp_dir.to_str().unwrap().into()),
+            ],
+            &env,
+            tx2,
+            None,
+        )
+        .unwrap();
+
+        let mut names2 = Vec::new();
+        while let Some(PipelinePayload::Data(val)) = rx2.recv().await {
+            if let Val::Map(map) = &*val {
+                if let Some(Val::String(name)) = map.get(&ustr::ustr("name")) {
+                    names2.push(name.clone());
+                }
+            }
+        }
+        assert!(names2.contains(&"test_a.txt".to_string()));
+        assert!(!names2.contains(&"test_b.tmp".to_string()));
+
+        // 3. Recursive listing with -R --ignore=.git
+        let (tx3, mut rx3) = mpsc::channel(100);
+        ls_builtin(
+            None,
+            vec![
+                Val::String("-R".into()),
+                Val::String("--ignore=.git".into()),
+                Val::String(temp_dir.to_str().unwrap().into()),
+            ],
+            &env,
+            tx3,
+            None,
+        )
+        .unwrap();
+
+        let mut names3 = Vec::new();
+        while let Some(PipelinePayload::Data(val)) = rx3.recv().await {
+            if let Val::Map(map) = &*val {
+                if let Some(Val::String(name)) = map.get(&ustr::ustr("name")) {
+                    names3.push(name.clone());
+                }
+            }
+        }
+        assert!(names3.iter().any(|n| n.contains("code.rs")));
+        assert!(!names3.iter().any(|n| n.contains(".git")));
+        assert!(!names3.iter().any(|n| n.contains("HEAD")));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
     // cd builtin
     #[tokio::test]
     async fn test_cd_valid_directory_succeeds() {

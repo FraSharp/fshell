@@ -148,7 +148,7 @@ fn parse_ls_args_to_rrls_config(
                             .to_string());
                         }
                     }
-                    "exclude" => ls.exclude.push(val.to_string()),
+                    "exclude" | "ignore" | "hide" => ls.exclude.push(val.to_string()),
                     _ => {
                         return Err(BuiltinError::InvalidArgument {
                             cmd: "ls".into(),
@@ -193,23 +193,23 @@ fn parse_ls_args_to_rrls_config(
                             return Err("ls: option '--depth' requires an argument".to_string());
                         }
                     }
-                    "exclude" => {
+                    "exclude" | "ignore" | "hide" => {
                         if idx < args.len() {
                             if let Val::String(pattern) = &args[idx] {
                                 ls.exclude.push(pattern.clone());
                                 idx += 1;
                             } else {
-                                return Err("ls: --exclude requires a string value".to_string());
+                                return Err(format!("ls: --{opt} requires a string value"));
                             }
                         } else {
-                            return Err("ls: option '--exclude' requires an argument".to_string());
+                            return Err(format!("ls: option '--{opt}' requires an argument"));
                         }
                     }
                     "group-directories-first" => ls.group_dirs = true,
                     "icons" => ls.icons = true,
                     "git" => ls.git = true,
                     "dereference" => ls.dereference = true,
-                    "recurse" => ls.recursive = true,
+                    "recurse" | "recursive" => ls.recursive = true,
                     "verbose" => ls.verbose = true,
                     _ => {
                         return Err(BuiltinError::InvalidArgument {
@@ -222,8 +222,25 @@ fn parse_ls_args_to_rrls_config(
                 }
             }
         } else if !end_of_opts && s.starts_with('-') && s.len() > 1 {
-            for ch in s.chars().skip(1) {
+            for (byte_idx, ch) in s.char_indices().skip(1) {
                 match ch {
+                    'I' => {
+                        let next_byte = byte_idx + ch.len_utf8();
+                        if next_byte < s.len() {
+                            ls.exclude.push(s[next_byte..].to_string());
+                            break;
+                        } else if idx < args.len() {
+                            if let Val::String(pattern) = &args[idx] {
+                                ls.exclude.push(pattern.clone());
+                                idx += 1;
+                                break;
+                            } else {
+                                return Err("ls: -I requires a string value".to_string());
+                            }
+                        } else {
+                            return Err("ls: option requires an argument -- 'I'".to_string());
+                        }
+                    }
                     'a' => ls.show_hidden = true,
                     'd' => ls.list_dirs = true,
                     'l' => {

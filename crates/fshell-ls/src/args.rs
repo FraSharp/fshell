@@ -46,7 +46,7 @@ pub struct Config {
     pub use_color: bool,
     pub tree: bool,
     pub tree_depth: Option<usize>,
-    /// Glob patterns matched against directory basenames in tree mode.
+    /// Glob patterns matched against entry basenames (in tree, direct scan, or recursive mode).
     pub tree_exclude: Vec<String>,
     pub group_directories_first: bool,
     pub show_icons: bool,

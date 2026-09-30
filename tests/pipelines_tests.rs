@@ -1649,3 +1649,45 @@ async fn test_external_pipeline_chunked_streaming_and_count() {
     let res = fshell_engine::eval_stmt(&stmts[0], &env, false).await;
     assert!(res.is_ok());
 }
+
+#[tokio::test]
+async fn test_ls_recursive_ignore_git_pipeline() {
+    let ctx = TestContext::new();
+    let root = ctx.temp_path().join("repo");
+    std::fs::create_dir_all(root.join(".git").join("objects")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join(".git").join("config"), b"gitconfig").unwrap();
+    std::fs::write(root.join("src").join("main.rs"), b"fn main() {}").unwrap();
+    std::fs::write(root.join("README.md"), b"# Repo").unwrap();
+
+    let cmd_str = format!("ls -R --ignore=.git \"{}\" | head -60", root.display());
+    let mut parser = fshell_core::Parser::new(&cmd_str);
+    let stmts = parser.parse_statements().unwrap();
+
+    let Stmt::Expr(expr) = stmts[0].unpack() else {
+        panic!("expected expression statement");
+    };
+    let fshell_core::Expr::Pipeline(pipeline) = expr.unpack() else {
+        panic!("expected pipeline expression");
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let res = fshell_engine::execute_pipeline(pipeline, &ctx.env, tx).await;
+    assert!(res.is_ok(), "pipeline execution failed: {:?}", res);
+
+    let mut collected = Vec::new();
+    while let Some(payload) = rx.recv().await {
+        if let PipelinePayload::Data(val) = payload {
+            collected.push(val.to_text());
+        }
+    }
+
+    assert!(!collected.is_empty(), "pipeline should return entries");
+    for item in &collected {
+        assert!(!item.contains(".git"), "ignored .git entry found: {item}");
+        assert!(
+            !item.contains("gitconfig"),
+            "file in ignored .git found: {item}"
+        );
+    }
+}

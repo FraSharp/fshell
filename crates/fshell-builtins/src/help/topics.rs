@@ -209,7 +209,7 @@ pub static TOPICS: &[HelpTopic] = &[
         category: HelpCategory::Builtin,
         summary: "List directory contents",
         description: "List directory entries under capability checks. Each entry is emitted as a record with fields for name, size, type, and metadata. Requires read capability on the target path.",
-        syntax: "ls [path] [-a] [-v] [--tree] [--exclude <glob>]",
+        syntax: "ls [path] [-a] [-l] [-R] [-v] [--tree] [-I <glob>] [--ignore <glob>]",
         examples: &[
             HelpExample {
                 input: "ls",
@@ -228,26 +228,34 @@ pub static TOPICS: &[HelpTopic] = &[
                 explanation: "Verbose output including permissions field.",
             },
             HelpExample {
+                input: "ls -R --ignore=.git",
+                explanation: "Recursively list directory entries excluding .git.",
+            },
+            HelpExample {
                 input: "ls --tree --exclude node_modules .",
                 explanation: "Show the directory tree without descending into directories named node_modules.",
             },
         ],
         flags: &[
             HelpFlag {
-                flag: "-a",
+                flag: "-a, --all",
                 desc: "Include hidden entries (files starting with '.')",
             },
             HelpFlag {
-                flag: "-v",
+                flag: "-R, --recursive, --recurse",
+                desc: "List directory contents recursively",
+            },
+            HelpFlag {
+                flag: "-I, --ignore, --exclude, --hide <glob>",
+                desc: "Omit entries matching glob pattern; repeatable",
+            },
+            HelpFlag {
+                flag: "-v, --verbose",
                 desc: "Verbose: include permissions field in output",
             },
             HelpFlag {
                 flag: "--tree",
                 desc: "Render the directory tree",
-            },
-            HelpFlag {
-                flag: "--exclude <glob>",
-                desc: "In tree mode, omit matching directory names and skip reading them; repeatable",
             },
         ],
         related: &["cd", "capabilities"],

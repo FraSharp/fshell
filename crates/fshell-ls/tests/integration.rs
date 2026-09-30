@@ -225,3 +225,29 @@ fn tree_render_can_be_cancelled() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_list_dir_exclude_patterns() {
+    let dir = temp_dir();
+    create_file(&dir, "a.txt");
+    create_file(&dir, "b.rs");
+    create_file(&dir, "c.tmp");
+    create_dir(&dir, "sub1");
+    create_dir(&dir, "sub2");
+
+    let mut config = base_config(dir.clone());
+    config.tree_exclude = vec!["*.tmp".to_string(), "sub2".to_string()];
+    let result = list_dir(&config).unwrap();
+    let names: Vec<&str> = result
+        .entries
+        .iter()
+        .map(|e| extract_name(e, &result.arena))
+        .collect();
+    assert!(names.contains(&"a.txt"));
+    assert!(names.contains(&"b.rs"));
+    assert!(names.contains(&"sub1"));
+    assert!(!names.contains(&"c.tmp"));
+    assert!(!names.contains(&"sub2"));
+
+    let _ = fs::remove_dir_all(&dir);
+}

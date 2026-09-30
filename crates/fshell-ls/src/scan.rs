@@ -13,11 +13,12 @@ use fshell_git::repo::Repository;
 use fshell_git::status::Status as FgStatus;
 use fshell_hash::FxHashMap;
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use libc::{
     O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, S_IFDIR, S_IFMT, close, dirfd, fdopendir, fstat,
     open, readdir,
 };
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -164,6 +165,12 @@ pub fn list_dir_with_git_status_cache(
     let path_is_dir = (path_stat.st_mode & S_IFMT) == S_IFDIR;
     let list_as_single_file = config.list_dirs || !path_is_dir;
 
+    let exclude_matcher = if config.tree_exclude.is_empty() {
+        None
+    } else {
+        Some(build_exclude_matcher(&config.tree_exclude)?)
+    };
+
     let (mut entries, dir_guard, dir_fd, root_identity) = if list_as_single_file {
         let name_bytes = config.path.as_os_str().as_bytes();
         let start = arena.len();
@@ -232,7 +239,8 @@ pub fn list_dir_with_git_status_cache(
             return Err(err);
         }
         let guard = DirGuard(dir);
-        let entries = read_directory_entries(dir, dir_fd, config, &mut arena)?;
+        let entries =
+            read_directory_entries(dir, dir_fd, config, &mut arena, exclude_matcher.as_ref())?;
         (
             entries,
             Some(guard),
@@ -294,6 +302,27 @@ pub fn list_dir_with_git_status_cache(
 }
 
 /// Read all entries from an open directory stream.
+/// Builds a compiled GlobSet from exclusion patterns.
+pub fn build_exclude_matcher(patterns: &[String]) -> io::Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = Glob::new(pattern).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid exclusion pattern '{pattern}': {err}"),
+            )
+        })?;
+        builder.add(glob);
+    }
+    builder.build().map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid exclusion patterns: {err}"),
+        )
+    })
+}
+
+/// Read all entries from an open directory stream.
 ///
 /// # Safety
 ///
@@ -305,6 +334,7 @@ fn read_directory_entries(
     dir_fd: i32,
     config: &Config,
     arena: &mut Vec<u8>,
+    exclude_matcher: Option<&GlobSet>,
 ) -> io::Result<Vec<FileInfo>> {
     let mut entries_data = Vec::with_capacity(INITIAL_ENTRIES_CAPACITY);
 
@@ -328,6 +358,11 @@ fn read_directory_entries(
             continue;
         }
         if !config.show_all && name_bytes.starts_with(b".") {
+            continue;
+        }
+        if let Some(matcher) = exclude_matcher
+            && matcher.is_match(OsStr::from_bytes(name_bytes))
+        {
             continue;
         }
 
