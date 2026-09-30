@@ -1742,4 +1742,74 @@ mod tests {
             remove_var("FSH_CONFIG_DIR");
         }
     }
+
+    #[tokio::test]
+    async fn test_uniq_builtin_options() {
+        let env = init_test_env();
+
+        async fn run_uniq(args: Vec<Val>, input_lines: &[&str], env: &Env) -> Vec<String> {
+            let (in_tx, in_rx) = mpsc::channel(100);
+            let (out_tx, mut out_rx) = mpsc::channel(100);
+            for line in input_lines {
+                in_tx
+                    .send(PipelinePayload::Data(Arc::new(Val::String(
+                        line.to_string(),
+                    ))))
+                    .await
+                    .unwrap();
+            }
+            drop(in_tx);
+
+            uniq_builtin(Some(in_rx), args, env, out_tx, None).unwrap();
+
+            let mut results = Vec::new();
+            while let Some(payload) = out_rx.recv().await {
+                if let PipelinePayload::Data(val) = payload {
+                    if let Val::String(s) = val.as_ref() {
+                        results.push(s.clone());
+                    }
+                }
+            }
+            results
+        }
+
+        // Default: deduplicate consecutive
+        let res = run_uniq(vec![], &["a", "a", "b", "c", "c"], &env).await;
+        assert_eq!(res, vec!["a", "b", "c"]);
+
+        // -d: repeated only
+        let res = run_uniq(
+            vec![Val::String("-d".into())],
+            &["a", "a", "b", "c", "c", "d"],
+            &env,
+        )
+        .await;
+        assert_eq!(res, vec!["a", "c"]);
+
+        // -u: unique only
+        let res = run_uniq(
+            vec![Val::String("-u".into())],
+            &["a", "a", "b", "c", "c", "d"],
+            &env,
+        )
+        .await;
+        assert_eq!(res, vec!["b", "d"]);
+
+        // -i: case-insensitive
+        let res = run_uniq(vec![Val::String("-i".into())], &["a", "A", "b"], &env).await;
+        assert_eq!(res, vec!["a", "b"]);
+
+        // -c: count
+        let res = run_uniq(vec![Val::String("-c".into())], &["a", "a", "b"], &env).await;
+        assert_eq!(res, vec!["      2 a", "      1 b"]);
+
+        // -f 1: skip fields
+        let res = run_uniq(
+            vec![Val::String("-f".into()), Val::String("1".into())],
+            &["1 apple", "2 apple", "3 banana"],
+            &env,
+        )
+        .await;
+        assert_eq!(res, vec!["1 apple", "3 banana"]);
+    }
 }

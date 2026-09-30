@@ -1138,6 +1138,36 @@ async fn test_integration_head_tail_uniq() {
             _ => panic!("Expected List"),
         }
     }
+
+    // Test uniq -d (only duplicate items)
+    let mut parser = Parser::new("$items | uniq -d");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        match res {
+            Val::List(filtered) => {
+                assert_eq!(filtered.len(), 2);
+                assert_eq!(filtered[0], Val::Int(1));
+                assert_eq!(filtered[1], Val::Int(3));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+
+    // Test uniq -u (only unique items)
+    let mut parser = Parser::new("$items | uniq -u");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        match res {
+            Val::List(filtered) => {
+                assert_eq!(filtered.len(), 2);
+                assert_eq!(filtered[0], Val::Int(2));
+                assert_eq!(filtered[1], Val::Int(1));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
 }
 
 #[tokio::test]

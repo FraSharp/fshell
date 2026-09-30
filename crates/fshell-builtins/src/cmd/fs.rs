@@ -1039,15 +1039,6 @@ fn split_bytes_lines(payload: &PipelinePayload) -> Vec<PipelinePayload> {
         .collect()
 }
 
-/// Equality between two stream items for consecutive-duplicate detection.
-fn previous_payload_eq(a: &PipelinePayload, b: &PipelinePayload) -> bool {
-    match (a, b) {
-        (PipelinePayload::Data(x), PipelinePayload::Data(y)) => x == y,
-        (PipelinePayload::Bytes(x), PipelinePayload::Bytes(y)) => x == y,
-        _ => false,
-    }
-}
-
 fn parse_head_tail_args(args: &[Val]) -> Result<(usize, Vec<String>), ShellError> {
     let mut n = 10usize;
     let mut paths = Vec::new();
@@ -1298,6 +1289,524 @@ pub fn tail_builtin(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DuplicateFilter {
+    All,
+    RepeatedOnly,
+    AllRepeated,
+    UniqueOnly,
+}
+
+#[derive(Debug, Clone)]
+struct UniqArgs {
+    filter: DuplicateFilter,
+    count: bool,
+    ignore_case: bool,
+    skip_fields: usize,
+    skip_chars: usize,
+    zero_terminated: bool,
+    input_file: Option<String>,
+    output_file: Option<String>,
+}
+
+fn parse_uniq_args(args: &[Val], span: Option<SourceSpan>) -> Result<UniqArgs, ShellError> {
+    let mut config = UniqArgs {
+        filter: DuplicateFilter::All,
+        count: false,
+        ignore_case: false,
+        skip_fields: 0,
+        skip_chars: 0,
+        zero_terminated: false,
+        input_file: None,
+        output_file: None,
+    };
+    let mut end_of_opts = false;
+    let mut idx = 0;
+
+    while idx < args.len() {
+        let arg = &args[idx];
+        idx += 1;
+
+        let s = match arg {
+            Val::String(s) => s.clone(),
+            Val::Int(n) if !end_of_opts && *n < 0 => n.to_string(),
+            other => {
+                if end_of_opts || config.input_file.is_none() || config.output_file.is_none() {
+                    val_to_display_string(other)
+                } else {
+                    return Err(ShellError::new(
+                        ErrorCode::InvalidArgument,
+                        "uniq: unexpected non-string argument",
+                    )
+                    .maybe_with_span(span));
+                }
+            }
+        };
+
+        if !end_of_opts && s == "--" {
+            end_of_opts = true;
+            continue;
+        }
+
+        if !end_of_opts && s.starts_with("--") && s.len() > 2 {
+            let opt = &s[2..];
+            if let Some(eq_pos) = opt.find('=') {
+                let key = &opt[..eq_pos];
+                let val = &opt[eq_pos + 1..];
+                match key {
+                    "count" => config.count = true,
+                    "repeated" => config.filter = DuplicateFilter::RepeatedOnly,
+                    "all-repeated" => config.filter = DuplicateFilter::AllRepeated,
+                    "unique" => config.filter = DuplicateFilter::UniqueOnly,
+                    "ignore-case" => config.ignore_case = true,
+                    "zero-terminated" => config.zero_terminated = true,
+                    "skip-fields" => {
+                        config.skip_fields = val.parse::<usize>().map_err(|_| {
+                            ShellError::new(
+                                ErrorCode::InvalidArgument,
+                                format!("uniq: invalid number of fields to skip: '{val}'"),
+                            )
+                            .maybe_with_span(span)
+                        })?;
+                    }
+                    "skip-chars" => {
+                        config.skip_chars = val.parse::<usize>().map_err(|_| {
+                            ShellError::new(
+                                ErrorCode::InvalidArgument,
+                                format!("uniq: invalid number of bytes to skip: '{val}'"),
+                            )
+                            .maybe_with_span(span)
+                        })?;
+                    }
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            format!("uniq: unrecognized option '--{key}'"),
+                        )
+                        .maybe_with_span(span));
+                    }
+                }
+            } else {
+                match opt {
+                    "count" => config.count = true,
+                    "repeated" => config.filter = DuplicateFilter::RepeatedOnly,
+                    "all-repeated" => config.filter = DuplicateFilter::AllRepeated,
+                    "unique" => config.filter = DuplicateFilter::UniqueOnly,
+                    "ignore-case" => config.ignore_case = true,
+                    "zero-terminated" => config.zero_terminated = true,
+                    "skip-fields" => {
+                        if idx < args.len() {
+                            let val_str = val_to_display_string(&args[idx]);
+                            idx += 1;
+                            config.skip_fields = val_str.parse::<usize>().map_err(|_| {
+                                ShellError::new(
+                                    ErrorCode::InvalidArgument,
+                                    format!("uniq: invalid number of fields to skip: '{val_str}'"),
+                                )
+                                .maybe_with_span(span)
+                            })?;
+                        } else {
+                            return Err(ShellError::new(
+                                ErrorCode::InvalidArgument,
+                                "uniq: option '--skip-fields' requires an argument",
+                            )
+                            .maybe_with_span(span));
+                        }
+                    }
+                    "skip-chars" => {
+                        if idx < args.len() {
+                            let val_str = val_to_display_string(&args[idx]);
+                            idx += 1;
+                            config.skip_chars = val_str.parse::<usize>().map_err(|_| {
+                                ShellError::new(
+                                    ErrorCode::InvalidArgument,
+                                    format!("uniq: invalid number of bytes to skip: '{val_str}'"),
+                                )
+                                .maybe_with_span(span)
+                            })?;
+                        } else {
+                            return Err(ShellError::new(
+                                ErrorCode::InvalidArgument,
+                                "uniq: option '--skip-chars' requires an argument",
+                            )
+                            .maybe_with_span(span));
+                        }
+                    }
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            format!("uniq: unrecognized option '--{opt}'"),
+                        )
+                        .maybe_with_span(span));
+                    }
+                }
+            }
+        } else if !end_of_opts && s.starts_with('-') && s.len() > 1 && s != "-" {
+            let chars: Vec<char> = s[1..].chars().collect();
+            let mut c_idx = 0;
+            while c_idx < chars.len() {
+                let ch = chars[c_idx];
+                match ch {
+                    'c' => config.count = true,
+                    'd' => config.filter = DuplicateFilter::RepeatedOnly,
+                    'D' => config.filter = DuplicateFilter::AllRepeated,
+                    'u' => config.filter = DuplicateFilter::UniqueOnly,
+                    'i' => config.ignore_case = true,
+                    'z' => config.zero_terminated = true,
+                    'f' => {
+                        let val_str = if c_idx + 1 < chars.len() {
+                            chars[c_idx + 1..].iter().collect()
+                        } else if idx < args.len() {
+                            let val = val_to_display_string(&args[idx]);
+                            idx += 1;
+                            val
+                        } else {
+                            return Err(ShellError::new(
+                                ErrorCode::InvalidArgument,
+                                "uniq: option requires an argument -- 'f'",
+                            )
+                            .maybe_with_span(span));
+                        };
+                        config.skip_fields = val_str.parse::<usize>().map_err(|_| {
+                            ShellError::new(
+                                ErrorCode::InvalidArgument,
+                                format!("uniq: invalid number of fields to skip: '{val_str}'"),
+                            )
+                            .maybe_with_span(span)
+                        })?;
+                        break;
+                    }
+                    's' => {
+                        let val_str = if c_idx + 1 < chars.len() {
+                            chars[c_idx + 1..].iter().collect()
+                        } else if idx < args.len() {
+                            let val = val_to_display_string(&args[idx]);
+                            idx += 1;
+                            val
+                        } else {
+                            return Err(ShellError::new(
+                                ErrorCode::InvalidArgument,
+                                "uniq: option requires an argument -- 's'",
+                            )
+                            .maybe_with_span(span));
+                        };
+                        config.skip_chars = val_str.parse::<usize>().map_err(|_| {
+                            ShellError::new(
+                                ErrorCode::InvalidArgument,
+                                format!("uniq: invalid number of bytes to skip: '{val_str}'"),
+                            )
+                            .maybe_with_span(span)
+                        })?;
+                        break;
+                    }
+                    _ => {
+                        return Err(ShellError::new(
+                            ErrorCode::InvalidArgument,
+                            format!("uniq: invalid option -- '{ch}'"),
+                        )
+                        .maybe_with_span(span));
+                    }
+                }
+                c_idx += 1;
+            }
+        } else if config.input_file.is_none() {
+            if s != "-" {
+                config.input_file = Some(s);
+            }
+        } else if config.output_file.is_none() {
+            if s != "-" {
+                config.output_file = Some(s);
+            }
+        } else {
+            return Err(ShellError::new(
+                ErrorCode::InvalidArgument,
+                format!("uniq: extra operand '{s}'"),
+            )
+            .maybe_with_span(span));
+        }
+    }
+
+    Ok(config)
+}
+
+fn extract_comparison_key<'a>(
+    s: &'a str,
+    skip_fields: usize,
+    skip_chars: usize,
+    ignore_case: bool,
+) -> std::borrow::Cow<'a, str> {
+    let mut remainder = s;
+    if skip_fields > 0 {
+        let mut fields_skipped = 0;
+        let mut chars = remainder.char_indices().peekable();
+        let mut end_offset = remainder.len();
+        while fields_skipped < skip_fields {
+            while let Some(&(_, ch)) = chars.peek() {
+                if ch.is_whitespace() {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if chars.peek().is_none() {
+                end_offset = remainder.len();
+                break;
+            }
+            while let Some(&(_, ch)) = chars.peek() {
+                if !ch.is_whitespace() {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            fields_skipped += 1;
+            if fields_skipped == skip_fields {
+                end_offset = chars.peek().map(|&(idx, _)| idx).unwrap_or(remainder.len());
+                break;
+            }
+        }
+        remainder = &remainder[end_offset..];
+    }
+
+    if skip_chars > 0 {
+        let skip_idx = remainder
+            .char_indices()
+            .nth(skip_chars)
+            .map(|(idx, _)| idx)
+            .unwrap_or(remainder.len());
+        remainder = &remainder[skip_idx..];
+    }
+
+    if ignore_case {
+        std::borrow::Cow::Owned(remainder.to_lowercase())
+    } else {
+        std::borrow::Cow::Borrowed(remainder)
+    }
+}
+
+enum UniqOutput {
+    Channel(PipeSender),
+    File(tokio::io::BufWriter<tokio::fs::File>),
+}
+
+impl UniqOutput {
+    async fn emit_payload(
+        &mut self,
+        payload: PipelinePayload,
+        zero_terminated: bool,
+    ) -> Result<(), ()> {
+        match self {
+            Self::Channel(tx) => tx.send(payload).await.map_err(|_| ()),
+            Self::File(writer) => {
+                use tokio::io::AsyncWriteExt;
+                let text = match &payload {
+                    PipelinePayload::Data(val) => val_to_display_string(val),
+                    PipelinePayload::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+                    PipelinePayload::Structured(_) => return Ok(()),
+                };
+                let sep = if zero_terminated { b"\0" } else { b"\n" };
+                writer.write_all(text.as_bytes()).await.map_err(|_| ())?;
+                writer.write_all(sep).await.map_err(|_| ())?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn flush(&mut self) -> Result<(), ()> {
+        if let Self::File(writer) = self {
+            use tokio::io::AsyncWriteExt;
+            writer.flush().await.map_err(|_| ())?;
+        }
+        Ok(())
+    }
+}
+
+fn format_count_payload(count: usize, payload: &PipelinePayload) -> PipelinePayload {
+    match payload {
+        PipelinePayload::Data(val) => {
+            let s = val_to_display_string(val);
+            PipelinePayload::Data(Arc::new(Val::String(format!("{:7} {}", count, s))))
+        }
+        PipelinePayload::Bytes(b) => {
+            let s = String::from_utf8_lossy(b);
+            PipelinePayload::Data(Arc::new(Val::String(format!("{:7} {}", count, s))))
+        }
+        other => other.clone(),
+    }
+}
+
+struct UniqEngine {
+    config: UniqArgs,
+    output: UniqOutput,
+    current_key: Option<String>,
+    current_item: Option<PipelinePayload>,
+    count: usize,
+    emitted_count: usize,
+}
+
+impl UniqEngine {
+    fn new(config: UniqArgs, output: UniqOutput) -> Self {
+        Self {
+            config,
+            output,
+            current_key: None,
+            current_item: None,
+            count: 0,
+            emitted_count: 0,
+        }
+    }
+
+    fn key_for_payload(&self, payload: &PipelinePayload) -> String {
+        match payload {
+            PipelinePayload::Data(val) => match val.as_ref() {
+                Val::String(s) => extract_comparison_key(
+                    s,
+                    self.config.skip_fields,
+                    self.config.skip_chars,
+                    self.config.ignore_case,
+                )
+                .into_owned(),
+                other => {
+                    if self.config.skip_fields == 0
+                        && self.config.skip_chars == 0
+                        && !self.config.ignore_case
+                    {
+                        format!("{other:?}")
+                    } else {
+                        let s = val_to_display_string(other);
+                        extract_comparison_key(
+                            &s,
+                            self.config.skip_fields,
+                            self.config.skip_chars,
+                            self.config.ignore_case,
+                        )
+                        .into_owned()
+                    }
+                }
+            },
+            PipelinePayload::Bytes(b) => {
+                let s = String::from_utf8_lossy(b);
+                extract_comparison_key(
+                    &s,
+                    self.config.skip_fields,
+                    self.config.skip_chars,
+                    self.config.ignore_case,
+                )
+                .into_owned()
+            }
+            PipelinePayload::Structured(_) => String::new(),
+        }
+    }
+
+    async fn feed(&mut self, item: PipelinePayload) -> Result<(), ()> {
+        let key = self.key_for_payload(&item);
+        let is_same = self.current_key.as_ref() == Some(&key);
+
+        if is_same {
+            self.count += 1;
+            match self.config.filter {
+                DuplicateFilter::AllRepeated => {
+                    if self.count == 2 {
+                        if let Some(first) = self.current_item.take() {
+                            self.output
+                                .emit_payload(first, self.config.zero_terminated)
+                                .await?;
+                        }
+                        self.output
+                            .emit_payload(item, self.config.zero_terminated)
+                            .await?;
+                    } else if self.count > 2 {
+                        self.output
+                            .emit_payload(item, self.config.zero_terminated)
+                            .await?;
+                    }
+                }
+                DuplicateFilter::RepeatedOnly if !self.config.count && self.emitted_count == 0 => {
+                    self.output
+                        .emit_payload(item, self.config.zero_terminated)
+                        .await?;
+                    self.emitted_count = 1;
+                }
+                _ => {}
+            }
+        } else {
+            self.flush_current().await?;
+            self.current_key = Some(key);
+            self.count = 1;
+            self.emitted_count = 0;
+
+            if self.config.filter == DuplicateFilter::All && !self.config.count {
+                self.output
+                    .emit_payload(item.clone(), self.config.zero_terminated)
+                    .await?;
+                self.emitted_count = 1;
+                self.current_item = None;
+            } else {
+                self.current_item = Some(item);
+            }
+        }
+        Ok(())
+    }
+
+    async fn flush_current(&mut self) -> Result<(), ()> {
+        if self.count == 0 {
+            return Ok(());
+        }
+
+        let count = self.count;
+        let item = self.current_item.take();
+
+        match self.config.filter {
+            DuplicateFilter::All => {
+                if self.config.count
+                    && let Some(it) = item
+                {
+                    let formatted = format_count_payload(count, &it);
+                    self.output
+                        .emit_payload(formatted, self.config.zero_terminated)
+                        .await?;
+                }
+            }
+            DuplicateFilter::UniqueOnly => {
+                if count == 1
+                    && let Some(it) = item
+                {
+                    let payload = if self.config.count {
+                        format_count_payload(count, &it)
+                    } else {
+                        it
+                    };
+                    self.output
+                        .emit_payload(payload, self.config.zero_terminated)
+                        .await?;
+                }
+            }
+            DuplicateFilter::RepeatedOnly => {
+                if count >= 2
+                    && self.config.count
+                    && let Some(it) = item
+                {
+                    let formatted = format_count_payload(count, &it);
+                    self.output
+                        .emit_payload(formatted, self.config.zero_terminated)
+                        .await?;
+                }
+            }
+            DuplicateFilter::AllRepeated => {}
+        }
+
+        self.count = 0;
+        self.emitted_count = 0;
+        self.current_key = None;
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> Result<(), ()> {
+        self.flush_current().await?;
+        self.output.flush().await
+    }
+}
+
 pub fn uniq_builtin(
     in_rx: Option<PipeStream>,
     args: Vec<Val>,
@@ -1305,79 +1814,46 @@ pub fn uniq_builtin(
     tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
-    let mut paths = Vec::new();
-    for arg in args {
-        match arg {
-            Val::String(s) => {
-                paths.push(s);
-            }
-            _ => {
-                return Err(ShellError::new(
-                    ErrorCode::InvalidArgument,
-                    "Unexpected non-string argument to uniq",
-                )
-                .maybe_with_span(span));
-            }
-        }
-    }
+    let config = parse_uniq_args(&args, span)?;
 
-    if paths.is_empty() {
-        if let Some(mut rx) = in_rx {
-            tokio::spawn(async move {
-                let mut last: Option<PipelinePayload> = None;
-                while let Some(payload) = rx.recv().await {
-                    if let PipelinePayload::Structured(_) = payload {
-                        if tx.send(payload).await.is_err() {
-                            break;
-                        }
-                        continue;
-                    }
-                    // Split multi-line strings and raw byte streams into lines
-                    // so consecutive duplicates are collapsed on line
-                    // boundaries (matching POSIX uniq).
-                    for item in split_multiline_payload(&payload) {
-                        let duplicate = last
-                            .as_ref()
-                            .is_some_and(|prev| previous_payload_eq(prev, &item));
-                        if !duplicate {
-                            if tx.send(item.clone()).await.is_err() {
-                                return;
-                            }
-                            last = Some(item);
-                        }
-                    }
-                }
-            });
-        }
-        return Ok(());
-    }
+    let canonical_input = if let Some(ref p) = config.input_file {
+        let raw = resolve_user_path(p, env);
+        let path = std::fs::canonicalize(&raw).map_err(|e| format!("Invalid path {raw:?}: {e}"))?;
+        check_read_file(env, "uniq", path.clone())?;
+        Some(path)
+    } else {
+        None
+    };
 
-    let canonical_paths = resolve_canonical_paths(&paths, env, "uniq")?;
+    let canonical_output = if let Some(ref p) = config.output_file {
+        let raw = resolve_user_path(p, env);
+        let path = if raw.exists() {
+            std::fs::canonicalize(&raw).map_err(|e| format!("Invalid path {raw:?}: {e}"))?
+        } else if let Some(parent) = raw.parent() {
+            let canon_parent =
+                std::fs::canonicalize(parent).map_err(|e| format!("Invalid path {raw:?}: {e}"))?;
+            canon_parent.join(raw.file_name().unwrap_or_default())
+        } else {
+            raw
+        };
+        env.enforce_capability("uniq", CapAction::WriteFile(path.clone()))?;
+        Some(path)
+    } else {
+        None
+    };
 
     tokio::spawn(async move {
         use tokio::io::AsyncBufReadExt;
-        for path in canonical_paths {
-            match tokio::fs::File::open(&path).await {
-                Ok(file) => {
-                    let reader = tokio::io::BufReader::new(file);
-                    let mut lines = reader.lines();
-                    let mut last_line: Option<String> = None;
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if last_line.as_deref() != Some(&line) {
-                            last_line = Some(line.clone());
-                            let payload = PipelinePayload::Data(Arc::new(Val::String(line)));
-                            if tx.send(payload).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
+
+        let output = if let Some(out_path) = canonical_output {
+            match tokio::fs::File::create(&out_path).await {
+                Ok(f) => UniqOutput::File(tokio::io::BufWriter::new(f)),
                 Err(e) => {
                     let _ = tx
                         .send(PipelinePayload::Structured(
                             ShellError::new(
                                 ErrorCode::IoError,
-                                format!("Failed to read file {:?}: {}", path, e),
+                                format!("Failed to create output file {:?}: {}", out_path, e),
                             )
                             .maybe_with_span(span)
                             .into(),
@@ -1386,7 +1862,65 @@ pub fn uniq_builtin(
                     return;
                 }
             }
+        } else {
+            UniqOutput::Channel(tx.clone())
+        };
+
+        let mut engine = UniqEngine::new(config, output);
+
+        if let Some(in_path) = canonical_input {
+            match tokio::fs::File::open(&in_path).await {
+                Ok(file) => {
+                    let reader = tokio::io::BufReader::new(file);
+                    let mut lines = reader.lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let payload = PipelinePayload::Data(Arc::new(Val::String(line)));
+                        if engine.feed(payload).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(PipelinePayload::Structured(
+                            ShellError::new(
+                                ErrorCode::IoError,
+                                format!("Failed to read file {:?}: {}", in_path, e),
+                            )
+                            .maybe_with_span(span)
+                            .into(),
+                        ))
+                        .await;
+                    return;
+                }
+            }
+        } else if let Some(mut rx) = in_rx {
+            while let Some(payload) = rx.recv().await {
+                if let PipelinePayload::Structured(s) = payload {
+                    if tx.send(PipelinePayload::Structured(s)).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                for item in split_multiline_payload(&payload) {
+                    if engine.feed(item).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        } else {
+            let stdin = tokio::io::stdin();
+            let reader = tokio::io::BufReader::new(stdin);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let payload = PipelinePayload::Data(Arc::new(Val::String(line)));
+                if engine.feed(payload).await.is_err() {
+                    return;
+                }
+            }
         }
+
+        let _ = engine.finish().await;
     });
 
     Ok(())

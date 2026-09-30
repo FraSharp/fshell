@@ -1725,20 +1725,61 @@ Fuzzy search (--search/-s) matches against topic name, summary, and description.
         name: "uniq",
         category: HelpCategory::Builtin,
         summary: "Filter out duplicate consecutive elements",
-        description: "Removes consecutive duplicate elements from a pipeline stream, emitting only unique adjacent values.",
-        syntax: "uniq",
+        description: "Removes consecutive duplicate elements from a pipeline stream or file, emitting unique or duplicate adjacent values according to flags.",
+        syntax: "uniq [-c | -d | -D | -u] [-i] [-f <N>] [-s <N>] [-z] [input [output]]",
         examples: &[
-            HelpExample {
-                input: "ls | map type | uniq",
-                explanation: "Show unique adjacent file/directory types.",
-            },
             HelpExample {
                 input: "echo a a b b c | uniq",
                 explanation: "Remove consecutive duplicates from a stream.",
             },
+            HelpExample {
+                input: "echo a a b c c | uniq -d",
+                explanation: "Output only duplicate lines (one per duplicate group).",
+            },
+            HelpExample {
+                input: "echo a a b c c | uniq -u",
+                explanation: "Output only unique lines (lines occurring once).",
+            },
+            HelpExample {
+                input: "echo a a b | uniq -c",
+                explanation: "Prefix lines with occurrence count.",
+            },
         ],
-        flags: &[],
-        related: &["head", "tail"],
+        flags: &[
+            HelpFlag {
+                flag: "-c, --count",
+                desc: "Prefix lines with their number of occurrences",
+            },
+            HelpFlag {
+                flag: "-d, --repeated",
+                desc: "Only print duplicate lines, one for each group",
+            },
+            HelpFlag {
+                flag: "-D, --all-repeated",
+                desc: "Print all duplicate lines",
+            },
+            HelpFlag {
+                flag: "-u, --unique",
+                desc: "Only print unique lines (occurring exactly once)",
+            },
+            HelpFlag {
+                flag: "-i, --ignore-case",
+                desc: "Ignore case differences when comparing",
+            },
+            HelpFlag {
+                flag: "-f, --skip-fields <N>",
+                desc: "Avoid comparing the first N fields",
+            },
+            HelpFlag {
+                flag: "-s, --skip-chars <N>",
+                desc: "Avoid comparing the first N characters",
+            },
+            HelpFlag {
+                flag: "-z, --zero-terminated",
+                desc: "Delimit lines with NUL byte instead of newline",
+            },
+        ],
+        related: &["head", "tail", "sort"],
     },
     HelpTopic {
         name: "group-by",
