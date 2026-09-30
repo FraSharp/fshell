@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(
             expr.unpack(),
             &Expr::String(vec![StringPart::Lit {
-                text: "\x1Bhello".to_string(),
+                text: "\\x1Bhello".to_string(),
                 quote: QuoteKind::Double,
             }])
         );
@@ -777,7 +777,7 @@ mod tests {
         assert_eq!(
             expr.unpack(),
             &Expr::String(vec![StringPart::Lit {
-                text: "\u{00E9}".to_string(),
+                text: "\\u00E9".to_string(),
                 quote: QuoteKind::Double,
             }])
         );
@@ -790,7 +790,7 @@ mod tests {
         match expr.unpack() {
             Expr::Map(pairs) => {
                 assert_eq!(pairs.len(), 1);
-                assert_eq!(pairs[0].0, "\u{00E9}");
+                assert_eq!(pairs[0].0, "\\u00E9");
             }
             _ => panic!("Expected Expr::Map"),
         }
@@ -803,7 +803,7 @@ mod tests {
         assert_eq!(
             expr.unpack(),
             &Expr::String(vec![StringPart::Lit {
-                text: "null\x00byte".to_string(),
+                text: "null\\0byte".to_string(),
                 quote: QuoteKind::Double,
             }])
         );
@@ -811,8 +811,8 @@ mod tests {
 
     #[test]
     fn test_string_escape_preserves_unknown() {
-        // Unknown escapes like \z, \., \s are preserved literally
-        // (bash double-quote convention) so regex patterns pass through.
+        // Unknown/data escapes like \z, \., \s, \n, \t are preserved literally
+        // (bash double-quote convention) so regex patterns and scripts pass through.
         use crate::ast::{Expr, StringPart};
 
         let mut parser = Parser::new(r#""\z""#);
@@ -835,13 +835,30 @@ mod tests {
                 quote: QuoteKind::Double,
             }])
         );
+
+        // Test \n specifically — python3 -c / grep use case
+        let mut parser3 = Parser::new(r#""\n""#);
+        let result3 = parser3.parse_expr().unwrap();
+        assert_eq!(
+            result3.unpack(),
+            &Expr::String(vec![StringPart::Lit {
+                text: "\\n".to_string(),
+                quote: QuoteKind::Double,
+            }])
+        );
     }
 
     #[test]
-    fn test_string_escape_invalid_hex() {
+    fn test_string_escape_non_hex_preserved() {
         let mut parser = Parser::new(r#""\xGH""#);
-        let result = parser.parse_expr();
-        assert!(result.is_err(), "Invalid hex escape should produce error");
+        let result = parser.parse_expr().unwrap();
+        assert_eq!(
+            result.unpack(),
+            &Expr::String(vec![StringPart::Lit {
+                text: "\\xGH".to_string(),
+                quote: QuoteKind::Double,
+            }])
+        );
     }
 
     #[test]

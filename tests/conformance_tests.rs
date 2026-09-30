@@ -57,6 +57,36 @@ fn word_model_cases() -> Vec<Case> {
             .features(&["word", "single_quote"]),
         Case::posix_only("word/double-quotes-contain-single", "argvdump \"it's\"")
             .features(&["word", "double_quote"]),
+        Case::posix_only(
+            "word/double-quote-escaped-quote",
+            r#"argvdump "say \"hi\"""#,
+        )
+        .features(&["word", "double_quote", "backslash"]),
+        Case::posix_only("word/double-quote-escaped-backslash", r#"argvdump "a\\b""#).features(&[
+            "word",
+            "double_quote",
+            "backslash",
+        ]),
+        Case::posix_only("word/double-quote-escaped-dollar", r#"argvdump "a\$b""#).features(&[
+            "word",
+            "double_quote",
+            "backslash",
+        ]),
+        Case::posix_only(
+            "word/double-quote-preserves-backslash-n",
+            r#"argvdump "a\nb""#,
+        )
+        .features(&["word", "double_quote", "backslash"]),
+        Case::posix_only(
+            "word/double-quote-preserves-backslash-t",
+            r#"argvdump "a\tb""#,
+        )
+        .features(&["word", "double_quote", "backslash"]),
+        Case::posix_only("word/double-quote-line-continuation", "argvdump \"a\\\nb\"").features(&[
+            "word",
+            "double_quote",
+            "backslash",
+        ]),
         // --- globbing and quote context ------------------------------------
         // Quoting must suppress pathname expansion: this is the invariant the
         // whole word model rests on.
@@ -608,6 +638,55 @@ fn native_word_model_cases() -> Vec<Case> {
             0,
         )
         .features(&["native", "word", "double_quote", "glob"]),
+        Case::native(
+            "native/double-quoted-escaped-quote",
+            r#"argvdump "say \"hi\"""#,
+            "argc=1\narg[0]=\"say \\\"hi\\\"\"\n",
+            0,
+        )
+        .features(&["native", "word", "double_quote", "backslash"]),
+        Case::native(
+            "native/double-quoted-escaped-backslash",
+            r#"argvdump "a\\b""#,
+            "argc=1\narg[0]=\"a\\\\b\"\n",
+            0,
+        )
+        .features(&["native", "word", "double_quote", "backslash"]),
+        Case::native(
+            "native/double-quoted-escaped-dollar",
+            r#"argvdump "a\$b""#,
+            "argc=1\narg[0]=\"a$b\"\n",
+            0,
+        )
+        .features(&["native", "word", "double_quote", "backslash"]),
+        Case::native(
+            "native/double-quoted-escaped-braces",
+            r#"argvdump "a\{b\}c""#,
+            "argc=1\narg[0]=\"a{b}c\"\n",
+            0,
+        )
+        .features(&["native", "word", "double_quote", "backslash"]),
+        Case::native(
+            "native/double-quoted-preserves-backslash-n",
+            r#"argvdump "a\nb""#,
+            "argc=1\narg[0]=\"a\\\\nb\"\n",
+            0,
+        )
+        .features(&["native", "word", "double_quote", "backslash"]),
+        Case::native(
+            "native/double-quoted-preserves-backslash-t",
+            r#"argvdump "a\tb""#,
+            "argc=1\narg[0]=\"a\\\\tb\"\n",
+            0,
+        )
+        .features(&["native", "word", "double_quote", "backslash"]),
+        Case::native(
+            "native/double-quoted-line-continuation",
+            "argvdump \"a\\\nb\"",
+            "argc=1\narg[0]=\"ab\"\n",
+            0,
+        )
+        .features(&["native", "word", "double_quote", "backslash"]),
         // An escape is the other way to make a metacharacter literal. Native
         // keeps the backslash in the value — its documented unknown-escape rule
         // (`docs/LANGUAGE.md`, "backslash escapes in words"), so unquoted regexes

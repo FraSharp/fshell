@@ -49,70 +49,29 @@ impl Parser {
         self.pos >= self.input.len()
     }
 
-    /// Parse an escape sequence inside a string literal.
-    /// Returns the expanded string (one or more chars).
-    /// For unrecognized escapes (e.g. `\.`), preserves the literal `\`+char
-    /// matching bash double-quote convention — essential for passing regex
-    /// patterns like `\.rs$` through to external commands unchanged.
+    /// Parse an escape sequence inside a double-quoted string literal.
+    ///
+    /// Following the POSIX/Bash double-quote convention, backslashes retain
+    /// special escape meaning only before `"`, `\`, `$`, `` ` ``, `{`, `}`,
+    /// and newline (line continuation). All other sequences (`\n`, `\t`, `\r`,
+    /// `\0`, `\x`, `\u`, `\.`, `\d`, etc.) preserve the backslash verbatim so
+    /// scripts, regexes, and arguments passed to external tools (Python, grep,
+    /// sed, awk) are not corrupted.
     pub(crate) fn parse_escape_seq(&mut self) -> Result<String, ParseError> {
         match self.next_char() {
-            Some('n') => Ok("\n".to_string()),
-            Some('t') => Ok("\t".to_string()),
-            Some('r') => Ok("\r".to_string()),
             Some('\\') => Ok("\\".to_string()),
             Some('"') => Ok("\"".to_string()),
+            Some('$') => Ok("$".to_string()),
+            Some('`') => Ok("`".to_string()),
             Some('{') => Ok("{".to_string()),
             Some('}') => Ok("}".to_string()),
-            Some('0') => Ok("\0".to_string()),
-            Some('x') => {
-                let mut hex = String::with_capacity(2);
-                for _ in 0..2 {
-                    match self.next_char() {
-                        Some(c) if c.is_ascii_hexdigit() => hex.push(c),
-                        _ => {
-                            return Err(ParseError::SyntaxError {
-                                message:
-                                    "Invalid hex escape: expected two hexadecimal digits after \\x"
-                                        .to_string(),
-                                span: self.current_span(),
-                            });
-                        }
-                    }
+            Some('\r') => {
+                if self.peek() == Some('\n') {
+                    self.next_char();
                 }
-                let byte = u8::from_str_radix(&hex, 16).map_err(|_| ParseError::SyntaxError {
-                    message: "Invalid hex digits".to_string(),
-                    span: self.current_span(),
-                })?;
-                Ok((byte as char).to_string())
+                Ok(String::new())
             }
-            Some('u') => {
-                let mut hex = String::with_capacity(4);
-                for _ in 0..4 {
-                    match self.next_char() {
-                        Some(c) if c.is_ascii_hexdigit() => hex.push(c),
-                        _ => {
-                            return Err(ParseError::SyntaxError {
-                                message:
-                                    "Invalid unicode escape: expected four hexadecimal digits after \\u"
-                                        .to_string(),
-                                span: self.current_span(),
-                            });
-                        }
-                    }
-                }
-                let code = u32::from_str_radix(&hex, 16).map_err(|_| ParseError::SyntaxError {
-                    message: "Invalid unicode escape digits".to_string(),
-                    span: self.current_span(),
-                })?;
-                let c = char::from_u32(code).ok_or_else(|| ParseError::SyntaxError {
-                    message: format!("Invalid unicode code point: U+{:X}", code),
-                    span: self.current_span(),
-                })?;
-                Ok(c.to_string())
-            }
-            // Unknown escapes like `\.`, `\s`, `\[`: preserve `\`+char literally.
-            // This is the standard bash double-quote behavior and critical for
-            // regex patterns passed to grep, rg, sed, etc.
+            Some('\n') => Ok(String::new()),
             Some(other) => Ok(format!("\\{}", other)),
             None => Err(ParseError::UnexpectedEof {
                 span: self.current_span(),

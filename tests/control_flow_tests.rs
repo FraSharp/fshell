@@ -879,7 +879,7 @@ async fn test_eval_if_else_if_chaining() {
 async fn test_string_escape_sequences() {
     let env = setup_test_env();
 
-    // \\n escape — the parser sees literal backslash-n and converts to newline
+    // Double quotes: unknown/data escapes are preserved verbatim matching Bash/POSIX
     let mut p = Parser::new(r##"let s = "hello\nworld""##);
     let stmts = p.parse_statements().unwrap();
     eval_stmt(&stmts[0], &env, false).await.unwrap();
@@ -887,12 +887,38 @@ async fn test_string_escape_sequences() {
         let vars = env.vars.read();
         assert_eq!(
             vars.get("s"),
-            Some(&Val::String("hello\nworld".to_string()))
+            Some(&Val::String("hello\\nworld".to_string()))
         );
     }
 
-    // \\x hex escapes: \\x48 = H, \\x65 = e, \\x6c = l, \\x6f = o
-    let mut p2 = Parser::new(r##"let t = "\x48\x65\x6c\x6c\x6f""##);
+    // Double quotes: structural escapes for quotes, backslashes, dollars, and braces
+    let mut p_esc = Parser::new(r#"let esc = "quote: \" backslash: \\ dollar: \$ brace: \{ok\}""#);
+    let stmts_esc = p_esc.parse_statements().unwrap();
+    eval_stmt(&stmts_esc[0], &env, false).await.unwrap();
+    {
+        let vars = env.vars.read();
+        assert_eq!(
+            vars.get("esc"),
+            Some(&Val::String(
+                "quote: \" backslash: \\ dollar: $ brace: {ok}".to_string()
+            ))
+        );
+    }
+
+    // Double quotes: line continuation strips backslash and newline
+    let mut p_cont = Parser::new("let cont = \"hello\\\nworld\"");
+    let stmts_cont = p_cont.parse_statements().unwrap();
+    eval_stmt(&stmts_cont[0], &env, false).await.unwrap();
+    {
+        let vars = env.vars.read();
+        assert_eq!(
+            vars.get("cont"),
+            Some(&Val::String("helloworld".to_string()))
+        );
+    }
+
+    // ANSI-C quoting ($'...'): C-style escapes are expanded
+    let mut p2 = Parser::new(r##"let t = $'\x48\x65\x6c\x6c\x6f'"##);
     let stmts2 = p2.parse_statements().unwrap();
     eval_stmt(&stmts2[0], &env, false).await.unwrap();
     {
@@ -900,8 +926,7 @@ async fn test_string_escape_sequences() {
         assert_eq!(vars.get("t"), Some(&Val::String("Hello".to_string())));
     }
 
-    // \\t escape
-    let mut p3 = Parser::new(r##"let u = "col1\tcol2""##);
+    let mut p3 = Parser::new(r##"let u = $'col1\tcol2'"##);
     let stmts3 = p3.parse_statements().unwrap();
     eval_stmt(&stmts3[0], &env, false).await.unwrap();
     {

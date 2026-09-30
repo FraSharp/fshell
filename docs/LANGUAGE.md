@@ -202,6 +202,10 @@ let url = "http://{user}@localhost:{port}/api"
 ```
 
 literal braces inside double quotes can be escaped with backslashes: `"\{not interpolated\}"`.
+backslash escapes also apply to `\"`, `\\`, `\$`, and line continuations (`\` + newline). all
+other backslash sequences (`\n`, `\t`, `\.`, `\d`, etc.) are preserved verbatim so scripts,
+regexes, and arguments passed to external utilities (e.g. `python3 -c "print('\n'.join(...))"`,
+`grep "\d+"`) reach subprocesses unaltered. For C-style escape sequences, use ANSI-C quoting (`$'...'`).
 
 single-quoted strings are raw and do not perform interpolation:
 
