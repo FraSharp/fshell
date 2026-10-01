@@ -27,8 +27,6 @@ pub const DISABLE_BLINKING: &str = "\x1b[?12l";
 
 /// Clear entire screen (`crossterm ClearType::All`).
 pub const CLEAR_ALL: &str = "\x1b[2J";
-/// Clear scrollback plus screen (`crossterm ClearType::Purge`).
-pub const CLEAR_PURGE: &str = "\x1b[3J";
 /// Clear from cursor down (`crossterm ClearType::FromCursorDown`).
 pub const CLEAR_FROM_CURSOR_DOWN: &str = "\x1b[J";
 /// Clear from cursor up (`crossterm ClearType::FromCursorUp`).
@@ -78,11 +76,6 @@ pub fn move_to(out: &mut impl Write, column: u16, row: u16) -> io::Result<()> {
 /// Write `MoveToColumn(column)` (`crossterm cursor::MoveToColumn`, 0-based).
 pub fn move_to_column(out: &mut impl Write, column: u16) -> io::Result<()> {
     write!(out, "\x1b[{}G", column.saturating_add(1))
-}
-
-/// Write `MoveToRow(row)` (`crossterm cursor::MoveToRow`, 0-based).
-pub fn move_to_row(out: &mut impl Write, row: u16) -> io::Result<()> {
-    write!(out, "\x1b[{}d", row.saturating_add(1))
 }
 
 /// Write raw bytes (`crossterm style::Print`).
@@ -168,18 +161,6 @@ pub fn disable_bracketed_paste(out: &mut impl Write) -> io::Result<()> {
     out.flush()
 }
 
-/// Enable focus-change reporting and flush.
-pub fn enable_focus_change(out: &mut impl Write) -> io::Result<()> {
-    write_all(out, ENABLE_FOCUS_CHANGE)?;
-    out.flush()
-}
-
-/// Disable focus-change reporting and flush.
-pub fn disable_focus_change(out: &mut impl Write) -> io::Result<()> {
-    write_all(out, DISABLE_FOCUS_CHANGE)?;
-    out.flush()
-}
-
 /// Save cursor position and flush.
 pub fn save_position(out: &mut impl Write) -> io::Result<()> {
     write_all(out, SAVE_POSITION)?;
@@ -211,7 +192,6 @@ mod tests {
         assert_eq!(ENABLE_BLINKING.as_bytes(), b"\x1b[?12h");
         assert_eq!(DISABLE_BLINKING.as_bytes(), b"\x1b[?12l");
         assert_eq!(CLEAR_ALL.as_bytes(), b"\x1b[2J");
-        assert_eq!(CLEAR_PURGE.as_bytes(), b"\x1b[3J");
         assert_eq!(CLEAR_FROM_CURSOR_DOWN.as_bytes(), b"\x1b[J");
         assert_eq!(CLEAR_FROM_CURSOR_UP.as_bytes(), b"\x1b[1J");
         assert_eq!(CLEAR_CURRENT_LINE.as_bytes(), b"\x1b[2K");
@@ -237,6 +217,5 @@ mod tests {
         assert_eq!(buf(|o| move_to(o, 0, 0)), b"\x1b[1;1H");
         assert_eq!(buf(|o| move_to(o, 10, 5)), b"\x1b[6;11H");
         assert_eq!(buf(|o| move_to_column(o, 0)), b"\x1b[1G");
-        assert_eq!(buf(|o| move_to_row(o, 0)), b"\x1b[1d");
     }
 }
