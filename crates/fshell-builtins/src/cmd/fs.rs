@@ -38,10 +38,16 @@ fn format_permissions_from_mode(mode: u32) -> String {
         .collect()
 }
 
-fn parse_ls_args_to_rrls_config(
-    args: &[Val],
-    env: &Env,
-) -> Result<(fshell_ls::Config, Vec<String>, bool), String> {
+enum LsParseResult {
+    Help,
+    List {
+        config: fshell_ls::Config,
+        path_args: Vec<String>,
+        verbose: bool,
+    },
+}
+
+fn parse_ls_args_to_rrls_config(args: &[Val], env: &Env) -> Result<LsParseResult, String> {
     let is_tty = fshell_engine::is_stdout_a_tty();
 
     let mut ls = LsArgs {
@@ -75,6 +81,10 @@ fn parse_ls_args_to_rrls_config(
             return Err("ls argument must be a string path".to_string());
         };
         idx += 1;
+
+        if !end_of_opts && s == "--help" {
+            return Ok(LsParseResult::Help);
+        }
 
         if !end_of_opts && s == "--" {
             end_of_opts = true;
@@ -300,7 +310,11 @@ fn parse_ls_args_to_rrls_config(
         verbose: ls.verbose,
     };
 
-    Ok((config, path_args, ls.verbose))
+    Ok(LsParseResult::List {
+        config,
+        path_args,
+        verbose: ls.verbose,
+    })
 }
 
 struct LsArgs {
@@ -506,7 +520,30 @@ pub fn ls_builtin(
         env.is_last_stage
     );
     // 1. Parse flags into rrls Config and collect path arguments
-    let (mut config, path_args, verbose) = parse_ls_args_to_rrls_config(&args, env)?;
+    let (mut config, path_args, verbose) = match parse_ls_args_to_rrls_config(&args, env)? {
+        LsParseResult::Help => {
+            let topic = crate::help::find_topic("ls")
+                .ok_or_else(|| ShellError::new(ErrorCode::General, "ls: help is unavailable"))?;
+            let color = env.options.read().error_color;
+            let text = crate::help::render_full(topic, color);
+
+            if !env.is_captured && env.is_last_stage {
+                print!("{text}");
+            } else {
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(PipelinePayload::Data(Arc::new(Val::String(text))))
+                        .await;
+                });
+            }
+            return Ok(());
+        }
+        LsParseResult::List {
+            config,
+            path_args,
+            verbose,
+        } => (config, path_args, verbose),
+    };
 
     // Set theme colors for fshell-ls
     let theme = env.active_theme();

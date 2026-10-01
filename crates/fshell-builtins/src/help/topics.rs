@@ -208,8 +208,8 @@ pub static TOPICS: &[HelpTopic] = &[
         name: "ls",
         category: HelpCategory::Builtin,
         summary: "List directory contents",
-        description: "List directory entries under capability checks. Each entry is emitted as a record with fields for name, size, type, and metadata. Requires read capability on the target path.",
-        syntax: "ls [path] [-a] [-l] [-R] [-v] [--tree] [-I <glob>] [--ignore <glob>]",
+        description: "List entries in one or more target directories under capability checks. In a terminal, entries are rendered for display; ordinary pipeline listings emit records with fields for name, size, type, and metadata, while tree mode emits text lines. Listing requires read capability on each target directory.",
+        syntax: "ls [OPTION]... [PATH]...",
         examples: &[
             HelpExample {
                 input: "ls",
@@ -235,11 +235,47 @@ pub static TOPICS: &[HelpTopic] = &[
                 input: "ls --tree --exclude node_modules .",
                 explanation: "Show the directory tree without descending into directories named node_modules.",
             },
+            HelpExample {
+                input: "ls --help",
+                explanation: "Show detailed usage and option descriptions.",
+            },
         ],
         flags: &[
             HelpFlag {
                 flag: "-a, --all",
                 desc: "Include hidden entries (files starting with '.')",
+            },
+            HelpFlag {
+                flag: "-d, --list-dirs",
+                desc: "List directory entries themselves instead of their contents",
+            },
+            HelpFlag {
+                flag: "-l, --long",
+                desc: "Show long listing information",
+            },
+            HelpFlag {
+                flag: "-1, --format=single-column",
+                desc: "Print one entry per line",
+            },
+            HelpFlag {
+                flag: "-h, --human-readable",
+                desc: "Use human-readable sizes",
+            },
+            HelpFlag {
+                flag: "-i, --inode",
+                desc: "Show each entry's inode number",
+            },
+            HelpFlag {
+                flag: "-S, --sort=size",
+                desc: "Sort entries by size",
+            },
+            HelpFlag {
+                flag: "-t, --sort=time",
+                desc: "Sort entries by modification time",
+            },
+            HelpFlag {
+                flag: "-r, --reverse",
+                desc: "Reverse the selected sort order",
             },
             HelpFlag {
                 flag: "-R, --recursive, --recurse",
@@ -250,12 +286,44 @@ pub static TOPICS: &[HelpTopic] = &[
                 desc: "Omit entries matching glob pattern; repeatable",
             },
             HelpFlag {
-                flag: "-v, --verbose",
-                desc: "Verbose: include permissions field in output",
+                flag: "--depth <N>",
+                desc: "Limit tree output to N levels",
             },
             HelpFlag {
                 flag: "--tree",
                 desc: "Render the directory tree",
+            },
+            HelpFlag {
+                flag: "--group-directories-first",
+                desc: "Place directories before files",
+            },
+            HelpFlag {
+                flag: "--color[=WHEN], --colour[=WHEN]",
+                desc: "Control color output: always, auto, or never",
+            },
+            HelpFlag {
+                flag: "--icons[=WHEN]",
+                desc: "Control icon output: always, auto, or never",
+            },
+            HelpFlag {
+                flag: "--git",
+                desc: "Include Git status indicators",
+            },
+            HelpFlag {
+                flag: "-L, --dereference",
+                desc: "Follow symbolic links",
+            },
+            HelpFlag {
+                flag: "-v, --verbose",
+                desc: "Verbose: include permissions field in output",
+            },
+            HelpFlag {
+                flag: "--raw",
+                desc: "Return size as a decimal string instead of an integer in pipeline records",
+            },
+            HelpFlag {
+                flag: "--help",
+                desc: "Show this help",
             },
         ],
         related: &["cd", "capabilities"],
