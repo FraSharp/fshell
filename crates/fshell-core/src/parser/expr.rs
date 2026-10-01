@@ -734,6 +734,44 @@ impl Parser {
         Ok(Expr::String(vec![StringPart::unquoted(path)]))
     }
 
+    /// Parse one `map` projection: a field path (`a.b.c`), an expansion
+    /// (`$x` or `(expr)`), or a bare field name.
+    ///
+    /// Projections are deliberately narrower than full expressions: a bare
+    /// word names a field of the incoming record rather than a command, which
+    /// is what lets `map pid command cpu` read as a field list.
+    pub(crate) fn parse_projection(&mut self) -> Result<Expr, ParseError> {
+        let saved_arg = self.cmd_arg_mode;
+        self.cmd_arg_mode = false;
+        let mut expr = if self.peek() == Some('(') {
+            // A parenthesized projection is a value expression: its bare words
+            // name record fields, and nested brackets keep that meaning.
+            self.next_char();
+            let saved_context = self.value_context;
+            self.value_context = true;
+            let inner = self.parse_expr_with_pipeline(false);
+            self.value_context = saved_context;
+            let inner = inner?;
+            self.skip_whitespace();
+            self.expect(')')?;
+            inner
+        } else if self.peek() == Some('$') {
+            self.parse_primary_expr()?
+        } else {
+            Expr::Ident(self.parse_identifier()?)
+        };
+        while self.peek() == Some('.') {
+            self.next_char();
+            let member = self.parse_identifier()?;
+            expr = Expr::MemberAccess {
+                expr: Box::new(expr),
+                member,
+            };
+        }
+        self.cmd_arg_mode = saved_arg;
+        Ok(expr)
+    }
+
     /// Parse one unquoted command argument.
     ///
     /// Command words are not expressions.  In particular, `2026-09-20`,
@@ -1370,7 +1408,11 @@ impl Parser {
                 self.next_char();
                 let saved_arg = self.cmd_arg_mode;
                 self.cmd_arg_mode = false;
-                let expr = self.parse_expr()?;
+                let expr = if self.value_context {
+                    self.parse_expr_with_pipeline(false)?
+                } else {
+                    self.parse_expr()?
+                };
                 self.cmd_arg_mode = saved_arg;
                 self.expect(')')?;
                 Ok(expr)
@@ -1383,7 +1425,11 @@ impl Parser {
                     let saved_arg = self.cmd_arg_mode;
                     self.cmd_arg_mode = false;
                     loop {
-                        elements.push(self.parse_expr()?);
+                        elements.push(if self.value_context {
+                            self.parse_expr_with_pipeline(false)?
+                        } else {
+                            self.parse_expr()?
+                        });
                         self.skip_whitespace();
                         if self.peek() == Some(',') {
                             self.next_char();

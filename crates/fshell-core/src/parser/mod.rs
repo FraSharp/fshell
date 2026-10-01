@@ -94,6 +94,10 @@ pub struct Parser {
     /// conditions, ...); at statement level they keep their shell meaning of
     /// chaining on the previous command's exit status.
     bool_ops: bool,
+    /// When true, bracketed subexpressions are value expressions: a bare word
+    /// names a field or variable rather than a command. Set while parsing a
+    /// `map` projection, where `(cpu / 100.0)` must compute, not execute.
+    value_context: bool,
     /// The character that ends the statement list currently being parsed. `}`
     /// for a block; `)` while parsing a `$(...)` statement list.
     statement_terminator: char,
@@ -3093,6 +3097,44 @@ mod tests {
             last_stage_of("ps | limit 10"),
             PipelineStage::Limit { .. }
         ));
+    }
+
+    #[test]
+    fn test_map_projections_include_paths_and_expressions() {
+        // A bare field list stays a list of identifiers.
+        let stage = last_stage_of("ps | map pid command");
+        let PipelineStage::Map { projections } = &stage else {
+            panic!("expected a map stage, got {stage:?}");
+        };
+        assert_eq!(projections.len(), 2);
+        assert!(matches!(&projections[0], Expr::Ident(name) if name == "pid"));
+
+        // A dotted path reaches a nested field.
+        let stage = last_stage_of("ps | map meta.region");
+        let PipelineStage::Map { projections } = &stage else {
+            panic!("expected a map stage, got {stage:?}");
+        };
+        match projections[0].unpack() {
+            Expr::MemberAccess { expr, member } => {
+                assert!(matches!(expr.unpack(), Expr::Ident(root) if root == "meta"));
+                assert_eq!(member, "region");
+            }
+            other => panic!("expected member access, got {other:?}"),
+        }
+
+        // A parenthesized projection is a value expression: its bare words
+        // name fields rather than commands.
+        let stage = last_stage_of("ps | map pid (cpu / 100.0)");
+        let PipelineStage::Map { projections } = &stage else {
+            panic!("expected a map stage, got {stage:?}");
+        };
+        assert_eq!(projections.len(), 2);
+        match projections[1].unpack() {
+            Expr::BinaryOp { lhs, .. } => {
+                assert!(matches!(lhs.unpack(), Expr::Ident(name) if name == "cpu"));
+            }
+            other => panic!("expected an arithmetic projection, got {other:?}"),
+        }
     }
 
     #[test]

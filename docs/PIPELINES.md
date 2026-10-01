@@ -141,6 +141,9 @@ projects specified fields or computes transformed fields.
 # project specific fields
 ps | map pid command cpu
 
+# project a nested field
+echo '{"repo": {"branch": "main"}}' | @json | map repo.branch
+
 # project and compute expressions
 ps | map pid (cpu / 100.0)
 ```
@@ -149,6 +152,11 @@ ps | map pid (cpu / 100.0)
 1. extracts field references from each incoming `Val::Map`.
 2. evaluates projected expressions against the record's fields.
 3. emits a new `Val::Map` preserving column ordering.
+
+a parenthesized projection is a value expression: inside it, bare words name
+fields rather than commands, so `(cpu / 100.0)` computes while `cpu` alone is a
+field. dotted paths reach nested fields; the emitted column takes the last path
+segment, and computed columns are named `col_<index>`.
 
 ### `sort`
 

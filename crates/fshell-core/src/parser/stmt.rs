@@ -1470,7 +1470,7 @@ impl Parser {
                     ) {
                         break;
                     }
-                    projections.push(Expr::Ident(self.parse_identifier()?));
+                    projections.push(self.parse_projection()?);
                     self.skip_horizontal_whitespace();
                     if self.peek() == Some(',') {
                         self.next_char();

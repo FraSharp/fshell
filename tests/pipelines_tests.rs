@@ -1772,3 +1772,38 @@ async fn test_yaml_documents_span_lines() {
     out.assert_success();
     out.assert_stdout_trimmed_eq("2");
 }
+
+/// `map` projections reach nested fields (`a.b`) and compute parenthesized
+/// expressions, while bare words stay field names.
+#[tokio::test]
+async fn test_pipeline_map_paths_and_expressions() {
+    let ctx = TestContext::new();
+    let record = Val::Map({
+        let mut map = indexmap::IndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
+        map.insert(ustr::ustr("pid"), Val::Int(7));
+        map.insert(ustr::ustr("cpu"), Val::Float(50.0));
+        map.insert(
+            ustr::ustr("meta"),
+            Val::Map({
+                let mut inner =
+                    indexmap::IndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
+                inner.insert(ustr::ustr("region"), Val::String("eu".into()));
+                inner
+            }),
+        );
+        map
+    });
+    ctx.set_var("records", Val::List(vec![record]));
+
+    let res = ctx
+        .eval_ok("$records | map pid (cpu / 100.0) meta.region")
+        .await;
+    let expected = Val::Map({
+        let mut map = indexmap::IndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
+        map.insert(ustr::ustr("pid"), Val::Int(7));
+        map.insert(ustr::ustr("col_1"), Val::Float(0.5));
+        map.insert(ustr::ustr("region"), Val::String("eu".into()));
+        map
+    });
+    assert_val_eq!(res, Val::List(vec![expected]));
+}

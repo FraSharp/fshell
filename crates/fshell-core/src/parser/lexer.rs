@@ -20,6 +20,7 @@ impl Parser {
             pos: 0,
             redirect_mode: false,
             cmd_arg_mode: false,
+            value_context: false,
             is_subsequent_stage: false,
             bool_ops: false,
             statement_terminator: '}',
