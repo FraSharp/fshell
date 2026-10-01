@@ -26,7 +26,7 @@ this document specifies fshell's interactive line editor widgets, terminal user 
 
 ## overview
 
-fshell provides a custom, transactional terminal line editor engine (`crates/fshell-repl/src/ftui/`) built on `crossterm` and `ratatui`.
+fshell provides a custom, transactional terminal line editor engine (`crates/fshell-repl/src/ftui/`) built on `ratatui` and the shell's own terminal layer (`fshell-terminal`).
 
 key features:
 - **transactional buffer**: multiline text buffer with syntax highlighting, visual selection, and bracket matching.

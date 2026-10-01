@@ -18,13 +18,6 @@ members = [
     "crates/fshell-posix",
     "fuzz",
 ]
-exclude = ["vendor/crossterm"]
-
-# Keep crossterm's Unix terminal reader EOF-safe until the upstream fix ships.
-[patch.crates-io]
-crossterm = { path = "vendor/crossterm" }
-
-
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -55,7 +48,6 @@ default-run = "fsh"
 include = [
     "src/**/*",
     "tests/helpers/**/*",
-    "vendor/crossterm/**/*",
     "build.rs",
     "LICENSE",
     "COPYING",
@@ -137,7 +129,6 @@ rmp-serde = "1.3.1"
 ustr = { version = "1.1.0", features = ["serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["std"] }
-crossterm = "0.29.0"
 fshell-terminal = { path = "crates/fshell-terminal" }
 notify = "8.2.0"
 clap = { version = "4.6.1", features = ["derive"] }

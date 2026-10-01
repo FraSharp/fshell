@@ -105,7 +105,8 @@ ok "build"
 
 # ---------- 4. test ----------
 # Headless: no alternate screen, no progress bar escapes, no stdin reads that suspend on scroll.
-# CI=1 + TERM=dumb tells ratatui/crossterm to stay off the alternate buffer.
+# CI=1 + TERM=dumb routes fshell_engine::is_test_mode() so the TUIs stay off
+# the alternate buffer.
 # Closing stdin prevents TUI tests from SIGTTIN when you scroll.
 export CI=1
 export TERM=dumb
