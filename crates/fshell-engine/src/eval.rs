@@ -1433,6 +1433,12 @@ fn drain_captured(
                     .to_string(),
             )),
             PipelinePayload::Structured(d) => {
+                // Command stderr stream content is output, not failure: pass
+                // it to the shell's stderr without recording anything.
+                if let Some(text) = d.stderr_text() {
+                    crate::write_stderr_stream(&text);
+                    continue;
+                }
                 crate::render_stage_diag(env, &d);
                 if let crate::PipelineFailure::Hard(diag) = crate::classify_diag(d)
                     && hard.is_none()

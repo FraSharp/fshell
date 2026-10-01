@@ -626,6 +626,21 @@ impl FshDiag {
         })
     }
 
+    /// True iff this diagnostic is command stderr stream content rather than
+    /// an engine failure. Collectors must route its text to the shell's
+    /// stderr and record no failure.
+    pub fn is_stderr_stream(&self) -> bool {
+        self.report.downcast_ref::<StderrStream>().is_some()
+    }
+
+    /// The raw stream text, when [`is_stderr_stream`](Self::is_stderr_stream)
+    /// holds.
+    pub fn stderr_text(&self) -> Option<String> {
+        self.report
+            .downcast_ref::<StderrStream>()
+            .map(|stream| stream.0.clone())
+    }
+
     /// The status this diagnostic declares, when it describes a *command-level*
     /// failure rather than an engine one.
     ///
@@ -671,5 +686,32 @@ impl From<String> for FshDiag {
 impl From<&str> for FshDiag {
     fn from(msg: &str) -> Self {
         crate::ShellError::from(msg).into()
+    }
+}
+
+/// Command stderr stream content carried on the pipeline's diagnostic channel.
+///
+/// fd 2 shares the `Structured` channel with engine diagnostics by design, so
+/// stderr bytes need provenance: without it a statement boundary cannot tell
+/// a command's own output from an engine failure and aborts with
+/// `FSH-PIPE-001` on any unredirected stderr. This marker is never rendered
+/// as a diagnostic; collectors route its text to the shell's stderr and
+/// record no failure.
+#[derive(Debug, Clone)]
+pub struct StderrStream(pub String);
+
+impl fmt::Display for StderrStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StderrStream {}
+
+impl Diagnostic for StderrStream {}
+
+impl DiagnosticExt for StderrStream {
+    fn category(&self) -> &'static str {
+        "stderr"
     }
 }

@@ -98,6 +98,12 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
                 results.push(strip_capture_sentinel(Val::String(s)));
             }
             PipelinePayload::Structured(d) => {
+                // Command stderr stream content is output, not failure: pass
+                // it to the shell's stderr and keep collecting.
+                if let Some(text) = d.stderr_text() {
+                    crate::write_stderr_stream(&text);
+                    continue;
+                }
                 crate::render_stage_diag(env, &d);
                 // An engine-level error still unwinds the expansion, so a failure
                 // inside a substitution is not quietly swallowed.
@@ -706,11 +712,20 @@ async fn route_payload(
                 .map_err(|_| "pipeline output channel closed".to_string())?;
         }
         OutputRoute::Diagnostic => {
+            // Payloads routed to fd 2 are stream content, never diagnostics:
+            // tag them so the statement boundary routes the bytes without
+            // recording a failure.
             let payload = match payload {
-                PipelinePayload::Data(value) => PipelinePayload::Structured(value.to_text().into()),
-                PipelinePayload::Bytes(bytes) => {
-                    PipelinePayload::Structured(String::from_utf8_lossy(&bytes).into_owned().into())
+                PipelinePayload::Data(value) => {
+                    PipelinePayload::Structured(fshell_core::diagnostic::FshDiag::new(
+                        fshell_core::diagnostic::StderrStream(value.to_text()),
+                    ))
                 }
+                PipelinePayload::Bytes(bytes) => PipelinePayload::Structured(
+                    fshell_core::diagnostic::FshDiag::new(fshell_core::diagnostic::StderrStream(
+                        String::from_utf8_lossy(&bytes).into_owned(),
+                    )),
+                ),
                 other => other,
             };
             out_tx
@@ -3245,10 +3260,15 @@ async fn execute_pipeline_inner(
                                         // 2>&1: stderr goes to stdout -> forward Structured as Data
                                         let _ = out_tx.send(PipelinePayload::Data(val_arc)).await;
                                     } else if src_fd == 1 && dst_fd == 2 {
-                                        // 1>&2: stdout goes to stderr -> forward Data as Structured
+                                        // 1>&2: stdout goes to stderr -> rerouted bytes
+                                        // are stream content, not a diagnostic.
                                         let _ = out_tx
                                             .send(PipelinePayload::Structured(
-                                                val_arc.to_text().into(),
+                                                fshell_core::diagnostic::FshDiag::new(
+                                                    fshell_core::diagnostic::StderrStream(
+                                                        val_arc.to_text(),
+                                                    ),
+                                                ),
                                             ))
                                             .await;
                                     } else if dst_fd == -1 {
@@ -3941,8 +3961,13 @@ pub(crate) async fn run_pipeline_statement(
                 let _ = std::io::stdout().write_all(&b);
             }
             PipelinePayload::Structured(d) => {
-                crate::render_stage_diag(env, &d);
-                failures.push(crate::classify_diag(d));
+                // Command stderr stream content is output, not failure.
+                if let Some(text) = d.stderr_text() {
+                    crate::write_stderr_stream(&text);
+                } else {
+                    crate::render_stage_diag(env, &d);
+                    failures.push(crate::classify_diag(d));
+                }
             }
         }
     }

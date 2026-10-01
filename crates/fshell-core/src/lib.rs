@@ -30,7 +30,7 @@ pub use ast::{
     QuoteKind, SerializationFormat, Stmt, StringPart, TimeUnit, TypeConstraint,
 };
 pub use completion::{CommandCompletion, DynamicProvider, FlagCompletion, SubcmdCompletion};
-pub use diagnostic::{DiagnosticExt, ErrorCode, FshDiag, ShellDiagnostic};
+pub use diagnostic::{DiagnosticExt, ErrorCode, FshDiag, ShellDiagnostic, StderrStream};
 pub use env_utils::{ThreadSafeEnv, expand_tilde, expand_tilde_str, get_var, remove_var, set_var};
 pub use glob_utils::{
     determine_base_dir, expand_brace_range, expand_braces, expand_glob, expand_glob_with_options,

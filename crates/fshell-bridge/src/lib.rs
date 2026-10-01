@@ -1141,7 +1141,9 @@ pub async fn run_external(
             }
             if !err_str.is_empty()
                 && tx_diag
-                    .send(PipelinePayload::Structured(err_str.into()))
+                    .send(PipelinePayload::Structured(fshell_core::FshDiag::new(
+                        fshell_core::StderrStream(err_str),
+                    )))
                     .await
                     .is_err()
                 && !output_cancelled_clone.swap(true, Ordering::AcqRel)

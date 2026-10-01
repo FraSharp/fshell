@@ -519,6 +519,22 @@ fn redirection_cases() -> Vec<Case> {
         Case::posix_only("redirect/close-stderr", "emit --stdout o --stderr e 2>&-")
             .compare_stderr()
             .features(&["redirect", "fd_dup", "closed"]),
+        // Unredirected stderr is output, not failure: the command's own bytes
+        // must reach the terminal with its status intact, on both engines.
+        Case::posix(
+            "redirect/stderr-unredirected-passthrough",
+            "emit --stderr err",
+        )
+        .compare_stderr()
+        .features(&["redirect", "stderr"]),
+        // Rerouted stdout (`1>&2`) travels the stderr channel as stream
+        // content, so it must not abort the statement either.
+        Case::posix(
+            "redirect/stdout-rerouted-to-stderr-passthrough",
+            "emit --stdout o 1>&2",
+        )
+        .compare_stderr()
+        .features(&["redirect", "fd_dup"]),
         // `&>` is a bash extension, so bash alone is the oracle.
         Case::posix_only(
             "redirect/both-to-file",

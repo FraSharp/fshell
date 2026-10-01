@@ -3596,6 +3596,29 @@ pub(crate) fn render_stage_diag(env: &Env, diag: &fshell_core::FshDiag) {
     eprintln!("{rendered}");
 }
 
+/// Write command stderr stream content to the shell's stderr.
+///
+/// Unredirected fd-2 bytes reaching a statement boundary are output, not a
+/// failure: the command already recorded its own status, and stderr text
+/// carries none. Newline handling mirrors `write_val_stdout` so `1>&2`
+/// reroutes stay byte-identical with the terminal writer.
+pub(crate) fn write_stderr_stream(text: &str) {
+    use std::io::Write;
+    if text.starts_with('\0') {
+        return;
+    }
+    let err = std::io::stderr();
+    let mut handle = err.lock();
+    if text.ends_with('\0') {
+        let _ = handle.write_all(text[..text.len() - 1].as_bytes());
+    } else if text.ends_with('\n') {
+        let _ = handle.write_all(text.as_bytes());
+    } else {
+        let _ = writeln!(handle, "{text}");
+    }
+    let _ = handle.flush();
+}
+
 thread_local! {
     static IS_RUNNING_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
