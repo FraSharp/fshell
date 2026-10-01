@@ -3,10 +3,12 @@
 
 //! Ratatui backend over fshell's own ANSI terminal primitives.
 //!
-//! Byte-for-byte replacement for `ratatui-crossterm`'s backend: buffered
-//! cell diffs, style changes, clearing, sizing, and the cursor status-report
-//! query all go through [`crate::ansi`] and [`crate::raw`], so no third-party
-//! terminal crate sits between ratatui and the device.
+//! Replacement for `ratatui-crossterm`'s backend: buffered cell diffs,
+//! style changes, clearing, sizing, and the cursor status-report query all
+//! go through [`crate::ansi`] and [`crate::raw`], so no third-party terminal
+//! crate sits between ratatui and the device. Named colors use the compact
+//! 16-color codes instead of the 256-color spellings; the rendered result is
+//! identical.
 //!
 //! Unix only.
 
@@ -52,6 +54,7 @@ impl<W: Write> Backend for FshellBackend<W> {
     {
         let mut fg = Color::Reset;
         let mut bg = Color::Reset;
+        let mut underline_color = Color::Reset;
         let mut modifier = Modifier::empty();
         let mut last: Option<Position> = None;
         for (x, y, cell) in content {
@@ -69,11 +72,15 @@ impl<W: Write> Backend for FshellBackend<W> {
                 fg = cell.fg;
                 bg = cell.bg;
             }
+            if cell.underline_color != underline_color {
+                write_underline_color(&mut self.writer, cell.underline_color)?;
+                underline_color = cell.underline_color;
+            }
             self.writer.write_all(cell.symbol().as_bytes())?;
         }
-        // Reset colors and attributes as three commands, the shape
-        // `ratatui-crossterm` emits at the end of every diff.
-        self.writer.write_all(b"\x1b[39m\x1b[49m")?;
+        // Reset colors and attributes as four commands, the shape the
+        // reference backend emits at the end of every diff.
+        self.writer.write_all(b"\x1b[39m\x1b[49m\x1b[59m")?;
         write_sgr(&mut self.writer, 0)
     }
 
@@ -190,6 +197,40 @@ fn write_color(out: &mut impl Write, color: Color, layer: Layer) -> io::Result<(
     }
 }
 
+/// Write `SetUnderlineColor(color)`: the `58` form for colors, `59` for a
+/// reset. Named colors are expressed by palette index.
+fn write_underline_color(out: &mut impl Write, color: Color) -> io::Result<()> {
+    match color {
+        Color::Reset => write_sgr(out, 59),
+        Color::Indexed(index) => write!(out, "\x1b[58;5;{index}m"),
+        Color::Rgb(r, g, b) => write!(out, "\x1b[58;2;{r};{g};{b}m"),
+        named => write!(out, "\x1b[58;5;{}m", palette_index(named)),
+    }
+}
+
+/// The 256-color palette index of a named color, in standard palette order.
+fn palette_index(color: Color) -> u16 {
+    match color {
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Reset | Color::Indexed(_) | Color::Rgb(_, _, _) => 0,
+    }
+}
+
 /// Write the attribute transitions between two modifier sets, in the exact
 /// order crossterm produces: removals first, then the intensity reset with
 /// its re-applications, then additions.
@@ -296,12 +337,12 @@ mod tests {
         // A cell with no symbol draws a space, as ratatui defines it.
         assert_eq!(
             draw_cell(ratatui::buffer::Cell::default()),
-            "\x1b[1;1H \x1b[39m\x1b[49m\x1b[0m"
+            "\x1b[1;1H \x1b[39m\x1b[49m\x1b[59m\x1b[0m"
         );
         // A reset-colored cell is indistinguishable from the default state.
         let mut cell = ratatui::buffer::Cell::default();
         cell.set_symbol("x");
-        assert_eq!(draw_cell(cell), "\x1b[1;1Hx\x1b[39m\x1b[49m\x1b[0m");
+        assert_eq!(draw_cell(cell), "\x1b[1;1Hx\x1b[39m\x1b[49m\x1b[59m\x1b[0m");
     }
 
     #[test]
@@ -309,7 +350,7 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
         buffer.set_string(0, 0, "abc", Style::default());
         let output = String::from_utf8(draw(&buffer)).unwrap();
-        assert_eq!(output, "\x1b[1;1Habc\x1b[39m\x1b[49m\x1b[0m");
+        assert_eq!(output, "\x1b[1;1Habc\x1b[39m\x1b[49m\x1b[59m\x1b[0m");
     }
 
     #[test]
@@ -321,7 +362,7 @@ mod tests {
         cell.modifier = Modifier::BOLD;
         assert_eq!(
             draw_cell(cell),
-            "\x1b[1;1H\x1b[1m\x1b[31;44mx\x1b[39m\x1b[49m\x1b[0m"
+            "\x1b[1;1H\x1b[1m\x1b[31;44mx\x1b[39m\x1b[49m\x1b[59m\x1b[0m"
         );
     }
 
@@ -354,9 +395,37 @@ mod tests {
             cell.bg = color;
             assert_eq!(
                 draw_cell(cell),
-                format!("\x1b[1;1H\x1b[{foreground};{background}mx\x1b[39m\x1b[49m\x1b[0m"),
+                format!("\x1b[1;1H\x1b[{foreground};{background}mx\x1b[39m\x1b[49m\x1b[59m\x1b[0m"),
                 "color {color:?}"
             );
+        }
+    }
+
+    #[test]
+    fn underline_colors_use_the_58_form() {
+        let mut cell = ratatui::buffer::Cell::default();
+        cell.set_symbol("x");
+        cell.underline_color = Color::Indexed(4);
+        assert_eq!(
+            draw_cell(cell),
+            "\x1b[1;1H\x1b[58;5;4mx\x1b[39m\x1b[49m\x1b[59m\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn named_underline_colors_use_palette_indexes() {
+        let cases = [
+            (Color::Reset, "\x1b[59m"),
+            (Color::Black, "\x1b[58;5;0m"),
+            (Color::LightRed, "\x1b[58;5;9m"),
+            (Color::White, "\x1b[58;5;15m"),
+            (Color::Indexed(200), "\x1b[58;5;200m"),
+            (Color::Rgb(1, 2, 3), "\x1b[58;2;1;2;3m"),
+        ];
+        for (color, expected) in cases {
+            let mut out = Vec::new();
+            write_underline_color(&mut out, color).unwrap();
+            assert_eq!(String::from_utf8(out).unwrap(), expected, "color {color:?}");
         }
     }
 
