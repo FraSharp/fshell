@@ -2,14 +2,15 @@
 name = "fshell-sandbox"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Landlock and SBPL sandboxing for fshell"
 repository.workspace = true
 
 [dependencies]
-fshell-core = { path = "../fshell-core" }
-fshell-engine = { path = "../fshell-engine" }
+fshell-core = { workspace = true }
+fshell-engine = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 libc = { workspace = true }
@@ -23,4 +24,3 @@ criterion = { workspace = true }
 [[bench]]
 name = "sandbox"
 harness = false
-

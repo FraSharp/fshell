@@ -2,13 +2,14 @@
 name = "fshell-render"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Miette-based error rendering for fshell"
 repository.workspace = true
 
 [dependencies]
-fshell-core = { path = "../fshell-core" }
+fshell-core = { workspace = true }
 miette = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -259,12 +259,7 @@ pub fn get_registry_completions(
     env: &fshell_engine::Env,
 ) -> Option<Vec<CompletionCandidate>> {
     let completions_guard = env.completions.read();
-    let pos = pos.min(line.len());
-    let pos = if line.is_char_boundary(pos) {
-        pos
-    } else {
-        line.floor_char_boundary(pos)
-    };
+    let pos = crate::text::floor_char_boundary(line, pos);
     let prefix = &line[..pos];
     let words: Vec<&str> = prefix.split_whitespace().collect();
     if words.is_empty() {
@@ -412,12 +407,7 @@ pub fn get_custom_completions(
     if let Some(reg_suggs) = get_registry_completions(line, pos, env) {
         return Some(reg_suggs);
     }
-    let pos = pos.min(line.len());
-    let pos = if line.is_char_boundary(pos) {
-        pos
-    } else {
-        line.floor_char_boundary(pos)
-    };
+    let pos = crate::text::floor_char_boundary(line, pos);
     let prefix = &line[..pos];
     let words: Vec<&str> = prefix.split_whitespace().collect();
     if words.is_empty() {

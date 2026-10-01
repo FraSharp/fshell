@@ -2,6 +2,7 @@
 name = "fshell-archive"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Bounded, capability-relative archive extraction for fshell"

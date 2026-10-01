@@ -27,7 +27,7 @@ a POSIX compatibility engine is bundled for the bash/zsh scripts you already hav
 ### requirements
 
 - linux or macOS
-- a stable Rust toolchain ([rustup.rs](https://rustup.rs))
+- a stable Rust toolchain ([rustup.rs](https://rustup.rs)); the minimum supported version is 1.88
 - a C compiler (the bundled SQLite and stacker builds need one; on macOS it ships with the Xcode command line tools)
 
 the default build is minimal — parser, engine, POSIX frontend and the core builtins — and needs no libraries beyond the system toolchain. the `full` feature set adds the archive extraction (`extract`), secrets (`vault`), assistant (`ai`), `http`, `sql`, `chart`, `notify`, fuzzy filter (`ff`), `replace` and sandbox builtins, and links libarchive statically:

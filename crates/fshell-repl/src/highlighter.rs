@@ -246,12 +246,7 @@ fn is_keyword(token: &str) -> bool {
 /// Clamp cursor to the nearest valid UTF-8 char boundary at or before pos.
 #[cfg(test)]
 fn clamp_cursor(line: &str, cursor: usize) -> usize {
-    let pos = cursor.min(line.len());
-    if line.is_char_boundary(pos) {
-        pos
-    } else {
-        line.floor_char_boundary(pos)
-    }
+    crate::text::floor_char_boundary(line, cursor)
 }
 
 // is_inside_string_literal is no longer part of the Highlighter trait in reedline 0.49.

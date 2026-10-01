@@ -2,13 +2,14 @@
 name = "fshell-capabilities"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Capability tokens for fshell"
 repository.workspace = true
 
 [dependencies]
-fshell-core = { path = "../fshell-core" }
+fshell-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -24,4 +25,3 @@ tempfile = { workspace = true }
 [[bench]]
 name = "capabilities"
 harness = false
-

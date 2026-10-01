@@ -92,3 +92,17 @@ jobs:
         run: cargo test --features full --target ${{ matrix.target }}
       - name: Clippy (full features)
         run: cargo clippy --features full --target ${{ matrix.target }} --all-targets -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Install archive build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev pkg-config libarchive-dev zlib1g-dev libbz2-dev liblzma-dev libzstd-dev liblz4-dev libb2-dev libxml2-dev libssl-dev libacl1-dev
+      - name: Check (default features)
+        run: cargo check --locked
+      - name: Check (full features)
+        run: cargo check --locked --features full

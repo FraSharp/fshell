@@ -181,12 +181,7 @@ pub fn builtin_flags(cmd: &str) -> &'static [(&'static str, &'static str)] {
 
 impl Completer for FshellCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<CompletionCandidate> {
-        let pos = pos.min(line.len());
-        let pos = if line.is_char_boundary(pos) {
-            pos
-        } else {
-            line.floor_char_boundary(pos)
-        };
+        let pos = crate::text::floor_char_boundary(line, pos);
         let prefix = &line[..pos];
         let words: Vec<&str> = prefix.split_whitespace().collect();
         let last_word = crate::ftui::completions::extract_quote_aware_token(prefix);

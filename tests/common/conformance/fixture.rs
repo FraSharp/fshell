@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use tempfile::TempDir;
 
@@ -233,11 +234,52 @@ impl Fixture {
 }
 
 /// Directory containing the conformance helper binaries.
+///
+/// The helpers are examples, not bins, so `cargo install` ships only `fsh`.
+/// A plain `cargo test` builds examples; a filtered run (`cargo test --test
+/// …`) does not, so build them on demand when they are missing.
 pub fn helper_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_argvdump"))
-        .parent()
-        .map(Path::to_path_buf)
-        .expect("argvdump binary has no parent directory")
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = PathBuf::from(env!("CARGO_BIN_EXE_fsh"))
+            .parent()
+            .map(|parent| parent.join("examples"))
+            .expect("fsh binary has no parent directory");
+        if dir.join("argvdump").exists() {
+            dir
+        } else {
+            build_helper_examples()
+        }
+    })
+    .clone()
+}
+
+/// Build the helper examples, returning the directory holding `argvdump`.
+fn build_helper_examples() -> PathBuf {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = std::process::Command::new(cargo)
+        .args(["build", "--examples", "--message-format=json"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("could not run cargo to build the conformance helper examples");
+    assert!(
+        output.status.success(),
+        "`cargo build --examples` failed while preparing the conformance helpers:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .find_map(|message| {
+            let target = message.get("target")?;
+            if target.get("name")?.as_str()? != "argvdump" {
+                return None;
+            }
+            let executable = message.get("executable")?.as_str()?;
+            Path::new(executable).parent().map(Path::to_path_buf)
+        })
+        .expect("cargo did not report an `argvdump` example artifact")
 }
 
 fn path_string(path: &Path) -> String {

@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/fshell-core",
     "crates/fshell-capabilities",
@@ -22,7 +22,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Francesco Duca <f.duca00@gmail.com>"]
 license = "GPL-3.0-or-later"
 description = "A modern shell"
@@ -36,6 +36,7 @@ categories = ["command-line-utilities", "development-tools"]
 name = "fshell"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description.workspace = true
@@ -87,25 +88,32 @@ path = "src/main.rs"
 # Deterministic argv inspector used by the differential conformance suite
 # (`tests/conformance_tests.rs`). It is a test instrument, not a shipping
 # utility: it exists so shell word expansion can be observed without the
-# semantics of a real utility obscuring the result.
-[[bin]]
+# semantics of a real utility obscuring the result. Declared as an example so
+# `cargo install fshell` ships only `fsh`.
+[[example]]
 name = "argvdump"
 path = "tests/helpers/argvdump.rs"
 
 # Deterministic stdout/stderr/exit emitter used by the differential conformance
 # suite for redirection, stream-merging and exit-status cases.
-[[bin]]
+[[example]]
 name = "emit"
 path = "tests/helpers/emit.rs"
 
+# Keeps the argvdump unit tests running under plain `cargo test`; examples are
+# built but not run as tests.
+[[test]]
+name = "argvdump_units"
+path = "tests/helpers/argvdump.rs"
+
 [dependencies]
-fshell-core = { path = "crates/fshell-core" }
-fshell-capabilities = { path = "crates/fshell-capabilities" }
-fshell-engine = { path = "crates/fshell-engine" }
-fshell-builtins = { path = "crates/fshell-builtins" }
-fshell-bridge = { path = "crates/fshell-bridge" }
-fshell-repl = { path = "crates/fshell-repl" }
-fshell-render = { path = "crates/fshell-render" }
+fshell-core = { workspace = true }
+fshell-capabilities = { workspace = true }
+fshell-engine = { workspace = true }
+fshell-builtins = { workspace = true }
+fshell-bridge = { workspace = true }
+fshell-repl = { workspace = true }
+fshell-render = { workspace = true }
 fshell-hash = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
@@ -116,9 +124,24 @@ fshell-terminal = { workspace = true }
 fshell-posix = { workspace = true }
 
 [workspace.dependencies]
-fshell-hash = { path = "crates/fshell-hash" }
-fshell-archive = { path = "crates/fshell-archive" }
-fshell-posix = { path = "crates/fshell-posix" }
+# Internal crates. Published independently, so each carries the same version
+# as [workspace.package]; tests/publishing_tests.rs keeps them in sync.
+fshell-archive = { path = "crates/fshell-archive", version = "0.1.0" }
+fshell-bridge = { path = "crates/fshell-bridge", version = "0.1.0" }
+fshell-builtins = { path = "crates/fshell-builtins", version = "0.1.0" }
+fshell-capabilities = { path = "crates/fshell-capabilities", version = "0.1.0" }
+fshell-core = { path = "crates/fshell-core", version = "0.1.0" }
+fshell-engine = { path = "crates/fshell-engine", version = "0.1.0" }
+fshell-git = { path = "crates/fshell-git", version = "0.1.0" }
+fshell-hash = { path = "crates/fshell-hash", version = "0.1.0" }
+fshell-ls = { path = "crates/fshell-ls", version = "0.1.0" }
+fshell-posix = { path = "crates/fshell-posix", version = "0.1.0" }
+fshell-render = { path = "crates/fshell-render", version = "0.1.0" }
+fshell-repl = { path = "crates/fshell-repl", version = "0.1.0" }
+fshell-sandbox = { path = "crates/fshell-sandbox", version = "0.1.0" }
+fshell-semantic = { path = "crates/fshell-semantic", version = "0.1.0" }
+fshell-terminal = { path = "crates/fshell-terminal", version = "0.1.0" }
+fshell-tty = { path = "crates/fshell-tty", version = "0.1.0" }
 strip-ansi-escapes = "0.2.1"
 tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "net", "signal", "process", "fs", "time", "io-util", "io-std", "sync", "macros"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
@@ -129,8 +152,6 @@ rmp-serde = "1.3.1"
 ustr = { version = "1.1.0", features = ["serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["std", "underline-color"] }
-fshell-tty = { path = "crates/fshell-tty" }
-fshell-terminal = { path = "crates/fshell-terminal" }
 notify = "8.2.0"
 clap = { version = "4.6.1", features = ["derive"] }
 miette = { version = "7.6.0", features = ["fancy"] }
@@ -199,6 +220,7 @@ rmp-serde = { workspace = true }
 ustr = { workspace = true }
 fshell-sandbox = { path = "crates/fshell-sandbox" }
 fshell-semantic = { path = "crates/fshell-semantic" }
-fshell-hash = { workspace = true }
+fshell-hash = { path = "crates/fshell-hash" }
 ratatui = { workspace = true }
 proptest = { workspace = true }
+toml_edit = { workspace = true }

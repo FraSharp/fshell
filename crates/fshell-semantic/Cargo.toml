@@ -2,6 +2,7 @@
 name = "fshell-semantic"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Shell-independent semantic action layer for fshell"
@@ -12,8 +13,8 @@ default = ["schema"]
 schema = ["dep:schemars"]
 
 [dependencies]
-fshell-core = { path = "../fshell-core" }
-fshell-engine = { path = "../fshell-engine" }
+fshell-core = { workspace = true }
+fshell-engine = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

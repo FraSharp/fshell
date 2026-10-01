@@ -2,6 +2,7 @@
 name = "fshell-ls"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Git-aware ls library for fshell"
@@ -11,7 +12,7 @@ repository.workspace = true
 terminal_size = { workspace = true }
 libc = { workspace = true }
 unicode-width = { workspace = true }
-fshell-git = { path = "../fshell-git" }
+fshell-git = { workspace = true }
 fshell-hash = { workspace = true }
 rayon = { workspace = true }
 parking_lot = { workspace = true }

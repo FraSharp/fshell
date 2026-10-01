@@ -2,6 +2,7 @@
 name = "fshell-fuzz"
 version = "0.0.1"
 edition = "2024"
+rust-version.workspace = true
 publish = false
 
 [package.metadata]
@@ -9,12 +10,12 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-fshell-core = { path = "../crates/fshell-core" }
-fshell-capabilities = { path = "../crates/fshell-capabilities" }
-fshell-engine = { path = "../crates/fshell-engine" }
-fshell-builtins = { path = "../crates/fshell-builtins" }
-fshell-posix = { path = "../crates/fshell-posix" }
-fshell-hash = { path = "../crates/fshell-hash" }
+fshell-core = { workspace = true }
+fshell-capabilities = { workspace = true }
+fshell-engine = { workspace = true }
+fshell-builtins = { workspace = true }
+fshell-posix = { workspace = true }
+fshell-hash = { workspace = true }
 brush-parser = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 serde_json = { workspace = true }

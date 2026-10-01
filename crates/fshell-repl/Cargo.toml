@@ -2,6 +2,7 @@
 name = "fshell-repl"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Native FTUI REPL for fshell"
@@ -11,12 +12,12 @@ repository.workspace = true
 ai = []
 
 [dependencies]
-fshell-core = { path = "../fshell-core" }
-fshell-engine = { path = "../fshell-engine" }
-fshell-builtins = { path = "../fshell-builtins" }
-fshell-bridge = { path = "../fshell-bridge" }
-fshell-render = { path = "../fshell-render" }
-fshell-git = { path = "../fshell-git" }
+fshell-core = { workspace = true }
+fshell-engine = { workspace = true }
+fshell-builtins = { workspace = true }
+fshell-bridge = { workspace = true }
+fshell-render = { workspace = true }
+fshell-git = { workspace = true }
 fshell-hash = { workspace = true }
 nucleo-matcher = { workspace = true }
 tokio = { workspace = true }

@@ -37,7 +37,7 @@ For deeper detail, see `docs/LANGUAGE.md` for language semantics, `docs/ARCHITEC
 
 ## Build on a supported platform
 
-fshell supports Unix systems: macOS and Linux. The workspace uses Rust edition 2024 and declares Rust 1.85 as its minimum version.
+fshell supports Unix systems: macOS and Linux. The workspace uses Rust edition 2024 and declares Rust 1.88 as its minimum version, checked by the `msrv` CI job.
 
 ```sh
 git clone https://github.com/FraSharp/fshell.git
@@ -77,7 +77,19 @@ CI runs on pushes and pull requests to `main`. Both the default (no optional fea
 | `macos-15-intel` | `x86_64-apple-darwin` |
 | `macos-latest` | `aarch64-apple-darwin` |
 
-Formatting, the native-language baseline, fuzz-target checking, and `cargo audit` run on `ubuntu-latest` only. Releases build and package all four targets on `v*` tags with `--features full`; the exact jobs are in [the CI workflow](.github/workflows/ci.yml) and [the release workflow](.github/workflows/release.yml).
+An `msrv` job checks the declared Rust 1.88 floor on `ubuntu-latest`. Formatting, the native-language baseline, fuzz-target checking, and `cargo audit` run on `ubuntu-latest` only. Releases build and package all four targets on `v*` tags with `--features full`; the exact jobs are in [the CI workflow](.github/workflows/ci.yml) and [the release workflow](.github/workflows/release.yml).
+
+## Publish to crates.io
+
+The workspace publishes as a family: `fshell` plus its sixteen library crates. Every member inherits `version` and `rust-version` from `[workspace.package]`, and every internal dependency in `[workspace.dependencies]` carries the same version requirement — `tests/publishing_tests.rs` asserts both, so a version bump must update the workspace version and the dependency entries together.
+
+```sh
+cargo package --workspace --no-verify   # manifests, file lists and sizes
+cargo login
+cargo publish --workspace --exclude fshell-fuzz
+```
+
+`cargo publish --workspace` walks the dependency order and waits for each crate to appear in the index. Before the first release the siblings do not exist in the registry yet, so `--dry-run` cannot complete; review the packaged trees with `cargo package --list` instead. Cargo always adds `LICENSE` and `README` files found under the package root — ignored directories included — so publish from a clean checkout rather than a working tree carrying local-only projects. Published versions can be yanked but never replaced. `fuzz/` is `publish = false`.
 
 ## Treat shell compatibility as test data
 

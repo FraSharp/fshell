@@ -76,6 +76,7 @@ pub mod prompt;
 pub mod prompt_config;
 pub mod prompt_customizer;
 pub mod terminal_mode;
+pub mod text;
 pub mod theme_ext;
 pub mod tui;
 

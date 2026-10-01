@@ -2,15 +2,16 @@
 name = "fshell-engine"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Evaluator and pipeline executor for fshell"
 repository.workspace = true
 
 [dependencies]
-fshell-core = { path = "../fshell-core" }
-fshell-capabilities = { path = "../fshell-capabilities" }
-fshell-render = { path = "../fshell-render" }
+fshell-core = { workspace = true }
+fshell-capabilities = { workspace = true }
+fshell-render = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -54,5 +55,3 @@ harness = false
 [[bench]]
 name = "pipeline"
 harness = false
-
-
