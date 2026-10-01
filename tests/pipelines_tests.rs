@@ -1724,3 +1724,51 @@ async fn test_json_array_spreads_across_the_pipeline() {
     out.assert_success();
     out.assert_stdout_trimmed_eq("2");
 }
+
+/// A CSV file arrives one line at a time; `@csv` must assemble the document
+/// before parsing it into records.
+#[tokio::test]
+async fn test_csv_document_spanning_process_lines() {
+    let ctx = TestContext::new();
+    std::fs::write(
+        ctx.temp_dir.path().join("data.csv"),
+        "name,age\nada,36\nbob,24\n",
+    )
+    .unwrap();
+
+    let out = ctx
+        .fsh_cmd()
+        .cmd("cat data.csv | @csv | count")
+        .run()
+        .expect("fsh runs");
+    out.assert_success();
+    out.assert_stdout_trimmed_eq("2");
+}
+
+/// YAML documents span lines, and `---` separates several in one stream.
+#[tokio::test]
+async fn test_yaml_documents_span_lines() {
+    let ctx = TestContext::new();
+    std::fs::write(ctx.temp_dir.path().join("doc.yaml"), "name: ada\nage: 36\n").unwrap();
+    std::fs::write(
+        ctx.temp_dir.path().join("multi.yaml"),
+        "name: a\n---\nname: b\n",
+    )
+    .unwrap();
+
+    let out = ctx
+        .fsh_cmd()
+        .cmd("cat doc.yaml | @yaml | count")
+        .run()
+        .expect("fsh runs");
+    out.assert_success();
+    out.assert_stdout_trimmed_eq("1");
+
+    let out = ctx
+        .fsh_cmd()
+        .cmd("cat multi.yaml | @yaml | count")
+        .run()
+        .expect("fsh runs");
+    out.assert_success();
+    out.assert_stdout_trimmed_eq("2");
+}

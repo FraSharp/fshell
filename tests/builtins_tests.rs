@@ -324,22 +324,16 @@ async fn test_integration_csv_roundtrip() {
     if let Stmt::Expr(expr) = stmts[0].unpack() {
         let res = eval_expr(expr, &env).await.unwrap();
         match res {
-            Val::List(outer) => {
-                assert_eq!(outer.len(), 1, "pipeline output should have 1 item");
-                // The single pipeline item is the Val::List of CSV records
-                if let Val::List(items) = &outer[0] {
-                    assert!(!items.is_empty(), "CSV parse should produce records");
-                    if let Val::Map(map) = &items[0] {
-                        assert_eq!(
-                            map.get(&ustr::ustr("name")),
-                            Some(&Val::String("main.rs".into()))
-                        );
-                        assert_eq!(map.get(&ustr::ustr("size")), Some(&Val::Int(14230)));
-                    } else {
-                        panic!("Expected Val::Map");
-                    }
+            Val::List(records) => {
+                assert_eq!(records.len(), 2, "one pipeline item per CSV record");
+                if let Val::Map(map) = &records[0] {
+                    assert_eq!(
+                        map.get(&ustr::ustr("name")),
+                        Some(&Val::String("main.rs".into()))
+                    );
+                    assert_eq!(map.get(&ustr::ustr("size")), Some(&Val::Int(14230)));
                 } else {
-                    panic!("Expected inner Val::List, got {:?}", outer[0]);
+                    panic!("Expected Val::Map, got {:?}", records[0]);
                 }
             }
             other => panic!("Expected Val::List, got {:?}", other),

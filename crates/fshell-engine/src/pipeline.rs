@@ -2,13 +2,15 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::Flow;
-use crate::eval::{json_value_to_val, val_to_json_value};
+use crate::eval::{
+    decode_csv_records, decode_yaml_documents, json_value_to_val, run_document_boundary,
+    val_to_json_value,
+};
 use crate::{
     CapAction, EngineError, Env, ExprOutcome, LocalScope, PendingSuggestion, PipeSender,
-    PipeStream, PipelinePayload, SuggestionMode, cmp_vals, decode_csv_input, eval_expr,
-    eval_expr_flow, eval_stmt, expand_alias_with_args, get_suggested_command,
-    is_external_command_at, pipeline_channel_size, render_bar_chart, render_table,
-    run_boundary_operator,
+    PipeStream, PipelinePayload, SuggestionMode, cmp_vals, eval_expr, eval_expr_flow, eval_stmt,
+    expand_alias_with_args, get_suggested_command, is_external_command_at, pipeline_channel_size,
+    render_bar_chart, render_table, run_boundary_operator,
 };
 use fshell_core::ShellError;
 use fshell_core::lock::{Mutex, RwLock};
@@ -2935,20 +2937,11 @@ async fn execute_pipeline_inner(
                 // YAML/MessagePack carry a plain data representation (the same
                 // shape `@json` uses), not the internal `{type, value}` envelope,
                 // so the output interoperates with external tools.
-                SerializationFormat::Yaml => run_boundary_operator(
+                SerializationFormat::Yaml => run_document_boundary(
                     current_rx,
                     out_tx,
                     &env_clone,
-                    |s| {
-                        serde_yaml::from_str::<serde_json::Value>(s)
-                            .map(json_value_to_val)
-                            .map_err(|e| format!("YAML parse error: {}", e))
-                    },
-                    |b| {
-                        serde_yaml::from_slice::<serde_json::Value>(b)
-                            .map(json_value_to_val)
-                            .map_err(|e| format!("YAML parse error: {}", e))
-                    },
+                    decode_yaml_documents,
                     |v| {
                         serde_yaml::to_string(&val_to_json_value(&v))
                             .map(|s| PipelinePayload::Data(Arc::new(Val::String(s))))
@@ -2987,16 +2980,11 @@ async fn execute_pipeline_inner(
                     let local_fields = Arc::new(Mutex::new(None));
                     let lf_clone = local_fields.clone();
 
-                    run_boundary_operator(
+                    run_document_boundary(
                         current_rx,
                         out_tx,
                         &env_clone,
-                        move |s: &str| decode_csv_input(s),
-                        move |b: &[u8]| {
-                            let s = std::str::from_utf8(b)
-                                .map_err(|e| format!("CSV bytes not valid UTF-8: {e}"))?;
-                            decode_csv_input(s)
-                        },
+                        decode_csv_records,
                         move |val: Val| match val {
                             Val::Map(map) => {
                                 let mut wtr = csv::Writer::from_writer(Vec::new());

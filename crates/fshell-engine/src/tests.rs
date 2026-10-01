@@ -1946,49 +1946,36 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_csv_input_basic() {
+    fn test_decode_csv_records_basic() {
         let csv = "name,size\nmain.rs,14230\nlib.rs,89201\n";
-        let result = super::decode_csv_input(csv).unwrap();
-        if let Val::List(items) = result {
-            assert_eq!(items.len(), 2);
-            if let Val::Map(map) = &items[0] {
-                assert_eq!(map.get(&ustr("name")), Some(&Val::String("main.rs".into())));
-                assert_eq!(map.get(&ustr("size")), Some(&Val::Int(14230)));
-            } else {
-                panic!("Expected Map");
-            }
+        let items = crate::eval::decode_csv_records(csv).unwrap();
+        assert_eq!(items.len(), 2);
+        if let Val::Map(map) = &items[0] {
+            assert_eq!(map.get(&ustr("name")), Some(&Val::String("main.rs".into())));
+            assert_eq!(map.get(&ustr("size")), Some(&Val::Int(14230)));
         } else {
-            panic!("Expected List");
+            panic!("Expected Map");
         }
     }
 
     #[test]
-    fn test_decode_csv_input_headers_only() {
+    fn test_decode_csv_records_headers_only() {
         let csv = "name,size\n";
-        let result = super::decode_csv_input(csv).unwrap();
-        if let Val::List(items) = result {
-            assert!(items.is_empty());
-        } else {
-            panic!("Expected List");
-        }
+        assert!(crate::eval::decode_csv_records(csv).unwrap().is_empty());
     }
 
     #[test]
-    fn test_decode_csv_input_quoted_fields() {
+    fn test_decode_csv_records_quoted_fields() {
         let csv = "name,desc\nfoo,\"hello, world\"\n";
-        let result = super::decode_csv_input(csv).unwrap();
-        if let Val::List(items) = result {
-            assert_eq!(items.len(), 1);
-            if let Val::Map(map) = &items[0] {
-                assert_eq!(
-                    map.get(&ustr("desc")),
-                    Some(&Val::String("hello, world".into()))
-                );
-            } else {
-                panic!("Expected Map");
-            }
+        let items = crate::eval::decode_csv_records(csv).unwrap();
+        assert_eq!(items.len(), 1);
+        if let Val::Map(map) = &items[0] {
+            assert_eq!(
+                map.get(&ustr("desc")),
+                Some(&Val::String("hello, world".into()))
+            );
         } else {
-            panic!("Expected List");
+            panic!("Expected Map");
         }
     }
 

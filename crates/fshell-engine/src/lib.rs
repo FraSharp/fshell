@@ -3751,8 +3751,7 @@ pub use pipeline::{
 pub use suggestions::{get_suggested_command, is_script_trusted, parse_json_value};
 
 pub(crate) use eval::{
-    PATH_CACHE, decode_csv_input, expand_alias_with_args, render_bar_chart, render_table,
-    run_boundary_operator,
+    PATH_CACHE, expand_alias_with_args, render_bar_chart, render_table, run_boundary_operator,
 };
 
 impl Env {

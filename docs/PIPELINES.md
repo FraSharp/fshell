@@ -357,6 +357,9 @@ serializes records as YAML documents:
 ls | limit 3 | @yaml
 ```
 
+input is assembled into a whole document before parsing, and a
+`---`-separated stream yields every document it contains.
+
 ### `@msgpack`
 
 encodes records as binary MessagePack payloads (`Val::Blob`):
@@ -372,6 +375,9 @@ formats records as comma-separated values with inferred headers:
 ```fsh
 ps | map pid command cpu | @csv > processes.csv
 ```
+
+input is assembled into a whole document before parsing, so quoted fields
+and records that span lines are handled by the CSV reader.
 
 ### `@text`
 

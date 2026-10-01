@@ -3384,8 +3384,121 @@ async fn feed_json(
     }
 }
 
-/// Parse a complete CSV string into Val::List of Val::Map records.
-pub(crate) fn decode_csv_input(input: &str) -> Result<Val, String> {
+/// Decode a stream whose text forms one document: text is accumulated and
+/// parsed once the stream ends, because CSV and YAML records span lines.
+///
+/// Values that are not text are encoded immediately, exactly like the other
+/// boundary operators (`ps | @csv` writes rows as they arrive).
+pub(crate) fn run_document_boundary<D, E>(
+    current_rx: Option<Receiver<PipelinePayload>>,
+    out_tx: Sender<PipelinePayload>,
+    env: &Env,
+    decode: D,
+    encode: E,
+) where
+    D: Fn(&str) -> Result<Vec<Val>, String> + Send + 'static,
+    E: Fn(Val) -> Result<PipelinePayload, String> + Send + 'static,
+{
+    let env = env.clone();
+    tokio::spawn(async move {
+        let _permit = boundary_permit().await;
+        let Some(mut rx) = current_rx else {
+            return;
+        };
+        let mut buffer = String::new();
+        while let Some(payload) = rx.recv().await {
+            match payload {
+                PipelinePayload::Data(value) => match (*value).clone() {
+                    Val::String(text) => push_line(&mut buffer, &text),
+                    Val::Blob(bytes) => match std::str::from_utf8(&bytes) {
+                        Ok(text) => push_line(&mut buffer, text),
+                        Err(error) => {
+                            report_decode_error(
+                                &out_tx,
+                                &env,
+                                format!("input is not valid UTF-8: {error}"),
+                            )
+                            .await;
+                        }
+                    },
+                    other => match encode(other) {
+                        Ok(encoded) => {
+                            if out_tx.send(encoded).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(message) => report_decode_error(&out_tx, &env, message).await,
+                    },
+                },
+                PipelinePayload::Bytes(bytes) => match std::str::from_utf8(&bytes) {
+                    Ok(text) => push_line(&mut buffer, text),
+                    Err(error) => {
+                        report_decode_error(
+                            &out_tx,
+                            &env,
+                            format!("input is not valid UTF-8: {error}"),
+                        )
+                        .await;
+                    }
+                },
+                PipelinePayload::Structured(document) => {
+                    let _ = out_tx.send(PipelinePayload::Structured(document)).await;
+                }
+            }
+        }
+        if buffer.trim().is_empty() {
+            return;
+        }
+        match decode(&buffer) {
+            Ok(values) => {
+                for value in values {
+                    if out_tx
+                        .send(PipelinePayload::Data(Arc::new(value)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            Err(message) => report_decode_error(&out_tx, &env, message).await,
+        }
+    });
+}
+
+/// Append a chunk to a line-oriented buffer. The raw input path splits
+/// process output into line payloads without their line breaks, so a newline
+/// is restored between chunks that do not carry one.
+fn push_line(buffer: &mut String, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if !buffer.is_empty() && !buffer.ends_with('\n') {
+        buffer.push('\n');
+    }
+    buffer.push_str(text);
+}
+
+/// Parse a complete YAML stream into its documents. A `---`-separated stream
+/// yields one value per document, and a top-level sequence spreads into its
+/// elements, matching `@json`.
+pub(crate) fn decode_yaml_documents(input: &str) -> Result<Vec<Val>, String> {
+    use serde::Deserialize;
+
+    let mut values = Vec::new();
+    for document in serde_yaml::Deserializer::from_str(input) {
+        let value = serde_json::Value::deserialize(document)
+            .map_err(|e| format!("YAML parse error: {e}"))?;
+        match json_value_to_val(value) {
+            Val::List(items) => values.extend(items),
+            other => values.push(other),
+        }
+    }
+    Ok(values)
+}
+
+/// Parse a complete CSV document into its records.
+pub(crate) fn decode_csv_records(input: &str) -> Result<Vec<Val>, String> {
     let mut reader = csv::ReaderBuilder::new()
         .flexible(true)
         .from_reader(input.as_bytes());
@@ -3407,7 +3520,7 @@ pub(crate) fn decode_csv_input(input: &str) -> Result<Val, String> {
         }
         records.push(Val::Map(map));
     }
-    Ok(Val::List(records))
+    Ok(records)
 }
 
 /// Try to parse a CSV field into the most specific Val type.

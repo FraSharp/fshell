@@ -28,11 +28,19 @@ impl StreamDecoder {
 
     /// Feed one text chunk, returning every value it completed.
     ///
-    /// A chunk that leaves an incomplete tail keeps it buffered for the next
-    /// call. Text that cannot be JSON at all clears the buffer and returns
-    /// the parse error.
+    /// Chunks are treated as consecutive lines, so a newline is inserted
+    /// between chunks that do not carry their own line break — the raw input
+    /// path splits process output into lines and drops the separator. A chunk
+    /// that leaves an incomplete tail keeps it buffered for the next call;
+    /// text that cannot be JSON at all clears the buffer and returns the
+    /// parse error.
     pub fn push(&mut self, text: &str) -> Result<Vec<serde_json::Value>, String> {
-        self.buffer.push_str(text);
+        if !text.is_empty() {
+            if !self.buffer.is_empty() && !self.buffer.ends_with('\n') {
+                self.buffer.push('\n');
+            }
+            self.buffer.push_str(text);
+        }
         let mut values = Vec::new();
         let mut consumed = 0;
         let mut error = None;
