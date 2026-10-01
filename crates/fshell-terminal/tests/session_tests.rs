@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::panic)]
 
 use futures::stream;
 use ratatui::backend::TestBackend;
@@ -9,6 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::{Frame, Terminal};
 
 use fshell_terminal::input::{InputEvent, Key, KeyEvent, Modifiers};
+use fshell_terminal::raw;
 use fshell_terminal::runner::{AppFlow, ShellTuiApp, run_tui_terminal};
 use fshell_terminal::session::{
     TerminalDevice, TerminalMode, TerminalSession, TerminalSessionOptions,
@@ -88,9 +89,14 @@ async fn test_run_tui_eof_returns_none_headless() {
 
 #[test]
 fn test_explicit_ownership_nested_raw_mode() {
-    // Simulate REPL environment where raw mode is ALREADY enabled
-    let _ = crossterm::terminal::enable_raw_mode();
-    let raw_initial = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+    // Simulate REPL environment where raw mode is ALREADY enabled.
+    // Headless CI (stdin = /dev/null, no controlling tty) cannot enter raw
+    // mode; skip gracefully instead of failing the suite.
+    if raw::enable_raw_mode().is_err() {
+        eprintln!("skip: no tty available for raw-mode ownership test");
+        return;
+    }
+    let raw_initial = raw::is_raw_mode_enabled();
 
     {
         // Enter a nested session using stdio in Fullscreen mode (no DSR query)
@@ -104,16 +110,30 @@ fn test_explicit_ownership_nested_raw_mode() {
         };
 
         let device = TerminalDevice::stdio();
-        let session = TerminalSession::enter(device, options).expect("enter nested session");
+        let session = match TerminalSession::enter(device, options) {
+            Ok(session) => session,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || matches!(e.raw_os_error(), Some(6) | Some(25)) =>
+            {
+                eprintln!("skip: no tty available for nested session: {e}");
+                let _ = raw::disable_raw_mode();
+                return;
+            }
+            Err(e) => {
+                let _ = raw::disable_raw_mode();
+                panic!("enter nested session: {e}");
+            }
+        };
         assert_eq!(session.mode(), TerminalMode::Fullscreen);
         // Session dropped here
     }
 
     // After nested session dropped, raw mode MUST STILL BE ENABLED because the session
     // did not enable it itself!
-    let raw_after = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+    let raw_after = raw::is_raw_mode_enabled();
     // Cleanup for test harness
-    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = raw::disable_raw_mode();
 
     if raw_initial {
         assert!(

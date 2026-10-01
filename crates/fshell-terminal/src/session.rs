@@ -10,16 +10,12 @@
 
 use std::io::{self, Write};
 
-use crossterm::cursor::{Hide, Show};
-use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-};
-use crossterm::execute;
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+use crate::ansi;
 use crate::lifecycle::{PanicHookGuard, SignalGuard};
+use crate::raw;
 
 /// Physical terminal device to interact with.
 #[derive(Debug)]
@@ -138,9 +134,9 @@ impl TerminalSession {
         // 1. Raw mode management
         match &device {
             TerminalDevice::Stdio(_) => {
-                let raw_already = terminal::is_raw_mode_enabled().unwrap_or(false);
+                let raw_already = raw::is_raw_mode_enabled();
                 if !raw_already {
-                    terminal::enable_raw_mode()?;
+                    raw::enable_raw_mode()?;
                     did_enable_raw = true;
                 }
             }
@@ -149,15 +145,15 @@ impl TerminalSession {
                 use std::os::unix::io::AsRawFd;
                 let fd = file.as_raw_fd();
                 if unsafe { libc::isatty(fd) == 1 } {
-                    let orig = enable_raw_mode_fd(fd)?;
+                    let orig = raw::enable_raw_mode_fd(fd)?;
                     orig_tty_termios = Some((fd, orig));
                 }
             }
             #[cfg(not(unix))]
             TerminalDevice::ControllingTty(_) => {
-                let raw_already = terminal::is_raw_mode_enabled().unwrap_or(false);
+                let raw_already = raw::is_raw_mode_enabled();
                 if !raw_already {
-                    terminal::enable_raw_mode()?;
+                    raw::enable_raw_mode()?;
                     did_enable_raw = true;
                 }
             }
@@ -169,7 +165,7 @@ impl TerminalSession {
 
         match options.mode {
             TerminalMode::Fullscreen => {
-                if let Err(e) = execute!(device, EnterAlternateScreen) {
+                if let Err(e) = ansi::enter_alternate_screen(&mut device) {
                     Self::cleanup_raw(did_enable_raw, orig_tty_termios);
                     return Err(e);
                 }
@@ -195,7 +191,7 @@ impl TerminalSession {
         // 3. Auxiliary modes
         let mut did_enable_mouse = false;
         if options.enable_mouse {
-            if let Err(e) = execute!(device, EnableMouseCapture) {
+            if let Err(e) = ansi::enable_mouse_capture(&mut device) {
                 Self::cleanup_partial(
                     &mut device,
                     did_enter_alt_screen,
@@ -210,7 +206,7 @@ impl TerminalSession {
 
         let mut did_enable_paste = false;
         if options.enable_bracketed_paste {
-            if let Err(e) = execute!(device, EnableBracketedPaste) {
+            if let Err(e) = ansi::enable_bracketed_paste(&mut device) {
                 Self::cleanup_partial(
                     &mut device,
                     did_enter_alt_screen,
@@ -225,7 +221,7 @@ impl TerminalSession {
 
         let mut did_hide_cursor = false;
         if options.hide_cursor {
-            if let Err(e) = execute!(device, Hide) {
+            if let Err(e) = ansi::hide_cursor(&mut device) {
                 Self::cleanup_partial(
                     &mut device,
                     did_enter_alt_screen,
@@ -312,11 +308,11 @@ impl TerminalSession {
         #[cfg(not(unix))] _orig_tty_termios: Option<()>,
     ) {
         if did_enable_raw {
-            let _ = terminal::disable_raw_mode();
+            let _ = raw::disable_raw_mode();
         }
         #[cfg(unix)]
         if let Some((fd, orig)) = orig_tty_termios {
-            let _ = restore_raw_mode_fd(fd, &orig);
+            let _ = raw::restore_raw_mode_fd(fd, &orig);
         }
     }
 
@@ -329,7 +325,7 @@ impl TerminalSession {
         #[cfg(not(unix))] orig_tty_termios: Option<()>,
     ) {
         if did_enter_alt_screen {
-            let _ = execute!(device, LeaveAlternateScreen);
+            let _ = ansi::leave_alternate_screen(device);
         }
         if let Some(h) = inline_height {
             let _ = write!(device, "\x1b[{}B\r", h);
@@ -351,22 +347,22 @@ impl Drop for TerminalSession {
 
         // 1. Restore cursor visibility if this session hid it
         if self.did_hide_cursor {
-            let _ = execute!(backend, Show);
+            let _ = ansi::show_cursor(backend);
         }
 
         // 2. Disable mouse capture if this session enabled it
         if self.did_enable_mouse {
-            let _ = execute!(backend, DisableMouseCapture);
+            let _ = ansi::disable_mouse_capture(backend);
         }
 
         // 3. Disable bracketed paste if this session enabled it
         if self.did_enable_paste {
-            let _ = execute!(backend, DisableBracketedPaste);
+            let _ = ansi::disable_bracketed_paste(backend);
         }
 
         // 4. Leave alternate screen if this session entered it
         if self.did_enter_alt_screen {
-            let _ = execute!(backend, LeaveAlternateScreen);
+            let _ = ansi::leave_alternate_screen(backend);
         }
 
         // 5. Cleanly release inline viewport if this session was inline
@@ -377,39 +373,13 @@ impl Drop for TerminalSession {
 
         // 6. Disable raw mode only if this session was the one that enabled it
         if self.did_enable_raw {
-            let _ = terminal::disable_raw_mode();
+            let _ = raw::disable_raw_mode();
         }
 
         // 7. Restore original termios for /dev/tty if modified
         #[cfg(unix)]
         if let Some((fd, orig)) = self.orig_tty_termios {
-            let _ = restore_raw_mode_fd(fd, &orig);
+            let _ = raw::restore_raw_mode_fd(fd, &orig);
         }
-    }
-}
-
-#[cfg(unix)]
-fn enable_raw_mode_fd(fd: std::os::unix::io::RawFd) -> io::Result<libc::termios> {
-    unsafe {
-        let mut termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut termios) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let orig = termios;
-        libc::cfmakeraw(&mut termios);
-        if libc::tcsetattr(fd, libc::TCSANOW, &termios) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(orig)
-    }
-}
-
-#[cfg(unix)]
-fn restore_raw_mode_fd(fd: std::os::unix::io::RawFd, orig: &libc::termios) -> io::Result<()> {
-    unsafe {
-        if libc::tcsetattr(fd, libc::TCSANOW, orig) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
     }
 }

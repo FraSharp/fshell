@@ -185,17 +185,16 @@ impl Drop for PanicHookGuard {
 
 /// Best-effort terminal cleanup used by panic hooks and emergency exits.
 pub fn emergency_restore_terminal() {
+    use crate::ansi;
+    use crate::raw;
     let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b[=0u");
-    let _ = crossterm::execute!(
-        out,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
-        crossterm::event::DisableBracketedPaste,
-        crossterm::event::DisableFocusChange,
-        crossterm::event::DisableMouseCapture,
-        crossterm::cursor::Show,
-        crossterm::cursor::EnableBlinking,
-    );
+    let _ = out.write_all(ansi::RESET_KEYBOARD_ENHANCEMENTS.as_bytes());
+    let _ = out.write_all(ansi::CLEAR_FROM_CURSOR_DOWN.as_bytes());
+    let _ = out.write_all(ansi::DISABLE_BRACKETED_PASTE.as_bytes());
+    let _ = out.write_all(ansi::DISABLE_FOCUS_CHANGE.as_bytes());
+    let _ = out.write_all(ansi::DISABLE_MOUSE_CAPTURE.as_bytes());
+    let _ = out.write_all(ansi::SHOW_CURSOR.as_bytes());
+    let _ = out.write_all(ansi::ENABLE_BLINKING.as_bytes());
     let _ = out.flush();
-    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = raw::disable_raw_mode();
 }
