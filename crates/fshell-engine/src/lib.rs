@@ -3609,8 +3609,8 @@ pub(crate) fn write_stderr_stream(text: &str) {
     }
     let err = std::io::stderr();
     let mut handle = err.lock();
-    if text.ends_with('\0') {
-        let _ = handle.write_all(text[..text.len() - 1].as_bytes());
+    if let Some(text) = text.strip_suffix('\0') {
+        let _ = handle.write_all(text.as_bytes());
     } else if text.ends_with('\n') {
         let _ = handle.write_all(text.as_bytes());
     } else {

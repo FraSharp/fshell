@@ -438,35 +438,29 @@ impl futures::Stream for UnixEventStream {
         if self.closed {
             return std::task::Poll::Ready(None);
         }
-        loop {
-            match self.events.try_recv() {
-                Ok(StreamMessage::Event(event)) => {
-                    return std::task::Poll::Ready(Some(event));
+        match self.events.try_recv() {
+            Ok(StreamMessage::Event(event)) => std::task::Poll::Ready(Some(event)),
+            Ok(StreamMessage::Closed) => {
+                self.closed = true;
+                std::task::Poll::Ready(None)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if let Ok(mut waker) = self.waker.lock() {
+                    *waker = Some(cx.waker().clone());
                 }
-                Ok(StreamMessage::Closed) => {
-                    self.closed = true;
-                    return std::task::Poll::Ready(None);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    if let Ok(mut waker) = self.waker.lock() {
-                        *waker = Some(cx.waker().clone());
+                // A send racing the lock above queued an event already.
+                match self.events.try_recv() {
+                    Ok(StreamMessage::Event(event)) => std::task::Poll::Ready(Some(event)),
+                    Ok(StreamMessage::Closed) => {
+                        self.closed = true;
+                        std::task::Poll::Ready(None)
                     }
-                    // A send racing the lock above queued an event already.
-                    match self.events.try_recv() {
-                        Ok(StreamMessage::Event(event)) => {
-                            return std::task::Poll::Ready(Some(event));
-                        }
-                        Ok(StreamMessage::Closed) => {
-                            self.closed = true;
-                            return std::task::Poll::Ready(None);
-                        }
-                        Err(_) => return std::task::Poll::Pending,
-                    }
+                    Err(_) => std::task::Poll::Pending,
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.closed = true;
-                    return std::task::Poll::Ready(None);
-                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.closed = true;
+                std::task::Poll::Ready(None)
             }
         }
     }
