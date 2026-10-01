@@ -178,8 +178,9 @@ pub fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
 }
 
-/// Enter the terminal state expected by a line-oriented prompt or a child
-/// process. This is the only cooked-mode transition used by FTUI.
+/// Enter the cooked input state for command execution without changing the
+/// FTUI session's steady cursor policy. Full-screen children may set their own
+/// cursor mode; the session restores its terminal state when they return.
 pub(crate) fn enter_cooked_mode() -> std::io::Result<()> {
     let mut out = std::io::stdout();
     out.flush()?;
@@ -190,7 +191,6 @@ pub(crate) fn enter_cooked_mode() -> std::io::Result<()> {
         crossterm::event::DisableFocusChange,
         crossterm::event::DisableMouseCapture,
         crossterm::cursor::Show,
-        crossterm::cursor::EnableBlinking,
     )?;
     out.flush()?;
     crossterm::terminal::disable_raw_mode()

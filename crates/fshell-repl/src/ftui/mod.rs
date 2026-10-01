@@ -3239,11 +3239,13 @@ pub async fn run_ftui_repl(
         history_mgr.reset();
         agent_state.active = false;
 
-        // 3. Exit fullscreen TUI and restore terminal to normal mode,
-        //    then print the final prompt + command for command execution.
+        // 3. Release the input viewport. Keep its last frame on screen until
+        //    the command handoff replaces the prompt row; clearing from the
+        //    cursor to the bottom here exposed a blank terminal between frames.
         if let Some(t) = terminal.take() {
-            // Explicitly clear the viewport area before dropping.
-            {
+            // There is no next prompt to reuse the viewport on shell exit, so
+            // clear the remaining inline UI only in that case.
+            if exit_repl {
                 let _ = crossterm::execute!(
                     std::io::stdout(),
                     crossterm::cursor::SavePosition,
@@ -3288,8 +3290,33 @@ pub async fn run_ftui_repl(
             // Rewrite \n -> \r\n and emit an explicit \r\n terminator so the next
             // prompt starts at column 0 even while _raw_session is still active.
             let safe_cmd = cmd.replace('\n', "\r\n");
-            print!("\r\x1b[2K{}{}\x1b[31m ^C\x1b[0m\r\n", left_ansi, safe_cmd);
-            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let mut stdout = std::io::stdout();
+            use std::io::Write as _;
+            let _ = write!(
+                stdout,
+                "\r\x1b[2K{}{}\x1b[31m ^C\x1b[0m\r\n",
+                left_ansi, safe_cmd
+            );
+            if let Some(origin_y) = prompt_origin_y {
+                let terminal_height = crossterm::terminal::size()
+                    .map(|(_, height)| height)
+                    .unwrap_or(u16::MAX);
+                let limit_row = if status_bar.visible {
+                    terminal_height.saturating_sub(2)
+                } else {
+                    terminal_height
+                };
+                let committed_rows = 1u16.saturating_add(cmd.matches('\n').count() as u16);
+                let _ = queue_clear_inline_rows(
+                    &mut stdout,
+                    origin_y,
+                    current_viewport_height,
+                    committed_rows,
+                    limit_row,
+                );
+                let _ = queue_clear_status_rows(&mut stdout, limit_row, terminal_height);
+            }
+            let _ = stdout.flush();
             status_bar.end_command_timer();
             status_bar.set_exit_code(130);
             let snap = crate::refresh_prompt_snapshot(&env, &current_dir);
@@ -3406,71 +3433,20 @@ pub async fn run_ftui_repl(
                 let final_ansi = prompt_mgr.render_prompt_final_ansi();
                 if let Some(oy) = prompt_origin_y {
                     let mut stdout = std::io::stdout();
-                    if trimmed.contains('\n') {
-                        let lines: Vec<&str> = trimmed.split('\n').collect();
-                        let total_lines = lines.len();
-                        let total_printed_rows = 1 + total_lines;
-
-                        // Row 0: Elevated prompt header
-                        let _ = crossterm::execute!(
-                            stdout,
-                            crossterm::cursor::MoveTo(0, oy),
-                            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-                            crossterm::style::Print(format!("{}\r\n", final_ansi)),
-                        );
-
-                        // Rows 1..=total_lines: Clean code lines flush at column 0
-                        for (i, line) in lines.iter().enumerate() {
-                            let row_y = oy + 1 + i as u16;
-                            let _ = crossterm::execute!(
-                                stdout,
-                                crossterm::cursor::MoveTo(0, row_y),
-                                crossterm::terminal::Clear(
-                                    crossterm::terminal::ClearType::CurrentLine
-                                ),
-                                crossterm::style::Print(format!("{}\r\n", line)),
-                            );
-                        }
-
-                        // Clear any remaining rows from previous viewport/footer
-                        for row in (total_printed_rows as u16)..current_viewport_height {
-                            let _ = crossterm::execute!(
-                                stdout,
-                                crossterm::cursor::MoveTo(0, oy + row),
-                                crossterm::terminal::Clear(
-                                    crossterm::terminal::ClearType::CurrentLine
-                                ),
-                            );
-                        }
-                        let _ = crossterm::execute!(
-                            stdout,
-                            crossterm::cursor::MoveTo(
-                                0,
-                                (oy + total_printed_rows as u16).min(term_h.saturating_sub(1))
-                            ),
-                        );
+                    let limit_row = if status_bar.visible {
+                        term_h.saturating_sub(2)
                     } else {
-                        let _ = crossterm::execute!(
-                            stdout,
-                            crossterm::cursor::MoveTo(0, oy),
-                            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-                            crossterm::style::Print(format!("{}{}\r\n", final_ansi, trimmed)),
-                        );
-                        for row in 1..current_viewport_height {
-                            let _ = crossterm::execute!(
-                                stdout,
-                                crossterm::cursor::MoveTo(0, oy + row),
-                                crossterm::terminal::Clear(
-                                    crossterm::terminal::ClearType::CurrentLine
-                                ),
-                            );
-                        }
-                        let _ = crossterm::execute!(
-                            stdout,
-                            crossterm::cursor::MoveTo(0, (oy + 1).min(term_h.saturating_sub(1))),
-                        );
-                    }
-                    let _ = std::io::Write::flush(&mut stdout);
+                        term_h
+                    };
+                    let _ = commit_command_line(
+                        &mut stdout,
+                        oy,
+                        current_viewport_height,
+                        limit_row,
+                        term_h,
+                        &final_ansi,
+                        &trimmed,
+                    );
                 } else if trimmed.contains('\n') {
                     let lines: Vec<&str> = trimmed.split('\n').collect();
                     println!("\r\x1b[2K{}", final_ansi);
@@ -3557,6 +3533,104 @@ pub async fn run_ftui_repl(
 
 fn safe_cursor_position() -> Option<(u16, u16)> {
     crossterm::cursor::position().ok()
+}
+
+/// Commit the visible input line as transcript and remove only the old inline
+/// viewport rows. Queue the whole handoff before flushing so the terminal never
+/// receives a frame where the prompt has disappeared but its replacement has
+/// not been written yet.
+fn commit_command_line(
+    out: &mut impl std::io::Write,
+    origin_y: u16,
+    viewport_height: u16,
+    limit_row: u16,
+    terminal_height: u16,
+    prompt: &str,
+    command: &str,
+) -> std::io::Result<()> {
+    if limit_row == 0 || origin_y >= limit_row {
+        return out.flush();
+    }
+
+    if command.contains('\n') {
+        crossterm::queue!(
+            out,
+            crossterm::cursor::MoveTo(0, origin_y),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+            crossterm::style::Print(format!("{prompt}\r\n")),
+        )?;
+
+        let mut command_rows = 0u16;
+        for (index, line) in command.split('\n').enumerate() {
+            let row = origin_y.saturating_add(1).saturating_add(index as u16);
+            crossterm::queue!(
+                out,
+                crossterm::cursor::MoveTo(0, row),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+                crossterm::style::Print(format!("{line}\r\n")),
+            )?;
+            command_rows = command_rows.saturating_add(1);
+        }
+
+        let committed_rows = 1u16.saturating_add(command_rows);
+        queue_clear_inline_rows(out, origin_y, viewport_height, committed_rows, limit_row)?;
+        queue_clear_status_rows(out, limit_row, terminal_height)?;
+        let cursor_y = origin_y.saturating_add(committed_rows).min(limit_row - 1);
+        crossterm::queue!(out, crossterm::cursor::MoveTo(0, cursor_y))?;
+    } else {
+        crossterm::queue!(
+            out,
+            crossterm::cursor::MoveTo(0, origin_y),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+            crossterm::style::Print(format!("{prompt}{command}\r\n")),
+        )?;
+
+        queue_clear_inline_rows(out, origin_y, viewport_height, 1, limit_row)?;
+        queue_clear_status_rows(out, limit_row, terminal_height)?;
+        let cursor_y = origin_y.saturating_add(1).min(limit_row - 1);
+        crossterm::queue!(out, crossterm::cursor::MoveTo(0, cursor_y))?;
+    }
+
+    out.flush()
+}
+
+fn queue_clear_inline_rows(
+    out: &mut impl std::io::Write,
+    origin_y: u16,
+    viewport_height: u16,
+    start_row: u16,
+    limit_row: u16,
+) -> std::io::Result<()> {
+    let viewport_end = origin_y
+        .saturating_add(viewport_height.min(limit_row.saturating_sub(origin_y)))
+        .min(limit_row);
+    for row_offset in start_row..viewport_height {
+        let row = origin_y.saturating_add(row_offset);
+        if row >= viewport_end {
+            break;
+        }
+        crossterm::queue!(
+            out,
+            crossterm::cursor::MoveTo(0, row),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+        )?;
+    }
+    Ok(())
+}
+
+fn queue_clear_status_rows(
+    out: &mut impl std::io::Write,
+    limit_row: u16,
+    terminal_height: u16,
+) -> std::io::Result<()> {
+    for row in limit_row.min(terminal_height)..terminal_height {
+        crossterm::queue!(
+            out,
+            crossterm::cursor::MoveTo(0, row),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+        )?;
+    }
+    Ok(())
 }
 
 fn slice_spans_by_column(
