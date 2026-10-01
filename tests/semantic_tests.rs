@@ -7,10 +7,9 @@
 mod common;
 use common::*;
 
-use fshell_semantic::{
-    Action, FindFiles, Os, Platform, UtilitySet, lower_fsh, render_fsh, render_posix,
-    validate_intent,
-};
+#[cfg(feature = "ff")]
+use fshell_semantic::{Action, FindFiles, lower_fsh};
+use fshell_semantic::{Os, Platform, UtilitySet, render_fsh, render_posix, validate_intent};
 use std::path::PathBuf;
 
 fn lowering_platform() -> Platform {
@@ -107,6 +106,7 @@ fn one_action_renders_differently_per_target() {
     assert_ne!(fsh, posix);
 }
 
+#[cfg(feature = "ff")]
 #[tokio::test(flavor = "multi_thread")]
 async fn lowered_fsh_pipeline_executes_against_the_real_engine() {
     let env = setup_test_env();
@@ -195,6 +195,7 @@ fn intent_reports_missing_information() {
     output.assert_stdout_contains("Understood so far");
 }
 
+#[cfg(feature = "ff")]
 #[test]
 fn intent_executes_and_composes_in_a_pipeline() {
     let cmd = FshCmd::new();

@@ -83,6 +83,7 @@ async fn test_integration_cd_isolated_from_process_environment() {
     assert_eq!(fshell_core::get_var("PWD"), process_pwd);
 }
 
+#[cfg(feature = "sandbox")]
 #[tokio::test]
 async fn test_custom_user_tilde_expansion() {
     let env = setup_test_env();

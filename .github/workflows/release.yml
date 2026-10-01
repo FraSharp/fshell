@@ -43,7 +43,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install pkg-config libarchive libb2 xz zstd lz4
       - run: rustup target add ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo build --release --features full --target ${{ matrix.target }}
       - name: Verify portable archive linkage
         run: scripts/check-archive-linkage.sh target/${{ matrix.target }}/release/fsh
       - name: Package

@@ -483,6 +483,7 @@ async fn test_fsh_script_allows_safe_commands_and_pipelines() {
     );
 }
 
+#[cfg(feature = "sandbox")]
 #[tokio::test]
 async fn test_fsh_script_sandbox_off_bypass() {
     let _guard = ProcessLockGuard::acquire();
@@ -820,6 +821,7 @@ async fn test_sandbox_blocks_home_ssh_write() {
     }
 }
 
+#[cfg(feature = "sandbox")]
 #[tokio::test]
 async fn test_sandbox_builtin_command_cli_modes() {
     let _guard = ProcessLockGuard::acquire();

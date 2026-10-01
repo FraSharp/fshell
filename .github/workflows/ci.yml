@@ -34,6 +34,48 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: rustup target add ${{ matrix.target }}
+      - name: Format Check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --check
+      - name: Build (default features)
+        run: cargo build --target ${{ matrix.target }}
+      - name: Test (default features)
+        run: cargo test --target ${{ matrix.target }}
+      - name: Native Language Baseline
+        if: matrix.os == 'ubuntu-latest'
+        run: FSH_BIN="target/${{ matrix.target }}/debug/fsh" scripts/fsh-language-baseline.sh
+      - name: Check Fuzz Targets
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo check -p fshell-fuzz
+      - name: Clippy (default features)
+        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
+      - name: Install cargo-audit
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@cargo-audit
+      - name: Audit
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo audit
+
+  full:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest        # x86_64
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm     # native ARM64 Linux (no qemu/cross toolchain)
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel       # native Intel macOS
+            target: x86_64-apple-darwin
+          - os: macos-latest         # native ARM64 macOS
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: rustup target add ${{ matrix.target }}
       - name: Install archive build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -42,26 +84,11 @@ jobs:
       - name: Install archive build dependencies (macOS)
         if: runner.os == 'macOS'
         run: brew install pkg-config libarchive libb2 xz zstd lz4
-      - name: Format Check
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt --check
-      - name: Build
-        run: cargo build --target ${{ matrix.target }}
+      - name: Build (full features)
+        run: cargo build --features full --target ${{ matrix.target }}
       - name: Verify portable archive linkage
         run: scripts/check-archive-linkage.sh target/${{ matrix.target }}/debug/fsh
-      - name: Test
-        run: cargo test --target ${{ matrix.target }}
-      - name: Native Language Baseline
-        if: matrix.os == 'ubuntu-latest'
-        run: FSH_BIN="target/${{ matrix.target }}/debug/fsh" scripts/fsh-language-baseline.sh
-      - name: Check Fuzz Targets
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo check -p fshell-fuzz
-      - name: Clippy
-        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
-      - name: Install cargo-audit
-        if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@cargo-audit
-      - name: Audit
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo audit
+      - name: Test (full features)
+        run: cargo test --features full --target ${{ matrix.target }}
+      - name: Clippy (full features)
+        run: cargo clippy --features full --target ${{ matrix.target }} --all-targets -- -D warnings

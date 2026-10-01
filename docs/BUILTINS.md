@@ -381,6 +381,8 @@ report an error rather than doing nothing.
 
 ## feature-gated builtins
 
+these builtins are compiled out unless their feature is enabled: the default build carries none of them, and `--features full` turns them all on.
+
 ### sandbox & capabilities (`feature = "sandbox"`)
 
 builtins for managing the capability security subsystem:

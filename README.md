@@ -28,8 +28,9 @@ a POSIX compatibility engine is bundled for the bash/zsh scripts you already hav
 
 - linux or macOS
 - a stable Rust toolchain ([rustup.rs](https://rustup.rs))
+- a C compiler (the bundled SQLite and stacker builds need one; on macOS it ships with the Xcode command line tools)
 
-the default feature set links libarchive (for the `extract` builtin):
+the default build is minimal — parser, engine, POSIX frontend and the core builtins — and needs no libraries beyond the system toolchain. the `full` feature set adds the archive extraction (`extract`), secrets (`vault`), assistant (`ai`), `http`, `sql`, `chart`, `notify`, fuzzy filter (`ff`), `replace` and sandbox builtins, and links libarchive statically:
 
 - ubuntu / debian: `sudo apt install clang libclang-dev pkg-config libarchive-dev liblzma-dev libzstd-dev liblz4-dev libb2-dev`
 - macOS: `brew install pkg-config libarchive libb2 xz zstd lz4`
@@ -39,17 +40,12 @@ the default feature set links libarchive (for the `extract` builtin):
 ```bash
 git clone https://github.com/FraSharp/fshell
 cd fshell
-cargo build --release        # binary at target/release/fsh
-cargo install --path .       # ...or install it into ~/.cargo/bin
+cargo build --release                   # minimal; binary at target/release/fsh
+cargo install --path .                  # ...or install it into ~/.cargo/bin
+cargo install --path . --features full  # everything above, with the native packages installed
 ```
 
-there are no prebuilt binaries yet; release archives for linux and macOS are produced by the release workflow on `v*` tags.
-
-to build without libarchive — `--no-default-features` disables every optional feature, including `vault`, `ai`, `http`, `sql`, `sandbox` and charts:
-
-```bash
-cargo build --release --no-default-features
-```
+there are no prebuilt binaries yet; release archives for linux and macOS are produced by the release workflow on `v*` tags and carry the full feature set.
 
 ### use it as your login shell
 

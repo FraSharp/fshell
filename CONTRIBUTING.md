@@ -45,7 +45,7 @@ cd fshell
 cargo build
 ```
 
-If your change does not involve archive extraction, you can avoid its native dependencies with `cargo build --no-default-features`. The default build includes native archive extraction and requires `pkg-config`, Clang/libclang, libarchive 3.6+ development headers, and static libarchive and codec libraries. See the installation section in [README.md](README.md) for platform-specific packages.
+The default build enables no optional features and needs only the Rust toolchain and a C compiler. The `full` feature set (`cargo build --features full`) adds native archive extraction and the other optional builtins, and requires `pkg-config`, Clang/libclang, libarchive 3.6+ development headers, and static libarchive and codec libraries. See the installation section in [README.md](README.md) for platform-specific packages.
 
 ## Choose checks for your change
 
@@ -57,7 +57,8 @@ The root package contains the command-line application and domain-split integrat
 |---|---|
 | `cargo fmt --check` | Rust formatting |
 | `cargo build` | Default debug build |
-| `cargo test` | Root package unit and integration tests |
+| `cargo test` | Root package unit and integration tests (default features) |
+| `cargo test --features full` | Root package tests with the full feature set (native archive dependencies required) |
 | `cargo test --workspace` | Available tests across workspace members |
 | `cargo test --test conformance_tests conformance_composition` | Pipeline and composition compatibility cases |
 | `cargo clippy --all-targets -- -D warnings` | Clippy checks for all root-package targets |
@@ -67,7 +68,7 @@ The root package contains the command-line application and domain-split integrat
 
 CI's Clippy gate covers the root package's targets. A workspace-wide Clippy run currently reports existing `unwrap_used` and `panic` lint violations in member-crate tests, so it is not a required local check.
 
-CI runs on pushes and pull requests to `main`. The root package's build, portable archive-linkage check, tests, and Clippy run on all four native targets:
+CI runs on pushes and pull requests to `main`. Both the default (no optional features) and `--features full` configurations build, test, and lint the root package on all four native targets; the `full` job also verifies portable archive linkage:
 
 | Runner | Rust target |
 |---|---|
@@ -76,7 +77,7 @@ CI runs on pushes and pull requests to `main`. The root package's build, portabl
 | `macos-15-intel` | `x86_64-apple-darwin` |
 | `macos-latest` | `aarch64-apple-darwin` |
 
-Formatting, the native-language baseline, fuzz-target checking, and `cargo audit` run on `ubuntu-latest` only. Releases build and package all four targets on `v*` tags; the exact jobs are in [the CI workflow](.github/workflows/ci.yml) and [the release workflow](.github/workflows/release.yml).
+Formatting, the native-language baseline, fuzz-target checking, and `cargo audit` run on `ubuntu-latest` only. Releases build and package all four targets on `v*` tags with `--features full`; the exact jobs are in [the CI workflow](.github/workflows/ci.yml) and [the release workflow](.github/workflows/release.yml).
 
 ## Treat shell compatibility as test data
 

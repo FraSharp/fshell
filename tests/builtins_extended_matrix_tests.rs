@@ -87,6 +87,7 @@ let type_tool = (type custom_tool)
 // 3. Text Search & Replace Builtins
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "replace")]
 #[tokio::test]
 async fn test_replace_builtin_in_files() {
     let env = setup_test_env();

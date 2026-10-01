@@ -56,7 +56,7 @@ include = [
 ]
 
 [features]
-default = ["full"]
+default = []
 full = [
     "sandbox",
     "vault",
@@ -69,7 +69,6 @@ full = [
     "replace",
     "extract",
 ]
-minimal = []
 sandbox = ["fshell-builtins/sandbox"]
 vault = ["fshell-builtins/vault"]
 ai = ["fshell-builtins/ai", "fshell-repl/ai"]

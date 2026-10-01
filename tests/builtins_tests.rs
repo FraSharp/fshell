@@ -467,6 +467,7 @@ async fn test_integration_z_builtin() {
     remove_var("FSH_Z_DB_PATH");
 }
 
+#[cfg(feature = "extract")]
 #[tokio::test]
 async fn test_integration_extract_builtin_capabilities() {
     let env = setup_test_env();

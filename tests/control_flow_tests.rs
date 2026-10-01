@@ -391,6 +391,7 @@ async fn test_integration_type_constraint() {
 
 // Strict Capability Mode & Constructors tests
 
+#[cfg(feature = "sandbox")]
 #[tokio::test]
 async fn test_strict_mode_caps_enforced() {
     let env = setup_test_env();
@@ -426,6 +427,7 @@ async fn test_strict_mode_caps_enforced() {
     eval_stmt(&stmts[1], &env, false).await.unwrap();
 }
 
+#[cfg(feature = "sandbox")]
 #[tokio::test]
 async fn test_capability_constructors_evaluation() {
     let env = setup_test_env();
