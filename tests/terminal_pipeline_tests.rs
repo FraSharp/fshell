@@ -16,7 +16,7 @@ fn piped_external_stage_can_read_password_from_controlling_terminal() {
         })
         .expect("open PTY");
 
-    let script = r#"echo "$(command -v fsh)" | cat; sh -c 'printf "TTY_READY\n" >/dev/tty; sleep 0.2; IFS= read -r value </dev/tty; printf "TTY_GOT:%s\n" "$value" >/dev/tty' | cat"#;
+    let script = r#"echo "$(sh -c 'printf substitution-ok')" | cat; sh -c 'printf "TTY_READY\n" >/dev/tty; sleep 0.2; IFS= read -r value </dev/tty; printf "TTY_GOT:%s\n" "$value" >/dev/tty' | cat"#;
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_fsh"));
     command.arg("-c");
     command.arg(script);
@@ -85,8 +85,8 @@ fn piped_external_stage_can_read_password_from_controlling_terminal() {
     };
     let output = String::from_utf8_lossy(&output);
     assert!(
-        output.lines().any(|line| line.trim_end().ends_with("/fsh")),
-        "command substitution did not emit the fsh path: {output}"
+        output.contains("substitution-ok"),
+        "command substitution did not flow through the pipeline: {output}"
     );
     assert!(
         !output.contains("FSH-EXEC-005"),

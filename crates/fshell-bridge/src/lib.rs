@@ -87,6 +87,16 @@ fn spawn_external_command(
     } else {
         pid
     };
+    // Parent-side `setpgid` closes the fork/exec race: the child sets its own
+    // group in `pre_exec` (via `process_group`), but it may not have been
+    // scheduled yet when a follower tries to join the leader's group or when
+    // the parent hands the terminal to the job. Doing it here guarantees the
+    // group exists before `tcsetpgrp` and before any follower's `setpgid`.
+    // Failures are benign (the child already set it, or already exec'd).
+    // SAFETY: `setpgid` on our own direct child with a valid pgid.
+    unsafe {
+        libc::setpgid(pid, job_pgid);
+    }
     if should_transfer {
         // SAFETY: SIGTTOU is ignored during the parent-side handoff.
         unsafe {
