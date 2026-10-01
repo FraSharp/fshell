@@ -21,6 +21,10 @@ fn piped_external_stage_can_read_password_from_controlling_terminal() {
     command.arg("-c");
     command.arg(script);
     command.env("TERM", "xterm-256color");
+    // The terminal handoff under test is exactly what test mode declines, so
+    // the ambient CI and FSH_TEST_ENV flags must not reach the child shell.
+    command.env_remove("CI");
+    command.env_remove("FSH_TEST_ENV");
     let mut child = pair.slave.spawn_command(command).expect("spawn fsh");
 
     let mut writer = pair.master.take_writer().expect("PTY writer");
