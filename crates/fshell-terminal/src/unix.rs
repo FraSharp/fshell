@@ -692,4 +692,48 @@ mod tests {
         ));
         assert_eq!(crate::inbox::take_cursor_report(), Some((8, 2)));
     }
+
+    #[test]
+    fn bracketed_paste_reaches_the_source_whole() {
+        let _guard = lock();
+        let mut pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        pipe.write(b"\x1B[200~pasted text\x1B[201~");
+        match source.poll(Duration::from_secs(5)) {
+            Ok(InputPoll::Event(InputEvent::Paste(text))) => assert_eq!(text, "pasted text"),
+            other => panic!("expected a paste event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pty_resize_surfaces_as_an_event() {
+        let _guard = lock();
+        let pty = portable_pty::native_pty_system();
+        let pair = pty
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let fd = pair.master.as_raw_fd().expect("master PTY descriptor");
+        let mut source = UnixEventSource {
+            source: crate::input::InputSource::new(UnixSource::open_fd(fd)),
+        };
+        pair.master
+            .resize(portable_pty::PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        match source.poll(Duration::from_secs(5)) {
+            Ok(InputPoll::Event(InputEvent::Resize { columns, rows })) => {
+                assert_eq!((columns, rows), (120, 40));
+            }
+            other => panic!("expected a resize event, got {other:?}"),
+        }
+    }
 }
