@@ -12,18 +12,34 @@
 
 use std::io::{self, Write};
 #[cfg(unix)]
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 #[cfg(unix)]
 use std::sync::Mutex;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
-/// Saved terminal state for the process-global raw-mode guard: the fd, the
-/// owned `/dev/tty` handle when one was opened (kept alive so the descriptor
-/// cannot be recycled while the guard holds it), and the original termios.
+/// Saved terminal state for the process-global raw-mode guard: the fd and
+/// its original termios. The descriptor belongs to [`controlling_tty`],
+/// which owns it for the process lifetime.
 #[cfg(unix)]
-static PRIOR_RAW_MODE: Mutex<Option<(RawFd, Option<std::fs::File>, libc::termios)>> =
-    Mutex::new(None);
+static PRIOR_RAW_MODE: Mutex<Option<(RawFd, libc::termios)>> = Mutex::new(None);
+
+/// The controlling terminal, opened once and kept for the process lifetime.
+///
+/// Opening `/dev/tty` per query cost a descriptor cycle on every redraw; the
+/// handle is created on first use, closed on exec, and never inherited.
+#[cfg(unix)]
+fn controlling_tty() -> Option<&'static std::fs::File> {
+    static TTY: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
+    TTY.get_or_init(|| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok()
+    })
+    .as_ref()
+}
 
 /// Terminal size as `(columns, rows)`.
 #[cfg(unix)]
@@ -45,24 +61,53 @@ fn window_size_fields(fd: RawFd) -> io::Result<(u16, u16, u16, u16)> {
     }
 }
 
-/// Query terminal size, preferring `/dev/tty` with stdout fallback.
-/// Matches `crossterm::terminal::size` Unix behavior (no `tput` fallback:
-/// callers already default to `(80, 24)` on error).
+/// Measure the terminal with the window-size ioctl, preferring the
+/// controlling terminal over stdout. Zeroed dimensions mean the ioctl was
+/// answered by something that is not a terminal, so they do not count.
+#[cfg(unix)]
+fn ioctl_size() -> Option<(u16, u16)> {
+    if let Some(file) = controlling_tty()
+        && let Ok(size) = window_size_fd(file.as_raw_fd())
+        && (size.0 != 0 || size.1 != 0)
+    {
+        return Some(size);
+    }
+    if let Ok(size) = window_size_fd(libc::STDOUT_FILENO)
+        && (size.0 != 0 || size.1 != 0)
+    {
+        return Some(size);
+    }
+    None
+}
+
+/// Ask `tput` for a dimension, used when the ioctl cannot measure the
+/// terminal at all.
+#[cfg(unix)]
+fn tput_dimension(name: &str) -> Option<u16> {
+    let output = std::process::Command::new("tput").arg(name).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_tput_output(&output.stdout)
+}
+
+/// Parse a `tput` dimension reply.
+#[cfg(unix)]
+fn parse_tput_output(bytes: &[u8]) -> Option<u16> {
+    std::str::from_utf8(bytes).ok()?.trim().parse().ok()
+}
+
+/// Query terminal size: the window-size ioctl first, then `tput` for
+/// environments where the ioctl is unavailable.
 #[cfg(unix)]
 pub fn size() -> io::Result<(u16, u16)> {
-    if let Ok(file) = std::fs::File::open("/dev/tty") {
-        use std::os::unix::io::AsRawFd;
-        if let Ok(dims) = window_size_fd(file.as_raw_fd())
-            && (dims.0 != 0 || dims.1 != 0)
-        {
-            return Ok(dims);
-        }
+    if let Some(size) = ioctl_size() {
+        return Ok(size);
     }
-    let dims = window_size_fd(libc::STDOUT_FILENO)?;
-    if dims.0 == 0 && dims.1 == 0 {
-        return Err(io::Error::other("terminal size is zero"));
+    match (tput_dimension("cols"), tput_dimension("lines")) {
+        (Some(columns), Some(rows)) => Ok((columns, rows)),
+        _ => Err(io::Error::other("terminal size is unavailable")),
     }
-    Ok(dims)
 }
 
 #[cfg(not(unix))]
@@ -71,16 +116,15 @@ pub fn size() -> io::Result<(u16, u16)> {
 }
 
 /// Full window size as `(columns, rows, width_pixels, height_pixels)`,
-/// preferring `/dev/tty` with stdout fallback. Mirrors
+/// preferring the controlling terminal with stdout fallback. Mirrors
 /// `crossterm::terminal::window_size` Unix behavior, including zeroed pixel
 /// fields on terminals that do not report them.
 #[cfg(unix)]
 pub fn window_size() -> io::Result<(u16, u16, u16, u16)> {
-    if let Ok(file) = std::fs::File::open("/dev/tty") {
-        use std::os::unix::io::AsRawFd;
-        if let Ok(size) = window_size_fields(file.as_raw_fd()) {
-            return Ok(size);
-        }
+    if let Some(file) = controlling_tty()
+        && let Ok(size) = window_size_fields(file.as_raw_fd())
+    {
+        return Ok(size);
     }
     window_size_fields(libc::STDOUT_FILENO)
 }
@@ -111,12 +155,11 @@ const CURSOR_REPORT_SLICE: Duration = Duration::from_millis(20);
 #[cfg(unix)]
 pub fn cursor_position(out: &mut impl Write) -> io::Result<(u16, u16)> {
     if is_raw_mode_enabled() {
-        let (fd, _owned) = tty_fd()?;
+        let fd = tty_fd()?;
         return query_cursor_position(out, fd, CURSOR_REPORT_TIMEOUT);
     }
     enable_raw_mode()?;
-    let result =
-        tty_fd().and_then(|(fd, _owned)| query_cursor_position(out, fd, CURSOR_REPORT_TIMEOUT));
+    let result = tty_fd().and_then(|fd| query_cursor_position(out, fd, CURSOR_REPORT_TIMEOUT));
     let _ = disable_raw_mode();
     result
 }
@@ -227,21 +270,16 @@ fn read_device(fd: RawFd, buffer: &mut Vec<u8>) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Resolve the fd `crossterm::terminal` operates on: stdin when it is a TTY,
-/// otherwise `/dev/tty`. Returns an owned file when `/dev/tty` is opened so
-/// the fd stays valid for the caller.
+/// Resolve the fd terminal queries operate on: stdin when it is a TTY,
+/// otherwise the process-wide controlling terminal.
 #[cfg(unix)]
-fn tty_fd() -> io::Result<(RawFd, Option<std::fs::File>)> {
+fn tty_fd() -> io::Result<RawFd> {
     if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
-        return Ok((libc::STDIN_FILENO, None));
+        return Ok(libc::STDIN_FILENO);
     }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")?;
-    use std::os::unix::io::AsRawFd;
-    let fd = file.as_raw_fd();
-    Ok((fd, Some(file)))
+    controlling_tty()
+        .map(|file| file.as_raw_fd())
+        .ok_or_else(|| io::Error::other("/dev/tty is unavailable"))
 }
 
 #[cfg(unix)]
@@ -306,7 +344,7 @@ pub fn enable_raw_mode() -> io::Result<()> {
     if guard.is_some() {
         return Ok(());
     }
-    let (fd, owned) = tty_fd()?;
+    let fd = tty_fd()?;
     let orig = get_attr(fd)?;
     unsafe {
         let mut raw = orig;
@@ -315,7 +353,7 @@ pub fn enable_raw_mode() -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
-    *guard = Some((fd, owned, orig));
+    *guard = Some((fd, orig));
     Ok(())
 }
 
@@ -331,7 +369,7 @@ pub fn disable_raw_mode() -> io::Result<()> {
         .lock()
         .map_err(|_| io::Error::other("raw-mode state lock is poisoned"))?
         .take();
-    if let Some((fd, _owned, orig)) = saved {
+    if let Some((fd, orig)) = saved {
         set_attr(fd, &orig)?;
     }
     Ok(())
@@ -404,6 +442,14 @@ mod tests {
             crate::inbox::pop(),
             Some(Recovered::Bytes(bytes)) if bytes == b"xy"
         ));
+    }
+
+    #[test]
+    fn tput_output_parses_dimensions() {
+        assert_eq!(parse_tput_output(b"120\n"), Some(120));
+        assert_eq!(parse_tput_output(b" 40 "), Some(40));
+        assert_eq!(parse_tput_output(b""), None);
+        assert_eq!(parse_tput_output(b"abc"), None);
     }
 
     #[test]
