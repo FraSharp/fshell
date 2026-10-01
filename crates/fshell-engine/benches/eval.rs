@@ -204,6 +204,7 @@ fn eval_statements(c: &mut Criterion) {
     let stmts = vec![
         Stmt::Let {
             name: "y".to_string(),
+            ty: None,
             expr: Expr::Int(99),
         },
         Stmt::Assign {

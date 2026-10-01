@@ -734,6 +734,20 @@ impl Parser {
         Ok(Expr::String(vec![StringPart::unquoted(path)]))
     }
 
+    /// Parse an optional `: Type` annotation on a variable declaration.
+    ///
+    /// Accepts the same type syntax as function parameters: a primitive name
+    /// (`Int`, `String`, ...) or a structural map layout (`{ port: Int, .. }`).
+    pub(crate) fn parse_type_annotation(&mut self) -> Result<Option<TypeConstraint>, ParseError> {
+        self.skip_horizontal_whitespace();
+        if self.peek() != Some(':') {
+            return Ok(None);
+        }
+        self.next_char();
+        self.skip_whitespace();
+        Ok(Some(self.parse_type_constraint()?))
+    }
+
     /// Parse one `map` projection: a field path (`a.b.c`), an expansion
     /// (`$x` or `(expr)`), or a bare field name.
     ///

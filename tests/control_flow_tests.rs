@@ -764,6 +764,7 @@ async fn test_eval_if_else() {
     };
     let stmt = Stmt::Let {
         name: "result".to_string(),
+        ty: None,
         expr: if_true,
     };
     eval_stmt(&stmt, &env, false).await.unwrap();
@@ -781,6 +782,7 @@ async fn test_eval_if_else() {
     };
     let stmt2 = Stmt::Let {
         name: "result2".to_string(),
+        ty: None,
         expr: if_false,
     };
     eval_stmt(&stmt2, &env, false).await.unwrap();
@@ -797,6 +799,7 @@ async fn test_eval_if_else() {
     };
     let stmt3 = Stmt::Let {
         name: "result3".to_string(),
+        ty: None,
         expr: if_no_else,
     };
     eval_stmt(&stmt3, &env, false).await.unwrap();
@@ -868,6 +871,7 @@ async fn test_eval_if_else_if_chaining() {
     };
     let stmt = Stmt::Let {
         name: "val".to_string(),
+        ty: None,
         expr: outer_if,
     };
     eval_stmt(&stmt, &env, false).await.unwrap();
@@ -1484,4 +1488,44 @@ async fn test_syntax_error_diagnostics_invalid_operator_sequence() {
         validation,
         fshell_core::ValidationResult::Invalid { .. }
     ));
+}
+
+/// Typed declarations check the bound value against the annotation.
+#[tokio::test]
+async fn test_typed_declarations_check_values() {
+    let ctx = TestContext::new();
+
+    let out = ctx
+        .fsh_cmd()
+        .cmd(r#"let port: Int = 8080; echo "port {port}""#)
+        .run()
+        .expect("fsh runs");
+    out.assert_success();
+    out.assert_stdout_trimmed_eq("port 8080");
+
+    let out = ctx
+        .fsh_cmd()
+        .cmd(r#"let port: Int = "nope""#)
+        .run()
+        .expect("fsh runs");
+    out.assert_failure();
+    out.assert_stderr_contains("type constraint error");
+
+    let out = ctx
+        .fsh_cmd()
+        .cmd(
+            r#"let cfg: { host: String, port: Int, .. } = {"host": "localhost", "port": 80, "extra": true}; echo "ok {cfg.port}""#,
+        )
+        .run()
+        .expect("fsh runs");
+    out.assert_success();
+    out.assert_stdout_trimmed_eq("ok 80");
+
+    let out = ctx
+        .fsh_cmd()
+        .cmd(r#"let cfg: { host: String, port: Int, .. } = {"host": "localhost"}"#)
+        .run()
+        .expect("fsh runs");
+    out.assert_failure();
+    out.assert_stderr_contains("missing field 'port'");
 }

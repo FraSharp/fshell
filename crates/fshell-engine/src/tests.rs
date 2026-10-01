@@ -421,6 +421,7 @@ mod tests {
         let env = Env::new();
         let stmt = Stmt::Let {
             name: "y".to_string(),
+            ty: None,
             expr: Expr::Int(100),
         };
         eval_stmt(&stmt, &env, false).await.unwrap();
@@ -1287,6 +1288,7 @@ mod tests {
             ret_type: None,
             body: vec![Stmt::Let {
                 name: "result".into(),
+                ty: None,
                 expr: Expr::Variable("x".into()),
             }],
         };
@@ -1312,11 +1314,13 @@ mod tests {
         let stmt = Stmt::TryCatch {
             try_body: vec![Stmt::Let {
                 name: "x".into(),
+                ty: None,
                 expr: Expr::Int(10),
             }],
             catch_var: "e".into(),
             catch_body: vec![Stmt::Let {
                 name: "caught".into(),
+                ty: None,
                 expr: Expr::Bool(true),
             }],
         };
@@ -1337,6 +1341,7 @@ mod tests {
             catch_var: "err".into(),
             catch_body: vec![Stmt::Let {
                 name: "handled".into(),
+                ty: None,
                 expr: Expr::Bool(true),
             }],
         };
@@ -1367,6 +1372,7 @@ mod tests {
             catch_var: "err_msg".into(),
             catch_body: vec![Stmt::Let {
                 name: "logged".into(),
+                ty: None,
                 expr: Expr::Ident("err_msg".into()),
             }],
         };
@@ -1399,6 +1405,7 @@ mod tests {
                     catch_var: "inner_err".into(),
                     catch_body: vec![Stmt::Let {
                         name: "inner_handled".into(),
+                        ty: None,
                         expr: Expr::Bool(true),
                     }],
                 },
@@ -1407,6 +1414,7 @@ mod tests {
             catch_var: "outer_err".into(),
             catch_body: vec![Stmt::Let {
                 name: "outer_handled".into(),
+                ty: None,
                 expr: Expr::Bool(true),
             }],
         };
@@ -1430,6 +1438,7 @@ mod tests {
             caps: vec![Expr::Variable("test_cap".into())],
             body: vec![Stmt::Let {
                 name: "inside".into(),
+                ty: None,
                 expr: Expr::Bool(true),
             }],
         };
@@ -1536,6 +1545,7 @@ mod tests {
                 pattern: MatchPattern::Wildcard,
                 body: vec![Stmt::Let {
                     name: "matched".into(),
+                    ty: None,
                     expr: Expr::Bool(true),
                 }],
             }],
@@ -1555,6 +1565,7 @@ mod tests {
                     pattern: MatchPattern::Literal(LiteralPattern::Int(0)),
                     body: vec![Stmt::Let {
                         name: "matched".into(),
+                        ty: None,
                         expr: Expr::String(vec![StringPart::unquoted("zero")]),
                     }],
                 },
@@ -1562,6 +1573,7 @@ mod tests {
                     pattern: MatchPattern::Literal(LiteralPattern::Int(42)),
                     body: vec![Stmt::Let {
                         name: "matched".into(),
+                        ty: None,
                         expr: Expr::String(vec![StringPart::unquoted("forty-two")]),
                     }],
                 },
@@ -1586,6 +1598,7 @@ mod tests {
                 pattern: MatchPattern::Literal(LiteralPattern::String("hello".into())),
                 body: vec![Stmt::Let {
                     name: "found".into(),
+                    ty: None,
                     expr: Expr::Bool(true),
                 }],
             }],
@@ -1609,6 +1622,7 @@ mod tests {
                 },
                 body: vec![Stmt::Let {
                     name: "matched".into(),
+                    ty: None,
                     expr: Expr::Bool(true),
                 }],
             }],
@@ -1641,6 +1655,7 @@ mod tests {
                 },
                 body: vec![Stmt::Let {
                     name: "got".into(),
+                    ty: None,
                     expr: Expr::Ident("d".into()),
                 }],
             }],
@@ -1662,6 +1677,7 @@ mod tests {
                 pattern: MatchPattern::Literal(LiteralPattern::Int(0)),
                 body: vec![Stmt::Let {
                     name: "matched".into(),
+                    ty: None,
                     expr: Expr::Bool(true),
                 }],
             }],
@@ -1690,6 +1706,7 @@ mod tests {
                 catch_var: "e".into(),
                 catch_body: vec![Stmt::Let {
                     name: "caught".into(),
+                    ty: None,
                     expr: Expr::Bool(true),
                 }],
             }],
@@ -1736,6 +1753,7 @@ mod tests {
             body: vec![
                 Stmt::Let {
                     name: "triggered".into(),
+                    ty: None,
                     expr: Expr::Bool(true),
                 },
                 Stmt::Expr(Expr::Null),

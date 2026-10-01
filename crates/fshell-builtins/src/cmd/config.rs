@@ -1148,18 +1148,66 @@ pub fn format_function(
     res
 }
 
+/// Render a declared type back into source syntax.
+fn format_type_constraint(constraint: &fshell_core::TypeConstraint) -> String {
+    match constraint {
+        fshell_core::TypeConstraint::Any => "Any".to_string(),
+        fshell_core::TypeConstraint::Primitive(name) => name.clone(),
+        fshell_core::TypeConstraint::Structural {
+            fields,
+            rest,
+            alias,
+        } => {
+            let mut out = String::from("{ ");
+            for (index, (name, field)) in fields.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(name);
+                out.push_str(": ");
+                out.push_str(&format_type_constraint(field));
+            }
+            if *rest {
+                if !fields.is_empty() {
+                    out.push_str(", ");
+                }
+                out.push_str("..");
+            }
+            out.push_str(" }");
+            if let Some(alias) = alias {
+                out.push_str(" as ");
+                out.push_str(alias);
+            }
+            out
+        }
+    }
+}
+
+/// Render an optional `: Type` annotation for a declaration.
+fn format_type_annotation(ty: &Option<fshell_core::TypeConstraint>) -> String {
+    match ty {
+        Some(constraint) => format!(": {}", format_type_constraint(constraint)),
+        None => String::new(),
+    }
+}
+
 pub fn format_stmt(stmt: &fshell_core::Stmt, indent: usize) -> String {
     let spaces = " ".repeat(indent);
     match stmt.unpack() {
-        fshell_core::Stmt::Local { name, expr } => {
+        fshell_core::Stmt::Local { name, ty, expr } => {
+            let annotation = format_type_annotation(ty);
             if let Some(expr) = expr {
-                format!("{spaces}local {name} = {};\n", format_expr(expr))
+                format!(
+                    "{spaces}local {name}{annotation} = {};\n",
+                    format_expr(expr)
+                )
             } else {
-                format!("{spaces}local {name};\n")
+                format!("{spaces}local {name}{annotation};\n")
             }
         }
-        fshell_core::Stmt::Let { name, expr } => {
-            format!("{spaces}let {name} = {};\n", format_expr(expr))
+        fshell_core::Stmt::Let { name, ty, expr } => {
+            let annotation = format_type_annotation(ty);
+            format!("{spaces}let {name}{annotation} = {};\n", format_expr(expr))
         }
         fshell_core::Stmt::Assign { name, expr } => {
             format!("{spaces}{name} = {};\n", format_expr(expr))

@@ -324,10 +324,16 @@ pub enum SerializationFormat {
 pub enum Stmt {
     Local {
         name: String,
+        /// Optional declared type; the bound value is checked against it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ty: Option<TypeConstraint>,
         expr: Option<Expr>,
     },
     Let {
         name: String,
+        /// Optional declared type; the bound value is checked against it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ty: Option<TypeConstraint>,
         expr: Expr,
     },
     Assign {

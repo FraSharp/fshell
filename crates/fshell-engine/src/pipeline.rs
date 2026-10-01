@@ -12,7 +12,6 @@ use crate::{
     expand_alias_with_args, get_suggested_command, is_external_command_at, pipeline_channel_size,
     render_bar_chart, render_table, run_boundary_operator,
 };
-use fshell_core::ShellError;
 use fshell_core::lock::{Mutex, RwLock};
 use fshell_core::{
     Expr, FshDiag, Parser, Pipeline, PipelineStage, SerializationFormat, Stmt, StringPart,
@@ -165,10 +164,7 @@ fn strip_capture_sentinel(val: Val) -> Val {
 
 /// Check that a Val satisfies the given type constraint.
 /// Returns Ok(()) if it does, Err with a message if not.
-pub(crate) fn check_type_constraint(
-    val: &Val,
-    constraint: &TypeConstraint,
-) -> Result<(), ShellError> {
+pub(crate) fn check_type_constraint(val: &Val, constraint: &TypeConstraint) -> Result<(), String> {
     use ustr::ustr;
     match (val, constraint) {
         (_, TypeConstraint::Any) => Ok(()),
@@ -181,8 +177,7 @@ pub(crate) fn check_type_constraint(
                     "type constraint error: expected primitive '{}', got '{}'",
                     name,
                     val.type_name()
-                )
-                .into())
+                ))
             }
         }
         (Val::Map(m), TypeConstraint::Structural { fields, rest, .. }) => {
@@ -190,9 +185,7 @@ pub(crate) fn check_type_constraint(
                 match m.get(&ustr(key)) {
                     Some(v) => check_type_constraint(v, expected_type)?,
                     None => {
-                        return Err(
-                            format!("type constraint error: missing field '{}'", key).into()
-                        );
+                        return Err(format!("type constraint error: missing field '{}'", key));
                     }
                 }
             }
@@ -200,9 +193,7 @@ pub(crate) fn check_type_constraint(
             if !*rest {
                 for key in m.keys() {
                     if !fields.iter().any(|(k, _)| k == key.as_str()) {
-                        return Err(
-                            format!("type constraint error: unexpected field '{}'", key).into()
-                        );
+                        return Err(format!("type constraint error: unexpected field '{}'", key));
                     }
                 }
             }
@@ -211,8 +202,7 @@ pub(crate) fn check_type_constraint(
         _ => Err(format!(
             "type constraint error: expected structural constraint, got '{}'",
             val.type_name()
-        )
-        .into()),
+        )),
     }
 }
 

@@ -366,6 +366,7 @@ impl Parser {
 
         if self.match_keyword("local") {
             let name = self.parse_identifier()?;
+            let ty = self.parse_type_annotation()?;
             self.skip_horizontal_whitespace();
             let expr = if self.peek() == Some('=') {
                 self.next_char();
@@ -374,12 +375,13 @@ impl Parser {
             } else {
                 None
             };
-            Ok(Stmt::Local { name, expr })
+            Ok(Stmt::Local { name, ty, expr })
         } else if self.match_keyword("let") {
             let name = self.parse_identifier()?;
+            let ty = self.parse_type_annotation()?;
             self.expect('=')?;
             let expr = self.parse_expr_bool()?;
-            Ok(Stmt::Let { name, expr })
+            Ok(Stmt::Let { name, ty, expr })
         } else if self.match_keyword("fn") {
             let name = self.parse_identifier()?;
             self.skip_whitespace();

@@ -488,9 +488,18 @@ let max_retries = 3
 
 # local binding (scoped to function or block)
 local temp_count = 0
+
+# declarations may pin the type; the bound value is checked against it
+let port: Int = 8080
+let cfg: { host: String, port: Int, .. } = load_config()
 ```
 
 `let` defines or re-binds a variable. if a local variable exists with that name, `let` updates the local scope; otherwise it updates the environment scope.
+
+a type annotation accepts a primitive name (`Int`, `Float`, `String`, `Bool`, `List`,
+`Map`, `Blob`, ...) or a structural map layout (`{ host: String, port: Int, .. }`,
+where `..` allows extra fields). a value that does not satisfy its constraint fails
+the declaration with a type-constraint error; `null` satisfies every constraint.
 
 ### assignment & compound updates
 

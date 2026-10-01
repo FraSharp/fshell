@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use crate::pipeline::check_type_constraint;
 use crate::profiler::{ProfilerCategory, ProfilerState};
 use crate::{
     BuiltinHandler, EngineError, Env, Flow, IS_TRUSTED_CONTEXT, PipelinePayload, ReactiveEvent,
@@ -1816,7 +1817,7 @@ fn try_eval_stmt_sync_inner(
     _unsafe_context: bool,
 ) -> Option<Result<Flow, EngineError>> {
     match stmt {
-        Stmt::Local { name, expr } => {
+        Stmt::Local { name, ty, expr } => {
             let val = if let Some(expr) = expr {
                 let val_res = try_eval_sync(expr, env)?;
                 match val_res {
@@ -1826,6 +1827,11 @@ fn try_eval_stmt_sync_inner(
             } else {
                 Val::Null
             };
+            if let Some(constraint) = ty
+                && let Err(message) = crate::pipeline::check_type_constraint(&val, constraint)
+            {
+                return Some(Err(EngineError::from(message)));
+            }
             if let Some(ref locals) = env.local_vars {
                 locals.declare(name, val);
             } else {
@@ -1833,12 +1839,17 @@ fn try_eval_stmt_sync_inner(
             }
             Some(Ok(Flow::Normal))
         }
-        Stmt::Let { name, expr } => {
+        Stmt::Let { name, ty, expr } => {
             let val_res = try_eval_sync(expr, env)?;
             let val = match val_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if let Some(constraint) = ty
+                && let Err(message) = crate::pipeline::check_type_constraint(&val, constraint)
+            {
+                return Some(Err(EngineError::from(message)));
+            }
             if let Some(ref locals) = env.local_vars
                 && locals.update(name, val.clone())
             {
@@ -2191,12 +2202,17 @@ async fn eval_stmt_inner(
     }
     let res: Result<Flow, EngineError> = match cur {
         Stmt::Spanned { .. } => unreachable!("Spanned should have been stripped"),
-        Stmt::Local { name, expr } => {
+        Stmt::Local { name, ty, expr } => {
             let val = if let Some(expr) = expr {
                 eval_rhs!(expr, env)
             } else {
                 Val::Null
             };
+            if let Some(constraint) = ty
+                && let Err(message) = check_type_constraint(&val, constraint)
+            {
+                return Err(EngineError::from(message));
+            }
             if let Some(ref locals) = env.local_vars {
                 locals.declare(name, val);
             } else {
@@ -2205,8 +2221,13 @@ async fn eval_stmt_inner(
             }
             Ok(Flow::Normal)
         }
-        Stmt::Let { name, expr } => {
+        Stmt::Let { name, ty, expr } => {
             let val = eval_rhs!(expr, env);
+            if let Some(constraint) = ty
+                && let Err(message) = check_type_constraint(&val, constraint)
+            {
+                return Err(EngineError::from(message));
+            }
             if let Some(ref locals) = env.local_vars
                 && locals.update(name, val.clone())
             {

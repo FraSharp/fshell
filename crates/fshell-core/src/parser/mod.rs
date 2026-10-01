@@ -450,7 +450,7 @@ mod tests {
         let mut p = Parser::new("let x = 42");
         let stmts = p.parse_statements().unwrap();
         assert_eq!(stmts.len(), 1);
-        if let Stmt::Let { name, expr } = stmts[0].unpack() {
+        if let Stmt::Let { name, expr, .. } = stmts[0].unpack() {
             assert_eq!(name, "x");
             assert_eq!(expr.unpack(), &Expr::Int(42));
         } else {
@@ -1762,7 +1762,7 @@ mod tests {
             .parse_statements()
             .unwrap();
         assert_eq!(stmts.len(), 1);
-        if let Stmt::Let { name, expr } = stmts[0].unpack() {
+        if let Stmt::Let { name, expr, .. } = stmts[0].unpack() {
             assert_eq!(name, "x");
             assert!(matches!(expr.unpack(), Expr::MultiLineString { .. }));
         } else {
@@ -2036,7 +2036,7 @@ mod tests {
             .parse_statements()
             .unwrap();
         assert_eq!(stmts.len(), 1);
-        if let Stmt::Let { name, expr } = stmts[0].unpack() {
+        if let Stmt::Let { name, expr, .. } = stmts[0].unpack() {
             assert_eq!(name, "x");
             assert!(matches!(
                 expr.unpack(),
@@ -2054,7 +2054,7 @@ mod tests {
             .parse_statements()
             .unwrap();
         assert_eq!(stmts.len(), 1);
-        if let Stmt::Let { name, expr } = stmts[0].unpack() {
+        if let Stmt::Let { name, expr, .. } = stmts[0].unpack() {
             assert_eq!(name, "x");
             match expr.unpack() {
                 Expr::VarWithModifier {
@@ -3097,6 +3097,34 @@ mod tests {
             last_stage_of("ps | limit 10"),
             PipelineStage::Limit { .. }
         ));
+    }
+
+    #[test]
+    fn test_typed_declarations_carry_constraints() {
+        let stmts = Parser::new("let port: Int = 8080")
+            .parse_statements()
+            .unwrap();
+        match stmts[0].unpack() {
+            Stmt::Let {
+                ty: Some(TypeConstraint::Primitive(name)),
+                ..
+            } => assert_eq!(name, "Int"),
+            other => panic!("expected a typed let, got {other:?}"),
+        }
+
+        let stmts = Parser::new("local cfg: { host: String, .. } = {}")
+            .parse_statements()
+            .unwrap();
+        match stmts[0].unpack() {
+            Stmt::Local {
+                ty: Some(TypeConstraint::Structural { fields, rest, .. }),
+                ..
+            } => {
+                assert_eq!(fields.len(), 1);
+                assert!(rest, "'..' must be recorded on the constraint");
+            }
+            other => panic!("expected a typed local, got {other:?}"),
+        }
     }
 
     #[test]
