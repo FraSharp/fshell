@@ -272,9 +272,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use crate::parse::{
-        RawEvent, RawKey, RawModifiers as WireModifiers, RawMouse, map_raw_event,
-    };
+    use crate::parse::{RawEvent, RawKey, RawModifiers as WireModifiers, RawMouse, map_raw_event};
 
     #[derive(Default)]
     struct FakeReader {

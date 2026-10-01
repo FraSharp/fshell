@@ -4,7 +4,7 @@
 use crate::terminal_mode::FullscreenTerminalGuard;
 use chrono::{Local, Utc};
 use fshell_core::Val;
-use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key};
+use fshell_terminal::input::{InputEvent, InputPoll, Key, UnixEventSource};
 use std::fmt::Write;
 use std::io::IsTerminal;
 use std::sync::Arc;

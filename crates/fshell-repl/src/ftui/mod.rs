@@ -21,11 +21,11 @@ pub mod widget_explorer;
 pub mod widgets;
 
 use chrono::TimeZone;
-use fshell_terminal::input::{
-    UnixEventSource, EventSource, InputError, InputEvent, InputPoll, Key, KeyAction,
-    Modifiers, MouseAction, MouseButton,
-};
 use fshell_terminal::FshellBackend;
+use fshell_terminal::input::{
+    EventSource, InputError, InputEvent, InputPoll, Key, KeyAction, Modifiers, MouseAction,
+    MouseButton, UnixEventSource,
+};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     layout::{Constraint, Direction, Layout, Rect},
@@ -2456,8 +2456,13 @@ pub async fn run_ftui_repl(
                                             prompt_mgr.refresh_snapshot(&current_dir);
                                             let final_ansi = prompt_mgr.render_prompt_final_ansi();
                                             let mut stdout = std::io::stdout();
-                                            let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
-                                            let _ = fshell_terminal::ansi::clear_current_line(&mut stdout);
+                                            let _ = fshell_terminal::ansi::move_to_column(
+                                                &mut stdout,
+                                                0,
+                                            );
+                                            let _ = fshell_terminal::ansi::clear_current_line(
+                                                &mut stdout,
+                                            );
                                             println!("\r\x1b[2K{}", final_ansi);
                                             let _ = std::io::Write::flush(&mut std::io::stdout());
                                             break 'input_loop;

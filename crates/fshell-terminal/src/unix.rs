@@ -617,10 +617,7 @@ mod tests {
         let mut stream = UnixEventStream::open_fd(pipe.reader);
         pipe.write(b"q");
         let first = futures::executor::block_on(stream.next());
-        assert!(matches!(
-            first,
-            InputPoll::Event(InputEvent::Key(_))
-        ));
+        assert!(matches!(first, InputPoll::Event(InputEvent::Key(_))));
         pipe.close_writer();
         // EOF arrives once the worker drains the queued key.
         let mut saw_closed = false;

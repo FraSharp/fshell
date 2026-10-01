@@ -9,10 +9,10 @@ use fshell_core::prompt_config::{
 };
 use fshell_core::theme::Theme;
 use fshell_engine::Env;
-use fshell_terminal::input::{
-    UnixEventSource, InputError, InputEvent, InputPoll, Key, KeyAction, KeyEvent, Modifiers,
-};
 use fshell_terminal::FshellBackend;
+use fshell_terminal::input::{
+    InputError, InputEvent, InputPoll, Key, KeyAction, KeyEvent, Modifiers, UnixEventSource,
+};
 use ratatui::{
     Terminal,
     layout::{Alignment, Constraint, Direction, Layout, Rect},

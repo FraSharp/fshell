@@ -5,7 +5,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
-use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key};
+use fshell_terminal::input::{InputEvent, InputPoll, Key, UnixEventSource};
 use miette::SourceSpan;
 use std::io::Write;
 use std::sync::Arc;
@@ -157,8 +157,7 @@ async fn read_line_standard(timeout_secs: Option<u64>) -> Result<String, String>
 }
 
 async fn read_line_silent(timeout_secs: Option<u64>) -> Result<String, String> {
-    fshell_terminal::enable_raw_mode()
-        .map_err(|e| format!("Failed to enable raw mode: {}", e))?;
+    fshell_terminal::enable_raw_mode().map_err(|e| format!("Failed to enable raw mode: {}", e))?;
 
     let mut line = String::new();
     let start = std::time::Instant::now();

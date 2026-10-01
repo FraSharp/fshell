@@ -9,10 +9,8 @@ use crate::tui::components::{KeyHint, ScrollState, SearchBarState, StatusFooter}
 use crate::tui::theme;
 use chrono::TimeZone;
 use fshell_core::theme::Theme;
-use fshell_terminal::input::{
-    UnixEventSource, InputEvent, InputPoll, Key, KeyAction, Modifiers,
-};
 use fshell_terminal::FshellBackend;
+use fshell_terminal::input::{InputEvent, InputPoll, Key, KeyAction, Modifiers, UnixEventSource};
 use ratatui::{
     Terminal,
     layout::{Constraint, Direction, Layout, Rect},

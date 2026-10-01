@@ -8,7 +8,7 @@ use crate::tui::components::{KeyHint, ScrollState, SearchBarState, StatusFooter,
 use crate::tui::theme;
 use fshell_core::lock::Mutex;
 use fshell_core::theme::Theme;
-use fshell_terminal::input::{UnixEventStream, InputEvent, Key, KeyAction, Modifiers};
+use fshell_terminal::input::{InputEvent, Key, KeyAction, Modifiers, UnixEventStream};
 use fshell_terminal::runner::{AppFlow, ShellTuiApp, run_tui};
 use fshell_terminal::session::{
     TerminalDevice, TerminalMode, TerminalSession, TerminalSessionOptions,

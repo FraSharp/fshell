@@ -372,10 +372,7 @@ mod tests {
 
     #[test]
     fn cursor_report_ignores_preceding_input() {
-        assert_eq!(
-            parse_cursor_position(b"\x1b[Ahello\x1b[3;4R"),
-            Some((3, 2))
-        );
+        assert_eq!(parse_cursor_position(b"\x1b[Ahello\x1b[3;4R"), Some((3, 2)));
     }
 
     #[test]

@@ -520,8 +520,8 @@ impl AnsiParser {
             .map(|index| index + terminator.len());
         match end {
             Some(end) => {
-                let text = String::from_utf8_lossy(&self.buf[6..end - terminator.len()])
-                    .into_owned();
+                let text =
+                    String::from_utf8_lossy(&self.buf[6..end - terminator.len()]).into_owned();
                 self.buf.drain(..end);
                 Parse::Event(RawEvent::Paste(text))
             }
@@ -559,7 +559,11 @@ impl AnsiParser {
 
     /// Parse SGR mouse (`ESC [ < Cb ; Cx ; Cy M|m`, lowercase `m` on release).
     fn parse_sgr_mouse(&mut self) -> Parse {
-        let end = match self.buf.iter().position(|byte| *byte == b'm' || *byte == b'M') {
+        let end = match self
+            .buf
+            .iter()
+            .position(|byte| *byte == b'm' || *byte == b'M')
+        {
             Some(index) if index >= 6 => index + 1,
             _ => return Parse::NeedMore,
         };
@@ -908,9 +912,18 @@ mod tests {
 
     #[test]
     fn plain_bytes_decode() {
-        assert_eq!(events(b"a"), (vec![key_event(RawKey::Char('a'))], AnsiParser::new()));
-        assert_eq!(events(b"\r"), (vec![key_event(RawKey::Enter)], AnsiParser::new()));
-        assert_eq!(events(b"\t"), (vec![key_event(RawKey::Tab)], AnsiParser::new()));
+        assert_eq!(
+            events(b"a"),
+            (vec![key_event(RawKey::Char('a'))], AnsiParser::new())
+        );
+        assert_eq!(
+            events(b"\r"),
+            (vec![key_event(RawKey::Enter)], AnsiParser::new())
+        );
+        assert_eq!(
+            events(b"\t"),
+            (vec![key_event(RawKey::Tab)], AnsiParser::new())
+        );
         assert_eq!(
             events(b"\x7F"),
             (vec![key_event(RawKey::Backspace)], AnsiParser::new())
@@ -1024,10 +1037,7 @@ mod tests {
         );
         assert_eq!(
             events(b"\x1B[15~"),
-            (
-                vec![key_event(RawKey::Function(5))],
-                AnsiParser::new()
-            )
+            (vec![key_event(RawKey::Function(5))], AnsiParser::new())
         );
         // Modified Delete keeps its key with Shift held.
         let (decoded, _) = events(b"\x1B[3;2~");

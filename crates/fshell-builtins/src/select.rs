@@ -24,9 +24,7 @@ use fshell_core::diagnostic::ErrorCode;
 use fshell_core::theme::{Theme, ThemeColor};
 use fshell_core::{ShellError, Val};
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
-use fshell_terminal::input::{
-    UnixEventStream, InputEvent, Key, KeyAction, Modifiers, MouseAction,
-};
+use fshell_terminal::input::{InputEvent, Key, KeyAction, Modifiers, MouseAction, UnixEventStream};
 use fshell_terminal::runner::{AppFlow, ShellTuiApp, run_tui};
 use fshell_terminal::session::{
     TerminalDevice, TerminalMode, TerminalSession, TerminalSessionOptions,

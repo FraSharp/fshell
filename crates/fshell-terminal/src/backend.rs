@@ -274,9 +274,11 @@ mod tests {
         let mut backend = FshellBackend::new(Vec::new());
         Backend::draw(
             &mut backend,
-            buffer.content.iter().enumerate().map(|(index, cell)| {
-                ((index % width) as u16, (index / width) as u16, cell)
-            }),
+            buffer
+                .content
+                .iter()
+                .enumerate()
+                .map(|(index, cell)| ((index % width) as u16, (index / width) as u16, cell)),
         )
         .unwrap();
         backend.writer
@@ -361,12 +363,12 @@ mod tests {
     #[test]
     fn modifier_diff_matches_crossterm_ordering() {
         // Intensity reset re-applies the surviving half.
+        assert_eq!(diff(Modifier::BOLD, Modifier::DIM), "\x1b[22m\x1b[2m");
         assert_eq!(
-            diff(Modifier::BOLD, Modifier::DIM),
-            "\x1b[22m\x1b[2m"
-        );
-        assert_eq!(
-            diff(Modifier::HIDDEN | Modifier::DIM, Modifier::BOLD | Modifier::DIM),
+            diff(
+                Modifier::HIDDEN | Modifier::DIM,
+                Modifier::BOLD | Modifier::DIM
+            ),
             "\x1b[28m\x1b[1m"
         );
         // Removals precede additions.

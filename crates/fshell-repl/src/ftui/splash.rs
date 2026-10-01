@@ -4,8 +4,8 @@
 //! Interactive first-run startup splash screen and environment status overview.
 
 use crate::terminal_mode::FullscreenTerminalGuard;
-use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key};
 use fshell_terminal::FshellBackend;
+use fshell_terminal::input::{InputEvent, InputPoll, Key, UnixEventSource};
 use ratatui::{
     Terminal,
     layout::{Alignment, Constraint, Direction, Layout, Rect},

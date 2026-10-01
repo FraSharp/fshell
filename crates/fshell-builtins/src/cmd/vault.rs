@@ -13,10 +13,10 @@ use fshell_core::RwLock;
 use fshell_core::ShellError;
 use fshell_core::{FxIndexMap, Val};
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
-use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key, KeyAction};
+use fshell_terminal::FshellBackend;
+use fshell_terminal::input::{InputEvent, InputPoll, Key, KeyAction, UnixEventSource};
 use miette::SourceSpan;
 use nu_ansi_term::{Color, Style};
-use fshell_terminal::FshellBackend;
 use ratatui::{
     Terminal,
     layout::{Constraint, Direction, Layout},

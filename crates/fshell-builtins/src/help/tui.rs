@@ -7,9 +7,7 @@ use crate::help::{HelpTopic, TOPICS};
 use fshell_core::ShellError;
 use fshell_core::theme::{Theme, ThemeColor};
 use fshell_engine::Env;
-use fshell_terminal::input::{
-    UnixEventSource, InputEvent, InputPoll, Key, KeyAction, Modifiers,
-};
+use fshell_terminal::input::{InputEvent, InputPoll, Key, KeyAction, Modifiers, UnixEventSource};
 use fshell_terminal::session::{
     TerminalDevice, TerminalMode, TerminalSession, TerminalSessionOptions,
 };
