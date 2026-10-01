@@ -21,6 +21,7 @@ fn fixture(name: &str) -> &'static [u8] {
 enum Kind {
     File,
     Directory,
+    IncrementalDirectory,
     Symlink,
     Hardlink,
     Fifo,
@@ -31,8 +32,8 @@ fn octal(field: &mut [u8], value: u64) {
     field.copy_from_slice(text.as_bytes());
 }
 
-/// Construct a tiny POSIX ustar archive without depending on system `tar` or
-/// on another copy of libarchive (which would collide with the decoder's FFI).
+/// Construct a tiny ustar archive without depending on system `tar` or on
+/// another copy of libarchive (which would collide with the decoder's FFI).
 fn make_tar_entries(path: &Path, entries: &[(&str, Kind, Option<&str>)]) {
     let mut archive = Vec::new();
     for &(name, kind, link) in entries {
@@ -50,13 +51,18 @@ fn make_tar_entries(path: &Path, entries: &[(&str, Kind, Option<&str>)]) {
         octal(&mut header[116..124], 0);
         octal(
             &mut header[124..136],
-            if kind == Kind::File { 4 } else { 0 },
+            if matches!(kind, Kind::File | Kind::IncrementalDirectory) {
+                4
+            } else {
+                0
+            },
         );
         octal(&mut header[136..148], 0);
         header[148..156].fill(b' ');
         header[156] = match kind {
             Kind::File => b'0',
             Kind::Directory => b'5',
+            Kind::IncrementalDirectory => b'D',
             Kind::Symlink => b'2',
             Kind::Hardlink => b'1',
             Kind::Fifo => b'6',
@@ -70,7 +76,7 @@ fn make_tar_entries(path: &Path, entries: &[(&str, Kind, Option<&str>)]) {
         let text = format!("{checksum:06o}\0 ");
         header[148..156].copy_from_slice(text.as_bytes());
         archive.extend_from_slice(&header);
-        if kind == Kind::File {
+        if matches!(kind, Kind::File | Kind::IncrementalDirectory) {
             archive.extend_from_slice(b"data");
             archive.resize(archive.len().next_multiple_of(512), 0);
         }
@@ -248,16 +254,9 @@ fn enforces_decoded_size_and_entry_limits() {
 fn counts_payload_on_non_regular_entries() {
     let (tmp, output) = setup();
     let archive = tmp.path().join("directory-with-data.tar");
-    make_tar_entries(&archive, &[("empty/", Kind::Directory, None)]);
-    let mut bytes = std::fs::read(&archive).unwrap();
-    octal(&mut bytes[124..136], 4);
-    bytes[148..156].fill(b' ');
-    let checksum: u32 = bytes[..512].iter().map(|b| u32::from(*b)).sum();
-    bytes[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
-    let mut payload = [0u8; 512];
-    payload[..4].copy_from_slice(b"data");
-    bytes.splice(512..512, payload);
-    std::fs::write(&archive, bytes).unwrap();
+    // GNU incremental directory records may carry data. Unlike ordinary tar
+    // directory entries, libarchive preserves their payload size for reading.
+    make_tar_entries(&archive, &[("empty/", Kind::IncrementalDirectory, None)]);
     run(&archive, &output, "--max-bytes 3")
         .assert_failure()
         .assert_stderr_contains("limit exceeded");
