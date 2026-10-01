@@ -410,6 +410,8 @@ natural language translation and shell assistant:
 
 ```fsh
 ai "find all files larger than 100mb modified in the last 2 days"
+ai --run "show disk usage by directory"     # execute without confirmation
+ai --explain "ls | filter size > 1000 | sort size desc"
 ai chat
 ```
 
