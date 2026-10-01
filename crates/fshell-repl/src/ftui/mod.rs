@@ -199,7 +199,7 @@ pub async fn run_ftui_repl(
             return;
         }
     };
-    let mut _raw_session = match raw::Session::enter() {
+    let mut _raw_session = match raw::enter_session() {
         Ok(session) => Some(Box::new(session)),
         Err(error) => {
             eprintln!("\r\n\x1b[1;31merror:\x1b[0m FTUI requires a raw terminal session: {error}");
@@ -287,17 +287,17 @@ pub async fn run_ftui_repl(
         // after `exit` (reported). Re-assert raw at the top of every iteration
         // when a session is active — idempotent.
         if let Some(s) = _raw_session.as_deref() {
-            s.reenter_raw();
+            s.reenter();
         }
 
         // Check if we resumed from SIGTSTP. The signal handler wrote minimal
         // reset sequences before suspending; the main loop re-enters raw and
-        // auxiliary modes. With a session-wide `raw::Session` the per-command
+        // auxiliary modes. With a session-wide raw session the per-command
         // re-enable below is skipped (raw never left).
         #[cfg(unix)]
         if raw::SignalGuard::suspended() {
             if let Some(s) = _raw_session.as_deref() {
-                s.reenter_raw();
+                s.reenter();
             } else {
                 let mut stdout = std::io::stdout();
                 let _ = fshell_terminal::ansi::show_cursor(&mut stdout);
@@ -317,7 +317,7 @@ pub async fn run_ftui_repl(
         if mouse_mgr.mode != MouseMode::Disabled {
             mouse_mgr.is_captured = false;
             // In session-wide raw mode auxiliary modes are already on from
-            // `raw::Session::enter`; re-enabling is idempotent, so just call
+            // `raw::enter_session`; re-enabling is idempotent, so just call
             // through so Smart mode's `is_captured` stays coherent.
             mouse_mgr.enable_capture();
         }

@@ -15,6 +15,7 @@ pub mod input;
 pub mod lifecycle;
 pub mod parse;
 pub mod raw;
+pub mod session;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod test_support;
@@ -25,3 +26,4 @@ pub use ansi::*;
 pub use input::*;
 pub use lifecycle::*;
 pub use raw::*;
+pub use session::*;
