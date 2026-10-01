@@ -12,9 +12,9 @@ use fshell_core::theme::Theme;
 use fshell_terminal::input::{
     UnixEventSource, InputEvent, InputPoll, Key, KeyAction, Modifiers,
 };
+use fshell_terminal::FshellBackend;
 use ratatui::{
     Terminal,
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
@@ -127,7 +127,7 @@ pub fn run_history_tui_with_theme(
     let _guard = FullscreenTerminalGuard::enter(true)
         .map_err(|e| format!("Failed to initialize terminal TUI: {e}"))?;
     let mut stdout = io::stdout();
-    let backend = CrosstermBackend::new(&mut stdout);
+    let backend = FshellBackend::new(&mut stdout);
     let mut terminal =
         Terminal::new(backend).map_err(|e| format!("Failed to create terminal: {e}"))?;
     terminal.clear().map_err(|e| e.to_string())?;

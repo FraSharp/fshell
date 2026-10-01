@@ -11,9 +11,9 @@
 use std::io::{self, Write};
 
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 
 use crate::ansi;
+use crate::backend::FshellBackend;
 use crate::lifecycle::{PanicHookGuard, SignalGuard};
 use crate::raw;
 
@@ -110,7 +110,7 @@ impl Default for TerminalSessionOptions {
 
 /// An active terminal session with configured viewport and explicit mode tracking.
 pub struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<TerminalDevice>>,
+    terminal: Terminal<FshellBackend<TerminalDevice>>,
     mode: TerminalMode,
     did_enable_raw: bool,
     #[cfg(unix)]
@@ -260,7 +260,7 @@ impl TerminalSession {
         };
 
         // 5. Construct Ratatui Terminal
-        let backend = CrosstermBackend::new(device);
+        let backend = FshellBackend::new(device);
         let terminal_options = match options.mode {
             TerminalMode::Fullscreen => ratatui::TerminalOptions {
                 viewport: ratatui::Viewport::Fullscreen,
@@ -298,7 +298,7 @@ impl TerminalSession {
         self.mode
     }
 
-    pub fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<TerminalDevice>> {
+    pub fn terminal_mut(&mut self) -> &mut Terminal<FshellBackend<TerminalDevice>> {
         &mut self.terminal
     }
 

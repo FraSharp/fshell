@@ -12,7 +12,7 @@ use fshell_core::theme::Theme;
 use fshell_engine::Env;
 use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key, KeyEvent};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use fshell_terminal::FshellBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -944,7 +944,7 @@ pub fn run(env: &Env) -> Result<(), String> {
         .map_err(|e| format!("Failed to initialize terminal: {e}"))?;
     let stdout = io::stdout();
 
-    let backend = CrosstermBackend::new(stdout);
+    let backend = FshellBackend::new(stdout);
     let mut terminal =
         Terminal::new(backend).map_err(|e| format!("Failed to initialize terminal: {e}"))?;
 

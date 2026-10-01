@@ -16,9 +16,9 @@ use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key, KeyAction};
 use miette::SourceSpan;
 use nu_ansi_term::{Color, Style};
+use fshell_terminal::FshellBackend;
 use ratatui::{
     Terminal,
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
@@ -1037,7 +1037,7 @@ pub fn run_tui(path: &Path, env: &Env) -> Result<(), ShellError> {
     let _raw_guard = RawModeGuard::new()?;
     let mut input = UnixEventSource::new();
 
-    let backend = CrosstermBackend::new(stdout);
+    let backend = FshellBackend::new(stdout);
     let mut terminal =
         Terminal::new(backend).map_err(|e| format!("Failed to init terminal: {}", e))?;
 

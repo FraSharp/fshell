@@ -14,7 +14,7 @@ use crate::tui::theme;
 use fshell_engine::{CapAction, CapPromptRequest, CapPromptResponse, Env};
 use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key, Modifiers};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use fshell_terminal::FshellBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -100,7 +100,7 @@ async fn handle_request(
             Err(_) => return CapPromptResponse::Deny,
         };
 
-        let backend = CrosstermBackend::new(std::io::stdout());
+        let backend = FshellBackend::new(std::io::stdout());
         let mut terminal = match Terminal::new(backend) {
             Ok(t) => t,
             Err(_) => return CapPromptResponse::Deny,

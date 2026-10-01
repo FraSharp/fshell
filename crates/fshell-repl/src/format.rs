@@ -60,7 +60,7 @@ pub fn show_text_pager_with_theme(text: &str, theme: &fshell_core::theme::Theme)
         }
     };
 
-    let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+    let backend = fshell_terminal::FshellBackend::new(std::io::stdout());
     let mut terminal = match ratatui::Terminal::new(backend) {
         Ok(t) => t,
         Err(_) => {

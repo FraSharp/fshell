@@ -8,7 +8,6 @@ description = "Terminal input boundary for fshell interactive interfaces"
 repository.workspace = true
 
 [dependencies]
-crossterm = { workspace = true, features = ["event-stream"] }
 futures = { workspace = true }
 thiserror = { workspace = true }
 ratatui = { workspace = true }

@@ -10,8 +10,8 @@ use crate::tui::components::search_bar::SearchBarState;
 use crate::tui::theme;
 use fshell_core::Val;
 use fshell_core::theme::Theme;
-use ratatui::backend::CrosstermBackend;
 use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key, Modifiers};
+use fshell_terminal::FshellBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
@@ -35,7 +35,7 @@ pub fn run_table_inspector(items: Vec<Val>, title: &str, theme: &Theme) -> Resul
     let _guard = FullscreenTerminalGuard::enter(false)
         .map_err(|e| format!("inspector: failed to enter raw terminal mode: {e}"))?;
 
-    let backend = CrosstermBackend::new(std::io::stdout());
+    let backend = FshellBackend::new(std::io::stdout());
     let mut terminal = ratatui::Terminal::new(backend)
         .map_err(|e| format!("inspector: failed to create terminal backend: {e}"))?;
     let _ = terminal.clear();

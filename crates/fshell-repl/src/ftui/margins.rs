@@ -3,7 +3,8 @@
 
 use crate::ftui::statusbar::{StatusBar, StatusBarWidget};
 use fshell_core::theme::Theme;
-use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
+use fshell_terminal::FshellBackend;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io::Write;
 
 /// RAII guard that locks terminal scrolling margins using DECSTBM (\x1b[1;limit_row r)
@@ -135,7 +136,7 @@ pub fn is_fullscreen_app(cmd: &str) -> bool {
 
 /// Renders the status bar at the locked bottom area (term_h - 2) while preserving cursor position.
 pub fn render_persistent_status_bar(
-    status_terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
+    status_terminal: &mut Option<Terminal<FshellBackend<std::io::Stdout>>>,
     status_bar: &StatusBar,
     theme: &Theme,
     term_w: u16,
@@ -147,7 +148,7 @@ pub fn render_persistent_status_bar(
 
     if status_terminal.is_none() {
         let stdout = std::io::stdout();
-        let backend = CrosstermBackend::new(stdout);
+        let backend = FshellBackend::new(stdout);
         if let Ok(st) = Terminal::with_options(
             backend,
             TerminalOptions {

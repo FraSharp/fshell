@@ -12,9 +12,9 @@ use fshell_engine::Env;
 use fshell_terminal::input::{
     UnixEventSource, InputError, InputEvent, InputPoll, Key, KeyAction, KeyEvent, Modifiers,
 };
+use fshell_terminal::FshellBackend;
 use ratatui::{
     Terminal,
-    backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -483,7 +483,7 @@ pub fn run_prompt_customizer(env: &Env) -> Result<(), String> {
     let _guard =
         FullscreenTerminalGuard::enter(false).map_err(|e| format!("terminal setup: {}", e))?;
     let mut stdout = io::stdout();
-    let backend = CrosstermBackend::new(&mut stdout);
+    let backend = FshellBackend::new(&mut stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| format!("terminal: {}", e))?;
 
     let mut app = App::new(env.clone());

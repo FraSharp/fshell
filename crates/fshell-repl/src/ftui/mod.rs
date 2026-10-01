@@ -25,9 +25,9 @@ use fshell_terminal::input::{
     UnixEventSource, EventSource, InputError, InputEvent, InputPoll, Key, KeyAction,
     Modifiers, MouseAction, MouseButton,
 };
+use fshell_terminal::FshellBackend;
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
@@ -332,8 +332,8 @@ pub async fn run_ftui_repl(
         let theme = env.active_theme();
         highlighter.update_theme(theme.clone());
         comp_mgr.update_theme(theme.clone());
-        let mut terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>> = None;
-        let mut status_terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>> = None;
+        let mut terminal: Option<Terminal<FshellBackend<std::io::Stdout>>> = None;
+        let mut status_terminal: Option<Terminal<FshellBackend<std::io::Stdout>>> = None;
         let mut current_viewport_height = 0u16;
         let mut prompt_origin_y: Option<u16> = None;
         let mut _last_relative_cursor_y = 0u16;
@@ -541,7 +541,7 @@ pub async fn run_ftui_repl(
                     let _ = std::io::Write::flush(&mut stdout);
 
                     let stdout = std::io::stdout();
-                    let backend = CrosstermBackend::new(stdout);
+                    let backend = FshellBackend::new(stdout);
                     if let Ok(t) = Terminal::with_options(
                         backend,
                         TerminalOptions {
@@ -556,7 +556,7 @@ pub async fn run_ftui_repl(
                 if status_terminal.is_none() && status_bar.visible {
                     if term_h > 2 {
                         let stdout = std::io::stdout();
-                        let backend = CrosstermBackend::new(stdout);
+                        let backend = FshellBackend::new(stdout);
                         if let Ok(st) = Terminal::with_options(
                             backend,
                             TerminalOptions {

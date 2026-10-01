@@ -5,9 +5,9 @@
 
 use crate::terminal_mode::FullscreenTerminalGuard;
 use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key};
+use fshell_terminal::FshellBackend;
 use ratatui::{
     Terminal,
-    backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -36,7 +36,7 @@ pub fn show_splash(
     };
 
     let mut stdout = std::io::stdout();
-    let backend = CrosstermBackend::new(&mut stdout);
+    let backend = FshellBackend::new(&mut stdout);
     let mut terminal = match Terminal::new(backend) {
         Ok(t) => t,
         Err(_) => return,

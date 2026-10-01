@@ -4,16 +4,18 @@
 //! scoped terminal sessions (fullscreen and inline), and the unified TUI runner.
 
 pub mod ansi;
+pub mod backend;
 pub mod input;
 pub mod lifecycle;
-pub mod raw;
 pub mod parse;
+pub mod raw;
 pub mod runner;
 pub mod session;
-
 #[cfg(unix)]
 pub mod unix;
+
 pub use ansi::*;
+pub use backend::*;
 pub use input::*;
 pub use lifecycle::*;
 pub use raw::*;
