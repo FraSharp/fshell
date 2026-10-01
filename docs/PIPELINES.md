@@ -339,7 +339,15 @@ serializes records as JSON:
 ps | filter cpu > 20.0 | @json
 ```
 
-when placed upstream of a command, `@json` parses raw JSON input into typed `Val` structures.
+when placed upstream of a command, `@json` parses JSON input into typed values:
+
+- a pretty-printed document is buffered until it is complete, so multi-line files parse;
+- line-delimited input emits each value as soon as its line arrives;
+- a top-level array spreads into one item per element, so downstream stages iterate records:
+
+```fsh
+cat users.json | @json | filter age > 30 | map name | @table
+```
 
 ### `@yaml`
 

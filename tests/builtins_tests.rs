@@ -100,10 +100,7 @@ async fn test_integration_json_serialize() {
 #[tokio::test]
 async fn test_integration_json_deserialize() {
     let env = setup_test_env();
-    // Seed a JSON string in Val's serde-tagged format (Map serializes as [[key, val], ...])
-    let json_str = Val::String(
-        r#"{"type":"Map","value":[["name",{"type":"String","value":"test"}],["value",{"type":"Int","value":42}]]}"#.to_string(),
-    );
+    let json_str = Val::String(r#"{"name":"test","value":42}"#.to_string());
     env.vars.write().insert("json_input".to_string(), json_str);
     let mut parser = Parser::new("$json_input | @json");
     let stmts = parser.parse_statements().unwrap();
@@ -125,6 +122,98 @@ async fn test_integration_json_deserialize() {
                 ),
             },
             other => panic!("Expected Val::List from pipeline, got {:?}", other),
+        }
+    } else {
+        panic!("Expected Stmt::Expr");
+    }
+}
+
+#[tokio::test]
+async fn test_integration_json_multiline_document() {
+    let env = setup_test_env();
+    let doc = Val::String("{\n  \"name\": \"test\",\n  \"value\": 42\n}".to_string());
+    env.vars.write().insert("doc".to_string(), doc);
+    let mut parser = Parser::new("$doc | @json");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        match res {
+            Val::List(items) if items.len() == 1 => match &items[0] {
+                Val::Map(m) => {
+                    assert_eq!(
+                        m.get(&ustr::ustr("name")),
+                        Some(&Val::String("test".into()))
+                    );
+                    assert_eq!(m.get(&ustr::ustr("value")), Some(&Val::Int(42)));
+                }
+                other => panic!("Expected a Map, got {:?}", other),
+            },
+            other => panic!("Expected one item, got {:?}", other),
+        }
+    } else {
+        panic!("Expected Stmt::Expr");
+    }
+}
+
+#[tokio::test]
+async fn test_integration_json_array_spreads_into_items() {
+    let env = setup_test_env();
+    env.vars.write().insert(
+        "json_array".to_string(),
+        Val::String("[1, 2, 3]".to_string()),
+    );
+    let mut parser = Parser::new("$json_array | @json");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        assert_eq!(
+            res,
+            Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
+            "a top-level array must spread into one item per element"
+        );
+    } else {
+        panic!("Expected Stmt::Expr");
+    }
+}
+
+#[tokio::test]
+async fn test_integration_json_ndjson_streams_independently() {
+    let env = setup_test_env();
+    let ndjson = Val::String("{\"a\": 1}\n{\"a\": 2}".to_string());
+    env.vars.write().insert("ndjson".to_string(), ndjson);
+    let mut parser = Parser::new("$ndjson | @json");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        match res {
+            Val::List(items) => assert_eq!(items.len(), 2, "one item per line: {items:?}"),
+            other => panic!("Expected a list, got {:?}", other),
+        }
+    } else {
+        panic!("Expected Stmt::Expr");
+    }
+}
+
+#[tokio::test]
+async fn test_integration_json_envelope_shaped_object_is_plain_data() {
+    let env = setup_test_env();
+    // A JSON object that happens to carry `type` and `value` keys is data,
+    // not a hidden encoding of an internal value.
+    let doc = Val::String(r#"{"type":"Map","value":[["a",1]]}"#.to_string());
+    env.vars.write().insert("json_doc".to_string(), doc);
+    let mut parser = Parser::new("$json_doc | @json");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        match res {
+            Val::List(items) if items.len() == 1 => match &items[0] {
+                Val::Map(m) => {
+                    assert_eq!(m.get(&ustr::ustr("type")), Some(&Val::String("Map".into())));
+                    assert!(m.contains_key(&ustr::ustr("value")));
+                }
+                other => panic!("Expected a plain Map, got {:?}", other),
+            },
+            other => panic!("Expected one item, got {:?}", other),
         }
     } else {
         panic!("Expected Stmt::Expr");

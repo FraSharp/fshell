@@ -3191,6 +3191,30 @@ pub(crate) fn val_to_json_value(val: &Val) -> serde_json::Value {
     val.into()
 }
 
+/// Bounds how many boundary-operator tasks run at once.
+///
+/// The permit is owned rather than borrowed so a task can hold it across the
+/// stream's whole lifetime; the semaphore is never closed, so acquiring one
+/// cannot fail.
+async fn boundary_permit() -> tokio::sync::OwnedSemaphorePermit {
+    static PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let permits = PERMITS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
+    permits
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("boundary semaphore is never closed")
+}
+
+/// Report a boundary-stage failure the same way every operator does: mark the
+/// stage failed and surface the message as a structured payload.
+async fn report_decode_error(out_tx: &Sender<PipelinePayload>, env: &Env, message: String) {
+    env.report_stage_error();
+    let _ = out_tx
+        .send(PipelinePayload::Structured(message.into()))
+        .await;
+}
+
 pub(crate) fn run_boundary_operator<F, G, H>(
     current_rx: Option<Receiver<PipelinePayload>>,
     out_tx: Sender<PipelinePayload>,
@@ -3203,36 +3227,10 @@ pub(crate) fn run_boundary_operator<F, G, H>(
     G: Fn(&[u8]) -> Result<Val, String> + Send + 'static,
     H: Fn(Val) -> Result<PipelinePayload, String> + Send + 'static,
 {
-    static BOUNDARY_SEMAPHORE: std::sync::OnceLock<tokio::sync::Semaphore> =
-        std::sync::OnceLock::new();
-    let sem = BOUNDARY_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(4));
     let env = env.clone();
 
     tokio::spawn(async move {
-        let _permit = match sem.acquire().await {
-            Ok(p) => Some(p),
-            Err(_) => {
-                static BOUNDARY_SEMAPHORE_FALLBACK: std::sync::OnceLock<tokio::sync::Semaphore> =
-                    std::sync::OnceLock::new();
-                let fb = BOUNDARY_SEMAPHORE_FALLBACK.get_or_init(|| tokio::sync::Semaphore::new(4));
-                match fb.acquire().await {
-                    Ok(p) => Some(p),
-                    Err(e) => {
-                        eprintln!("Semaphore unexpectedly closed: {e}");
-                        env.report_stage_error();
-                        let _ = out_tx
-                            .send(PipelinePayload::Structured(
-                                format!("Semaphore closed: {e}").into(),
-                            ))
-                            .await;
-                        None
-                    }
-                }
-            }
-        };
-        if _permit.is_none() {
-            return;
-        }
+        let _permit = boundary_permit().await;
         if let Some(mut rx) = current_rx {
             while let Some(payload) = rx.recv().await {
                 let result = match payload {
@@ -3272,6 +3270,146 @@ pub(crate) fn run_boundary_operator<F, G, H>(
             }
         }
     });
+}
+
+/// Decode JSON input as whole documents rather than per-line fragments.
+///
+/// Raw process output reaches a boundary operator one line at a time, so a
+/// pretty-printed document spans many payloads. Text is buffered until it
+/// parses; complete values are emitted as soon as they are recognized, which
+/// keeps line-delimited JSON streaming and lets a document end mid-stream. A
+/// top-level array is spread into its elements, so `cat data.json | @json |
+/// filter …` iterates records instead of handing one opaque list downstream.
+///
+/// Values that are not text are serialized, exactly like the other boundary
+/// operators: `ps | filter cpu > 20.0 | @json` writes one object per line.
+pub(crate) fn run_json_boundary(
+    current_rx: Option<Receiver<PipelinePayload>>,
+    out_tx: Sender<PipelinePayload>,
+    env: &Env,
+) {
+    let env = env.clone();
+    tokio::spawn(async move {
+        let _permit = boundary_permit().await;
+        let Some(mut rx) = current_rx else {
+            return;
+        };
+        let mut buffer = String::new();
+        while let Some(payload) = rx.recv().await {
+            match payload {
+                PipelinePayload::Data(value) => match (*value).clone() {
+                    Val::String(text) => {
+                        buffer.push_str(&text);
+                        emit_complete_json(&mut buffer, &out_tx, &env).await;
+                    }
+                    Val::Blob(bytes) => match std::str::from_utf8(&bytes) {
+                        Ok(text) => {
+                            buffer.push_str(text);
+                            emit_complete_json(&mut buffer, &out_tx, &env).await;
+                        }
+                        Err(error) => {
+                            report_decode_error(
+                                &out_tx,
+                                &env,
+                                format!("JSON input is not valid UTF-8: {error}"),
+                            )
+                            .await;
+                        }
+                    },
+                    other => match serde_json::to_string(&val_to_json_value(&other)) {
+                        Ok(text) => {
+                            let _ = out_tx
+                                .send(PipelinePayload::Data(Arc::new(Val::String(text))))
+                                .await;
+                        }
+                        Err(error) => {
+                            report_decode_error(
+                                &out_tx,
+                                &env,
+                                format!("JSON serialize error: {error}"),
+                            )
+                            .await;
+                        }
+                    },
+                },
+                PipelinePayload::Bytes(bytes) => match std::str::from_utf8(&bytes) {
+                    Ok(text) => {
+                        buffer.push_str(text);
+                        emit_complete_json(&mut buffer, &out_tx, &env).await;
+                    }
+                    Err(error) => {
+                        report_decode_error(
+                            &out_tx,
+                            &env,
+                            format!("JSON input is not valid UTF-8: {error}"),
+                        )
+                        .await;
+                    }
+                },
+                PipelinePayload::Structured(document) => {
+                    let _ = out_tx.send(PipelinePayload::Structured(document)).await;
+                }
+            }
+        }
+        if !buffer.trim().is_empty() {
+            let detail = serde_json::from_str::<serde_json::Value>(&buffer)
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "unexpected end of input".to_string());
+            report_decode_error(&out_tx, &env, format!("JSON parse error: {detail}")).await;
+        }
+    });
+}
+
+/// Emit every complete JSON value in `buffer`, keeping an incomplete tail for
+/// the next read. Top-level arrays are spread into their elements.
+async fn emit_complete_json(buffer: &mut String, out_tx: &Sender<PipelinePayload>, env: &Env) {
+    let mut values = Vec::new();
+    let mut consumed = 0;
+    let mut error = None;
+    {
+        let mut stream =
+            serde_json::Deserializer::from_str(buffer).into_iter::<serde_json::Value>();
+        while let Some(item) = stream.next() {
+            match item {
+                Ok(value) => {
+                    consumed = stream.byte_offset();
+                    values.push(value);
+                }
+                Err(parse_error) => {
+                    error = Some(parse_error);
+                    break;
+                }
+            }
+        }
+    }
+    buffer.drain(..consumed);
+    for value in values {
+        emit_json_value(value, out_tx).await;
+    }
+    let Some(parse_error) = error else {
+        return;
+    };
+    if parse_error.is_eof() {
+        // The tail is a value that still needs more input.
+        return;
+    }
+    buffer.clear();
+    report_decode_error(out_tx, env, format!("JSON parse error: {parse_error}")).await;
+}
+
+/// Send one decoded JSON value: a top-level array becomes its elements.
+async fn emit_json_value(value: serde_json::Value, out_tx: &Sender<PipelinePayload>) {
+    match json_value_to_val(value) {
+        Val::List(items) => {
+            for item in items {
+                let _ = out_tx.send(PipelinePayload::Data(Arc::new(item))).await;
+            }
+        }
+        other => {
+            let _ = out_tx.send(PipelinePayload::Data(Arc::new(other))).await;
+        }
+    }
 }
 
 /// Parse a complete CSV string into Val::List of Val::Map records.

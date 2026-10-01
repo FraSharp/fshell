@@ -1691,3 +1691,36 @@ async fn test_ls_recursive_ignore_git_pipeline() {
         );
     }
 }
+
+/// A pretty-printed JSON document arrives from a process one line at a time;
+/// `@json` must buffer it into a document before parsing.
+#[tokio::test]
+async fn test_json_document_spanning_process_lines() {
+    let ctx = TestContext::new();
+    std::fs::write(
+        ctx.temp_dir.path().join("data.json"),
+        "{\n  \"name\": \"fshell\",\n  \"stars\": 231\n}\n",
+    )
+    .unwrap();
+
+    let out = ctx
+        .fsh_cmd()
+        .cmd("cat data.json | @json | map name stars | @json")
+        .run()
+        .expect("fsh runs");
+    out.assert_success();
+    out.assert_stdout_trimmed_eq("{\"name\":\"fshell\",\"stars\":231}");
+}
+
+/// A top-level JSON array becomes one pipeline item per element.
+#[tokio::test]
+async fn test_json_array_spreads_across_the_pipeline() {
+    let ctx = TestContext::new();
+    let out = ctx
+        .fsh_cmd()
+        .cmd(r#"echo '[{"n": 1}, {"n": 2}, {"n": 3}]' | @json | filter n > 1 | count"#)
+        .run()
+        .expect("fsh runs");
+    out.assert_success();
+    out.assert_stdout_trimmed_eq("2");
+}

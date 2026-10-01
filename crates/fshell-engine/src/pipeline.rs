@@ -2929,30 +2929,9 @@ async fn execute_pipeline_inner(
                 });
             }
             PipelineStage::BoundaryOperator { format } => match format {
-                SerializationFormat::Json => run_boundary_operator(
-                    current_rx,
-                    out_tx,
-                    &env_clone,
-                    |s| {
-                        serde_json::from_str::<Val>(s).or_else(|_| {
-                            serde_json::from_str::<serde_json::Value>(s)
-                                .map(crate::eval::json_value_to_val)
-                                .map_err(|e| format!("JSON parse error: {}", e))
-                        })
-                    },
-                    |b| {
-                        serde_json::from_slice::<Val>(b).or_else(|_| {
-                            serde_json::from_slice::<serde_json::Value>(b)
-                                .map(crate::eval::json_value_to_val)
-                                .map_err(|e| format!("JSON parse error: {}", e))
-                        })
-                    },
-                    |v| {
-                        serde_json::to_string(&crate::eval::val_to_json_value(&v))
-                            .map(|s| PipelinePayload::Data(Arc::new(Val::String(s))))
-                            .map_err(|e| format!("JSON serialize error: {}", e))
-                    },
-                ),
+                SerializationFormat::Json => {
+                    crate::eval::run_json_boundary(current_rx, out_tx, &env_clone)
+                }
                 // YAML/MessagePack carry a plain data representation (the same
                 // shape `@json` uses), not the internal `{type, value}` envelope,
                 // so the output interoperates with external tools.
