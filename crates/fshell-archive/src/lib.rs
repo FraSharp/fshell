@@ -645,12 +645,26 @@ pub fn extract(
         if !new_dirs.contains(&dir.path) {
             continue;
         }
-        let handle = dest.open_dir(&dir.path)?.into_std_file();
+        // `open_dir` may return an O_PATH descriptor on Linux. Such a handle
+        // is useful for capability-relative lookup, but fchmod/futimens reject
+        // it with EBADF. Open a readable descriptor and apply both metadata
+        // changes through that stable handle instead.
+        let handle = dest.open_with(&dir.path, OpenOptions::new().read(true))?;
+        if !handle.metadata()?.is_dir() {
+            return Err(ExtractError::Conflict(format!(
+                "{:?} is not a directory",
+                dir.path
+            )));
+        }
         if let Some(mode) = dir.mode {
-            handle.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+            handle.set_permissions(Permissions::from_std(std::fs::Permissions::from_mode(
+                mode & 0o777,
+            )))?;
         }
         if let Some(mtime) = dir.mtime {
-            handle.set_times(std::fs::FileTimes::new().set_modified(mtime))?;
+            handle
+                .into_std()
+                .set_times(std::fs::FileTimes::new().set_modified(mtime))?;
         }
     }
     Ok(count)
