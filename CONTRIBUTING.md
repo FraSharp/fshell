@@ -89,7 +89,7 @@ cargo login
 cargo publish --workspace --exclude fshell-fuzz
 ```
 
-`cargo publish --workspace` walks the dependency order and waits for each crate to appear in the index. Before the first release the siblings do not exist in the registry yet, so `--dry-run` cannot complete; review the packaged trees with `cargo package --list` instead. Cargo always adds `LICENSE` and `README` files found under the package root — ignored directories included — so publish from a clean checkout rather than a working tree carrying local-only projects. Published versions can be yanked but never replaced. `fuzz/` is `publish = false`.
+`cargo publish --workspace` walks the dependency order and waits for each crate to appear in the index. Before the first release the siblings do not exist in the registry yet, so `--dry-run` cannot complete; review the packaged trees with `cargo package --list` instead. `include` patterns are gitignore-style, so the root package anchors its paths with a leading `/` — a bare `LICENSE` or `README.md` matches at any depth and drags unrelated files into the crate. Published versions can be yanked but never replaced. `fuzz/` is `publish = false`.
 
 ## Treat shell compatibility as test data
 

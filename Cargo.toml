@@ -48,12 +48,12 @@ categories.workspace = true
 autobins = false
 default-run = "fsh"
 include = [
-    "src/**/*",
-    "tests/helpers/**/*",
-    "build.rs",
-    "LICENSE",
-    "COPYING",
-    "README.md",
+    "/src/**/*",
+    "/tests/helpers/**/*",
+    "/build.rs",
+    "/LICENSE",
+    "/COPYING",
+    "/README.md",
 ]
 
 [features]

@@ -59,6 +59,25 @@ fn dependency_versions_match_the_workspace_version() {
     }
 }
 
+/// Root-package `include` patterns must be anchored to the package root:
+/// gitignore-style patterns without a leading `/` match at any depth, so a
+/// bare `LICENSE` or `README.md` would drag unrelated files into the crate.
+#[test]
+fn root_package_include_patterns_are_anchored() {
+    let root = read_manifest(".");
+    let include = root["package"]["include"]
+        .as_array()
+        .expect("[package] must declare an include list");
+
+    for pattern in include {
+        let pattern = pattern.as_str().expect("include patterns must be strings");
+        assert!(
+            pattern.starts_with('/'),
+            "include pattern `{pattern}` must start with `/`"
+        );
+    }
+}
+
 /// Every published crate declares its version and MSRV by inheriting the
 /// workspace fields, and ships the license text alongside its source.
 #[test]
