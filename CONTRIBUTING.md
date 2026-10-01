@@ -10,7 +10,7 @@ For changes that cross parser, evaluator, and runtime boundaries, sketch the int
 
 ## Find the right part of the tree
 
-The Cargo workspace contains the root `fshell` package, 15 crates under `crates/`, and the `fshell-fuzz` package:
+The Cargo workspace contains the root `fshell` package, 16 crates under `crates/`, and the `fshell-fuzz` package:
 
 | Package | Responsibility |
 |---|---|
@@ -25,7 +25,8 @@ The Cargo workspace contains the root `fshell` package, 15 crates under `crates/
 | `fshell-repl` | Interactive REPL, configuration, and history |
 | `fshell-ls` | Git-aware directory listing library |
 | `fshell-render` | Structured shell error rendering |
-| `fshell-terminal` | Terminal input, lifecycle, sessions, and TUI runner APIs |
+| `fshell-tty` | Unix terminal input, raw mode, ANSI primitives, and lifecycle guards |
+| `fshell-terminal` | Ratatui backend, terminal sessions, and TUI runner |
 | `fshell-sandbox` | Linux Landlock and macOS Seatbelt sandboxing |
 | `fshell-hash` | Sponge-based hash provider |
 | `fshell-git` | Git integration shared by listing and builtins |

@@ -18,7 +18,7 @@ indexmap = { workspace = true }
 fshell-hash = { path = "../fshell-hash", features = ["std"] }
 ustr = { workspace = true }
 libc = { workspace = true }
-fshell-terminal = { workspace = true }
+fshell-tty = { workspace = true }
 miette = { workspace = true }
 bytes = { workspace = true }
 

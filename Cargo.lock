@@ -1283,7 +1283,7 @@ dependencies = [
  "fshell-engine",
  "fshell-hash",
  "fshell-sandbox",
- "fshell-terminal",
+ "fshell-tty",
  "indexmap",
  "libc",
  "miette",
@@ -1386,7 +1386,7 @@ dependencies = [
  "fshell-core",
  "fshell-hash",
  "fshell-render",
- "fshell-terminal",
+ "fshell-tty",
  "globset",
  "hostname",
  "indexmap",
@@ -1566,12 +1566,21 @@ dependencies = [
 name = "fshell-terminal"
 version = "0.1.0"
 dependencies = [
+ "fshell-tty",
+ "futures",
+ "libc",
+ "ratatui",
+ "tokio",
+]
+
+[[package]]
+name = "fshell-tty"
+version = "0.1.0"
+dependencies = [
  "futures",
  "libc",
  "portable-pty",
- "ratatui",
  "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]

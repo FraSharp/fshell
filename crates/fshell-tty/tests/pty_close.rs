@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fshell_terminal::input::{InputPoll, UnixEventSource};
+use fshell_tty::input::{InputPoll, UnixEventSource};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 const PROBE_ENV: &str = "FSHELL_TERMINAL_PTY_CLOSE_PROBE";

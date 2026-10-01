@@ -114,7 +114,8 @@ the workspace is organized into 12 crates with strict dependency layering:
 | `fshell-builtins` | ~117 built-in commands registered into `Env` | `fshell-core`, `fshell-engine`, `fshell-ls`, `fshell-capabilities` |
 | `fshell-bridge` | external command fallback, globbing, path caching | `fshell-core`, `fshell-engine`, `fshell-capabilities` |
 | `fshell-posix` | POSIX/Bash syntax parser and runtime engine | `fshell-core`, `fshell-engine` |
-| `fshell-terminal` | Unix input decoding, raw mode and ANSI primitives, ratatui backend, scoped terminal sessions, TUI runner | `libc`, `ratatui` |
+| `fshell-tty` | Unix input decoding, raw mode and ANSI primitives, cursor and size queries, lifecycle guards | `libc`, `futures`, `thiserror` |
+| `fshell-terminal` | ratatui backend, scoped terminal sessions, TUI runner | `fshell-tty`, `ratatui` |
 | `fshell-repl` | interactive prompt, FTUI, native line-editor, completions, config TUI, SQLite history | `fshell-engine`, `fshell-builtins`, `fshell-bridge`, `fshell-terminal`, `ratatui` |
 
 ---

@@ -34,7 +34,7 @@ hostname = { workspace = true }
 regex = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
-fshell-terminal = { workspace = true }
+fshell-tty = { workspace = true }
 stacker = { workspace = true }
 async-recursion = { workspace = true }
 

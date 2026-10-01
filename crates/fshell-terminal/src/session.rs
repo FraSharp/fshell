@@ -12,10 +12,11 @@ use std::io::{self, Write};
 
 use ratatui::Terminal;
 
-use crate::ansi;
+use fshell_tty::ansi;
+use fshell_tty::lifecycle::{PanicHookGuard, SignalGuard};
+use fshell_tty::raw;
+
 use crate::backend::FshellBackend;
-use crate::lifecycle::{PanicHookGuard, SignalGuard};
-use crate::raw;
 
 /// Physical terminal device to interact with.
 #[derive(Debug)]

@@ -5,8 +5,8 @@
 //!
 //! Replacement for `ratatui-crossterm`'s backend: buffered cell diffs,
 //! style changes, clearing, sizing, and the cursor status-report query all
-//! go through [`crate::ansi`] and [`crate::raw`], so no third-party terminal
-//! crate sits between ratatui and the device. Named colors use the compact
+//! go through [`fshell_tty::ansi`] and [`fshell_tty::raw`], so no third-party
+//! terminal crate sits between ratatui and the device. Named colors use the compact
 //! 16-color codes instead of the 256-color spellings; the rendered result is
 //! identical.
 //!
@@ -19,8 +19,7 @@ use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
 use ratatui::style::{Color, Modifier};
 
-use crate::ansi;
-use crate::raw;
+use fshell_tty::{ansi, raw};
 
 /// Ratatui backend writing ANSI sequences to a terminal device.
 #[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]

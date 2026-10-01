@@ -1,20 +1,19 @@
 [package]
-name = "fshell-terminal"
+name = "fshell-tty"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Terminal runtime boundary for fshell interactive interfaces"
+description = "Unix terminal primitives for fshell: input decoding, raw mode, and ANSI output"
 repository.workspace = true
 
 [dependencies]
-fshell-tty = { workspace = true }
 futures = { workspace = true }
 libc = { workspace = true }
-ratatui = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+portable-pty = { workspace = true }
 
 [lints]
 workspace = true

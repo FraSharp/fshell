@@ -1,27 +1,17 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
+
 //! Fshell-owned terminal runtime boundary.
 //!
-//! Owns terminal input normalization, process-level lifecycle guards,
-//! scoped terminal sessions (fullscreen and inline), and the unified TUI runner.
+//! Owns the ratatui backend, scoped terminal sessions (fullscreen and
+//! inline), and the unified TUI runner. The underlying terminal primitives
+//! live in `fshell-tty` and are re-exported here for callers.
 
-pub mod ansi;
 pub mod backend;
-mod inbox;
-pub mod input;
-pub mod lifecycle;
-pub mod parse;
-pub mod raw;
 pub mod runner;
 pub mod session;
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod test_support;
-#[cfg(unix)]
-pub mod unix;
 
-pub use ansi::*;
 pub use backend::*;
-pub use input::*;
-pub use lifecycle::*;
-pub use raw::*;
+pub use fshell_tty::*;
 pub use runner::*;
 pub use session::*;

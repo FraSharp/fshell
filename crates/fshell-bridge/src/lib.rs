@@ -187,7 +187,7 @@ impl InteractiveTerminalGuard {
         let mut raw_mode_was_enabled = false;
         let debug_fg = std::env::var("FSH_DEBUG_FG").is_ok();
         if is_interactive {
-            raw_mode_was_enabled = fshell_terminal::is_raw_mode_enabled();
+            raw_mode_was_enabled = fshell_tty::is_raw_mode_enabled();
             if debug_fg {
                 eprintln!(
                     "[FSH_DEBUG_FG] guard: raw_mode_was_enabled={}",
@@ -198,7 +198,7 @@ impl InteractiveTerminalGuard {
                 if debug_fg {
                     eprintln!("[FSH_DEBUG_FG] guard: disabling raw mode");
                 }
-                let _ = fshell_terminal::disable_raw_mode();
+                let _ = fshell_tty::disable_raw_mode();
             }
             if debug_fg {
                 eprintln!("[FSH_DEBUG_FG] guard: suspending session logging");
@@ -235,7 +235,7 @@ impl Drop for InteractiveTerminalGuard {
                 if debug_fg {
                     eprintln!("[FSH_DEBUG_FG] guard: re-enabling raw mode");
                 }
-                let _ = fshell_terminal::enable_raw_mode();
+                let _ = fshell_tty::enable_raw_mode();
             }
             if debug_fg {
                 eprintln!("[FSH_DEBUG_FG] guard: resuming session logging");
