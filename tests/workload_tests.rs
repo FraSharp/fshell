@@ -174,6 +174,27 @@ command -v fsh"#,
         .tree(TREE)
         .stubs(STUBS)
         .features(&["workload", "nested"]),
+        posix_case(
+            "workload/command-builtin-semantics",
+            r#"alias fsh='echo alias'
+command -v fsh
+command fsh
+unalias fsh
+fsh() { echo function; }
+command -v fsh
+command fsh
+command -p -v sh
+PATH=/nonexistent command -p sh -c 'printf "default-path\n"'
+command -V printf
+printf() { echo function; }
+command -v printf
+printf original
+command printf '%s\n' utility
+command"#,
+        )
+        .tree(TREE)
+        .stubs(STUBS)
+        .features(&["workload", "command", "builtins"]),
     ]
 }
 

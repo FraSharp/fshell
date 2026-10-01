@@ -487,6 +487,33 @@ async fn test_posix_alias_defines_and_lists() {
 }
 
 #[tokio::test]
+async fn command_export_expands_assignment_values_without_field_splitting() {
+    let env = setup_posix_env();
+    let script = r#"value='one two'; command export FSH_COMMAND_DECL=$value; printf '<%s>\n' "$FSH_COMMAND_DECL""#;
+
+    let (code, out) = run_posix_capture(script, &env).await;
+
+    assert_eq!(code, 0);
+    assert_eq!(out, "<one two>\n");
+    assert_eq!(
+        env.vars.read().get("FSH_COMMAND_DECL").map(Val::to_text),
+        Some("one two".to_string())
+    );
+}
+
+#[tokio::test]
+async fn command_function_keeps_arguments_in_regular_expansion_context() {
+    let env = setup_posix_env();
+    let script = r#"value='one two'; command() { printf '<%s>\n' "$@"; }; command export FSH_COMMAND_FN_DECL=$value"#;
+
+    let (code, out) = run_posix_capture(script, &env).await;
+
+    assert_eq!(code, 0);
+    assert_eq!(out, "<export>\n<FSH_COMMAND_FN_DECL=one>\n<two>\n");
+    assert!(!env.vars.read().contains_key("FSH_COMMAND_FN_DECL"));
+}
+
+#[tokio::test]
 async fn test_posix_umask_query_and_set() {
     let env = setup_posix_env();
     let (_, out) = run_posix_capture("umask 022; umask", &env).await;

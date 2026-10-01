@@ -1421,6 +1421,95 @@ fn eval_arithmetic_command(expr: &str, env: &Env) -> Result<i64, PosixError> {
         .map_err(PosixError::Engine)
 }
 
+fn declaration_suffix_start(
+    command_word: Option<&str>,
+    suffix: Option<&CommandSuffix>,
+    env: &Env,
+) -> Option<usize> {
+    let mut command_name = static_command_word(command_word?)?;
+    let mut cursor = 0;
+    let mut suppress_function_lookup = false;
+    loop {
+        if matches!(
+            command_name,
+            "export" | "readonly" | "declare" | "typeset" | "local"
+        ) {
+            if !suppress_function_lookup
+                && !crate::posix_builtins::type_cmd::is_special_builtin(command_name)
+                && get_posix_function(env, command_name).is_some()
+            {
+                return None;
+            }
+            return Some(cursor);
+        }
+        if command_name != "command" {
+            return None;
+        }
+        if !suppress_function_lookup && get_posix_function(env, "command").is_some() {
+            return None;
+        }
+
+        let items = &suffix?.0;
+        let mut index = cursor;
+        let mut options = true;
+        let mut found_target = false;
+        while let Some(item) = items.get(index) {
+            match item {
+                CommandPrefixOrSuffixItem::IoRedirect(_) => index += 1,
+                CommandPrefixOrSuffixItem::Word(word) => {
+                    let value = static_command_word(&word.value)?;
+                    if options && value == "--" {
+                        options = false;
+                        index += 1;
+                        continue;
+                    }
+                    if options && value.starts_with('-') && value.len() > 1 {
+                        if value[1..].chars().all(|flag| flag == 'p') {
+                            index += 1;
+                            continue;
+                        }
+                        return None;
+                    }
+                    command_name = value;
+                    cursor = index + 1;
+                    suppress_function_lookup = true;
+                    found_target = true;
+                    break;
+                }
+                CommandPrefixOrSuffixItem::AssignmentWord(..)
+                | CommandPrefixOrSuffixItem::ProcessSubstitution(..) => return None,
+            }
+        }
+        if !found_target {
+            return None;
+        }
+    }
+}
+
+fn static_command_word(word: &str) -> Option<&str> {
+    if let Some(literal) = word.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+        && !literal.contains('\'')
+    {
+        return Some(literal);
+    }
+    if let Some(literal) = word.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+        && !literal
+            .chars()
+            .any(|character| matches!(character, '"' | '$' | '`' | '\\'))
+    {
+        return Some(literal);
+    }
+    if word.chars().any(|character| {
+        matches!(
+            character,
+            '\'' | '"' | '$' | '`' | '\\' | '*' | '?' | '[' | ']'
+        )
+    }) {
+        return None;
+    }
+    Some(word)
+}
+
 #[async_recursion]
 async fn eval_simple_command(
     simple: &SimpleCommand,
@@ -1462,10 +1551,12 @@ async fn eval_simple_command(
     }
 
     let cmd_word = simple.word_or_name.as_ref().map(|w| w.value.clone());
+    let assignment_context_start =
+        declaration_suffix_start(cmd_word.as_deref(), simple.suffix.as_ref(), env);
 
     let mut args: Vec<String> = Vec::new();
     if let Some(suffix) = &simple.suffix {
-        for item in &suffix.0 {
+        for (item_index, item) in suffix.0.iter().enumerate() {
             match item {
                 CommandPrefixOrSuffixItem::Word(w) => {
                     let expanded = expand_word(
@@ -1492,6 +1583,20 @@ async fn eval_simple_command(
                         AssignmentName::VariableName(n) => n.clone(),
                         AssignmentName::ArrayElementName(n, idx) => format!("{}[{}]", n, idx),
                     };
+                    if assignment_context_start.is_some_and(|start| item_index >= start) {
+                        let value = match &assign.value {
+                            AssignmentValue::Scalar(word) => {
+                                expand_assignment_word(&word.value, env, positional)?
+                            }
+                            AssignmentValue::Array(elems) => elems
+                                .iter()
+                                .map(|(_, word)| word.value.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        };
+                        args.push(format!("{name}={value}"));
+                        continue;
+                    }
                     // `Word::value` is the raw, unexpanded source text, including
                     // any quoting, so the rebuilt word re-parses with its quotes.
                     let raw = match &assign.value {
@@ -1564,7 +1669,7 @@ async fn eval_simple_command(
         },
         positional,
     )?;
-    let (cmd_name, extra_args) = if !expanded_cmd_words.is_empty() {
+    let (mut cmd_name, extra_args) = if !expanded_cmd_words.is_empty() {
         (
             expanded_cmd_words[0].clone(),
             expanded_cmd_words[1..].to_vec(),
@@ -1574,14 +1679,47 @@ async fn eval_simple_command(
     };
     let mut all_args = extra_args;
     all_args.extend(args);
-    let args = all_args;
+    let mut args = all_args;
+
+    // Resolve executable `command` wrappers before prefix-assignment handling.
+    // Lookup forms stay as the `command` builtin for execution.
+    let mut suppress_function_lookup = false;
+    let mut search_path_override = None;
+    let mut command_action = None;
+    loop {
+        if cmd_name != "command"
+            || (!suppress_function_lookup && get_posix_function(env, "command").is_some())
+        {
+            break;
+        }
+        match crate::posix_builtins::command::parse_command_args(&args) {
+            crate::posix_builtins::command::CommandAction::Execute {
+                command_name,
+                args: command_args,
+                use_default_path,
+            } => {
+                cmd_name = command_name;
+                args = command_args;
+                suppress_function_lookup = true;
+                search_path_override = use_default_path
+                    .then_some(crate::posix_builtins::command::DEFAULT_PATH.to_string());
+            }
+            action => {
+                command_action = Some(action);
+                break;
+            }
+        }
+    }
 
     let capture_stdout = io_cfg.capture_stdout || redir.stdout_file().is_some();
 
-    let is_decl_cmd = matches!(
-        cmd_name.as_str(),
-        "export" | "readonly" | "declare" | "typeset" | "local"
-    );
+    // `command` suppresses the special properties of special builtins. In
+    // particular, a prefix assignment before `command export` is temporary.
+    let is_special_decl_cmd =
+        !suppress_function_lookup && matches!(cmd_name.as_str(), "export" | "readonly");
+    let is_regular_decl_cmd = matches!(cmd_name.as_str(), "declare" | "typeset" | "local")
+        && (suppress_function_lookup || get_posix_function(env, &cmd_name).is_none());
+    let is_decl_cmd = is_special_decl_cmd || is_regular_decl_cmd;
 
     let mut saved_prefix_vars: Vec<(String, Option<Val>)> = Vec::new();
     if !prefix_assignments.is_empty() {
@@ -1608,6 +1746,9 @@ async fn eval_simple_command(
         env,
         cfg,
         io_cfg,
+        suppress_function_lookup,
+        search_path_override.as_deref(),
+        command_action,
     )
     .await;
 
@@ -1651,7 +1792,35 @@ async fn eval_simple_command_inner(
     env: &Env,
     cfg: &EvalConfig,
     mut io_cfg: IoStreamConfig,
+    suppress_function_lookup: bool,
+    search_path_override: Option<&str>,
+    command_action: Option<crate::posix_builtins::command::CommandAction>,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
+    if !suppress_function_lookup
+        && !crate::posix_builtins::type_cmd::is_special_builtin(cmd_name)
+        && let Some(func_body) = get_posix_function(env, cmd_name)
+    {
+        let saved = save_positional(env);
+        apply_positional(env, args);
+        let fn_cfg = EvalConfig {
+            positional: args.to_vec(),
+            errexit: cfg.errexit,
+            source: cfg.source.clone(),
+        };
+        let result = eval_compound_command_stream(&func_body, env, &fn_cfg, io_cfg).await;
+        restore_positional(env, saved);
+        // `return` ends the function, not the script that called it: a caller sees
+        // the status the function returned with and carries on.
+        return match result {
+            Ok((code, out)) => Ok((code, out)),
+            Err(PosixError::Return(code)) => {
+                env.set_exit_code(code as i64);
+                Ok((code, None))
+            }
+            Err(other) => Err(other),
+        };
+    }
+
     match cmd_name {
         ":" | "true" => return Ok((0, None)),
         "false" => return Ok((1, None)),
@@ -1873,6 +2042,42 @@ async fn eval_simple_command_inner(
                 })?;
             let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout).await?;
             return Ok((code, out));
+        }
+        "command" => {
+            let action = command_action
+                .unwrap_or_else(|| crate::posix_builtins::command::parse_command_args(args));
+            match action {
+                crate::posix_builtins::command::CommandAction::Noop => {
+                    return Ok((0, None));
+                }
+                crate::posix_builtins::command::CommandAction::Error(error) => {
+                    eprintln!("command: {error}");
+                    return Ok((2, None));
+                }
+                crate::posix_builtins::command::CommandAction::Lookup {
+                    names,
+                    verbose,
+                    use_default_path,
+                } => {
+                    let path_override =
+                        use_default_path.then_some(crate::posix_builtins::command::DEFAULT_PATH);
+                    let (code, rendered) = crate::posix_builtins::command::lookup_commands(
+                        &names,
+                        verbose,
+                        env,
+                        path_override,
+                    );
+                    let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout).await?;
+                    return Ok((code, out));
+                }
+                crate::posix_builtins::command::CommandAction::Execute { .. } => {
+                    return Err(PosixError::Engine(EngineError::Generic {
+                        message: "command execution was not unwrapped before POSIX dispatch"
+                            .to_string(),
+                        span: None,
+                    }));
+                }
+            }
         }
         "eval" => {
             let code = crate::posix_builtins::eval_builtin::eval_posix(args, env)
@@ -2147,29 +2352,6 @@ async fn eval_simple_command_inner(
         _ => {}
     }
 
-    // Check for POSIX shell function
-    if let Some(func_body) = get_posix_function(env, cmd_name) {
-        let saved = save_positional(env);
-        apply_positional(env, args);
-        let fn_cfg = EvalConfig {
-            positional: args.to_vec(),
-            errexit: cfg.errexit,
-            source: cfg.source.clone(),
-        };
-        let result = eval_compound_command_stream(&func_body, env, &fn_cfg, io_cfg).await;
-        restore_positional(env, saved);
-        // `return` ends the function, not the script that called it: a caller sees
-        // the status the function returned with and carries on.
-        return match result {
-            Ok((code, out)) => Ok((code, out)),
-            Err(PosixError::Return(code)) => {
-                env.set_exit_code(code as i64);
-                Ok((code, None))
-            }
-            Err(other) => Err(other),
-        };
-    }
-
     // Job control is shared with the native engine: run `jobs`, `kill`, `fg`,
     // `bg` and `disown` through the registered builtin so both engines report
     // and signal the same job table.
@@ -2207,7 +2389,16 @@ async fn eval_simple_command_inner(
     }
 
     // Fallback: subprocess execution with full I/O piping and redirections
-    run_external_command(cmd_name, args, prefix_assignments, redir, io_cfg, env).await
+    run_external_command(
+        cmd_name,
+        args,
+        prefix_assignments,
+        redir,
+        io_cfg,
+        env,
+        search_path_override,
+    )
+    .await
 }
 
 fn parse_status_argument(value: Option<&String>, default: i64) -> Result<i32, String> {
@@ -2521,6 +2712,7 @@ async fn run_external_command(
     redir: &RedirectionContext,
     mut io_cfg: IoStreamConfig,
     env: &Env,
+    search_path_override: Option<&str>,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
     use std::process::Stdio;
 
@@ -2553,6 +2745,11 @@ async fn run_external_command(
     }
     for (k, v) in prefix_assignments {
         cmd.env(k, v);
+    }
+    if let Some(path) = search_path_override {
+        // `command -p` controls the utility search as well as the environment
+        // used by `execvp` to resolve a bare command name.
+        cmd.env("PATH", path);
     }
 
     if let Some(stdin_file) = &redir.stdin_file {
