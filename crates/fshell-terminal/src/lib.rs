@@ -5,12 +5,16 @@
 
 pub mod ansi;
 pub mod backend;
+mod inbox;
 pub mod input;
 pub mod lifecycle;
 pub mod parse;
 pub mod raw;
 pub mod runner;
 pub mod session;
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod test_support;
 #[cfg(unix)]
 pub mod unix;
 

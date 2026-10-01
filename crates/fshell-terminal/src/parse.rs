@@ -393,8 +393,12 @@ impl AnsiParser {
             b'~' => self.parse_special_key(&seq),
             b'u' => self.parse_csi_u(&seq),
             b'M' => self.parse_rxvt_mouse(&seq),
-            // Cursor-position responses are consumed, never input.
+            // Cursor-position responses feed a waiting query and are never
+            // surfaced as input.
             b'R' => {
+                if let Some((column, row)) = cursor_report(&seq) {
+                    crate::inbox::record_cursor_report(column, row);
+                }
                 self.buf.drain(..len);
                 Parse::Again
             }
@@ -747,6 +751,72 @@ fn map_key(key: RawKey) -> Key {
         RawKey::Function(number) => Key::Function(number),
         RawKey::Null => Key::Null,
     }
+}
+
+/// Decode a complete `CSI row ; column R` sequence into 0-based
+/// `(column, row)`.
+pub(crate) fn cursor_report(sequence: &[u8]) -> Option<(u16, u16)> {
+    let body = sequence.strip_prefix(b"\x1B[")?.strip_suffix(b"R")?;
+    let body = std::str::from_utf8(body).ok()?;
+    let (row, column) = body.split_once(';')?;
+    let row: u16 = row.parse().ok()?;
+    let column: u16 = column.parse().ok()?;
+    Some((column.saturating_sub(1), row.saturating_sub(1)))
+}
+
+/// Find a `CSI row ; column R` report in `bytes`, returning its span and
+/// 0-based `(column, row)`.
+///
+/// The scanner tolerates surrounding input, because a query can read
+/// keystrokes before the report arrives, and oversized parameters are
+/// skipped rather than aborting the search.
+pub(crate) fn find_cursor_report(bytes: &[u8]) -> Option<(usize, usize, u16, u16)> {
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        if bytes[index] != 0x1B || bytes[index + 1] != b'[' {
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + 2;
+        let row_start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        if cursor == row_start || cursor >= bytes.len() || bytes[cursor] != b';' {
+            index += 1;
+            continue;
+        }
+        let row = std::str::from_utf8(&bytes[row_start..cursor])
+            .ok()
+            .and_then(|text| text.parse::<u16>().ok());
+        let Some(row) = row else {
+            index += 1;
+            continue;
+        };
+        cursor += 1;
+        let column_start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        if cursor == column_start || cursor >= bytes.len() || bytes[cursor] != b'R' {
+            index += 1;
+            continue;
+        }
+        let column = std::str::from_utf8(&bytes[column_start..cursor])
+            .ok()
+            .and_then(|text| text.parse::<u16>().ok());
+        let Some(column) = column else {
+            index += 1;
+            continue;
+        };
+        return Some((
+            index,
+            cursor + 1,
+            column.saturating_sub(1),
+            row.saturating_sub(1),
+        ));
+    }
+    None
 }
 
 /// Length of the CSI sequence starting the buffer, through its final byte.
@@ -1162,6 +1232,39 @@ mod tests {
         assert_eq!(events(b"\x1B[O"), (vec![], AnsiParser::new()));
         // A cursor-position report never leaks as keystrokes.
         assert_eq!(events(b"\x1B[24;80R"), (vec![], AnsiParser::new()));
+    }
+
+    #[test]
+    fn cursor_reports_are_recorded_for_a_waiting_query() {
+        let _guard = crate::test_support::lock();
+        crate::inbox::clear_cursor_report();
+        let (decoded, _) = events(b"\x1B[24;80R");
+        assert!(decoded.is_empty());
+        assert_eq!(crate::inbox::take_cursor_report(), Some((79, 23)));
+    }
+
+    #[test]
+    fn cursor_report_scans_anywhere_in_the_buffer() {
+        assert_eq!(find_cursor_report(b"\x1B[12;34R"), Some((0, 8, 33, 11)));
+        assert_eq!(
+            find_cursor_report(b"\x1B[Ahello\x1B[3;4R"),
+            Some((8, 14, 3, 2))
+        );
+    }
+
+    #[test]
+    fn incomplete_or_absent_reports_are_none() {
+        assert_eq!(find_cursor_report(b"\x1B[12;"), None);
+        assert_eq!(find_cursor_report(b"\x1B[12;34"), None);
+        assert_eq!(find_cursor_report(b"plain text"), None);
+    }
+
+    #[test]
+    fn oversized_parameters_do_not_abort_the_scan() {
+        assert_eq!(
+            find_cursor_report(b"\x1B[999999999;1R\x1B[2;3R"),
+            Some((14, 20, 2, 1))
+        );
     }
 
     #[test]

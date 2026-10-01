@@ -11,6 +11,7 @@
 //!
 //! Unix only.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -100,7 +101,7 @@ fn window_size(fd: RawFd) -> Option<(u16, u16)> {
 pub(crate) struct UnixSource {
     fd: Option<UnixFd>,
     parser: AnsiParser,
-    pending: Option<InputEvent>,
+    pending: VecDeque<InputEvent>,
     last_size: Option<(u16, u16)>,
     size_pending: bool,
     esc_due: bool,
@@ -112,7 +113,7 @@ impl UnixSource {
         Self {
             fd: None,
             parser: AnsiParser::new(),
-            pending: None,
+            pending: VecDeque::new(),
             last_size: None,
             size_pending: false,
             esc_due: false,
@@ -126,7 +127,7 @@ impl UnixSource {
         Self {
             fd: Some(UnixFd::open(fd, None)),
             parser: AnsiParser::new(),
-            pending: None,
+            pending: VecDeque::new(),
             last_size: window_size(fd),
             size_pending: false,
             esc_due: false,
@@ -155,25 +156,38 @@ impl UnixSource {
         Ok(fd)
     }
 
-    /// Decode buffered bytes into the pending slot. Returns true when an
-    /// event is pending; false when more bytes could complete a partial
-    /// sequence. Swallowed bytes (focus reports, undecodable input) drain
-    /// silently inside.
-    fn probe(&mut self) -> bool {
+    /// Decode every complete event in the buffer into the queue. Returns
+    /// true when at least one event is pending; swallowed bytes (focus
+    /// reports, undecodable input) drain silently inside.
+    fn drain_events(&mut self) -> bool {
         loop {
             match self.parser.try_parse() {
                 Parse::Event(raw) => {
-                    if self.pending.is_none() {
-                        self.pending = crate::parse::map_raw_event(raw);
-                    }
-                    if self.pending.is_some() {
-                        return true;
+                    if let Some(event) = crate::parse::map_raw_event(raw) {
+                        self.pending.push_back(event);
                     }
                 }
                 Parse::Again => {}
-                Parse::NeedMore => return false,
+                Parse::NeedMore => break,
             }
         }
+        !self.pending.is_empty()
+    }
+
+    /// Replay input recovered outside this source, in the order it left the
+    /// device: raw bytes feed the parser first, and decoded events follow
+    /// the events those bytes produce. Returns true when an event is pending.
+    fn recover(&mut self) -> bool {
+        while let Some(item) = crate::inbox::pop() {
+            match item {
+                crate::inbox::Recovered::Bytes(bytes) => self.parser.push(&bytes),
+                crate::inbox::Recovered::Event(event) => {
+                    self.drain_events();
+                    self.pending.push_back(event);
+                }
+            }
+        }
+        self.drain_events()
     }
 }
 
@@ -183,14 +197,14 @@ impl EventReader for UnixSource {
     /// out, or the descriptor reached EOF.
     fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
         let fd = self.ensure_open()?;
-        if self.pending.is_some() || self.esc_due || self.size_pending {
+        if !self.pending.is_empty() || self.esc_due || self.size_pending {
             return Ok(true);
         }
         // Seed the size baseline on first use so an early resize is caught.
         if self.last_size.is_none() {
             self.last_size = window_size(fd);
         }
-        if self.probe() {
+        if self.recover() {
             return Ok(true);
         }
         let start = Instant::now();
@@ -235,12 +249,20 @@ impl EventReader for UnixSource {
                 }
                 continue;
             }
-            match self
-                .fd
-                .as_ref()
-                .expect("descriptor opened above")
-                .read_chunk(&mut self.chunk)
-            {
+            // Recovered bytes are older than whatever the device still holds,
+            // so replay them first, then read, under the shared device lock
+            // that keeps readers from interleaving.
+            let read = {
+                let _guard = crate::inbox::lock_device();
+                if self.recover() {
+                    return Ok(true);
+                }
+                self.fd
+                    .as_ref()
+                    .expect("descriptor opened above")
+                    .read_chunk(&mut self.chunk)
+            };
+            match read {
                 Ok(0) => {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -249,7 +271,7 @@ impl EventReader for UnixSource {
                 }
                 Ok(count) => {
                     self.parser.push(&self.chunk[..count]);
-                    if self.probe() {
+                    if self.drain_events() {
                         return Ok(true);
                     }
                     // Partial sequence: loop back to waiting for the rest.
@@ -287,7 +309,7 @@ impl EventReader for UnixSource {
                 }));
             }
         }
-        if let Some(event) = self.pending.take() {
+        if let Some(event) = self.pending.pop_front() {
             return Ok(Some(event));
         }
         // Progress was reported but nothing is buffered: only a spurious
@@ -364,12 +386,17 @@ impl UnixEventStream {
             .spawn(move || {
                 while !worker_shutdown.load(Ordering::Relaxed) {
                     match source.poll(Duration::from_secs(60 * 60)) {
-                        Ok(InputPoll::Event(event)) => {
-                            if tx.send(StreamMessage::Event(event)).is_err() {
+                        Ok(InputPoll::Event(event)) => match tx.send(StreamMessage::Event(event)) {
+                            Ok(()) => wake(),
+                            Err(error) => {
+                                // The consumer is gone; keep the event for
+                                // whichever source reads next.
+                                if let StreamMessage::Event(event) = error.0 {
+                                    crate::inbox::push_event(event);
+                                }
                                 break;
                             }
-                            wake();
-                        }
+                        },
                         Ok(InputPoll::Closed) => {
                             let _ = tx.send(StreamMessage::Closed);
                             wake();
@@ -467,51 +494,11 @@ impl futures::Stream for UnixEventStream {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::input::Key;
-
-    /// A pipe standing in for the terminal: the test writes input bytes,
-    /// the source reads them through the real `poll`/`read` path.
-    struct Pipe {
-        reader: RawFd,
-        writer: Option<File>,
-    }
-
-    impl Pipe {
-        fn new() -> io::Result<Self> {
-            let mut fds = [0; 2];
-            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let writer = unsafe {
-                use std::os::unix::io::FromRawFd;
-                File::from_raw_fd(fds[1])
-            };
-            Ok(Self {
-                reader: fds[0],
-                writer: Some(writer),
-            })
-        }
-
-        fn write(&mut self, bytes: &[u8]) {
-            use std::io::Write;
-            let writer = self.writer.as_mut().expect("writer is open");
-            writer.write_all(bytes).unwrap();
-            writer.flush().unwrap();
-        }
-
-        fn close_writer(&mut self) {
-            drop(self.writer.take());
-        }
-    }
-
-    impl Drop for Pipe {
-        fn drop(&mut self) {
-            unsafe { libc::close(self.reader) };
-        }
-    }
+    use crate::input::{Key, KeyEvent, Modifiers};
+    use crate::test_support::{Pipe, lock};
 
     fn source_on(pipe: &Pipe) -> UnixEventSource {
         UnixEventSource {
@@ -528,6 +515,7 @@ mod tests {
 
     #[test]
     fn pipe_roundtrip_preserves_order() {
+        let _guard = lock();
         let mut pipe = Pipe::new().unwrap();
         let mut source = source_on(&pipe);
         pipe.write(b"a\x1B[A");
@@ -543,6 +531,7 @@ mod tests {
 
     #[test]
     fn fragmented_writes_reassemble_before_return() {
+        let _guard = lock();
         let mut pipe = Pipe::new().unwrap();
         let mut source = source_on(&pipe);
         // A six-byte mouse report split mid-sequence must not surface
@@ -561,6 +550,7 @@ mod tests {
 
     #[test]
     fn lone_escape_becomes_escape_not_timeout() {
+        let _guard = lock();
         let mut pipe = Pipe::new().unwrap();
         let mut source = source_on(&pipe);
         pipe.write(b"\x1B");
@@ -572,6 +562,7 @@ mod tests {
 
     #[test]
     fn escape_plus_byte_is_alt_not_escape() {
+        let _guard = lock();
         let mut pipe = Pipe::new().unwrap();
         let mut source = source_on(&pipe);
         pipe.write(b"\x1Bx");
@@ -582,6 +573,7 @@ mod tests {
 
     #[test]
     fn idle_pipe_times_out() {
+        let _guard = lock();
         let pipe = Pipe::new().unwrap();
         let mut source = source_on(&pipe);
         assert!(matches!(
@@ -592,6 +584,7 @@ mod tests {
 
     #[test]
     fn closed_write_end_is_sticky_closed() {
+        let _guard = lock();
         let mut pipe = Pipe::new().unwrap();
         let mut source = source_on(&pipe);
         pipe.close_writer();
@@ -607,6 +600,7 @@ mod tests {
 
     #[test]
     fn stream_serves_events_then_closure() {
+        let _guard = lock();
         let mut pipe = Pipe::new().unwrap();
         let mut stream = UnixEventStream::open_fd(pipe.reader);
         pipe.write(b"q");
@@ -629,5 +623,73 @@ mod tests {
             futures::executor::block_on(stream.next()),
             InputPoll::Closed
         );
+    }
+
+    #[test]
+    fn recovered_bytes_replay_before_the_device() {
+        let _guard = lock();
+        let pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        crate::inbox::push_bytes(b"a");
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(5))),
+            (Key::Character('a'), Modifiers::empty())
+        );
+    }
+
+    #[test]
+    fn recovered_events_keep_their_order_between_bytes() {
+        let _guard = lock();
+        let pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        crate::inbox::push_bytes(b"a");
+        crate::inbox::push_event(InputEvent::Key(KeyEvent::new(
+            Key::Enter,
+            Modifiers::empty(),
+        )));
+        crate::inbox::push_bytes(b"b");
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(5))),
+            (Key::Character('a'), Modifiers::empty())
+        );
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(5))),
+            (Key::Enter, Modifiers::empty())
+        );
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(5))),
+            (Key::Character('b'), Modifiers::empty())
+        );
+    }
+
+    #[test]
+    fn device_bytes_follow_recovered_ones() {
+        let _guard = lock();
+        let mut pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        crate::inbox::push_bytes(b"a");
+        pipe.write(b"b");
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(5))),
+            (Key::Character('a'), Modifiers::empty())
+        );
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(5))),
+            (Key::Character('b'), Modifiers::empty())
+        );
+    }
+
+    #[test]
+    fn reports_consumed_by_the_source_answer_a_query() {
+        let _guard = lock();
+        let mut pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        crate::inbox::clear_cursor_report();
+        pipe.write(b"\x1B[3;9R");
+        assert!(matches!(
+            source.poll(Duration::from_millis(80)),
+            Ok(InputPoll::Timeout)
+        ));
+        assert_eq!(crate::inbox::take_cursor_report(), Some((8, 2)));
     }
 }

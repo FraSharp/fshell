@@ -15,6 +15,8 @@ use std::io::{self, Write};
 use std::os::unix::io::RawFd;
 #[cfg(unix)]
 use std::sync::Mutex;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 /// Saved terminal state for the process-global raw-mode guard: the fd, the
 /// owned `/dev/tty` handle when one was opened (kept alive so the descriptor
@@ -88,21 +90,33 @@ pub fn window_size() -> io::Result<(u16, u16, u16, u16)> {
     Err(io::Error::other("Unix-only terminal support"))
 }
 
+/// Time allowed for a cursor report to arrive.
+#[cfg(unix)]
+const CURSOR_REPORT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Longest a query waits on the device between checks for a report that a
+/// concurrent event source recorded.
+#[cfg(unix)]
+const CURSOR_REPORT_SLICE: Duration = Duration::from_millis(20);
+
 /// Query the terminal cursor position as `(column, row)` with a device
 /// status report. The request is written to `out`; the reply is read from
 /// the terminal device. Raw mode is entered for the duration when it is not
 /// already active, because canonical mode would hold the reply back.
 ///
-/// The reply can be consumed by a concurrent input reader; callers that poll
-/// the terminal from another thread may see this time out, exactly as with
-/// `crossterm::cursor::position`.
+/// When an event source polls concurrently it consumes the reply and records
+/// it, so the query completes without reading the device. Anything the query
+/// reads that is not the report is pushed to the input inbox for the next
+/// source to replay; no keystroke is lost either way.
 #[cfg(unix)]
 pub fn cursor_position(out: &mut impl Write) -> io::Result<(u16, u16)> {
     if is_raw_mode_enabled() {
-        return read_cursor_position(out);
+        let (fd, _owned) = tty_fd()?;
+        return query_cursor_position(out, fd, CURSOR_REPORT_TIMEOUT);
     }
     enable_raw_mode()?;
-    let result = read_cursor_position(out);
+    let result =
+        tty_fd().and_then(|(fd, _owned)| query_cursor_position(out, fd, CURSOR_REPORT_TIMEOUT));
     let _ = disable_raw_mode();
     result
 }
@@ -112,112 +126,105 @@ pub fn cursor_position(_out: &mut impl Write) -> io::Result<(u16, u16)> {
     Err(io::Error::other("Unix-only terminal support"))
 }
 
-/// Write the status report request and wait up to two seconds for its reply.
+/// Ask for a cursor report on `fd` and wait for it.
 #[cfg(unix)]
-fn read_cursor_position(out: &mut impl Write) -> io::Result<(u16, u16)> {
+fn query_cursor_position(
+    out: &mut impl Write,
+    fd: RawFd,
+    timeout: Duration,
+) -> io::Result<(u16, u16)> {
+    // A report left over from an earlier exchange is not this answer.
+    crate::inbox::clear_cursor_report();
     out.write_all(b"\x1b[6n")?;
     out.flush()?;
-    let (fd, _owned) = tty_fd()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = Instant::now() + timeout;
     let mut buffer = Vec::with_capacity(32);
     loop {
-        let now = std::time::Instant::now();
+        if let Some(position) = crate::inbox::take_cursor_report() {
+            return Ok(position);
+        }
+        let now = Instant::now();
         if now >= deadline {
+            // Whatever was read is input for the next source, not ours.
+            crate::inbox::push_bytes(&buffer);
             return Err(io::Error::other(
                 "the cursor position could not be read within a normal duration",
             ));
         }
-        let millis = (deadline - now)
-            .as_millis()
-            .min(std::ffi::c_int::MAX as u128) as std::ffi::c_int;
-        let mut poll_fd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut poll_fd, 1, millis) };
-        if ready < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        if ready == 0 {
+        let wait = (deadline - now).min(CURSOR_REPORT_SLICE);
+        if !wait_readable(fd, wait)? {
             continue;
         }
-        let mut chunk = [0u8; 32];
-        let count = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
-        if count < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted
-                || error.kind() == io::ErrorKind::WouldBlock
-            {
-                continue;
+        let read = {
+            // Reads are serialized with the event source so recovered bytes
+            // keep the order the device released them in.
+            let _guard = crate::inbox::lock_device();
+            read_device(fd, &mut buffer)
+        };
+        match read {
+            Ok(true) => {
+                if let Some((start, end, column, row)) = crate::parse::find_cursor_report(&buffer) {
+                    let mut leftovers = Vec::with_capacity(buffer.len() - (end - start));
+                    leftovers.extend_from_slice(&buffer[..start]);
+                    leftovers.extend_from_slice(&buffer[end..]);
+                    crate::inbox::push_bytes(&leftovers);
+                    return Ok((column, row));
+                }
+                // Only the tail can complete a pending report; older bytes
+                // are user input and belong to the next source.
+                if buffer.len() > 64 {
+                    let tail = buffer.split_off(buffer.len() - 32);
+                    crate::inbox::push_bytes(&buffer);
+                    buffer = tail;
+                }
             }
-            return Err(error);
-        }
-        if count == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "terminal input closed",
-            ));
-        }
-        buffer.extend_from_slice(&chunk[..count as usize]);
-        if let Some(position) = parse_cursor_position(&buffer) {
-            return Ok(position);
-        }
-        // Only the tail can complete a pending sequence.
-        if buffer.len() > 64 {
-            buffer.drain(..buffer.len() - 32);
+            Ok(false) => {}
+            Err(error) => return Err(error),
         }
     }
 }
 
-/// Scan for a `CSI row ; column R` reply, returning 0-based `(column, row)`.
+/// Wait up to `timeout` for `fd` to become readable.
 #[cfg(unix)]
-fn parse_cursor_position(bytes: &[u8]) -> Option<(u16, u16)> {
-    let mut index = 0;
-    while index + 3 <= bytes.len() {
-        if bytes[index] != 0x1B || bytes[index + 1] != b'[' {
-            index += 1;
-            continue;
+fn wait_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+    let millis = timeout.as_millis().min(std::ffi::c_int::MAX as u128) as std::ffi::c_int;
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, millis) };
+    if ready < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok(false);
         }
-        let mut cursor = index + 2;
-        let row_start = cursor;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-            cursor += 1;
-        }
-        if cursor == row_start || cursor >= bytes.len() || bytes[cursor] != b';' {
-            index += 1;
-            continue;
-        }
-        let row = std::str::from_utf8(&bytes[row_start..cursor])
-            .ok()
-            .and_then(|text| text.parse::<u16>().ok());
-        let Some(row) = row else {
-            index += 1;
-            continue;
-        };
-        cursor += 1;
-        let column_start = cursor;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-            cursor += 1;
-        }
-        if cursor == column_start || cursor >= bytes.len() || bytes[cursor] != b'R' {
-            index += 1;
-            continue;
-        }
-        let column = std::str::from_utf8(&bytes[column_start..cursor])
-            .ok()
-            .and_then(|text| text.parse::<u16>().ok());
-        let Some(column) = column else {
-            index += 1;
-            continue;
-        };
-        return Some((column.saturating_sub(1), row.saturating_sub(1)));
+        return Err(error);
     }
-    None
+    Ok(ready > 0)
+}
+
+/// Read one chunk from `fd` into `buffer`. Returns false when the read was
+/// interrupted or would block and the caller should wait again.
+#[cfg(unix)]
+fn read_device(fd: RawFd, buffer: &mut Vec<u8>) -> io::Result<bool> {
+    let mut chunk = [0u8; 64];
+    let count = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+    if count < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted || error.kind() == io::ErrorKind::WouldBlock {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    if count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "terminal input closed",
+        ));
+    }
+    buffer.extend_from_slice(&chunk[..count as usize]);
+    Ok(true)
 }
 
 /// Resolve the fd `crossterm::terminal` operates on: stdin when it is a TTY,
@@ -361,32 +368,58 @@ pub fn is_stdin_tty() -> bool {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::inbox::Recovered;
+    use crate::test_support::{Pipe, lock};
 
     #[test]
-    fn cursor_report_parses_zero_based() {
-        assert_eq!(parse_cursor_position(b"\x1b[12;34R"), Some((33, 11)));
-    }
-
-    #[test]
-    fn cursor_report_ignores_preceding_input() {
-        assert_eq!(parse_cursor_position(b"\x1b[Ahello\x1b[3;4R"), Some((3, 2)));
-    }
-
-    #[test]
-    fn incomplete_or_absent_reports_are_none() {
-        assert_eq!(parse_cursor_position(b"\x1b[12;"), None);
-        assert_eq!(parse_cursor_position(b"\x1b[12;34"), None);
-        assert_eq!(parse_cursor_position(b"plain text"), None);
-    }
-
-    #[test]
-    fn oversized_parameters_do_not_abort_the_scan() {
+    fn query_returns_the_report_and_keeps_surrounding_input() {
+        let _guard = lock();
+        let mut pipe = Pipe::new().unwrap();
+        pipe.write(b"ab\x1B[4;7Rcd");
+        let mut out = Vec::new();
         assert_eq!(
-            parse_cursor_position(b"\x1b[999999999;1R\x1b[2;3R"),
-            Some((2, 1))
+            query_cursor_position(&mut out, pipe.reader, Duration::from_secs(5)).unwrap(),
+            (6, 3)
         );
+        assert_eq!(out.as_slice(), b"\x1B[6n");
+        // The keystrokes around the report survive for the next reader.
+        assert!(matches!(
+            crate::inbox::pop(),
+            Some(Recovered::Bytes(bytes)) if bytes == b"abcd"
+        ));
+        assert!(crate::inbox::pop().is_none());
+    }
+
+    #[test]
+    fn query_timeout_returns_input_to_the_inbox() {
+        let _guard = lock();
+        let mut pipe = Pipe::new().unwrap();
+        pipe.write(b"xy");
+        let mut out = Vec::new();
+        assert!(query_cursor_position(&mut out, pipe.reader, Duration::from_millis(60)).is_err());
+        assert!(matches!(
+            crate::inbox::pop(),
+            Some(Recovered::Bytes(bytes)) if bytes == b"xy"
+        ));
+    }
+
+    #[test]
+    fn report_recorded_elsewhere_answers_the_query() {
+        let _guard = lock();
+        let pipe = Pipe::new().unwrap();
+        let recorder = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(40));
+            crate::inbox::record_cursor_report(4, 5);
+        });
+        let mut out = Vec::new();
+        assert_eq!(
+            query_cursor_position(&mut out, pipe.reader, Duration::from_secs(2)).unwrap(),
+            (4, 5)
+        );
+        recorder.join().unwrap();
+        assert!(crate::inbox::pop().is_none());
     }
 }
