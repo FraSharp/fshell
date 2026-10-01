@@ -3,12 +3,11 @@
 
 //! Ratatui backend over fshell's own ANSI terminal primitives.
 //!
-//! Replacement for `ratatui-crossterm`'s backend: buffered cell diffs,
-//! style changes, clearing, sizing, and the cursor status-report query all
-//! go through [`fshell_tty::ansi`] and [`fshell_tty::raw`], so no third-party
-//! terminal crate sits between ratatui and the device. Named colors use the compact
-//! 16-color codes instead of the 256-color spellings; the rendered result is
-//! identical.
+//! Buffered cell diffs, style changes, clearing, sizing, and the cursor
+//! status-report query all go through [`fshell_tty::ansi`] and
+//! [`fshell_tty::raw`], so no third-party terminal crate sits between ratatui
+//! and the device. Named colors use the compact 16-color codes rather than
+//! the 256-color spellings; the rendered result is identical.
 //!
 //! Unix only.
 
@@ -150,7 +149,7 @@ fn write_sgr(out: &mut impl Write, code: u16) -> io::Result<()> {
     write!(out, "\x1b[{code}m")
 }
 
-/// Write `SetColors(fg, bg)` as the single combined sequence crossterm emits.
+/// Write the foreground and background colors as one combined sequence.
 fn write_colors(out: &mut impl Write, fg: Color, bg: Color) -> io::Result<()> {
     out.write_all(b"\x1b[")?;
     write_color(out, fg, Layer::Foreground)?;
@@ -165,9 +164,9 @@ enum Layer {
     Background,
 }
 
-/// Write a color's SGR parameters, matching crossterm's color table: the
-/// named colors select the dark or bright half of the 8-color palette,
-/// `Indexed` uses the 256-color form, and `Rgb` the true-color form.
+/// Write a color's SGR parameters: named colors select the dark or bright
+/// half of the 8-color palette, `Indexed` uses the 256-color form, and `Rgb`
+/// the true-color form.
 fn write_color(out: &mut impl Write, color: Color, layer: Layer) -> io::Result<()> {
     let (base, reset, extended) = match layer {
         Layer::Foreground => (30, 39, 38),
@@ -230,9 +229,9 @@ fn palette_index(color: Color) -> u16 {
     }
 }
 
-/// Write the attribute transitions between two modifier sets, in the exact
-/// order crossterm produces: removals first, then the intensity reset with
-/// its re-applications, then additions.
+/// Write the attribute transitions between two modifier sets: removals
+/// first, then the shared intensity reset with its re-applications, then the
+/// additions.
 fn write_modifier_diff(out: &mut impl Write, from: Modifier, to: Modifier) -> io::Result<()> {
     let removed = from & !to;
     if removed.contains(Modifier::REVERSED) {
@@ -366,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn color_parameters_match_the_crossterm_table() {
+    fn color_parameters_use_standard_palette_codes() {
         let cases = [
             (Color::Black, "30", "40"),
             (Color::Red, "31", "41"),
@@ -429,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn modifier_diff_matches_crossterm_ordering() {
+    fn modifier_diff_orders_resets_before_additions() {
         // Intensity reset re-applies the surviving half.
         assert_eq!(diff(Modifier::BOLD, Modifier::DIM), "\x1b[22m\x1b[2m");
         assert_eq!(

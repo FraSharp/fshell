@@ -4,16 +4,16 @@
 //! Unix terminal input decoding owned by fshell.
 //!
 //! Translates raw terminal bytes into [`RawEvent`]s. The accepted grammar is
-//! the subset of `crossterm 0.29`'s Unix decoding that a shell line editor
-//! can act on: control bytes, UTF-8 text, CSI/SS3 functional keys, legacy and
-//! SGR mouse reports, bracketed paste, and focus reports (consumed silently).
+//! the subset a shell line editor can act on: control bytes, UTF-8 text,
+//! CSI/SS3 functional keys, legacy and SGR mouse reports, bracketed paste,
+//! and focus reports (recorded for cursor queries, never surfaced as input).
 //!
-//! Deliberate deviations from crossterm, all documented at the site:
-//! - coordinate arithmetic saturates instead of panicking on `0` (`u16 - 1`);
+//! Deliberate departures from a strict reading of the input grammar, all
+//! documented at the site:
+//! - coordinate arithmetic saturates instead of underflowing on `0`;
 //! - a double `ESC` yields one `Escape` and keeps the second `ESC` pending
 //!   instead of swallowing it, so no keystroke is ever lost;
-//! - `CSI R` (`F(3)`) is accepted alongside the SS3 form; crossterm only
-//!   accepted the SS3 one;
+//! - `CSI R` (`F(3)`) is accepted alongside the SS3 form;
 //! - kinds are always `Press`: without the kitty keyboard protocol (which
 //!   fshell never enables) terminals never report repeat or release.
 
@@ -170,7 +170,7 @@ impl AnsiParser {
                 Parse::Event(key(RawKey::Backspace))
             }
             0x00 => {
-                // NUL arrives as Ctrl+Space, exactly as crossterm decoded it.
+                // NUL arrives as Ctrl+Space.
                 self.buf.drain(..1);
                 Parse::Event(RawEvent::Key {
                     key: RawKey::Char(' '),
@@ -194,7 +194,7 @@ impl AnsiParser {
             }
             0x1C..=0x1F => {
                 // Ctrl+4..Ctrl+7 (`Ctrl+\`, `Ctrl+]`, `Ctrl+^`, `Ctrl+_`),
-                // decoded to their shifted digits as crossterm did.
+                // decoded to their shifted digits.
                 self.buf.drain(..1);
                 Parse::Event(RawEvent::Key {
                     key: RawKey::Char((byte - 0x1C + b'4') as char),
@@ -218,8 +218,8 @@ impl AnsiParser {
                 }
                 Utf8::NeedMore => Parse::NeedMore,
                 Utf8::Invalid => {
-                    // Undecodable bytes carry no key; skip one, as dropping
-                    // the failed parse did in crossterm's buffer clearing.
+                    // Undecodable bytes carry no key; skip one so decoding
+                    // resumes at the next valid byte.
                     self.buf.drain(..1);
                     Parse::Again
                 }
@@ -282,7 +282,7 @@ impl AnsiParser {
         Parse::Event(key(code))
     }
 
-    /// Parse `ESC [` (CSI) with byte-level dispatch matching crossterm's.
+    /// Parse `ESC [` (CSI), dispatching on the byte after the introducer.
     fn parse_csi(&mut self) -> Parse {
         if self.buf.len() == 2 {
             return Parse::NeedMore;
@@ -513,8 +513,8 @@ impl AnsiParser {
     }
 
     /// Parse bracketed paste (`ESC [ 200 ~ text ESC [ 201 ~`). The opening
-    /// marker alone waits for the terminator; content decodes lossily exactly
-    /// as crossterm did.
+    /// marker alone waits for the terminator; the text decodes lossily, so
+    /// invalid bytes become replacement characters.
     fn parse_paste(&mut self) -> Parse {
         let terminator = b"\x1B[201~";
         let end = self
@@ -610,7 +610,7 @@ impl AnsiParser {
             }
         };
         // SGR marks release with a lowercase `m`: a press kind becomes its
-        // release, exactly as crossterm translated it.
+        // release.
         if release {
             action = match action {
                 MouseAction::Down(button) => MouseAction::Up(button),
@@ -881,9 +881,9 @@ fn decode_modifier_mask(mask: u8) -> RawModifiers {
     }
 }
 
-/// Button code to mouse action, matching crossterm's table exactly: low two
-/// bits plus high bits form the button number, bit 5 marks dragging, 3 is
-/// release-as-Left, 4/5/6/7 unpressed are wheel and horizontal scroll.
+/// Button code to mouse action: the low two bits plus the high bits form the
+/// button number, bit 5 marks dragging, 3 is release-as-Left, and 4/5/6/7
+/// unpressed are wheel and horizontal scroll.
 fn mouse_button(code: u8) -> Option<MouseAction> {
     let button = (code & 0b0000_0011) | ((code & 0b1100_0000) >> 4);
     let dragging = code & 0b0010_0000 == 0b0010_0000;
@@ -915,8 +915,7 @@ fn drag_button(action: &MouseAction) -> Option<MouseButton> {
     }
 }
 
-/// UTF-8 decode of a buffer head, validating continuation bytes exactly as
-/// crossterm's character parser did.
+/// UTF-8 decode of a buffer head, validating continuation bytes strictly.
 enum Utf8 {
     Char(char, usize),
     NeedMore,
@@ -1022,7 +1021,7 @@ mod tests {
                 },
             }]
         );
-        // Uppercase carries Shift, exactly as crossterm reported it.
+        // Uppercase carries Shift.
         let (decoded, _) = events(b"A");
         assert_eq!(
             decoded,

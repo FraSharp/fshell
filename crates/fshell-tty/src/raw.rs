@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-//! Unix raw-mode and terminal-size primitives owned by fshell.
+//! Unix raw-mode, terminal-size, and cursor-query primitives owned by fshell.
 //!
-//! Replaces `crossterm::terminal::{enable_raw_mode, disable_raw_mode,
-//! is_raw_mode_enabled, size}` with explicit, per-fd termios handling.
-//! The process-global `enable/disable/is_enabled` trio preserves crossterm's
-//! nesting semantics (first enabler owns the restore) so existing call sites
-//! migrate without behavior change; new code should prefer the `_fd` variants
-//! that carry the original termios explicitly.
+//! Termios handling is explicit and per-fd. The process-global
+//! `enable/disable/is_enabled` trio follows nesting semantics: the first
+//! enabler owns the restore and later enablers are no-ops. New code should
+//! prefer the `_fd` variants that carry the original termios explicitly.
 
 use std::io::{self, Write};
 #[cfg(unix)]
@@ -116,9 +114,8 @@ pub fn size() -> io::Result<(u16, u16)> {
 }
 
 /// Full window size as `(columns, rows, width_pixels, height_pixels)`,
-/// preferring the controlling terminal with stdout fallback. Mirrors
-/// `crossterm::terminal::window_size` Unix behavior, including zeroed pixel
-/// fields on terminals that do not report them.
+/// preferring the controlling terminal with stdout fallback. Pixel fields
+/// stay zero on terminals that do not report them.
 #[cfg(unix)]
 pub fn window_size() -> io::Result<(u16, u16, u16, u16)> {
     if let Some(file) = controlling_tty()
@@ -393,7 +390,7 @@ pub fn is_tty_fd(fd: RawFd) -> bool {
     }
 }
 
-/// Returns true when stdin is a TTY. Replaces `crossterm::tty::IsTty`.
+/// Returns true when stdin is a TTY.
 pub fn is_stdin_tty() -> bool {
     #[cfg(unix)]
     {

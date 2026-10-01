@@ -1,59 +1,59 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-//! Raw ANSI terminal command bytes owned by fshell.
+//! Raw ANSI terminal commands owned by fshell.
 //!
-//! Byte-for-byte replacement for the subset of `crossterm` commands fshell
-//! actually uses. Sequences match `crossterm 0.29.0` Unix output so existing
-//! snapshots, PTY tests, and terminal behavior are unchanged.
+//! These sequences are the shell's contract with the terminal: changing one
+//! changes every snapshot, PTY test, and running session. The exact bytes are
+//! pinned by tests so they cannot drift silently.
 //!
 //! Unix only. This crate targets macOS/Linux; non-Unix builds get stubs.
 
 use std::io::{self, Write};
 
-/// Alternate screen entry (`crossterm EnterAlternateScreen`).
+/// Enter the alternate screen buffer (DECSET 1049).
 pub const ENTER_ALTERNATE_SCREEN: &str = "\x1b[?1049h";
-/// Alternate screen exit (`crossterm LeaveAlternateScreen`).
+/// Leave the alternate screen buffer (DECRST 1049).
 pub const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
 
-/// Show cursor (`crossterm cursor::Show`).
+/// Show the cursor (DECTCEM).
 pub const SHOW_CURSOR: &str = "\x1b[?25h";
-/// Hide cursor (`crossterm cursor::Hide`).
+/// Hide the cursor (DECTCEM).
 pub const HIDE_CURSOR: &str = "\x1b[?25l";
-/// Enable cursor blinking (`crossterm cursor::EnableBlinking`).
+/// Enable cursor blinking (DECSET 12).
 pub const ENABLE_BLINKING: &str = "\x1b[?12h";
-/// Disable cursor blinking (`crossterm cursor::DisableBlinking`).
+/// Disable cursor blinking (DECRST 12).
 pub const DISABLE_BLINKING: &str = "\x1b[?12l";
 
-/// Clear entire screen (`crossterm ClearType::All`).
+/// Clear the whole screen (ED 2).
 pub const CLEAR_ALL: &str = "\x1b[2J";
-/// Clear from cursor down (`crossterm ClearType::FromCursorDown`).
+/// Clear from the cursor down (ED 0).
 pub const CLEAR_FROM_CURSOR_DOWN: &str = "\x1b[J";
-/// Clear from cursor up (`crossterm ClearType::FromCursorUp`).
+/// Clear from the cursor up (ED 1).
 pub const CLEAR_FROM_CURSOR_UP: &str = "\x1b[1J";
-/// Clear current line (`crossterm ClearType::CurrentLine`).
+/// Clear the current line (EL 2).
 pub const CLEAR_CURRENT_LINE: &str = "\x1b[2K";
-/// Clear until new line (`crossterm ClearType::UntilNewLine`).
+/// Clear from the cursor to the end of the line (EL 0).
 pub const CLEAR_UNTIL_NEW_LINE: &str = "\x1b[K";
 
-/// Mouse capture enable (`crossterm EnableMouseCapture`, all modes, in order).
+/// Enable mouse capture: all tracking modes (1000, 1002, 1003, 1015, 1006).
 pub const ENABLE_MOUSE_CAPTURE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
-/// Mouse capture disable (inverse, reverse order).
+/// Disable mouse capture, in reverse order.
 pub const DISABLE_MOUSE_CAPTURE: &str = "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 
-/// Focus-change enable (`crossterm EnableFocusChange`).
+/// Enable focus-change reporting (DECSET 1004).
 pub const ENABLE_FOCUS_CHANGE: &str = "\x1b[?1004h";
-/// Focus-change disable (`crossterm DisableFocusChange`).
+/// Disable focus-change reporting (DECRST 1004).
 pub const DISABLE_FOCUS_CHANGE: &str = "\x1b[?1004l";
 
-/// Bracketed-paste enable (`crossterm EnableBracketedPaste`).
+/// Enable bracketed paste (DECSET 2004).
 pub const ENABLE_BRACKETED_PASTE: &str = "\x1b[?2004h";
-/// Bracketed-paste disable (`crossterm DisableBracketedPaste`).
+/// Disable bracketed paste (DECRST 2004).
 pub const DISABLE_BRACKETED_PASTE: &str = "\x1b[?2004l";
 
-/// Save cursor position (`crossterm SavePosition`, SCO form).
+/// Save the cursor position (SCO).
 pub const SAVE_POSITION: &str = "\x1b7";
-/// Restore cursor position (`crossterm RestorePosition`, SCO form).
+/// Restore the cursor position (SCO).
 pub const RESTORE_POSITION: &str = "\x1b8";
 
 /// Kitty keyboard enhancement reset written by the emergency restore path.
@@ -63,7 +63,7 @@ fn write_all(out: &mut impl Write, bytes: &str) -> io::Result<()> {
     out.write_all(bytes.as_bytes())
 }
 
-/// Write `MoveTo(column, row)` (`crossterm cursor::MoveTo`, 0-based).
+/// Move the cursor to a zero-based `(column, row)` (CUP).
 pub fn move_to(out: &mut impl Write, column: u16, row: u16) -> io::Result<()> {
     write!(
         out,
@@ -73,12 +73,12 @@ pub fn move_to(out: &mut impl Write, column: u16, row: u16) -> io::Result<()> {
     )
 }
 
-/// Write `MoveToColumn(column)` (`crossterm cursor::MoveToColumn`, 0-based).
+/// Move the cursor to a zero-based column (CHA).
 pub fn move_to_column(out: &mut impl Write, column: u16) -> io::Result<()> {
     write!(out, "\x1b[{}G", column.saturating_add(1))
 }
 
-/// Write raw bytes (`crossterm style::Print`).
+/// Write raw bytes, without interpretation.
 pub fn print(out: &mut impl Write, text: &str) -> io::Result<()> {
     out.write_all(text.as_bytes())
 }
@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn sequences_match_crossterm_unix_bytes() {
+    fn escape_bytes_are_pinned() {
         assert_eq!(ENTER_ALTERNATE_SCREEN.as_bytes(), b"\x1b[?1049h");
         assert_eq!(LEAVE_ALTERNATE_SCREEN.as_bytes(), b"\x1b[?1049l");
         assert_eq!(SHOW_CURSOR.as_bytes(), b"\x1b[?25h");
