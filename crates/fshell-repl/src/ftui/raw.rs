@@ -164,18 +164,15 @@ impl Drop for PanicHookGuard {
 /// Best-effort terminal cleanup used by both normal Drop and panic handling.
 pub fn restore_terminal() {
     let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b[=0u");
-    let _ = crossterm::execute!(
-        out,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
-        crossterm::event::DisableBracketedPaste,
-        crossterm::event::DisableFocusChange,
-        crossterm::event::DisableMouseCapture,
-        crossterm::cursor::Show,
-        crossterm::cursor::EnableBlinking,
-    );
+    let _ = out.write_all(fshell_terminal::ansi::RESET_KEYBOARD_ENHANCEMENTS.as_bytes());
+    let _ = out.write_all(fshell_terminal::ansi::CLEAR_FROM_CURSOR_DOWN.as_bytes());
+    let _ = out.write_all(fshell_terminal::ansi::DISABLE_BRACKETED_PASTE.as_bytes());
+    let _ = out.write_all(fshell_terminal::ansi::DISABLE_FOCUS_CHANGE.as_bytes());
+    let _ = out.write_all(fshell_terminal::ansi::DISABLE_MOUSE_CAPTURE.as_bytes());
+    let _ = out.write_all(fshell_terminal::ansi::SHOW_CURSOR.as_bytes());
+    let _ = out.write_all(fshell_terminal::ansi::ENABLE_BLINKING.as_bytes());
     let _ = out.flush();
-    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = fshell_terminal::disable_raw_mode();
 }
 
 /// Enter the cooked input state for command execution without changing the
@@ -184,33 +181,27 @@ pub fn restore_terminal() {
 pub(crate) fn enter_cooked_mode() -> std::io::Result<()> {
     let mut out = std::io::stdout();
     out.flush()?;
-    out.write_all(b"\x1b[=0u")?;
-    crossterm::execute!(
-        out,
-        crossterm::event::DisableBracketedPaste,
-        crossterm::event::DisableFocusChange,
-        crossterm::event::DisableMouseCapture,
-        crossterm::cursor::Show,
-    )?;
+    out.write_all(fshell_terminal::ansi::RESET_KEYBOARD_ENHANCEMENTS.as_bytes())?;
+    out.write_all(fshell_terminal::ansi::DISABLE_BRACKETED_PASTE.as_bytes())?;
+    out.write_all(fshell_terminal::ansi::DISABLE_FOCUS_CHANGE.as_bytes())?;
+    out.write_all(fshell_terminal::ansi::DISABLE_MOUSE_CAPTURE.as_bytes())?;
+    out.write_all(fshell_terminal::ansi::SHOW_CURSOR.as_bytes())?;
     out.flush()?;
-    crossterm::terminal::disable_raw_mode()
+    fshell_terminal::disable_raw_mode()
 }
 
 /// Enter the complete raw terminal state owned by an interactive FTUI
 /// session. Keeping this transition in one place prevents prompt, child, and
 /// signal paths from drifting apart.
 pub(crate) fn enter_raw_mode() -> std::io::Result<()> {
-    crossterm::terminal::enable_raw_mode()?;
+    fshell_terminal::enable_raw_mode()?;
     let mut out = std::io::stdout();
     let result = (|| {
-        out.write_all(b"\x1b[=0u")?;
-        crossterm::execute!(
-            out,
-            crossterm::cursor::DisableBlinking,
-            crossterm::event::EnableBracketedPaste,
-            crossterm::event::EnableFocusChange,
-            crossterm::event::EnableMouseCapture,
-        )?;
+        out.write_all(fshell_terminal::ansi::RESET_KEYBOARD_ENHANCEMENTS.as_bytes())?;
+        out.write_all(fshell_terminal::ansi::DISABLE_BLINKING.as_bytes())?;
+        out.write_all(fshell_terminal::ansi::ENABLE_BRACKETED_PASTE.as_bytes())?;
+        out.write_all(fshell_terminal::ansi::ENABLE_FOCUS_CHANGE.as_bytes())?;
+        out.write_all(fshell_terminal::ansi::ENABLE_MOUSE_CAPTURE.as_bytes())?;
         out.flush()
     })();
     if result.is_err() {

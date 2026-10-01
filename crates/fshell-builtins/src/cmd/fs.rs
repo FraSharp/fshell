@@ -2055,7 +2055,7 @@ pub fn wrap_builtin(
     _tx: PipeSender,
     _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
-    let (_, h) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (_, h) = fshell_terminal::size().unwrap_or((80, 24));
     print!("{}", "\n".repeat(h as usize));
     print!("\x1B[1;1H");
     let _ = std::io::stdout().flush();

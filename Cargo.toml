@@ -120,7 +120,7 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 indexmap = { workspace = true }
 ustr = { workspace = true }
-crossterm = { workspace = true }
+fshell-terminal = { workspace = true }
 fshell-posix = { workspace = true }
 
 [workspace.dependencies]

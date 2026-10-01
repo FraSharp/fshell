@@ -407,7 +407,7 @@ pub fn render_search_results(text: &str, color: bool) -> (String, bool) {
 // Terminal detection & pager
 
 fn terminal_height() -> u16 {
-    if let Ok((_, h)) = crossterm::terminal::size() {
+    if let Ok((_, h)) = fshell_terminal::size() {
         h
     } else {
         24

@@ -299,11 +299,10 @@ pub async fn run_ftui_repl(
             if let Some(s) = _raw_session.as_deref() {
                 s.reenter_raw();
             } else {
-                let _ = crossterm::execute!(
-                    std::io::stdout(),
-                    crossterm::cursor::Show,
-                    crossterm::style::Print("\r\n"),
-                );
+                let mut stdout = std::io::stdout();
+                let _ = fshell_terminal::ansi::show_cursor(&mut stdout);
+                let _ = fshell_terminal::ansi::print(&mut stdout, "\r\n");
+                let _ = std::io::Write::flush(&mut stdout);
             }
         }
 
@@ -323,11 +322,9 @@ pub async fn run_ftui_repl(
             mouse_mgr.enable_capture();
         }
 
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-            crossterm::cursor::MoveToColumn(0),
-        );
+        let mut stdout = std::io::stdout();
+        let _ = fshell_terminal::ansi::clear_current_line(&mut stdout);
+        let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
 
         let theme = env.active_theme();
         highlighter.update_theme(theme.clone());
@@ -417,7 +414,7 @@ pub async fn run_ftui_repl(
                 } else {
                     1
                 };
-                let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+                let (term_w, term_h) = fshell_terminal::size().unwrap_or((80, 24));
                 let cap = if status_bar.visible {
                     term_h.saturating_sub(2)
                 } else {
@@ -490,20 +487,18 @@ pub async fn run_ftui_repl(
                         scroll_d = d;
                         must_recreate = true;
                         let mut stdout = std::io::stdout();
-                        let _ = crossterm::execute!(
-                            stdout,
-                            crossterm::cursor::MoveTo(0, term_h.saturating_sub(1))
+                        let _ = fshell_terminal::ansi::move_to(
+                            &mut stdout,
+                            0,
+                            term_h.saturating_sub(1),
                         );
                         for _ in 0..d {
-                            let _ = crossterm::execute!(
-                                stdout,
-                                crossterm::style::Print("\r\n"),
-                                crossterm::cursor::MoveToColumn(0),
-                            );
+                            let _ = fshell_terminal::ansi::print(&mut stdout, "\r\n");
+                            let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
                         }
                         origin_y = origin_y.saturating_sub(d);
                         prompt_origin_y = Some(origin_y);
-                        let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(0, origin_y));
+                        let _ = fshell_terminal::ansi::move_to(&mut stdout, 0, origin_y);
                         let _ = std::io::Write::flush(&mut stdout);
                     }
                 }
@@ -530,14 +525,14 @@ pub async fn run_ftui_repl(
                         .min(limit_row.saturating_sub(origin_y));
                     let mut stdout = std::io::stdout();
                     for row in 0..rows_to_erase {
-                        let _ = crossterm::execute!(
-                            stdout,
-                            crossterm::cursor::MoveTo(0, origin_y + row),
-                            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine,),
+                        let _ = fshell_terminal::ansi::move_to(&mut stdout, 0, origin_y + row);
+                        let _ = fshell_terminal::ansi::print(
+                            &mut stdout,
+                            fshell_terminal::ansi::CLEAR_CURRENT_LINE,
                         );
                     }
                     // Place cursor at origin_y so ratatui's Inline(needed_height) binds to origin_y
-                    let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(0, origin_y));
+                    let _ = fshell_terminal::ansi::move_to(&mut stdout, 0, origin_y);
                     let _ = std::io::Write::flush(&mut stdout);
 
                     let stdout = std::io::stdout();
@@ -2460,13 +2455,9 @@ pub async fn run_ftui_repl(
                                         } else if !in_continuation {
                                             prompt_mgr.refresh_snapshot(&current_dir);
                                             let final_ansi = prompt_mgr.render_prompt_final_ansi();
-                                            let _ = crossterm::execute!(
-                                                std::io::stdout(),
-                                                crossterm::cursor::MoveToColumn(0),
-                                                crossterm::terminal::Clear(
-                                                    crossterm::terminal::ClearType::CurrentLine,
-                                                ),
-                                            );
+                                            let mut stdout = std::io::stdout();
+                                            let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
+                                            let _ = fshell_terminal::ansi::clear_current_line(&mut stdout);
                                             println!("\r\x1b[2K{}", final_ansi);
                                             let _ = std::io::Write::flush(&mut std::io::stdout());
                                             break 'input_loop;
@@ -2886,11 +2877,10 @@ pub async fn run_ftui_repl(
                         Key::Character('l') if key.modifiers.contains(Modifiers::CONTROL) => {
                             // Bug 1.4: Ctrl+L clear screen
                             history_index = None;
-                            let _ = crossterm::execute!(
-                                std::io::stdout(),
-                                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                                crossterm::cursor::MoveTo(0, 0),
-                            );
+                            let mut stdout = std::io::stdout();
+                            let _ = fshell_terminal::ansi::clear_all(&mut stdout);
+                            let _ = fshell_terminal::ansi::move_to(&mut stdout, 0, 0);
+                            let _ = std::io::Write::flush(&mut stdout);
                             // Drop the ratatui terminal so it is recreated on the next
                             // redraw.  After ClearType::All the physical screen is blank,
                             // but ratatui's internal "previous frame" buffer still describes
@@ -3061,13 +3051,9 @@ pub async fn run_ftui_repl(
                                 // "new" prompt appear (like zsh does on bare Enter).
                                 prompt_mgr.refresh_snapshot(&current_dir);
                                 let final_ansi = prompt_mgr.render_prompt_final_ansi();
-                                let _ = crossterm::execute!(
-                                    std::io::stdout(),
-                                    crossterm::cursor::MoveToColumn(0),
-                                    crossterm::terminal::Clear(
-                                        crossterm::terminal::ClearType::CurrentLine,
-                                    ),
-                                );
+                                let mut stdout = std::io::stdout();
+                                let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
+                                let _ = fshell_terminal::ansi::clear_current_line(&mut stdout);
                                 println!("\r\x1b[2K{}", final_ansi);
                                 let _ = std::io::Write::flush(&mut std::io::stdout());
                                 text_buf.clear();
@@ -3092,12 +3078,12 @@ pub async fn run_ftui_repl(
                                         break 'input_loop;
                                     } else {
                                         eof_pending = true;
-                                        let _ = crossterm::execute!(
-                                            std::io::stderr(),
-                                            crossterm::style::Print(
-                                                "\r\nUse 'exit' to leave shell (press Ctrl-D again)\r\n"
-                                            )
+                                        let mut stderr = std::io::stderr();
+                                        let _ = fshell_terminal::ansi::print(
+                                            &mut stderr,
+                                            "\r\nUse 'exit' to leave shell (press Ctrl-D again)\r\n",
                                         );
+                                        let _ = std::io::Write::flush(&mut stderr);
                                         redraw = true;
                                         continue;
                                     }
@@ -3246,13 +3232,11 @@ pub async fn run_ftui_repl(
             // There is no next prompt to reuse the viewport on shell exit, so
             // clear the remaining inline UI only in that case.
             if exit_repl {
-                let _ = crossterm::execute!(
-                    std::io::stdout(),
-                    crossterm::cursor::SavePosition,
-                    crossterm::cursor::MoveToColumn(0),
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown,),
-                    crossterm::cursor::RestorePosition,
-                );
+                let mut stdout = std::io::stdout();
+                let _ = fshell_terminal::ansi::save_position(&mut stdout);
+                let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
+                let _ = fshell_terminal::ansi::clear_from_cursor_down(&mut stdout);
+                let _ = fshell_terminal::ansi::restore_position(&mut stdout);
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
             drop(t);
@@ -3269,13 +3253,11 @@ pub async fn run_ftui_repl(
             // was already dropped above, so this is idempotent. Do NOT
             // break straight to `std::process::exit` elsewhere.
             if let Some(t) = terminal.take() {
-                let _ = crossterm::execute!(
-                    std::io::stdout(),
-                    crossterm::cursor::SavePosition,
-                    crossterm::cursor::MoveToColumn(0),
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
-                    crossterm::cursor::RestorePosition,
-                );
+                let mut stdout = std::io::stdout();
+                let _ = fshell_terminal::ansi::save_position(&mut stdout);
+                let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
+                let _ = fshell_terminal::ansi::clear_from_cursor_down(&mut stdout);
+                let _ = fshell_terminal::ansi::restore_position(&mut stdout);
                 let _ = std::io::Write::flush(&mut std::io::stdout());
                 drop(t);
             }
@@ -3298,7 +3280,7 @@ pub async fn run_ftui_repl(
                 left_ansi, safe_cmd
             );
             if let Some(origin_y) = prompt_origin_y {
-                let terminal_height = crossterm::terminal::size()
+                let terminal_height = fshell_terminal::size()
                     .map(|(_, height)| height)
                     .unwrap_or(u16::MAX);
                 let limit_row = if status_bar.visible {
@@ -3378,7 +3360,7 @@ pub async fn run_ftui_repl(
                 // tail for tiny terminals where the viewport hides output.
                 // Correctness: never grow past ANCHORED_OUTPUT_SAFETY_CAP.
                 let term_cap = {
-                    let (_, h) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let (_, h) = fshell_terminal::size().unwrap_or((80, 24));
                     if status_bar.visible {
                         h.saturating_sub(2)
                     } else {
@@ -3427,7 +3409,7 @@ pub async fn run_ftui_repl(
                     None => break 'repl_loop,
                 };
                 let t_disable = ftui_start.elapsed();
-                let (_, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+                let (_, term_h) = fshell_terminal::size().unwrap_or((80, 24));
                 prompt_mgr.refresh_snapshot(&current_dir);
                 let t_refresh = ftui_start.elapsed();
                 let final_ansi = prompt_mgr.render_prompt_final_ansi();
@@ -3502,11 +3484,9 @@ pub async fn run_ftui_repl(
             // we inspect the cursor or begin the next prompt.
             if let Some((cursor_x, _)) = safe_cursor_position() {
                 if cursor_x > 0 {
-                    let _ = crossterm::execute!(
-                        std::io::stdout(),
-                        crossterm::style::Print("\r\n"),
-                        crossterm::cursor::MoveToColumn(0),
-                    );
+                    let mut stdout = std::io::stdout();
+                    let _ = fshell_terminal::ansi::print(&mut stdout, "\r\n");
+                    let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
                 }
             }
 
@@ -3532,7 +3512,8 @@ pub async fn run_ftui_repl(
 }
 
 fn safe_cursor_position() -> Option<(u16, u16)> {
-    crossterm::cursor::position().ok()
+    let mut stdout = std::io::stdout();
+    fshell_terminal::cursor_position(&mut stdout).ok()
 }
 
 /// Commit the visible input line as transcript and remove only the old inline
@@ -3553,22 +3534,16 @@ fn commit_command_line(
     }
 
     if command.contains('\n') {
-        crossterm::queue!(
-            out,
-            crossterm::cursor::MoveTo(0, origin_y),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-            crossterm::style::Print(format!("{prompt}\r\n")),
-        )?;
+        fshell_terminal::ansi::move_to(out, 0, origin_y)?;
+        fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
+        fshell_terminal::ansi::print(out, &format!("{prompt}\r\n"))?;
 
         let mut command_rows = 0u16;
         for (index, line) in command.split('\n').enumerate() {
             let row = origin_y.saturating_add(1).saturating_add(index as u16);
-            crossterm::queue!(
-                out,
-                crossterm::cursor::MoveTo(0, row),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-                crossterm::style::Print(format!("{line}\r\n")),
-            )?;
+            fshell_terminal::ansi::move_to(out, 0, row)?;
+            fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
+            fshell_terminal::ansi::print(out, &format!("{line}\r\n"))?;
             command_rows = command_rows.saturating_add(1);
         }
 
@@ -3576,19 +3551,16 @@ fn commit_command_line(
         queue_clear_inline_rows(out, origin_y, viewport_height, committed_rows, limit_row)?;
         queue_clear_status_rows(out, limit_row, terminal_height)?;
         let cursor_y = origin_y.saturating_add(committed_rows).min(limit_row - 1);
-        crossterm::queue!(out, crossterm::cursor::MoveTo(0, cursor_y))?;
+        fshell_terminal::ansi::move_to(out, 0, cursor_y)?;
     } else {
-        crossterm::queue!(
-            out,
-            crossterm::cursor::MoveTo(0, origin_y),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-            crossterm::style::Print(format!("{prompt}{command}\r\n")),
-        )?;
+        fshell_terminal::ansi::move_to(out, 0, origin_y)?;
+        fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
+        fshell_terminal::ansi::print(out, &format!("{prompt}{command}\r\n"))?;
 
         queue_clear_inline_rows(out, origin_y, viewport_height, 1, limit_row)?;
         queue_clear_status_rows(out, limit_row, terminal_height)?;
         let cursor_y = origin_y.saturating_add(1).min(limit_row - 1);
-        crossterm::queue!(out, crossterm::cursor::MoveTo(0, cursor_y))?;
+        fshell_terminal::ansi::move_to(out, 0, cursor_y)?;
     }
 
     out.flush()
@@ -3609,11 +3581,8 @@ fn queue_clear_inline_rows(
         if row >= viewport_end {
             break;
         }
-        crossterm::queue!(
-            out,
-            crossterm::cursor::MoveTo(0, row),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-        )?;
+        fshell_terminal::ansi::move_to(out, 0, row)?;
+        fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
     }
     Ok(())
 }
@@ -3624,11 +3593,8 @@ fn queue_clear_status_rows(
     terminal_height: u16,
 ) -> std::io::Result<()> {
     for row in limit_row.min(terminal_height)..terminal_height {
-        crossterm::queue!(
-            out,
-            crossterm::cursor::MoveTo(0, row),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-        )?;
+        fshell_terminal::ansi::move_to(out, 0, row)?;
+        fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
     }
     Ok(())
 }

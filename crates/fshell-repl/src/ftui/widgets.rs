@@ -487,11 +487,10 @@ pub fn execute_widget(widget_name: &str, ctx: &mut WidgetContext<'_>) -> WidgetA
             WidgetAction::Redraw
         }
         "clear-screen" | "reset-prompt" => {
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                crossterm::cursor::MoveTo(0, 0),
-            );
+            let mut stdout = std::io::stdout();
+            let _ = fshell_terminal::ansi::clear_all(&mut stdout);
+            let _ = fshell_terminal::ansi::move_to(&mut stdout, 0, 0);
+            let _ = std::io::Write::flush(&mut stdout);
             ctx.comp_mgr.clear();
             WidgetAction::Redraw
         }

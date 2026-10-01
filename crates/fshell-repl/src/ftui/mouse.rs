@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-use crossterm::execute;
-use std::io::Write;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseMode {
     Disabled,
@@ -45,8 +41,7 @@ impl MouseStateManager {
         }
         if !self.is_captured {
             let mut stdout = std::io::stdout();
-            let _ = execute!(stdout, EnableMouseCapture);
-            let _ = stdout.flush();
+            let _ = fshell_terminal::ansi::enable_mouse_capture(&mut stdout);
             self.is_captured = true;
         }
     }
@@ -54,8 +49,7 @@ impl MouseStateManager {
     pub fn disable_capture(&mut self) {
         if self.is_captured {
             let mut stdout = std::io::stdout();
-            let _ = execute!(stdout, DisableMouseCapture);
-            let _ = stdout.flush();
+            let _ = fshell_terminal::ansi::disable_mouse_capture(&mut stdout);
             self.is_captured = false;
         }
     }

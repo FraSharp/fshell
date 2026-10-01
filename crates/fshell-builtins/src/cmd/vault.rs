@@ -254,7 +254,7 @@ struct RawModeGuard;
 
 impl RawModeGuard {
     fn new() -> Result<Self, ShellError> {
-        crossterm::terminal::enable_raw_mode()
+        fshell_terminal::enable_raw_mode()
             .map_err(|e| format!("Failed to enable raw mode: {}", e))?;
         Ok(Self)
     }
@@ -262,7 +262,7 @@ impl RawModeGuard {
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = fshell_terminal::disable_raw_mode();
     }
 }
 
@@ -1032,7 +1032,7 @@ pub fn run_tui(path: &Path, env: &Env) -> Result<(), ShellError> {
     let mut entries = load_vault_with_session(path, env)?;
 
     let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)
+    fshell_terminal::ansi::enter_alternate_screen(&mut stdout)
         .map_err(|e| ShellError::from(format!("{}", e)))?;
     let _raw_guard = RawModeGuard::new()?;
     let mut input = UnixEventSource::new();
@@ -1300,8 +1300,8 @@ pub fn run_tui(path: &Path, env: &Env) -> Result<(), ShellError> {
         }
 
         if add_requested {
-            crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen).ok();
-            crossterm::terminal::disable_raw_mode().ok();
+            fshell_terminal::ansi::leave_alternate_screen(&mut std::io::stdout()).ok();
+            fshell_terminal::disable_raw_mode().ok();
 
             println!("\n--- Add New Entry ---");
             if let Err(e) = interactive_add(path, &mut entries, env) {
@@ -1312,14 +1312,14 @@ pub fn run_tui(path: &Path, env: &Env) -> Result<(), ShellError> {
                 let _ = read_password_prompt("Press Enter to return...");
             }
 
-            crossterm::terminal::enable_raw_mode().ok();
-            crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen).ok();
+            fshell_terminal::enable_raw_mode().ok();
+            fshell_terminal::ansi::enter_alternate_screen(&mut std::io::stdout()).ok();
             terminal.clear().ok();
         }
 
         if let Some(db_idx) = edit_target {
-            crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen).ok();
-            crossterm::terminal::disable_raw_mode().ok();
+            fshell_terminal::ansi::leave_alternate_screen(&mut std::io::stdout()).ok();
+            fshell_terminal::disable_raw_mode().ok();
 
             println!("\n--- Edit Entry ---");
             if let Err(e) = interactive_edit(path, &mut entries, db_idx, env) {
@@ -1330,14 +1330,14 @@ pub fn run_tui(path: &Path, env: &Env) -> Result<(), ShellError> {
                 let _ = read_password_prompt("Press Enter to return...");
             }
 
-            crossterm::terminal::enable_raw_mode().ok();
-            crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen).ok();
+            fshell_terminal::enable_raw_mode().ok();
+            fshell_terminal::ansi::enter_alternate_screen(&mut std::io::stdout()).ok();
             terminal.clear().ok();
         }
 
         if let Some(db_idx) = delete_target {
-            crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen).ok();
-            crossterm::terminal::disable_raw_mode().ok();
+            fshell_terminal::ansi::leave_alternate_screen(&mut std::io::stdout()).ok();
+            fshell_terminal::disable_raw_mode().ok();
 
             let name = entries[db_idx].name.clone();
             println!("\nDelete entry '{}'? [y/N]", name);
@@ -1352,13 +1352,13 @@ pub fn run_tui(path: &Path, env: &Env) -> Result<(), ShellError> {
                 }
             }
 
-            crossterm::terminal::enable_raw_mode().ok();
-            crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen).ok();
+            fshell_terminal::enable_raw_mode().ok();
+            fshell_terminal::ansi::enter_alternate_screen(&mut std::io::stdout()).ok();
             terminal.clear().ok();
         }
     }
 
-    crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen).ok();
+    fshell_terminal::ansi::leave_alternate_screen(&mut std::io::stdout()).ok();
     Ok(())
 }
 

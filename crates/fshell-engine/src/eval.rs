@@ -3340,10 +3340,10 @@ pub(crate) fn render_table(items: &[Val]) -> String {
             .join("\n");
     }
 
-    // Prefer crossterm's size (works in raw + kitty) with sensible fallbacks.
-    // 80 is too narrow for `ps`'s `command` (often 30-50 chars) and makes every
-    // table useless. Use 120 as the non-tty default.
-    let term_width = crossterm::terminal::size()
+    // Prefer the terminal's own size (works in raw + kitty) with sensible
+    // fallbacks. 80 is too narrow for `ps`'s `command` (often 30-50 chars) and
+    // makes every table useless. Use 120 as the non-tty default.
+    let term_width = fshell_terminal::size()
         .map(|(w, _)| w as usize)
         .unwrap_or(0);
     let term_width = if term_width < 20 {

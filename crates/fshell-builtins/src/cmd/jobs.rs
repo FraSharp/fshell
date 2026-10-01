@@ -96,9 +96,9 @@ pub fn fg_builtin(
         fn new(restore_terminal: bool) -> Self {
             let mut raw_mode_was_enabled = false;
             if restore_terminal {
-                raw_mode_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+                raw_mode_was_enabled = fshell_terminal::is_raw_mode_enabled();
                 if raw_mode_was_enabled {
-                    let _ = crossterm::terminal::disable_raw_mode();
+                    let _ = fshell_terminal::disable_raw_mode();
                 }
             }
             #[cfg(unix)]
@@ -133,7 +133,7 @@ pub fn fg_builtin(
                     libc::signal(libc::SIGTTOU, libc::SIG_DFL);
                 }
                 if self.raw_mode_was_enabled {
-                    let _ = crossterm::terminal::enable_raw_mode();
+                    let _ = fshell_terminal::enable_raw_mode();
                 }
             }
         }

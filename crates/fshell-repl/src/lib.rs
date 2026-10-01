@@ -787,7 +787,7 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
 
             if !session_files.is_empty() {
                 let selected_path = if target == "ask"
-                    && crossterm::tty::IsTty::is_tty(&std::io::stdin())
+                    && fshell_terminal::is_stdin_tty()
                     && std::env::var("FSH_TEST_ENV").is_err()
                 {
                     // Build picker items
@@ -979,7 +979,7 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
 
     // Non-interactive batch mode: if stdin or stdout is not a TTY (e.g. piped or redirected)
     let is_interactive = !fshell_engine::is_test_mode()
-        && crossterm::tty::IsTty::is_tty(&std::io::stdin())
+        && fshell_terminal::is_stdin_tty()
         && fshell_engine::is_stdout_a_tty();
 
     if !is_interactive {

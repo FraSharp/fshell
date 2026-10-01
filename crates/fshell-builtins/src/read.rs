@@ -157,7 +157,7 @@ async fn read_line_standard(timeout_secs: Option<u64>) -> Result<String, String>
 }
 
 async fn read_line_silent(timeout_secs: Option<u64>) -> Result<String, String> {
-    crossterm::terminal::enable_raw_mode()
+    fshell_terminal::enable_raw_mode()
         .map_err(|e| format!("Failed to enable raw mode: {}", e))?;
 
     let mut line = String::new();
@@ -206,6 +206,6 @@ async fn read_line_silent(timeout_secs: Option<u64>) -> Result<String, String> {
         }
     };
 
-    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = fshell_terminal::disable_raw_mode();
     result
 }

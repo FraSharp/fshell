@@ -524,16 +524,16 @@ pub fn zi_builtin(
         use std::io::Write;
         let _ = std::io::stdout().flush();
 
-        let raw_mode_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+        let raw_mode_was_enabled = fshell_terminal::is_raw_mode_enabled();
         if raw_mode_was_enabled {
-            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = fshell_terminal::disable_raw_mode();
         }
 
         let mut input = String::new();
         let read_res = std::io::stdin().read_line(&mut input);
 
         if raw_mode_was_enabled {
-            let _ = crossterm::terminal::enable_raw_mode();
+            let _ = fshell_terminal::enable_raw_mode();
         }
 
         if read_res.is_err() {

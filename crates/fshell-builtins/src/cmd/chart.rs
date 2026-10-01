@@ -295,7 +295,7 @@ pub fn chart_builtin(
             return;
         }
 
-        let term_width = crossterm::terminal::size()
+        let term_width = fshell_terminal::size()
             .map(|(w, _)| w as usize)
             .unwrap_or(80);
 

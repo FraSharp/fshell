@@ -24,22 +24,16 @@ pub fn paste_from_clipboard() -> Option<String> {
     clip.get_text().ok()
 }
 
-/// OSC 52 paste escape — encodes the text as base64 and writes
-/// the escape sequence to stdout for terminal integration.
-/// Uses `crossterm::execute!` so it goes through crossterm's buffering
-/// correctly even while raw mode + ratatui is active (long-term vs direct
-/// `write!` which could be swallowed mid-frame).
+/// OSC 52 copy escape — encodes the text as base64 and writes the escape
+/// sequence to stdout for terminal integration. Callers (Alt+C/X) run in
+/// the event loop between draws, so the write cannot be interleaved inside
+/// a ratatui frame.
 fn osc_52_copy(text: &str) -> bool {
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let seq = format!("\x1b]52;c;{encoded}\x07");
-    // Use crossterm's queue + flush path so OSC52 isn't interleaved inside
-    // a ratatui draw's buffered output. Best-effort outside draw.
     use std::io::Write;
     let mut stdout = std::io::stdout();
     let _ = write!(stdout, "{seq}");
     let _ = stdout.flush();
-    // Note: ideally this would be queued via crossterm::execute! or drawn
-    // outside the ratatui Terminal::draw closure. Callers (Alt+C/X) run in
-    // the event loop between draws, so the interleaving risk is low.
     true
 }

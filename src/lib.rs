@@ -546,8 +546,8 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
         fshell_repl::init(&env);
         finish_span(&mut timing, SpanOutcome::Ok);
         fshell_repl::run_repl_with_env(env, cli.resume).await;
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::EnableBlinking);
-        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = fshell_terminal::ansi::enable_blinking(&mut std::io::stdout());
+        let _ = fshell_terminal::disable_raw_mode();
     }
 }
 
@@ -724,8 +724,8 @@ async fn run_ls_utility(args: &[String], trace: Arc<TraceSink>) -> i32 {
 pub fn setup_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::EnableBlinking);
-        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = fshell_terminal::ansi::enable_blinking(&mut std::io::stdout());
+        let _ = fshell_terminal::disable_raw_mode();
         if std::env::var("RUST_BACKTRACE").is_ok() {
             default_hook(info);
         } else {

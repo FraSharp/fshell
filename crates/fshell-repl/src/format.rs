@@ -387,7 +387,7 @@ pub fn print_compact_names(list: &[Val], theme: &fshell_core::theme::Theme) {
         return;
     }
 
-    let (term_width, term_height) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (term_width, term_height) = fshell_terminal::size().unwrap_or((80, 24));
     let max_len = entries
         .iter()
         .map(|e| UnicodeWidthStr::width(crate::ftui::ansi::strip_ansi_codes(e.name).as_str()))
@@ -434,7 +434,7 @@ pub fn print_compact_names(list: &[Val], theme: &fshell_core::theme::Theme) {
 }
 
 pub fn print_value_beautifully(val: &Val, theme: &fshell_core::theme::Theme) {
-    let (_, term_height) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (_, term_height) = fshell_terminal::size().unwrap_or((80, 24));
     let is_terminal = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
 
     let needs_pager = is_terminal

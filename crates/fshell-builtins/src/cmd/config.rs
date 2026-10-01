@@ -1703,9 +1703,9 @@ pub fn funced_builtin(
     impl EditorTerminalGuard {
         fn new() -> Self {
             fshell_engine::suspend_session_logging();
-            let raw_mode_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+            let raw_mode_was_enabled = fshell_terminal::is_raw_mode_enabled();
             if raw_mode_was_enabled {
-                let _ = crossterm::terminal::disable_raw_mode();
+                let _ = fshell_terminal::disable_raw_mode();
             }
             #[cfg(unix)]
             let shell_pgid = unsafe { libc::getpgrp() };
@@ -1728,7 +1728,7 @@ pub fn funced_builtin(
                 libc::signal(libc::SIGTTOU, libc::SIG_DFL);
             }
             if self.raw_mode_was_enabled {
-                let _ = crossterm::terminal::enable_raw_mode();
+                let _ = fshell_terminal::enable_raw_mode();
             }
             fshell_engine::resume_session_logging();
         }
