@@ -265,11 +265,16 @@ help setopt
 - `type <name>`: introspects a name, identifying whether it is a builtin, alias, user function, keyword, or external executable.
 
 ### `explain`
-breaks down complex pipelines and explains each stage in plain language:
+explains diagnostics rather than pipelines: `explain` describes the most recent
+error, `explain FSH-TYPE-001` a specific error code, and `explain --list` every
+registered code and category.
 
 ```fsh
-explain "ps | filter cpu > 50.0 | map pid command"
+explain FSH-TYPE-001
 ```
+
+for a plain-language explanation of a pipeline, use the assistant:
+`ai --explain "ps | filter cpu > 50.0 | map pid command"`.
 
 ### `reload`
 reloads configuration or performs a full process handoff (`reload --full`) while preserving state.
