@@ -10,7 +10,7 @@ use crate::tui::theme;
 use chrono::TimeZone;
 use fshell_core::theme::Theme;
 use fshell_terminal::input::{
-    CrosstermEventSource, InputEvent, InputPoll, Key, KeyAction, Modifiers,
+    UnixEventSource, InputEvent, InputPoll, Key, KeyAction, Modifiers,
 };
 use ratatui::{
     Terminal,
@@ -144,7 +144,7 @@ pub fn run_history_tui_with_theme(
 
     let mut should_requery = true;
     let mut entries = Vec::new();
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
 
     loop {
         if should_requery {

@@ -13,7 +13,7 @@ use fshell_core::RwLock;
 use fshell_core::ShellError;
 use fshell_core::{FxIndexMap, Val};
 use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
-use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, KeyAction};
+use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key, KeyAction};
 use miette::SourceSpan;
 use nu_ansi_term::{Color, Style};
 use ratatui::{
@@ -272,7 +272,7 @@ pub fn read_password_prompt(prompt: &str) -> Result<String, ShellError> {
 
     let _raw_guard = RawModeGuard::new()?;
     let mut password = String::new();
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
     loop {
         let key_event = match input
             .poll(Duration::from_millis(100))
@@ -954,7 +954,7 @@ pub fn watch_totps(entries: &[VaultEntry]) -> Result<(), ShellError> {
     }
 
     let _raw_guard = RawModeGuard::new()?;
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
     let title_style = Style::new().fg(Color::Cyan).bold();
     let time_style = Style::new().fg(Color::Yellow);
     let bar_style = Style::new().fg(Color::Green);
@@ -1035,7 +1035,7 @@ pub fn run_tui(path: &Path, env: &Env) -> Result<(), ShellError> {
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)
         .map_err(|e| ShellError::from(format!("{}", e)))?;
     let _raw_guard = RawModeGuard::new()?;
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal =

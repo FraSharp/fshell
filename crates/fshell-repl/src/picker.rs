@@ -8,7 +8,7 @@ use crate::tui::components::{KeyHint, ScrollState, SearchBarState, StatusFooter,
 use crate::tui::theme;
 use fshell_core::lock::Mutex;
 use fshell_core::theme::Theme;
-use fshell_terminal::input::{CrosstermEventStream, InputEvent, Key, KeyAction, Modifiers};
+use fshell_terminal::input::{UnixEventStream, InputEvent, Key, KeyAction, Modifiers};
 use fshell_terminal::runner::{AppFlow, ShellTuiApp, run_tui};
 use fshell_terminal::session::{
     TerminalDevice, TerminalMode, TerminalSession, TerminalSessionOptions,
@@ -575,7 +575,7 @@ impl Picker {
             ..Default::default()
         };
         let mut session = TerminalSession::enter(device, options).map_err(|e| e.to_string())?;
-        let events = CrosstermEventStream::new();
+        let events = UnixEventStream::new();
         let mut app = PickerApp::new(&self.prompt, &mut self.items, &self.theme);
 
         let result = run_tui(&mut app, &mut session, events)

@@ -1,8 +1,21 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
+
+//! Terminal input vocabulary and source state machine.
+//!
+//! [`InputEvent`] and friends are the only input language fshell's
+//! interactive interfaces speak. Decoding lives in [`crate::parse`];
+//! transport (blocking poll, async stream) lives in [`crate::unix`].
+
 use std::io;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event as CrosstermEvent};
 use thiserror::Error;
+
+#[cfg(unix)]
+pub use crate::unix::{UnixEventSource, UnixEventStream};
+
+use crate::parse::RawModifiers;
 
 /// A terminal event understood by fshell's interactive interfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +53,7 @@ pub enum Key {
 
 /// The modifier keys relevant to fshell's input behavior.
 ///
-/// Super, Hyper, Meta, and any future Crossterm modifier bits are folded into
+/// Super, Hyper, Meta, and any future modifier bits are folded into
 /// `OTHER`. This preserves the important semantic distinction between an
 /// unmodified character and a character with an unsupported modifier.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,20 +77,18 @@ impl Modifiers {
         self.0 == 0
     }
 
-    fn from_crossterm(modifiers: event::KeyModifiers) -> Self {
+    pub(crate) fn from_raw(modifiers: RawModifiers) -> Self {
         let mut result = Self::empty();
-        if modifiers.contains(event::KeyModifiers::SHIFT) {
+        if modifiers.shift {
             result |= Self::SHIFT;
         }
-        if modifiers.contains(event::KeyModifiers::CONTROL) {
+        if modifiers.control {
             result |= Self::CONTROL;
         }
-        if modifiers.contains(event::KeyModifiers::ALT) {
+        if modifiers.alt {
             result |= Self::ALT;
         }
-        if modifiers.intersects(
-            event::KeyModifiers::SUPER | event::KeyModifiers::HYPER | event::KeyModifiers::META,
-        ) {
+        if modifiers.other {
             result |= Self::OTHER;
         }
         result
@@ -163,16 +174,14 @@ pub enum InputPoll {
     Closed,
 }
 
-/// Errors from terminal input, retaining which public Crossterm operation
-/// surfaced the error for useful diagnostics.
+/// Errors from terminal input, retaining which read operation surfaced the
+/// error for useful diagnostics.
 #[derive(Debug, Error)]
 pub enum InputError {
-    #[error("Crossterm event poll failed: {0}")]
+    #[error("terminal event poll failed: {0}")]
     Poll(#[source] io::Error),
-    #[error("Crossterm event read failed: {0}")]
+    #[error("terminal event read failed: {0}")]
     Read(#[source] io::Error),
-    #[error("Crossterm event stream failed: {0}")]
-    Stream(#[source] io::Error),
     #[error("terminal input worker failed: {0}")]
     Worker(String),
 }
@@ -185,59 +194,18 @@ pub trait EventSource: Send {
     fn poll(&mut self, timeout: Duration) -> Result<InputPoll, InputError>;
 }
 
-trait EventReader: Send {
+pub(crate) trait EventReader: Send {
     fn poll(&mut self, timeout: Duration) -> io::Result<bool>;
-    fn read(&mut self) -> io::Result<CrosstermEvent>;
+    fn read(&mut self) -> io::Result<Option<InputEvent>>;
 }
 
-struct CrosstermReader;
-
-impl EventReader for CrosstermReader {
-    fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
-        event::poll(timeout)
-    }
-
-    fn read(&mut self) -> io::Result<CrosstermEvent> {
-        event::read()
-    }
-}
-
-/// Crossterm-backed source for blocking/polling interfaces.
-pub struct CrosstermEventSource {
-    source: InputSource<CrosstermReader>,
-}
-
-impl CrosstermEventSource {
-    pub fn new() -> Self {
-        Self {
-            source: InputSource::new(CrosstermReader),
-        }
-    }
-
-    pub fn poll(&mut self, timeout: Duration) -> Result<InputPoll, InputError> {
-        self.source.poll(timeout)
-    }
-}
-
-impl Default for CrosstermEventSource {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl EventSource for CrosstermEventSource {
-    fn poll(&mut self, timeout: Duration) -> Result<InputPoll, InputError> {
-        CrosstermEventSource::poll(self, timeout)
-    }
-}
-
-struct InputSource<R> {
+pub(crate) struct InputSource<R> {
     reader: R,
     closed: bool,
 }
 
 impl<R> InputSource<R> {
-    fn new(reader: R) -> Self {
+    pub(crate) fn new(reader: R) -> Self {
         Self {
             reader,
             closed: false,
@@ -246,7 +214,7 @@ impl<R> InputSource<R> {
 }
 
 impl<R: EventReader> InputSource<R> {
-    fn poll(&mut self, timeout: Duration) -> Result<InputPoll, InputError> {
+    pub(crate) fn poll(&mut self, timeout: Duration) -> Result<InputPoll, InputError> {
         if self.closed {
             return Ok(InputPoll::Closed);
         }
@@ -260,9 +228,8 @@ impl<R: EventReader> InputSource<R> {
                     self.closed = true;
                     return Ok(InputPoll::Closed);
                 }
-                // Crossterm's public poll API reports an interrupted source
-                // read as `Ok(false)`, so an exposed Interrupted error has the
-                // same non-fatal meaning at this boundary.
+                // An interrupted wait carries no input either way, so it has
+                // the same non-fatal meaning at this boundary as a timeout.
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                     return Ok(InputPoll::Timeout);
                 }
@@ -288,7 +255,7 @@ impl<R: EventReader> InputSource<R> {
                 Err(error) => return Err(InputError::Read(error)),
             };
 
-            if let Some(event) = map_event(event) {
+            if let Some(event) = event {
                 return Ok(InputPoll::Event(event));
             }
 
@@ -299,190 +266,20 @@ impl<R: EventReader> InputSource<R> {
     }
 }
 
-/// Async adapter for interactive clients that consume Crossterm's event
-/// stream. Closure is sticky; `next()` returns `Closed` on every later call.
-pub struct CrosstermEventStream {
-    stream: crossterm::event::EventStream,
-    closed: bool,
-}
-
-impl Default for CrosstermEventStream {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CrosstermEventStream {
-    pub fn new() -> Self {
-        Self {
-            stream: crossterm::event::EventStream::new(),
-            closed: false,
-        }
-    }
-
-    pub async fn next(&mut self) -> Result<InputPoll, InputError> {
-        use futures::StreamExt;
-
-        if self.closed {
-            return Ok(InputPoll::Closed);
-        }
-
-        loop {
-            match self.stream.next().await {
-                None => {
-                    self.closed = true;
-                    return Ok(InputPoll::Closed);
-                }
-                Some(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                    self.closed = true;
-                    return Ok(InputPoll::Closed);
-                }
-                Some(Err(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Some(Err(error)) => return Err(InputError::Stream(error)),
-                Some(Ok(event)) => {
-                    if let Some(event) = map_event(event) {
-                        return Ok(InputPoll::Event(event));
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl futures::Stream for CrosstermEventStream {
-    type Item = InputEvent;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        if self.closed {
-            return std::task::Poll::Ready(None);
-        }
-
-        loop {
-            match std::pin::Pin::new(&mut self.stream).poll_next(cx) {
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-                std::task::Poll::Ready(None) => {
-                    self.closed = true;
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Ready(Some(Err(error))) => {
-                    if error.kind() == io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    self.closed = true;
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Ready(Some(Ok(event))) => {
-                    if let Some(event) = map_event(event) {
-                        return std::task::Poll::Ready(Some(event));
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn map_event(event: CrosstermEvent) -> Option<InputEvent> {
-    match event {
-        CrosstermEvent::Key(key) => {
-            let (code, modifiers) = normalize_line_terminator(key.code, key.modifiers);
-            Some(InputEvent::Key(KeyEvent {
-                key: map_key(code),
-                modifiers: Modifiers::from_crossterm(modifiers),
-                action: match key.kind {
-                    event::KeyEventKind::Press => KeyAction::Press,
-                    event::KeyEventKind::Repeat => KeyAction::Repeat,
-                    event::KeyEventKind::Release => KeyAction::Release,
-                },
-            }))
-        }
-        CrosstermEvent::Mouse(mouse) => Some(InputEvent::Mouse(MouseEvent {
-            action: match mouse.kind {
-                event::MouseEventKind::Down(button) => MouseAction::Down(map_button(button)),
-                event::MouseEventKind::Up(button) => MouseAction::Up(map_button(button)),
-                event::MouseEventKind::Drag(button) => MouseAction::Drag(map_button(button)),
-                event::MouseEventKind::Moved => MouseAction::Moved,
-                event::MouseEventKind::ScrollDown => MouseAction::ScrollDown,
-                event::MouseEventKind::ScrollUp => MouseAction::ScrollUp,
-                event::MouseEventKind::ScrollLeft => MouseAction::ScrollLeft,
-                event::MouseEventKind::ScrollRight => MouseAction::ScrollRight,
-            },
-            column: mouse.column,
-            row: mouse.row,
-        })),
-        CrosstermEvent::Resize(columns, rows) => Some(InputEvent::Resize { columns, rows }),
-        CrosstermEvent::Paste(text) => Some(InputEvent::Paste(text)),
-        // No current fshell screen consumes focus changes. They are enabled
-        // only as part of the current terminal mode and are ignored here.
-        CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => None,
-    }
-}
-
-/// Treat a bare line feed as Enter.
-///
-/// In raw mode the Enter key arrives as CR and Crossterm reports it as
-/// [`event::KeyCode::Enter`]. A bare LF (`\n`) — how coding agents,
-/// `tmux send-keys`, `expect`, and piped scripts terminate a line — is instead
-/// decoded as `Ctrl+J`. A shell must treat that byte as "run this line": bash
-/// and zsh both bind `\C-j` to accept-line, and the two are indistinguishable
-/// at the byte level in a raw terminal. Without this normalization such input
-/// can never be submitted from the editor — it just keeps adding newlines.
-fn normalize_line_terminator(
-    code: event::KeyCode,
-    modifiers: event::KeyModifiers,
-) -> (event::KeyCode, event::KeyModifiers) {
-    if code == event::KeyCode::Char('j') && modifiers == event::KeyModifiers::CONTROL {
-        (event::KeyCode::Enter, event::KeyModifiers::NONE)
-    } else {
-        (code, modifiers)
-    }
-}
-
-fn map_key(key: event::KeyCode) -> Key {
-    match key {
-        event::KeyCode::Char(character) => Key::Character(character),
-        event::KeyCode::Enter => Key::Enter,
-        event::KeyCode::Esc => Key::Escape,
-        event::KeyCode::Backspace => Key::Backspace,
-        event::KeyCode::Tab => Key::Tab,
-        event::KeyCode::BackTab => Key::BackTab,
-        event::KeyCode::Up => Key::Up,
-        event::KeyCode::Down => Key::Down,
-        event::KeyCode::Left => Key::Left,
-        event::KeyCode::Right => Key::Right,
-        event::KeyCode::Home => Key::Home,
-        event::KeyCode::End => Key::End,
-        event::KeyCode::PageUp => Key::PageUp,
-        event::KeyCode::PageDown => Key::PageDown,
-        event::KeyCode::Delete => Key::Delete,
-        event::KeyCode::Insert => Key::Insert,
-        event::KeyCode::F(number) => Key::Function(number),
-        event::KeyCode::Null => Key::Null,
-        _ => Key::Other,
-    }
-}
-
-fn map_button(button: event::MouseButton) -> MouseButton {
-    match button {
-        event::MouseButton::Left => MouseButton::Left,
-        event::MouseButton::Middle => MouseButton::Middle,
-        event::MouseButton::Right => MouseButton::Right,
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::parse::{
+        RawEvent, RawKey, RawModifiers as WireModifiers, RawMouse, map_raw_event,
+    };
 
     #[derive(Default)]
     struct FakeReader {
         polls: VecDeque<io::Result<bool>>,
-        reads: VecDeque<io::Result<CrosstermEvent>>,
+        reads: VecDeque<io::Result<Option<InputEvent>>>,
         poll_count: usize,
     }
 
@@ -494,7 +291,7 @@ mod tests {
                 .expect("test must provide a poll result")
         }
 
-        fn read(&mut self) -> io::Result<CrosstermEvent> {
+        fn read(&mut self) -> io::Result<Option<InputEvent>> {
             self.reads
                 .pop_front()
                 .expect("test must provide a read result")
@@ -503,7 +300,7 @@ mod tests {
 
     fn source(
         polls: &[io::Result<bool>],
-        reads: &[io::Result<CrosstermEvent>],
+        reads: &[io::Result<Option<InputEvent>>],
     ) -> InputSource<FakeReader> {
         InputSource::new(FakeReader {
             polls: polls.iter().map(clone_io_result).collect(),
@@ -589,10 +386,33 @@ mod tests {
             &[Ok(true), Ok(true)],
             &[
                 Err(io::Error::from(io::ErrorKind::Interrupted)),
-                Ok(CrosstermEvent::Key(event::KeyEvent::new(
-                    event::KeyCode::Enter,
-                    event::KeyModifiers::empty(),
-                ))),
+                Ok(Some(InputEvent::Key(KeyEvent::new(
+                    Key::Enter,
+                    Modifiers::empty(),
+                )))),
+            ],
+        );
+        assert_eq!(
+            read_source.poll(Duration::from_secs(1)).unwrap(),
+            InputPoll::Event(InputEvent::Key(KeyEvent::new(
+                Key::Enter,
+                Modifiers::empty(),
+            )))
+        );
+    }
+
+    #[test]
+    fn skipped_events_keep_waiting() {
+        // A swallowed decode (focus, undecodable bytes) surfaces as `None`
+        // and the source waits for the next event within the same call.
+        let mut read_source = source(
+            &[Ok(true), Ok(true)],
+            &[
+                Ok(None),
+                Ok(Some(InputEvent::Key(KeyEvent::new(
+                    Key::Enter,
+                    Modifiers::empty(),
+                )))),
             ],
         );
         assert_eq!(
@@ -606,14 +426,17 @@ mod tests {
 
     #[test]
     fn bare_line_feed_maps_to_enter() {
-        // A raw `\n` reaches Crossterm as Ctrl+J; a shell must treat it as
-        // Enter so agent/tool input can submit a line (bash and zsh bind
-        // `\C-j` to accept-line).
+        // A raw `\n` decodes as Ctrl+J; a shell must treat it as Enter so
+        // agent/tool input can submit a line (bash and zsh bind `\C-j` to
+        // accept-line).
         assert_eq!(
-            map_event(CrosstermEvent::Key(event::KeyEvent::new(
-                event::KeyCode::Char('j'),
-                event::KeyModifiers::CONTROL,
-            ))),
+            map_raw_event(RawEvent::Key {
+                key: RawKey::Char('j'),
+                modifiers: WireModifiers {
+                    control: true,
+                    ..WireModifiers::default()
+                },
+            }),
             Some(InputEvent::Key(KeyEvent::new(
                 Key::Enter,
                 Modifiers::empty(),
@@ -623,10 +446,14 @@ mod tests {
         // A genuine Ctrl+J is the same byte and therefore also submits.
         // Modified variants (e.g. Ctrl+Alt+J) are left alone.
         assert_eq!(
-            map_event(CrosstermEvent::Key(event::KeyEvent::new(
-                event::KeyCode::Char('j'),
-                event::KeyModifiers::CONTROL | event::KeyModifiers::ALT,
-            ))),
+            map_raw_event(RawEvent::Key {
+                key: RawKey::Char('j'),
+                modifiers: WireModifiers {
+                    control: true,
+                    alt: true,
+                    ..WireModifiers::default()
+                },
+            }),
             Some(InputEvent::Key(KeyEvent::new(
                 Key::Character('j'),
                 Modifiers::CONTROL | Modifiers::ALT,
@@ -635,27 +462,30 @@ mod tests {
     }
 
     #[test]
-    fn crossterm_events_map_to_fshell_semantics() {
-        let key = map_event(CrosstermEvent::Key(event::KeyEvent::new_with_kind(
-            event::KeyCode::Char('x'),
-            event::KeyModifiers::CONTROL | event::KeyModifiers::ALT,
-            event::KeyEventKind::Repeat,
-        )))
+    fn wire_events_map_to_fshell_semantics() {
+        let key = map_raw_event(RawEvent::Key {
+            key: RawKey::Char('x'),
+            modifiers: WireModifiers {
+                control: true,
+                alt: true,
+                ..WireModifiers::default()
+            },
+        })
         .unwrap();
         assert_eq!(
             key,
             InputEvent::Key(KeyEvent {
                 key: Key::Character('x'),
                 modifiers: Modifiers::CONTROL | Modifiers::ALT,
-                action: KeyAction::Repeat,
+                action: KeyAction::Press,
             })
         );
 
-        let mouse = map_event(CrosstermEvent::Mouse(event::MouseEvent {
-            kind: event::MouseEventKind::Drag(event::MouseButton::Left),
+        let mouse = map_raw_event(RawEvent::Mouse(RawMouse {
+            action: crate::input::MouseAction::Drag(MouseButton::Left),
+            button: Some(MouseButton::Left),
             column: 7,
             row: 3,
-            modifiers: event::KeyModifiers::empty(),
         }))
         .unwrap();
         assert_eq!(
@@ -668,22 +498,17 @@ mod tests {
         );
 
         assert_eq!(
-            map_event(CrosstermEvent::Resize(80, 24)),
-            Some(InputEvent::Resize {
-                columns: 80,
-                rows: 24
-            })
-        );
-        assert_eq!(
-            map_event(CrosstermEvent::Paste("text".into())),
+            map_raw_event(RawEvent::Paste("text".into())),
             Some(InputEvent::Paste("text".into()))
         );
-        assert_eq!(map_event(CrosstermEvent::FocusGained), None);
     }
 
     #[test]
     fn unsupported_modifiers_do_not_become_plain_character_input() {
-        let modifiers = Modifiers::from_crossterm(event::KeyModifiers::SUPER);
+        let modifiers = Modifiers::from_raw(WireModifiers {
+            other: true,
+            ..WireModifiers::default()
+        });
         assert!(!modifiers.is_empty());
         assert!(!modifiers.contains(Modifiers::CONTROL));
     }

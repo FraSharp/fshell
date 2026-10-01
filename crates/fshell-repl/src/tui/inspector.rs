@@ -10,8 +10,8 @@ use crate::tui::components::search_bar::SearchBarState;
 use crate::tui::theme;
 use fshell_core::Val;
 use fshell_core::theme::Theme;
-use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, Modifiers};
 use ratatui::backend::CrosstermBackend;
+use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key, Modifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
@@ -40,7 +40,7 @@ pub fn run_table_inspector(items: Vec<Val>, title: &str, theme: &Theme) -> Resul
         .map_err(|e| format!("inspector: failed to create terminal backend: {e}"))?;
     let _ = terminal.clear();
 
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
     let mut state = DataGridState::new();
     let mut search_bar = SearchBarState::new();
     let mut is_searching = false;

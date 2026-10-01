@@ -22,7 +22,7 @@ pub mod widgets;
 
 use chrono::TimeZone;
 use fshell_terminal::input::{
-    CrosstermEventSource, EventSource, InputError, InputEvent, InputPoll, Key, KeyAction,
+    UnixEventSource, EventSource, InputError, InputEvent, InputPoll, Key, KeyAction,
     Modifiers, MouseAction, MouseButton,
 };
 use ratatui::{
@@ -207,7 +207,7 @@ pub async fn run_ftui_repl(
         }
     };
     let event_source: Arc<std::sync::Mutex<dyn EventSource>> =
-        Arc::new(std::sync::Mutex::new(CrosstermEventSource::new()));
+        Arc::new(std::sync::Mutex::new(UnixEventSource::new()));
 
     // Wait for deferred initialization (login shell env, PATH cache warmup) to finish
     init_done.notified().await;

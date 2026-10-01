@@ -10,7 +10,7 @@ use crate::theme_ext::ThemeColorRatatui;
 use fshell_core::Val;
 use fshell_core::theme::Theme;
 use fshell_engine::Env;
-use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key, KeyEvent};
+use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key, KeyEvent};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -966,7 +966,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> Result<(), String> {
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
     while app.running {
         terminal
             .draw(|f| {

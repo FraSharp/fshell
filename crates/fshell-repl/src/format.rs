@@ -4,7 +4,7 @@
 use crate::terminal_mode::FullscreenTerminalGuard;
 use chrono::{Local, Utc};
 use fshell_core::Val;
-use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key};
+use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key};
 use std::fmt::Write;
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -70,7 +70,7 @@ pub fn show_text_pager_with_theme(text: &str, theme: &fshell_core::theme::Theme)
     };
     let _ = terminal.clear();
 
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
     let mut offset_y: usize = 0;
     let mut offset_x: usize = 0;
     let mut show_line_numbers = false;

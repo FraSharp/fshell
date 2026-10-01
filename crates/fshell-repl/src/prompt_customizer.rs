@@ -10,7 +10,7 @@ use fshell_core::prompt_config::{
 use fshell_core::theme::Theme;
 use fshell_engine::Env;
 use fshell_terminal::input::{
-    CrosstermEventSource, InputError, InputEvent, InputPoll, Key, KeyAction, KeyEvent, Modifiers,
+    UnixEventSource, InputError, InputEvent, InputPoll, Key, KeyAction, KeyEvent, Modifiers,
 };
 use ratatui::{
     Terminal,
@@ -487,7 +487,7 @@ pub fn run_prompt_customizer(env: &Env) -> Result<(), String> {
     let mut terminal = Terminal::new(backend).map_err(|e| format!("terminal: {}", e))?;
 
     let mut app = App::new(env.clone());
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
 
     loop {
         let ok = terminal.draw(|f| draw_studio(f, &app)).is_ok();

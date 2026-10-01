@@ -5,7 +5,7 @@ use fshell_core::ShellError;
 use fshell_core::Val;
 use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
-use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key};
+use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key};
 use miette::SourceSpan;
 use std::io::Write;
 use std::sync::Arc;
@@ -162,7 +162,7 @@ async fn read_line_silent(timeout_secs: Option<u64>) -> Result<String, String> {
 
     let mut line = String::new();
     let start = std::time::Instant::now();
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
 
     let result = loop {
         if let Some(t) = timeout_secs

@@ -1,0 +1,642 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
+
+//! Unix terminal input source owned by fshell.
+//!
+//! Reads the terminal file descriptor with `libc::poll`, decodes bytes with
+//! [`AnsiParser`](crate::parse::AnsiParser), and reports closure when the
+//! descriptor reaches EOF. Resize is observed by comparing the window size on
+//! every wake: bounded by [`RESIZE_QUANTUM`] even when no keys arrive, with
+//! no signal handlers and no extra file descriptors.
+//!
+//! Unix only.
+
+use std::fs::File;
+use std::io;
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use crate::input::{EventReader, InputError, InputEvent, InputPoll};
+use crate::parse::{AnsiParser, ESC_TIMEOUT, Parse, RawEvent, RawKey, RawModifiers};
+
+/// Upper bound on resize-observation latency while blocked in a read.
+///
+/// The terminal descriptor is not signalled on resize, so a wait with no
+/// input wakes periodically to re-check the window size. Two hundred
+/// milliseconds is invisible next to human resize gestures and costs one
+/// `poll` + `ioctl` per quantum.
+const RESIZE_QUANTUM: Duration = Duration::from_millis(200);
+
+/// TTY input fd. Reads stay blocking: every read follows `poll` reporting
+/// readiness, so it returns with the bytes already available. The
+/// descriptor is shared with stdout and inherited by children, so it must
+/// never carry `O_NONBLOCK`.
+struct UnixFd {
+    fd: RawFd,
+    /// Owned handle when the fd came from `/dev/tty`; `None` for stdin.
+    _owned: Option<File>,
+}
+
+impl UnixFd {
+    /// Take ownership of `fd` without touching its status flags.
+    fn open(fd: RawFd, owned: Option<File>) -> Self {
+        Self { fd, _owned: owned }
+    }
+
+    /// Wait up to `timeout` for readability. Hangup and error conditions
+    /// count as readable: the subsequent read resolves them to EOF or error.
+    fn wait_readable(&self, timeout: Duration) -> io::Result<bool> {
+        let mut fd = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = timeout.as_millis().min(std::ffi::c_int::MAX as u128) as std::ffi::c_int;
+        let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            // A signal interrupted the wait without input; the caller's
+            // loop re-checks its deadline and waits again.
+            if error.kind() == io::ErrorKind::Interrupted {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        Ok(ready > 0)
+    }
+
+    /// Read into `buf`; callers wait for readability first. A zero-byte
+    /// read is terminal EOF.
+    fn read_chunk(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let count = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if count < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(count as usize)
+    }
+}
+
+#[allow(clippy::useless_conversion)]
+fn window_size(fd: RawFd) -> Option<(u16, u16)> {
+    unsafe {
+        let mut size: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(fd, libc::TIOCGWINSZ.into(), &mut size) != 0 {
+            return None;
+        }
+        if size.ws_col == 0 && size.ws_row == 0 {
+            return None;
+        }
+        Some((size.ws_col, size.ws_row))
+    }
+}
+
+/// Synchronous Unix terminal reader: TTY bytes into mapped input events.
+///
+/// Opening is lazy so construction never fails: the descriptor is acquired
+/// on first use and open errors surface as [`InputError::Poll`], exactly
+/// where callers already handle input failure.
+pub(crate) struct UnixSource {
+    fd: Option<UnixFd>,
+    parser: AnsiParser,
+    pending: Option<InputEvent>,
+    last_size: Option<(u16, u16)>,
+    size_pending: bool,
+    esc_due: bool,
+    chunk: Vec<u8>,
+}
+
+impl UnixSource {
+    pub fn new() -> Self {
+        Self {
+            fd: None,
+            parser: AnsiParser::new(),
+            pending: None,
+            last_size: None,
+            size_pending: false,
+            esc_due: false,
+            chunk: vec![0u8; 1024],
+        }
+    }
+
+    /// Open over an explicit fd (tests, PTY probes).
+    #[cfg(test)]
+    fn open_fd(fd: RawFd) -> Self {
+        Self {
+            fd: Some(UnixFd::open(fd, None)),
+            parser: AnsiParser::new(),
+            pending: None,
+            last_size: window_size(fd),
+            size_pending: false,
+            esc_due: false,
+            chunk: vec![0u8; 1024],
+        }
+    }
+
+    /// Acquire the terminal descriptor on first use: stdin when it is a TTY,
+    /// else `/dev/tty`.
+    fn ensure_open(&mut self) -> io::Result<RawFd> {
+        if let Some(fd) = &self.fd {
+            return Ok(fd.fd);
+        }
+        let (fd, owned) = if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+            (libc::STDIN_FILENO, None)
+        } else {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")?;
+            let fd = file.as_raw_fd();
+            (fd, Some(file))
+        };
+        self.last_size = window_size(fd);
+        self.fd = Some(UnixFd::open(fd, owned));
+        Ok(fd)
+    }
+
+    /// Decode buffered bytes into the pending slot. Returns true when an
+    /// event is pending; false when more bytes could complete a partial
+    /// sequence. Swallowed bytes (focus reports, undecodable input) drain
+    /// silently inside.
+    fn probe(&mut self) -> bool {
+        loop {
+            match self.parser.try_parse() {
+                Parse::Event(raw) => {
+                    if self.pending.is_none() {
+                        self.pending = crate::parse::map_raw_event(raw);
+                    }
+                    if self.pending.is_some() {
+                        return true;
+                    }
+                }
+                Parse::Again => {}
+                Parse::NeedMore => return false,
+            }
+        }
+    }
+}
+
+impl EventReader for UnixSource {
+    /// Wait until [`read`](EventReader::read) can make progress: a complete
+    /// event is buffered, the window size moved, a pending lone `ESC` aged
+    /// out, or the descriptor reached EOF.
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+        let fd = self.ensure_open()?;
+        if self.pending.is_some() || self.esc_due || self.size_pending {
+            return Ok(true);
+        }
+        // Seed the size baseline on first use so an early resize is caught.
+        if self.last_size.is_none() {
+            self.last_size = window_size(fd);
+        }
+        if self.probe() {
+            return Ok(true);
+        }
+        let start = Instant::now();
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                // A lone ESC with no continuation is the Escape key, not a
+                // timeout: the byte is already in hand.
+                if self.parser.take_lone_esc() {
+                    self.esc_due = true;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            let remaining = timeout - elapsed;
+            // A lone ESC shortens the wait to its disambiguation window;
+            // otherwise the wait is bounded so a lone resize still surfaces.
+            let wait = if self.parser.is_lone_esc() {
+                remaining.min(ESC_TIMEOUT)
+            } else {
+                remaining.min(RESIZE_QUANTUM)
+            };
+            let readable = self
+                .fd
+                .as_ref()
+                .expect("descriptor opened above")
+                .wait_readable(wait)?;
+            if !readable {
+                // Quantum expired with no input: age out a lone ESC within
+                // ESC_TIMEOUT and surface a lone resize within the quantum.
+                if self.parser.is_lone_esc() && start.elapsed() >= ESC_TIMEOUT {
+                    self.parser.take_lone_esc();
+                    self.esc_due = true;
+                    return Ok(true);
+                }
+                if let Some(size) = window_size(fd)
+                    && Some(size) != self.last_size
+                {
+                    self.last_size = Some(size);
+                    self.size_pending = true;
+                    return Ok(true);
+                }
+                continue;
+            }
+            match self
+                .fd
+                .as_ref()
+                .expect("descriptor opened above")
+                .read_chunk(&mut self.chunk)
+            {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "terminal input closed",
+                    ));
+                }
+                Ok(count) => {
+                    self.parser.push(&self.chunk[..count]);
+                    if self.probe() {
+                        return Ok(true);
+                    }
+                    // Partial sequence: loop back to waiting for the rest.
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    // A signal interrupted the read; nothing was consumed.
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    // Readiness was consumed elsewhere; wait again.
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Decode one event. Succeeds after [`poll`](EventReader::poll) reported
+    /// progress; a lone `WouldBlock` is unreachable by construction.
+    fn read(&mut self) -> io::Result<Option<InputEvent>> {
+        if self.esc_due {
+            self.esc_due = false;
+            return Ok(Some(
+                crate::parse::map_raw_event(RawEvent::Key {
+                    key: RawKey::Escape,
+                    modifiers: RawModifiers::default(),
+                })
+                .expect("escape always maps to an event"),
+            ));
+        }
+        if self.size_pending {
+            self.size_pending = false;
+            if let Some(size) = self.last_size {
+                return Ok(Some(InputEvent::Resize {
+                    columns: size.0,
+                    rows: size.1,
+                }));
+            }
+        }
+        if let Some(event) = self.pending.take() {
+            return Ok(Some(event));
+        }
+        // Progress was reported but nothing is buffered: only a spurious
+        // wakeup away from the next poll, never a silent wait.
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
+}
+
+/// Synchronous Unix terminal input over [`UnixSource`].
+pub struct UnixEventSource {
+    source: crate::input::InputSource<UnixSource>,
+}
+
+impl UnixEventSource {
+    pub fn new() -> Self {
+        Self {
+            source: crate::input::InputSource::new(UnixSource::new()),
+        }
+    }
+
+    pub fn poll(&mut self, timeout: Duration) -> Result<InputPoll, InputError> {
+        self.source.poll(timeout)
+    }
+}
+
+impl Default for UnixEventSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::input::EventSource for UnixEventSource {
+    fn poll(&mut self, timeout: Duration) -> Result<InputPoll, InputError> {
+        UnixEventSource::poll(self, timeout)
+    }
+}
+
+/// Async Unix terminal input: decoded events without blocking the executor.
+///
+/// A worker thread owns a [`UnixEventSource`] and forwards its outcomes; the
+/// [`futures::Stream`] impl serves them from a queue. Closure is sticky, the
+/// worker exits on its own within [`RESIZE_QUANTUM`] once the stream drops,
+/// and non-EOF input errors end the stream as closure, mirroring the
+/// previous stream contract.
+pub struct UnixEventStream {
+    events: std::sync::mpsc::Receiver<StreamMessage>,
+    waker: Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+    closed: bool,
+    shutdown: Arc<AtomicBool>,
+}
+
+enum StreamMessage {
+    Event(InputEvent),
+    Closed,
+}
+
+impl UnixEventStream {
+    fn spawn(mut source: UnixEventSource) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waker: Arc<std::sync::Mutex<Option<std::task::Waker>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let worker_waker = waker.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = shutdown.clone();
+        let wake = move || {
+            if let Ok(mut guard) = worker_waker.lock()
+                && let Some(waker) = guard.take()
+            {
+                waker.wake();
+            }
+        };
+        let _ = std::thread::Builder::new()
+            .name("fsh-terminal-input".to_string())
+            .spawn(move || {
+                while !worker_shutdown.load(Ordering::Relaxed) {
+                    match source.poll(Duration::from_secs(60 * 60)) {
+                        Ok(InputPoll::Event(event)) => {
+                            if tx.send(StreamMessage::Event(event)).is_err() {
+                                break;
+                            }
+                            wake();
+                        }
+                        Ok(InputPoll::Closed) => {
+                            let _ = tx.send(StreamMessage::Closed);
+                            wake();
+                            break;
+                        }
+                        Ok(InputPoll::Timeout) => {}
+                        Err(_) => {
+                            let _ = tx.send(StreamMessage::Closed);
+                            wake();
+                            break;
+                        }
+                    }
+                }
+            });
+        Self {
+            events: rx,
+            waker,
+            closed: false,
+            shutdown,
+        }
+    }
+
+    pub fn new() -> Self {
+        Self::spawn(UnixEventSource::new())
+    }
+
+    /// Open a stream over an explicit fd (tests).
+    #[cfg(test)]
+    fn open_fd(fd: RawFd) -> Self {
+        let source = UnixEventSource {
+            source: crate::input::InputSource::new(UnixSource::open_fd(fd)),
+        };
+        Self::spawn(source)
+    }
+
+    /// Next decoded event, waiting as long as needed. Closure is sticky:
+    /// once the stream reports [`InputPoll::Closed`] it keeps reporting it.
+    pub async fn next(&mut self) -> InputPoll {
+        use futures::StreamExt;
+        match StreamExt::next(self).await {
+            Some(event) => InputPoll::Event(event),
+            None => InputPoll::Closed,
+        }
+    }
+}
+
+impl Default for UnixEventStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for UnixEventStream {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+impl futures::Stream for UnixEventStream {
+    type Item = InputEvent;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        if self.closed {
+            return std::task::Poll::Ready(None);
+        }
+        loop {
+            match self.events.try_recv() {
+                Ok(StreamMessage::Event(event)) => {
+                    return std::task::Poll::Ready(Some(event));
+                }
+                Ok(StreamMessage::Closed) => {
+                    self.closed = true;
+                    return std::task::Poll::Ready(None);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if let Ok(mut waker) = self.waker.lock() {
+                        *waker = Some(cx.waker().clone());
+                    }
+                    // A send racing the lock above queued an event already.
+                    match self.events.try_recv() {
+                        Ok(StreamMessage::Event(event)) => {
+                            return std::task::Poll::Ready(Some(event));
+                        }
+                        Ok(StreamMessage::Closed) => {
+                            self.closed = true;
+                            return std::task::Poll::Ready(None);
+                        }
+                        Err(_) => return std::task::Poll::Pending,
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.closed = true;
+                    return std::task::Poll::Ready(None);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::input::Key;
+
+    /// A pipe standing in for the terminal: the test writes input bytes,
+    /// the source reads them through the real `poll`/`read` path.
+    struct Pipe {
+        reader: RawFd,
+        writer: Option<File>,
+    }
+
+    impl Pipe {
+        fn new() -> io::Result<Self> {
+            let mut fds = [0; 2];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let writer = unsafe {
+                use std::os::unix::io::FromRawFd;
+                File::from_raw_fd(fds[1])
+            };
+            Ok(Self {
+                reader: fds[0],
+                writer: Some(writer),
+            })
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            use std::io::Write;
+            let writer = self.writer.as_mut().expect("writer is open");
+            writer.write_all(bytes).unwrap();
+            writer.flush().unwrap();
+        }
+
+        fn close_writer(&mut self) {
+            drop(self.writer.take());
+        }
+    }
+
+    impl Drop for Pipe {
+        fn drop(&mut self) {
+            unsafe { libc::close(self.reader) };
+        }
+    }
+
+    fn source_on(pipe: &Pipe) -> UnixEventSource {
+        UnixEventSource {
+            source: crate::input::InputSource::new(UnixSource::open_fd(pipe.reader)),
+        }
+    }
+
+    fn expect_key(poll: Result<InputPoll, InputError>) -> (Key, crate::input::Modifiers) {
+        match poll {
+            Ok(InputPoll::Event(InputEvent::Key(key))) => (key.key, key.modifiers),
+            other => panic!("expected a key event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipe_roundtrip_preserves_order() {
+        let mut pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        pipe.write(b"a\x1B[A");
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(5))),
+            (Key::Character('a'), crate::input::Modifiers::empty())
+        );
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(5))),
+            (Key::Up, crate::input::Modifiers::empty())
+        );
+    }
+
+    #[test]
+    fn fragmented_writes_reassemble_before_return() {
+        let mut pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        // A six-byte mouse report split mid-sequence must not surface
+        // as an error or a partial key.
+        pipe.write(b"\x1B[<0;");
+        std::thread::sleep(Duration::from_millis(50));
+        pipe.write(b"8;4M");
+        match source.poll(Duration::from_secs(5)) {
+            Ok(InputPoll::Event(InputEvent::Mouse(mouse))) => {
+                assert_eq!(mouse.column, 7);
+                assert_eq!(mouse.row, 3);
+            }
+            other => panic!("expected a mouse event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lone_escape_becomes_escape_not_timeout() {
+        let mut pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        pipe.write(b"\x1B");
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(5))),
+            (Key::Escape, crate::input::Modifiers::empty())
+        );
+    }
+
+    #[test]
+    fn escape_plus_byte_is_alt_not_escape() {
+        let mut pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        pipe.write(b"\x1Bx");
+        let (key, modifiers) = expect_key(source.poll(Duration::from_secs(5)));
+        assert_eq!(key, Key::Character('x'));
+        assert!(modifiers.contains(crate::input::Modifiers::ALT));
+    }
+
+    #[test]
+    fn idle_pipe_times_out() {
+        let pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        assert!(matches!(
+            source.poll(Duration::from_millis(50)),
+            Ok(InputPoll::Timeout)
+        ));
+    }
+
+    #[test]
+    fn closed_write_end_is_sticky_closed() {
+        let mut pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        pipe.close_writer();
+        assert!(matches!(
+            source.poll(Duration::from_secs(5)),
+            Ok(InputPoll::Closed)
+        ));
+        assert!(matches!(
+            source.poll(Duration::from_secs(5)),
+            Ok(InputPoll::Closed)
+        ));
+    }
+
+    #[test]
+    fn stream_serves_events_then_closure() {
+        let mut pipe = Pipe::new().unwrap();
+        let mut stream = UnixEventStream::open_fd(pipe.reader);
+        pipe.write(b"q");
+        let first = futures::executor::block_on(stream.next());
+        assert!(matches!(
+            first,
+            InputPoll::Event(InputEvent::Key(_))
+        ));
+        pipe.close_writer();
+        // EOF arrives once the worker drains the queued key.
+        let mut saw_closed = false;
+        for _ in 0..100 {
+            if matches!(
+                futures::executor::block_on(stream.next()),
+                InputPoll::Closed
+            ) {
+                saw_closed = true;
+                break;
+            }
+        }
+        assert!(saw_closed, "stream must report closure after EOF");
+        assert_eq!(
+            futures::executor::block_on(stream.next()),
+            InputPoll::Closed
+        );
+    }
+}

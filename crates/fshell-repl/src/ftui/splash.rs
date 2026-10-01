@@ -4,7 +4,7 @@
 //! Interactive first-run startup splash screen and environment status overview.
 
 use crate::terminal_mode::FullscreenTerminalGuard;
-use fshell_terminal::input::{CrosstermEventSource, InputEvent, InputPoll, Key};
+use fshell_terminal::input::{UnixEventSource, InputEvent, InputPoll, Key};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -180,7 +180,7 @@ pub fn show_splash(
         });
     }
 
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
     let mut wait_span = env.trace.span(
         env.trace_context,
         "startup.splash_wait",

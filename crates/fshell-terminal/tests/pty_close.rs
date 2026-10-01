@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fshell_terminal::input::{CrosstermEventSource, InputPoll};
+use fshell_terminal::input::{UnixEventSource, InputPoll};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 const PROBE_ENV: &str = "FSHELL_TERMINAL_PTY_CLOSE_PROBE";
@@ -26,7 +26,7 @@ fn pty_probe_waits_for_close() {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
 
-    let mut input = CrosstermEventSource::new();
+    let mut input = UnixEventSource::new();
     println!("{}", String::from_utf8_lossy(READY_MARKER));
     let _ = std::io::Write::flush(&mut std::io::stdout());
     match input.poll(Duration::from_secs(30)) {

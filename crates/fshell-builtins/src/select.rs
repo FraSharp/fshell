@@ -25,7 +25,7 @@ use fshell_core::theme::{Theme, ThemeColor};
 use fshell_core::{ShellError, Val};
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use fshell_terminal::input::{
-    CrosstermEventStream, InputEvent, Key, KeyAction, Modifiers, MouseAction,
+    UnixEventStream, InputEvent, Key, KeyAction, Modifiers, MouseAction,
 };
 use fshell_terminal::runner::{AppFlow, ShellTuiApp, run_tui};
 use fshell_terminal::session::{
@@ -864,7 +864,7 @@ async fn run_select_task(
         Err(_) => return,
     };
 
-    let input_stream = CrosstermEventStream::new().map(SelectMessage::Input);
+    let input_stream = UnixEventStream::new().map(SelectMessage::Input);
 
     let pipe_stream: BoxStream<'static, SelectMessage> = if let Some(rx) = rx {
         futures::stream::unfold(
