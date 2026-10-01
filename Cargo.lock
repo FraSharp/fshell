@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "fshell"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "fshell-bridge",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-archive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bindgen",
  "cap-std",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-builtins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-capabilities"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "fshell-core",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-recursion",
  "bytes",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "flate2",
@@ -1415,7 +1415,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-hash"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "digest 0.11.3",
@@ -1425,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-ls"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "fshell-git",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-posix"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-recursion",
  "brush-parser",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fshell-core",
  "miette",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-repl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "fshell-core",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-semantic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fshell-core",
  "fshell-engine",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-terminal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fshell-tty",
  "futures",
@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "fshell-tty"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "libc",

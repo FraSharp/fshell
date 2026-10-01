@@ -20,7 +20,7 @@ members = [
     "fuzz",
 ]
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Francesco Duca <f.duca00@gmail.com>"]
@@ -126,22 +126,22 @@ fshell-posix = { workspace = true }
 [workspace.dependencies]
 # Internal crates. Published independently, so each carries the same version
 # as [workspace.package]; tests/publishing_tests.rs keeps them in sync.
-fshell-archive = { path = "crates/fshell-archive", version = "0.1.0" }
-fshell-bridge = { path = "crates/fshell-bridge", version = "0.1.0" }
-fshell-builtins = { path = "crates/fshell-builtins", version = "0.1.0" }
-fshell-capabilities = { path = "crates/fshell-capabilities", version = "0.1.0" }
-fshell-core = { path = "crates/fshell-core", version = "0.1.0" }
-fshell-engine = { path = "crates/fshell-engine", version = "0.1.0" }
-fshell-git = { path = "crates/fshell-git", version = "0.1.0" }
-fshell-hash = { path = "crates/fshell-hash", version = "0.1.0" }
-fshell-ls = { path = "crates/fshell-ls", version = "0.1.0" }
-fshell-posix = { path = "crates/fshell-posix", version = "0.1.0" }
-fshell-render = { path = "crates/fshell-render", version = "0.1.0" }
-fshell-repl = { path = "crates/fshell-repl", version = "0.1.0" }
-fshell-sandbox = { path = "crates/fshell-sandbox", version = "0.1.0" }
-fshell-semantic = { path = "crates/fshell-semantic", version = "0.1.0" }
-fshell-terminal = { path = "crates/fshell-terminal", version = "0.1.0" }
-fshell-tty = { path = "crates/fshell-tty", version = "0.1.0" }
+fshell-archive = { path = "crates/fshell-archive", version = "0.2.0" }
+fshell-bridge = { path = "crates/fshell-bridge", version = "0.2.0" }
+fshell-builtins = { path = "crates/fshell-builtins", version = "0.2.0" }
+fshell-capabilities = { path = "crates/fshell-capabilities", version = "0.2.0" }
+fshell-core = { path = "crates/fshell-core", version = "0.2.0" }
+fshell-engine = { path = "crates/fshell-engine", version = "0.2.0" }
+fshell-git = { path = "crates/fshell-git", version = "0.2.0" }
+fshell-hash = { path = "crates/fshell-hash", version = "0.2.0" }
+fshell-ls = { path = "crates/fshell-ls", version = "0.2.0" }
+fshell-posix = { path = "crates/fshell-posix", version = "0.2.0" }
+fshell-render = { path = "crates/fshell-render", version = "0.2.0" }
+fshell-repl = { path = "crates/fshell-repl", version = "0.2.0" }
+fshell-sandbox = { path = "crates/fshell-sandbox", version = "0.2.0" }
+fshell-semantic = { path = "crates/fshell-semantic", version = "0.2.0" }
+fshell-terminal = { path = "crates/fshell-terminal", version = "0.2.0" }
+fshell-tty = { path = "crates/fshell-tty", version = "0.2.0" }
 strip-ansi-escapes = "0.2.1"
 tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "net", "signal", "process", "fs", "time", "io-util", "io-std", "sync", "macros"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
