@@ -195,6 +195,73 @@ async fn test_integration_json_ndjson_streams_independently() {
 }
 
 #[tokio::test]
+async fn test_integration_json_query_selects_fields() {
+    let env = setup_test_env();
+    let doc = Val::String(r#"{"users":[{"name":"ada","age":36},{"name":"bob","age":24}]}"#.into());
+    env.vars.write().insert("payload".to_string(), doc);
+    let mut parser = Parser::new("$payload | json .users[1].name");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        assert_eq!(res, Val::List(vec![Val::String("bob".to_string())]));
+    } else {
+        panic!("Expected Stmt::Expr");
+    }
+}
+
+#[tokio::test]
+async fn test_integration_json_query_iterates_arrays() {
+    let env = setup_test_env();
+    let doc = Val::String(r#"{"users":[{"name":"ada"},{"name":"bob"}]}"#.into());
+    env.vars.write().insert("payload".to_string(), doc);
+    let mut parser = Parser::new("$payload | json .users[].name");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        assert_eq!(
+            res,
+            Val::List(vec![
+                Val::String("ada".to_string()),
+                Val::String("bob".to_string())
+            ])
+        );
+    } else {
+        panic!("Expected Stmt::Expr");
+    }
+}
+
+#[tokio::test]
+async fn test_integration_json_query_missing_path_is_null() {
+    let env = setup_test_env();
+    env.vars
+        .write()
+        .insert("payload".to_string(), Val::String(r#"{"a":1}"#.into()));
+    let mut parser = Parser::new("$payload | json .missing");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        let res = eval_expr(expr, &env).await.unwrap();
+        assert_eq!(res, Val::List(vec![Val::Null]));
+    } else {
+        panic!("Expected Stmt::Expr");
+    }
+}
+
+#[tokio::test]
+async fn test_integration_json_invalid_query_fails() {
+    let env = setup_test_env();
+    env.vars
+        .write()
+        .insert("payload".to_string(), Val::String("{}".into()));
+    let mut parser = Parser::new("$payload | json '[x]'");
+    let stmts = parser.parse_statements().unwrap();
+    if let Stmt::Expr(expr) = stmts[0].unpack() {
+        assert!(eval_expr(expr, &env).await.is_err());
+    } else {
+        panic!("Expected Stmt::Expr");
+    }
+}
+
+#[tokio::test]
 async fn test_integration_json_envelope_shaped_object_is_plain_data() {
     let env = setup_test_env();
     // A JSON object that happens to carry `type` and `value` keys is data,

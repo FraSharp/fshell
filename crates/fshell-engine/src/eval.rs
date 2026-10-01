@@ -3294,18 +3294,20 @@ pub(crate) fn run_json_boundary(
         let Some(mut rx) = current_rx else {
             return;
         };
-        let mut buffer = String::new();
+        let mut decoder = crate::json::StreamDecoder::new();
         while let Some(payload) = rx.recv().await {
             match payload {
                 PipelinePayload::Data(value) => match (*value).clone() {
                     Val::String(text) => {
-                        buffer.push_str(&text);
-                        emit_complete_json(&mut buffer, &out_tx, &env).await;
+                        if !feed_json(&mut decoder, &text, &out_tx, &env).await {
+                            return;
+                        }
                     }
                     Val::Blob(bytes) => match std::str::from_utf8(&bytes) {
                         Ok(text) => {
-                            buffer.push_str(text);
-                            emit_complete_json(&mut buffer, &out_tx, &env).await;
+                            if !feed_json(&mut decoder, text, &out_tx, &env).await {
+                                return;
+                            }
                         }
                         Err(error) => {
                             report_decode_error(
@@ -3334,8 +3336,9 @@ pub(crate) fn run_json_boundary(
                 },
                 PipelinePayload::Bytes(bytes) => match std::str::from_utf8(&bytes) {
                     Ok(text) => {
-                        buffer.push_str(text);
-                        emit_complete_json(&mut buffer, &out_tx, &env).await;
+                        if !feed_json(&mut decoder, text, &out_tx, &env).await {
+                            return;
+                        }
                     }
                     Err(error) => {
                         report_decode_error(
@@ -3351,63 +3354,32 @@ pub(crate) fn run_json_boundary(
                 }
             }
         }
-        if !buffer.trim().is_empty() {
-            let detail = serde_json::from_str::<serde_json::Value>(&buffer)
-                .err()
-                .map(|error| error.to_string())
-                .unwrap_or_else(|| "unexpected end of input".to_string());
-            report_decode_error(&out_tx, &env, format!("JSON parse error: {detail}")).await;
+        if let Err(message) = decoder.finish() {
+            report_decode_error(&out_tx, &env, message).await;
         }
     });
 }
 
-/// Emit every complete JSON value in `buffer`, keeping an incomplete tail for
-/// the next read. Top-level arrays are spread into their elements.
-async fn emit_complete_json(buffer: &mut String, out_tx: &Sender<PipelinePayload>, env: &Env) {
-    let mut values = Vec::new();
-    let mut consumed = 0;
-    let mut error = None;
-    {
-        let mut stream =
-            serde_json::Deserializer::from_str(buffer).into_iter::<serde_json::Value>();
-        while let Some(item) = stream.next() {
-            match item {
-                Ok(value) => {
-                    consumed = stream.byte_offset();
-                    values.push(value);
-                }
-                Err(parse_error) => {
-                    error = Some(parse_error);
-                    break;
+/// Push text into the decoder, forwarding completed values. Returns false
+/// when the receiving stage is gone.
+async fn feed_json(
+    decoder: &mut crate::json::StreamDecoder,
+    text: &str,
+    out_tx: &Sender<PipelinePayload>,
+    env: &Env,
+) -> bool {
+    match decoder.push(text) {
+        Ok(values) => {
+            for value in values {
+                if !crate::json::send_value(value, out_tx).await {
+                    return false;
                 }
             }
+            true
         }
-    }
-    buffer.drain(..consumed);
-    for value in values {
-        emit_json_value(value, out_tx).await;
-    }
-    let Some(parse_error) = error else {
-        return;
-    };
-    if parse_error.is_eof() {
-        // The tail is a value that still needs more input.
-        return;
-    }
-    buffer.clear();
-    report_decode_error(out_tx, env, format!("JSON parse error: {parse_error}")).await;
-}
-
-/// Send one decoded JSON value: a top-level array becomes its elements.
-async fn emit_json_value(value: serde_json::Value, out_tx: &Sender<PipelinePayload>) {
-    match json_value_to_val(value) {
-        Val::List(items) => {
-            for item in items {
-                let _ = out_tx.send(PipelinePayload::Data(Arc::new(item))).await;
-            }
-        }
-        other => {
-            let _ = out_tx.send(PipelinePayload::Data(Arc::new(other))).await;
+        Err(message) => {
+            report_decode_error(out_tx, env, message).await;
+            true
         }
     }
 }

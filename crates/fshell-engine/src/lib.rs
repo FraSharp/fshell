@@ -89,6 +89,7 @@ pub use completions::{load_completions, save_completions};
 pub mod exe;
 pub mod hooks;
 pub mod job_control;
+pub mod json;
 pub mod multicall;
 pub mod profiler;
 pub mod prompt;

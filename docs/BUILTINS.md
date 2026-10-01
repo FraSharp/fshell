@@ -204,11 +204,17 @@ replaces the current shell process with the specified command.
 ## data streams & transformation
 
 ### `json`
-parses or queries raw JSON data using jq-like path expressions:
+parses JSON input and selects values with a jq-like path:
 
 ```fsh
-cat payload.json | json .users[0].name
+cat payload.json | json '.users[0].name'
+ps | json '.cpu'
 ```
+
+the input may be a whole document, line-delimited values, or typed pipeline
+values. paths are built from `.field`, `[n]` (negative indexes count from the
+end) and `[]` (iterate). a path that does not exist selects `null`; a selected
+array spreads into one pipeline item per element; a malformed path is an error.
 
 ### `csv`
 parses CSV input into structured maps or formats maps into CSV.
