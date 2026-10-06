@@ -222,12 +222,12 @@ pub async fn run_ftui_repl(
     let mut prompt_mgr = PromptManager::new(env.clone());
     let mut text_buf = TextBuffer::new();
     let mut cursor_state = CursorState::new();
-    let mut comp_mgr = CompletionsManager::new(env.clone());
+    let mut comp_mgr = CompletionsManager::new_async(env.clone());
     let mut mouse_mgr = MouseStateManager::new();
     let mut history_mgr = HistoryManager::new();
     let mut agent_state = AgentModeState::new();
 
-    // Initialize FshellHinter for inline hints (history, path, and completion hints)
+    // Initialize FshellHinter for lightweight history and path hints
     let mut hinter = crate::hinter::FshellHinter::default().with_env(env.clone());
     let mut current_hint = String::new();
 
@@ -333,6 +333,7 @@ pub async fn run_ftui_repl(
 
         cpu_dbg!("--- entering input_loop ---");
         let mut completion_popup: Option<Rect> = None;
+        let mut pending_completion_tab: Option<u64> = None;
         'input_loop: loop {
             input_iter += 1;
 
@@ -372,6 +373,18 @@ pub async fn run_ftui_repl(
                     }
                 }
                 redraw = true;
+            }
+
+            if comp_mgr.apply_pending_results() {
+                if pending_completion_tab == Some(comp_mgr.generation()) {
+                    pending_completion_tab = None;
+                    accept_first_tab_completion(&mut comp_mgr, &mut text_buf);
+                }
+                redraw = true;
+            }
+            if pending_completion_tab.is_some_and(|generation| generation != comp_mgr.generation())
+            {
+                pending_completion_tab = None;
             }
 
             // Update prompt timers / background widgets (triggers at most every 1s internally)
@@ -1262,7 +1275,9 @@ pub async fn run_ftui_repl(
                                     Paragraph::new(content).block(agent_block),
                                     agent_area,
                                 );
-                            } else if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
+                            } else if comp_mgr.visible
+                                && (!comp_mgr.suggestions.is_empty() || comp_mgr.loading)
+                            {
                                 let total_items = comp_mgr.suggestions.len();
                                 let max_w = size.width.saturating_sub(2);
 
@@ -1340,18 +1355,31 @@ pub async fn run_ftui_repl(
                                         comp_mgr.scroll_offset = selected_row;
                                     }
 
-                                    let (list_items, total_display) =
-                                        comp_mgr.render_popup(popup_w, visible_rows);
+                                    let (list_items, total_display) = if comp_mgr.loading {
+                                        (
+                                            vec![ListItem::new(Line::from(Span::styled(
+                                                "Loading completions…",
+                                                theme.status.muted.to_style_dim(),
+                                            )))],
+                                            1,
+                                        )
+                                    } else {
+                                        comp_mgr.render_popup(popup_w, visible_rows)
+                                    };
 
                                     let is_files = comp_mgr.is_all_files_or_dirs();
                                     let header_label =
                                         if is_files { "Files" } else { "Completions" };
-                                    let title_text = format!(
-                                        " {} ({}/{}) ",
-                                        header_label,
-                                        comp_mgr.selected_idx + 1,
-                                        total_items,
-                                    );
+                                    let title_text = if comp_mgr.loading {
+                                        " Loading completions… ".to_string()
+                                    } else {
+                                        format!(
+                                            " {} ({}/{}) ",
+                                            header_label,
+                                            comp_mgr.selected_idx + 1,
+                                            total_items,
+                                        )
+                                    };
 
                                     let mut comp_block = Block::default()
                                         .borders(Borders::ALL)
@@ -1773,6 +1801,7 @@ pub async fn run_ftui_repl(
             // Bug 7.2: Check prompt_mgr.has_active_animations() which includes
             // both async widgets AND spinner/prompt animations.
             let has_active_animations = agent_state.is_loading
+                || comp_mgr.loading
                 || (comp_mgr.visible
                     && comp_mgr
                         .suggestions
@@ -1985,7 +2014,7 @@ pub async fn run_ftui_repl(
                         text_buf.delete_selection();
                     }
                     text_buf.insert_str(&pasted_text);
-                    comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                    comp_mgr.update_from_buffer(&text_buf, false);
                     redraw = true;
                     continue;
                 }
@@ -2298,7 +2327,7 @@ pub async fn run_ftui_repl(
                                     );
                                 } else {
                                     text_buf.move_right();
-                                    comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                                    comp_mgr.update_from_buffer(&text_buf, false);
                                 }
                                 redraw = true;
                                 continue;
@@ -2308,7 +2337,7 @@ pub async fn run_ftui_repl(
                                     comp_mgr.select_left();
                                 } else {
                                     text_buf.move_left();
-                                    comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                                    comp_mgr.update_from_buffer(&text_buf, false);
                                 }
                                 redraw = true;
                                 continue;
@@ -2476,11 +2505,7 @@ pub async fn run_ftui_repl(
                                             && (text_buf.text() != prev_text
                                                 || text_buf.cursor() != prev_cursor)
                                         {
-                                            comp_mgr.update(
-                                                &text_buf.text(),
-                                                text_buf.cursor(),
-                                                false,
-                                            );
+                                            comp_mgr.update_from_buffer(&text_buf, false);
                                         }
                                         redraw = true;
                                         continue;
@@ -2517,11 +2542,7 @@ pub async fn run_ftui_repl(
                                         } else {
                                             text_buf.insert_str(&m);
                                             if comp_mgr.session_active {
-                                                comp_mgr.update(
-                                                    &text_buf.text(),
-                                                    text_buf.cursor(),
-                                                    false,
-                                                );
+                                                comp_mgr.update_from_buffer(&text_buf, false);
                                             }
                                             redraw = true;
                                             continue;
@@ -2803,13 +2824,13 @@ pub async fn run_ftui_repl(
                                     text_buf.delete_left();
                                 }
                             }
-                            comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                            comp_mgr.update_from_buffer(&text_buf, false);
                             redraw = true;
                         }
                         Key::Delete => {
                             history_index = None;
                             text_buf.delete_right();
-                            comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                            comp_mgr.update_from_buffer(&text_buf, false);
                             redraw = true;
                         }
                         Key::Escape => {
@@ -2879,7 +2900,7 @@ pub async fn run_ftui_repl(
                         Key::Character('w') if key.modifiers.contains(Modifiers::CONTROL) => {
                             history_index = None;
                             text_buf.delete_word_left();
-                            comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                            comp_mgr.update_from_buffer(&text_buf, false);
                             redraw = true;
                         }
                         Key::Character('c') if key.modifiers.contains(Modifiers::ALT) => {
@@ -3102,7 +3123,7 @@ pub async fn run_ftui_repl(
                             // Bug 1.3: Ctrl+D on non-empty buffer = delete_right (forward delete)
                             history_index = None;
                             text_buf.delete_right();
-                            comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                            comp_mgr.update_from_buffer(&text_buf, false);
                             redraw = true;
                         }
                         Key::Character('c') if key.modifiers.contains(Modifiers::CONTROL) => {
@@ -3122,60 +3143,13 @@ pub async fn run_ftui_repl(
                         Key::Tab => {
                             history_index = None;
                             if !comp_mgr.visible {
-                                // I2: First Tab — fetch suggestions
-                                comp_mgr.update(&text_buf.text(), text_buf.cursor(), true);
-                                if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
-                                    // If exactly one suggestion, accept it
-                                    if comp_mgr.suggestions.len() == 1 {
-                                        if let Some(s) = comp_mgr.suggestions.first() {
-                                            // Bug 1.1: Use Suggestion span
-                                            let line = text_buf.text();
-                                            apply_completion(&mut text_buf, &line, s);
-                                        }
-                                        comp_mgr.refresh_after_completion(
-                                            &text_buf.text(),
-                                            text_buf.cursor(),
-                                        );
-                                    } else if !comp_mgr.prefix_accepted {
-                                        // Multiple suggestions — try longest common prefix
-                                        if let Some(prefix) = comp_mgr.longest_common_prefix() {
-                                            let cursor = text_buf.cursor();
-                                            let chars = text_buf.chars();
-                                            let last_word_start = chars[..cursor]
-                                                .iter()
-                                                .rposition(|&c| {
-                                                    c.is_whitespace()
-                                                        || c == '|'
-                                                        || c == '>'
-                                                        || c == '<'
-                                                })
-                                                .map(|idx| idx + 1)
-                                                .unwrap_or(0);
-                                            let current_word: String =
-                                                chars[last_word_start..cursor].iter().collect();
-                                            if prefix.len() > current_word.len() {
-                                                // Fill in the common prefix
-                                                let extra = &prefix[current_word.len()..];
-                                                for c in extra.chars() {
-                                                    text_buf.insert_char(c);
-                                                }
-                                                append_slash_if_dir(&mut text_buf, &prefix);
-                                                comp_mgr.prefix_accepted = true;
-                                                // Keep completions visible for next Tab
-                                            } else {
-                                                // No extension — just show popup
-                                                comp_mgr.prefix_accepted = true;
-                                            }
-                                        } else {
-                                            // No common prefix, just show popup
-                                            comp_mgr.prefix_accepted = true;
-                                        }
-                                    } else {
-                                        // Prefix already accepted, now cycle
-                                        comp_mgr.select_next();
-                                    }
+                                comp_mgr.update_from_buffer(&text_buf, true);
+                                if comp_mgr.loading {
+                                    pending_completion_tab = Some(comp_mgr.generation());
+                                } else {
+                                    accept_first_tab_completion(&mut comp_mgr, &mut text_buf);
                                 }
-                            } else {
+                            } else if !comp_mgr.loading {
                                 // Already visible — cycle through
                                 comp_mgr.select_next();
                             }
@@ -3193,7 +3167,7 @@ pub async fn run_ftui_repl(
                                 try_inline_alias_expansion(&mut text_buf, &env, &alias_state);
                             }
                             text_buf.insert_char(c);
-                            comp_mgr.update(&text_buf.text(), text_buf.cursor(), false);
+                            comp_mgr.update_from_buffer(&text_buf, false);
                             redraw = true;
                         }
                         _ => {}
@@ -3293,8 +3267,11 @@ pub async fn run_ftui_repl(
                     limit_row,
                 );
                 let _ = queue_clear_status_rows(&mut stdout, limit_row, terminal_height);
-                next_prompt_origin_y =
-                    Some(origin_y.saturating_add(committed_rows).min(limit_row.saturating_sub(1)));
+                next_prompt_origin_y = Some(
+                    origin_y
+                        .saturating_add(committed_rows)
+                        .min(limit_row.saturating_sub(1)),
+                );
             }
             let _ = stdout.flush();
             status_bar.end_command_timer();
@@ -3488,7 +3465,11 @@ pub async fn run_ftui_repl(
                     let mut stdout = std::io::stdout();
                     let _ = fshell_terminal::ansi::print(&mut stdout, "\r\n");
                     let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
-                    Some(cursor_y.saturating_add(1).min(terminal_height.saturating_sub(1)))
+                    Some(
+                        cursor_y
+                            .saturating_add(1)
+                            .min(terminal_height.saturating_sub(1)),
+                    )
                 } else {
                     Some(cursor_y)
                 }
@@ -3849,6 +3830,43 @@ fn accept_completion_legacy(
 ) {
     text_buf.insert_str(value);
     append_completion_tail(text_buf, value, append_whitespace);
+}
+
+fn accept_first_tab_completion(
+    comp_mgr: &mut CompletionsManager,
+    text_buf: &mut buffer::TextBuffer,
+) {
+    if !comp_mgr.visible || comp_mgr.suggestions.is_empty() {
+        return;
+    }
+
+    if comp_mgr.suggestions.len() == 1 {
+        if let Some(suggestion) = comp_mgr.suggestions.first() {
+            let line = text_buf.text();
+            apply_completion(text_buf, &line, suggestion);
+        }
+        comp_mgr.refresh_after_completion(&text_buf.text(), text_buf.cursor());
+    } else if !comp_mgr.prefix_accepted {
+        if let Some(prefix) = comp_mgr.longest_common_prefix() {
+            let cursor = text_buf.cursor();
+            let chars = text_buf.chars();
+            let last_word_start = chars[..cursor]
+                .iter()
+                .rposition(|&c| c.is_whitespace() || c == '|' || c == '>' || c == '<')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            let current_word: String = chars[last_word_start..cursor].iter().collect();
+            if prefix.len() > current_word.len() {
+                for c in prefix[current_word.len()..].chars() {
+                    text_buf.insert_char(c);
+                }
+                append_slash_if_dir(text_buf, &prefix);
+            }
+        }
+        comp_mgr.prefix_accepted = true;
+    } else {
+        comp_mgr.select_next();
+    }
 }
 
 pub(crate) fn append_slash_if_dir(text_buf: &mut buffer::TextBuffer, value: &str) {

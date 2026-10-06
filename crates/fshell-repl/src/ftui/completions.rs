@@ -14,6 +14,7 @@ use ratatui::style::{Color, Modifier as StyleModifier, Style};
 use ratatui::text::{Line, Span};
 use std::ops::Range;
 use std::sync::Arc;
+use tokio::sync::{mpsc, watch};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Truncate a string to a maximum display width, appending "…" if truncated.
@@ -442,8 +443,139 @@ pub fn categorize(s: &CompletionCandidate) -> CompletionCategory {
     CompletionCategory::from(s.kind)
 }
 
+#[derive(Clone)]
+struct CompletionRequest {
+    generation: u64,
+    line: String,
+    cursor_pos: usize,
+    force_visible: bool,
+}
+
+struct CompletionResponse {
+    request: CompletionRequest,
+    suggestions: Vec<CompletionCandidate>,
+}
+
+fn spawn_completion_worker(
+    env: Env,
+) -> Option<(
+    watch::Sender<Option<CompletionRequest>>,
+    mpsc::UnboundedReceiver<CompletionResponse>,
+)> {
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    let (request_tx, mut request_rx) = watch::channel::<Option<CompletionRequest>>(None);
+    let (result_tx, result_rx) = mpsc::unbounded_channel();
+
+    runtime.spawn(async move {
+        loop {
+            if request_rx.changed().await.is_err() {
+                break;
+            }
+            let Some(mut request) = request_rx.borrow_and_update().clone() else {
+                continue;
+            };
+
+            loop {
+                let worker_env = env.clone();
+                let worker_request = request.clone();
+                let task = tokio::task::spawn_blocking(move || {
+                    compute_completion_candidates(&worker_env, &worker_request)
+                });
+                let suggestions = task.await.unwrap_or_default();
+
+                match request_rx.borrow_and_update().clone() {
+                    Some(latest) if latest.generation != request.generation => {
+                        request = latest;
+                    }
+                    Some(_) => {
+                        let _ = result_tx.send(CompletionResponse {
+                            request,
+                            suggestions,
+                        });
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    });
+
+    Some((request_tx, result_rx))
+}
+
+fn compute_completion_candidates(
+    env: &Env,
+    request: &CompletionRequest,
+) -> Vec<CompletionCandidate> {
+    if request.line.trim().is_empty() {
+        if !request.force_visible {
+            return Vec::new();
+        }
+
+        let builtins = env.get_all_builtins();
+        let mut raw: Vec<CompletionCandidate> = builtins
+            .into_iter()
+            .map(|builtin| {
+                let desc = crate::autocomplete::command_description(&builtin)
+                    .unwrap_or("Built-in command");
+                CompletionCandidate::new(builtin, CompletionKind::Builtin, TextSpan::new(0, 0))
+                    .with_description(desc)
+            })
+            .collect();
+
+        for (command, desc) in crate::autocomplete::COMMON_EXTERNAL_COMMANDS {
+            if !raw.iter().any(|candidate| candidate.value == *command) {
+                raw.push(
+                    CompletionCandidate::new(
+                        *command,
+                        CompletionKind::ExternalCommand,
+                        TextSpan::new(0, 0),
+                    )
+                    .with_description(*desc),
+                );
+            }
+        }
+
+        if let Ok(entries) = crate::history::query_frequent_by_prefix("", 10) {
+            for (command, frequency) in &entries {
+                if !raw.iter().any(|candidate| candidate.value == *command) {
+                    raw.push(
+                        CompletionCandidate::new(
+                            command.clone(),
+                            CompletionKind::Custom("history"),
+                            TextSpan::new(0, 0),
+                        )
+                        .with_description(format!(
+                            "History ({} use{})",
+                            frequency,
+                            if *frequency == 1 { "" } else { "s" }
+                        )),
+                    );
+                }
+            }
+        }
+
+        raw.sort_by_key(|candidate| candidate.value.to_lowercase());
+        raw.truncate(50);
+        return raw;
+    }
+
+    let mut completer = FshellCompleter { env: env.clone() };
+    let cursor_byte = request
+        .line
+        .char_indices()
+        .nth(request.cursor_pos)
+        .map(|(index, _)| index)
+        .unwrap_or(request.line.len());
+    completer.complete(&request.line, cursor_byte)
+}
+
 pub struct CompletionsManager {
     completer: FshellCompleter,
+    completion_request_tx: Option<watch::Sender<Option<CompletionRequest>>>,
+    completion_result_rx: Option<mpsc::UnboundedReceiver<CompletionResponse>>,
+    generation: u64,
+    pub loading: bool,
     pub session: Option<CompletionSession>,
     /// Full unfiltered suggestion list from the completer (never mutated by filter)
     pub all_suggestions: Vec<CompletionCandidate>,
@@ -466,9 +598,26 @@ pub struct CompletionsManager {
 }
 
 impl CompletionsManager {
+    /// Create a synchronous manager for direct callers and tests.
     pub fn new(env: Env) -> Self {
+        Self::new_internal(env, false)
+    }
+
+    /// Create a manager that computes completion results off the input loop.
+    pub fn new_async(env: Env) -> Self {
+        Self::new_internal(env, true)
+    }
+
+    fn new_internal(env: Env, background: bool) -> Self {
+        let worker = background
+            .then(|| spawn_completion_worker(env.clone()))
+            .flatten();
         Self {
             completer: FshellCompleter { env },
+            completion_request_tx: worker.as_ref().map(|(tx, _)| tx.clone()),
+            completion_result_rx: worker.map(|(_, rx)| rx),
+            generation: 0,
+            loading: false,
             session: None,
             all_suggestions: Vec::new(),
             suggestions: Vec::new(),
@@ -491,94 +640,106 @@ impl CompletionsManager {
     }
 
     pub fn update(&mut self, line: &str, cursor_pos: usize, force_visible: bool) {
+        if !force_visible && !self.session_active {
+            return;
+        }
+        self.update_owned(line.to_string(), cursor_pos, force_visible);
+    }
+
+    pub fn update_from_buffer(
+        &mut self,
+        text_buf: &crate::ftui::buffer::TextBuffer,
+        force_visible: bool,
+    ) {
+        if !force_visible && !self.session_active {
+            return;
+        }
+        self.update_owned(text_buf.text(), text_buf.cursor(), force_visible);
+    }
+
+    fn update_owned(&mut self, line: String, cursor_pos: usize, force_visible: bool) {
         if force_visible {
             self.session_active = true;
         }
 
-        // Skip full completer when completions session is not active and not explicitly requested
-        if !force_visible && !self.session_active {
+        if line.trim().is_empty() && !force_visible {
+            self.clear();
             return;
         }
 
-        if line.trim().is_empty() {
-            if force_visible {
-                // Tab on empty line — show curated command list
-                let builtins = self.completer.env.get_all_builtins();
-                let mut raw: Vec<CompletionCandidate> = builtins
-                    .into_iter()
-                    .map(|b| {
-                        let desc = crate::autocomplete::command_description(&b)
-                            .unwrap_or("Built-in command");
-                        CompletionCandidate::new(b, CompletionKind::Builtin, TextSpan::new(0, 0))
-                            .with_description(desc)
-                    })
-                    .collect();
+        self.generation = self.generation.wrapping_add(1);
+        let request = CompletionRequest {
+            generation: self.generation,
+            line,
+            cursor_pos,
+            force_visible,
+        };
 
-                for (cmd, desc) in crate::autocomplete::COMMON_EXTERNAL_COMMANDS {
-                    if !raw.iter().any(|s| s.value == *cmd) {
-                        raw.push(
-                            CompletionCandidate::new(
-                                cmd.to_string(),
-                                CompletionKind::ExternalCommand,
-                                TextSpan::new(0, 0),
-                            )
-                            .with_description(*desc),
-                        );
-                    }
-                }
+        if let Some(request_tx) = &self.completion_request_tx {
+            request_tx.send_replace(Some(request));
+            self.loading = true;
+            self.visible = true;
+            self.all_suggestions.clear();
+            self.suggestions.clear();
+            self.session = None;
+            self.selected_idx = 0;
+            self.scroll_offset = 0;
+        } else {
+            let suggestions = compute_completion_candidates(&self.completer.env, &request);
+            self.apply_result(&request, suggestions);
+        }
+    }
 
-                if let Ok(entries) = crate::history::query_frequent_by_prefix("", 10) {
-                    for (cmd, freq) in &entries {
-                        if !raw.iter().any(|s| s.value == *cmd) {
-                            raw.push(
-                                CompletionCandidate::new(
-                                    cmd.clone(),
-                                    CompletionKind::Custom("history"),
-                                    TextSpan::new(0, 0),
-                                )
-                                .with_description(format!(
-                                    "History ({} use{})",
-                                    freq,
-                                    if *freq == 1 { "" } else { "s" }
-                                )),
-                            );
-                        }
-                    }
-                }
-
-                raw.sort_by_key(|a| a.value.to_lowercase());
-                raw.truncate(50);
-
-                self.layout_kind = CompletionLayoutKind::List;
-                self.all_suggestions = raw;
-                let partial = extract_partial_word(line, cursor_pos);
-                self.filter(partial);
-                self.selected_idx = 0;
-                self.scroll_offset = 0;
-                self.visible = !self.suggestions.is_empty();
-                self.session_active = self.visible;
-            } else {
-                self.clear();
+    /// Apply any completed background request. Stale results are ignored so an
+    /// older, slower directory scan can never replace suggestions for newer text.
+    pub fn apply_pending_results(&mut self) -> bool {
+        let responses = {
+            let Some(result_rx) = self.completion_result_rx.as_mut() else {
+                return false;
+            };
+            let mut responses = Vec::new();
+            while let Ok(response) = result_rx.try_recv() {
+                responses.push(response);
             }
+            responses
+        };
+
+        let mut changed = false;
+        for response in responses {
+            if response.request.generation != self.generation {
+                continue;
+            }
+            self.loading = false;
+            self.apply_result(&response.request, response.suggestions);
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn apply_result(&mut self, request: &CompletionRequest, suggestions: Vec<CompletionCandidate>) {
+        self.loading = false;
+        self.all_suggestions = suggestions;
+
+        if request.line.trim().is_empty() && request.force_visible {
+            self.layout_kind = CompletionLayoutKind::List;
+            self.filter(extract_partial_word(&request.line, request.cursor_pos));
+            self.selected_idx = 0;
+            self.scroll_offset = 0;
+            self.visible = !self.suggestions.is_empty();
+            self.session_active = self.visible;
             return;
         }
-
-        let cursor_byte = line
-            .char_indices()
-            .nth(cursor_pos)
-            .map(|(i, _)| i)
-            .unwrap_or(line.len());
-
-        // Call our FshellCompleter backend
-        let raw_suggestions = self.completer.complete(line, cursor_byte);
-        self.all_suggestions = raw_suggestions;
 
         // Context-driven layout: establish layout mode upon session opening, and keep stable
         if !self.session_active || self.session.is_none() {
             let is_fs = !self.all_suggestions.is_empty()
-                && self.all_suggestions.iter().all(|s| {
+                && self.all_suggestions.iter().all(|suggestion| {
                     matches!(
-                        categorize(s),
+                        categorize(suggestion),
                         CompletionCategory::Directory | CompletionCategory::File
                     )
                 });
@@ -589,10 +750,8 @@ impl CompletionsManager {
             };
         }
 
-        // Apply fuzzy filter against the current partial word
-        let partial = extract_partial_word(line, cursor_pos);
+        let partial = extract_partial_word(&request.line, request.cursor_pos);
         self.filter(partial);
-
         if self.suggestions.is_empty() {
             self.visible = false;
             self.selected_idx = 0;
@@ -818,6 +977,11 @@ impl CompletionsManager {
     }
 
     pub fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(request_tx) = &self.completion_request_tx {
+            request_tx.send_replace(None);
+        }
+        self.loading = false;
         self.suggestions.clear();
         self.all_suggestions.clear();
         self.session = None;
@@ -1520,6 +1684,56 @@ mod tests {
         mgr.update("echo è à é", 10, false);
         let partial2 = extract_partial_word("echo è à é", 10);
         assert_eq!(partial2, "é");
+    }
+
+    #[tokio::test]
+    async fn background_completion_processes_providers_and_discards_stale_input() {
+        let env = fshell_engine::Env::new();
+        env.vars.write().insert(
+            "choices".to_string(),
+            fshell_core::Val::List(vec![fshell_core::Val::String("alpha".to_string())]),
+        );
+        let mut completion = fshell_core::CommandCompletion::default();
+        completion
+            .dynamic_providers
+            .push(fshell_core::DynamicProvider {
+                parent_subcmds: Vec::new(),
+                command: "($choices)".to_string(),
+                cache_ms: None,
+            });
+        env.completions
+            .write()
+            .insert("testcmd".to_string(), completion);
+        let direct = crate::autocomplete::get_custom_completions("testcmd a", 9, &env);
+        assert!(direct.is_some(), "dynamic completion setup should resolve");
+
+        let mut manager = CompletionsManager::new_async(env);
+        manager.update("testcmd a", 9, true);
+        let stale_generation = manager.generation();
+        manager.update("testcmd al", 10, false);
+        assert_ne!(manager.generation(), stale_generation);
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while manager.loading {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                manager.apply_pending_results();
+            }
+        })
+        .await;
+        assert!(completed.is_ok(), "completion worker did not return");
+        assert_eq!(manager.filter_query(), "al");
+        assert!(
+            manager
+                .suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "alpha"),
+            "dynamic provider result was missing: {:?}",
+            manager
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

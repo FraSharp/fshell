@@ -195,42 +195,65 @@ pub fn git_branch_context(words: &[&str]) -> bool {
     )
 }
 
-fn evaluate_fsh_completions_sync(expr_str: &str, env: &fshell_engine::Env) -> Vec<String> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| {
-            handle.block_on(async {
-                let mut parser = fshell_core::Parser::new(expr_str);
-                if let Ok(stmts) = parser.parse_statements() {
-                    let mut last_results = Vec::new();
-                    for stmt in stmts {
-                        if let Stmt::Expr(expr) = stmt {
-                            if let Ok(res) = fshell_engine::eval_expr(&expr, env).await {
-                                match res {
-                                    Val::List(list) => {
-                                        last_results =
-                                            list.into_iter().map(|v| v.to_text()).collect();
-                                    }
-                                    Val::String(s) => {
-                                        last_results =
-                                            s.split_whitespace().map(|s| s.to_string()).collect();
-                                    }
-                                    other => {
-                                        last_results = vec![other.to_text()];
-                                    }
-                                }
-                            }
-                        } else {
-                            let _ = fshell_engine::eval_stmt(&stmt, env, false).await;
-                        }
+static COMPLETION_EVAL_RUNTIME: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
+
+async fn evaluate_fsh_completions(expr_str: &str, env: &fshell_engine::Env) -> Vec<String> {
+    let mut parser = fshell_core::Parser::new(expr_str);
+    let Ok(stmts) = parser.parse_statements() else {
+        return Vec::new();
+    };
+
+    let mut last_results = Vec::new();
+    for stmt in stmts {
+        // Parser output wraps top-level statements in `Spanned`; inspect the inner node so
+        // expression-valued providers return values instead of falling through to `eval_stmt`.
+        if let Stmt::Expr(expr) = stmt.unpack() {
+            if let Ok(result) = fshell_engine::eval_expr(expr, env).await {
+                match result {
+                    Val::List(list) => {
+                        last_results = list.into_iter().map(|value| value.to_text()).collect();
                     }
-                    last_results
-                } else {
-                    vec![]
+                    Val::String(value) => {
+                        last_results = value.split_whitespace().map(str::to_string).collect();
+                    }
+                    other => last_results = vec![other.to_text()],
                 }
-            })
-        })
-    } else {
-        vec![]
+            }
+        } else {
+            let _ = fshell_engine::eval_stmt(&stmt, env, false).await;
+        }
+    }
+    last_results
+}
+
+fn evaluate_fsh_completions_with_runtime(expr_str: &str, env: &fshell_engine::Env) -> Vec<String> {
+    let mut runtime_guard = COMPLETION_EVAL_RUNTIME.lock();
+    if runtime_guard.is_none() {
+        *runtime_guard = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok();
+    }
+    runtime_guard
+        .as_mut()
+        .map(|runtime| runtime.block_on(evaluate_fsh_completions(expr_str, env)))
+        .unwrap_or_default()
+}
+
+fn evaluate_fsh_completions_sync(expr_str: &str, env: &fshell_engine::Env) -> Vec<String> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(evaluate_fsh_completions(expr_str, env)))
+        }
+        // Current-thread runtimes cannot be blocked reentrantly. Run the synchronous API's
+        // provider evaluation on a dedicated thread using the shared isolated runtime.
+        Ok(_) => std::thread::scope(|scope| {
+            scope
+                .spawn(|| evaluate_fsh_completions_with_runtime(expr_str, env))
+                .join()
+                .unwrap_or_default()
+        }),
+        Err(_) => evaluate_fsh_completions_with_runtime(expr_str, env),
     }
 }
 
@@ -258,7 +281,6 @@ pub fn get_registry_completions(
     pos: usize,
     env: &fshell_engine::Env,
 ) -> Option<Vec<CompletionCandidate>> {
-    let completions_guard = env.completions.read();
     let pos = crate::text::floor_char_boundary(line, pos);
     let prefix = &line[..pos];
     let words: Vec<&str> = prefix.split_whitespace().collect();
@@ -266,7 +288,7 @@ pub fn get_registry_completions(
         return None;
     }
     let cmd = words[0];
-    let comp = completions_guard.get(cmd)?;
+    let comp = env.completions.read().get(cmd)?.clone();
 
     let last_word = if prefix.ends_with(' ') {
         ""
@@ -1011,6 +1033,19 @@ fn brew_installed() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dynamic_completion_expression_eval() {
+        let env = fshell_engine::Env::new();
+        env.vars.write().insert(
+            "choices".to_string(),
+            Val::List(vec![Val::String("alpha".to_string())]),
+        );
+        assert_eq!(
+            evaluate_fsh_completions_with_runtime("$choices", &env),
+            vec!["alpha".to_string()]
+        );
+    }
 
     #[test]
     fn test_git_branch_context() {
