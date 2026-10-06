@@ -3,10 +3,12 @@
 
 //! Fish-like autosuggestion engine.
 //!
-//! Searches three sources in priority order:
+//! Searches lightweight local sources in priority order:
 //! 1. **History** — finds the most recent command line that starts with the current input.
-//! 2. **Path** — if the current token looks like a file path, suggests directory entries.
-//! 3. **Argument prediction** — if we know the command, suggest flags/args from history.
+//! 2. **Path** — uses a background-refreshed directory snapshot for file-path hints.
+//!
+//! Dynamic command providers are reserved for explicit completion sessions so they do not
+//! execute on every prompt redraw.
 
 use fshell_engine::Env;
 use nu_ansi_term::{Color, Style};
@@ -21,7 +23,7 @@ pub struct FshellHinter {
     env: Option<Env>,
 }
 
-type DirCache = (String, std::time::Instant, Vec<(String, bool)>);
+type DirCache = (String, std::time::Instant, Arc<Vec<(String, bool)>>);
 
 impl Default for FshellHinter {
     fn default() -> Self {
@@ -111,7 +113,7 @@ impl FshellHinter {
         };
 
         let dir_str = dir_to_read.to_string_lossy().to_string();
-        let mut cached_entries = Vec::new();
+        let mut cached_entries = None;
         let mut needs_refresh = false;
 
         if let Ok(cache) = self.path_cache.lock() {
@@ -119,7 +121,7 @@ impl FshellHinter {
                 if cached_dir == &dir_str
                     && timestamp.elapsed().as_millis() < Self::PATH_CACHE_TTL_MS as u128
                 {
-                    cached_entries = entries.clone();
+                    cached_entries = Some(Arc::clone(entries));
                 } else {
                     needs_refresh = true;
                 }
@@ -150,26 +152,28 @@ impl FshellHinter {
                     }
                 }
                 if let Ok(mut cache) = path_cache_clone.lock() {
-                    *cache = Some((dir_str_clone, std::time::Instant::now(), entries));
+                    *cache = Some((dir_str_clone, std::time::Instant::now(), Arc::new(entries)));
                 }
                 path_updating_clone.store(false, std::sync::atomic::Ordering::SeqCst);
             });
         }
 
-        for (name, is_dir) in &cached_entries {
-            if name.starts_with(&file_prefix) && name.len() > file_prefix.len() {
-                let mut full = format!("{}{}", prefix, name);
-                if *is_dir {
-                    full.push('/');
-                }
-                if let Some(ref current) = best_hint {
-                    if full.len() < current.len()
-                        || (full.len() == current.len() && full < *current)
-                    {
+        if let Some(cached_entries) = &cached_entries {
+            for (name, is_dir) in cached_entries.iter() {
+                if name.starts_with(&file_prefix) && name.len() > file_prefix.len() {
+                    let mut full = format!("{}{}", prefix, name);
+                    if *is_dir {
+                        full.push('/');
+                    }
+                    if let Some(ref current) = best_hint {
+                        if full.len() < current.len()
+                            || (full.len() == current.len() && full < *current)
+                        {
+                            best_hint = Some(full);
+                        }
+                    } else {
                         best_hint = Some(full);
                     }
-                } else {
-                    best_hint = Some(full);
                 }
             }
         }
@@ -208,13 +212,10 @@ impl FshellHinter {
             self.current_hint.clear();
             return String::new();
         }
-        let hint = if let Some(h) = self.history_hint(line) {
-            h
-        } else if let Some(h) = self.completion_hint(line) {
-            h
-        } else {
-            self.path_hint(line).unwrap_or_default()
-        };
+        let hint = self
+            .history_hint(line)
+            .or_else(|| self.path_hint(line))
+            .unwrap_or_default();
         self.current_hint = hint.clone();
         if hint.is_empty() {
             return String::new();
@@ -285,7 +286,8 @@ mod tests {
 
         let mut h = FshellHinter::default().with_env(env);
         let result = h.handle("mycmd -", 7, false);
-        assert!(!result.is_empty());
+        assert!(result.is_empty());
+        assert!(!h.completion_hint("mycmd -").unwrap_or_default().is_empty());
     }
 
     #[test]
