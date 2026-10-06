@@ -36,10 +36,10 @@ pub const CLEAR_CURRENT_LINE: &str = "\x1b[2K";
 /// Clear from the cursor to the end of the line (EL 0).
 pub const CLEAR_UNTIL_NEW_LINE: &str = "\x1b[K";
 
-/// Enable mouse capture: all tracking modes (1000, 1002, 1003, 1015, 1006).
-pub const ENABLE_MOUSE_CAPTURE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
+/// Enable mouse capture: button and drag tracking modes (1000, 1002, 1015, 1006).
+pub const ENABLE_MOUSE_CAPTURE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h";
 /// Disable mouse capture, in reverse order.
-pub const DISABLE_MOUSE_CAPTURE: &str = "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+pub const DISABLE_MOUSE_CAPTURE: &str = "\x1b[?1006l\x1b[?1015l\x1b[?1002l\x1b[?1000l";
 
 /// Enable focus-change reporting (DECSET 1004).
 pub const ENABLE_FOCUS_CHANGE: &str = "\x1b[?1004h";
@@ -198,11 +198,11 @@ mod tests {
         assert_eq!(CLEAR_UNTIL_NEW_LINE.as_bytes(), b"\x1b[K");
         assert_eq!(
             ENABLE_MOUSE_CAPTURE.as_bytes(),
-            b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h"
+            b"\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h"
         );
         assert_eq!(
             DISABLE_MOUSE_CAPTURE.as_bytes(),
-            b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+            b"\x1b[?1006l\x1b[?1015l\x1b[?1002l\x1b[?1000l"
         );
         assert_eq!(ENABLE_FOCUS_CHANGE.as_bytes(), b"\x1b[?1004h");
         assert_eq!(DISABLE_FOCUS_CHANGE.as_bytes(), b"\x1b[?1004l");
