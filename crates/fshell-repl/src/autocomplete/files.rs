@@ -5,8 +5,26 @@
 
 use super::types::{CompletionCandidate, CompletionKind, TextSpan};
 use crate::fuzzy;
-use fshell_core::Val;
+use fshell_core::{FxIndexMap, Val};
 use fshell_engine::Env;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+const DIRECTORY_SNAPSHOT_TTL: Duration = Duration::from_millis(400);
+const MAX_CACHED_DIRECTORIES: usize = 64;
+const MAX_DIRECTORY_ENTRIES: usize = 2000;
+
+type DirectoryEntries = Arc<Vec<(String, bool)>>;
+
+struct DirectorySnapshot {
+    loaded_at: Instant,
+    entries: DirectoryEntries,
+}
+
+// Completion runs on the REPL's blocking worker. Reuse bounded directory snapshots across
+// adjacent keystrokes so a live completion session does not rescan its directory per key.
+static DIRECTORY_SNAPSHOTS: LazyLock<Mutex<FxIndexMap<std::path::PathBuf, DirectorySnapshot>>> =
+    LazyLock::new(|| Mutex::new(FxIndexMap::default()));
 
 /// Expand `$VAR` and `${VAR}` patterns using environment variables.
 pub fn expand_env_vars(s: &str) -> String {
@@ -153,32 +171,22 @@ pub fn complete_files_at(
     };
 
     let perform_read = move || {
-        let mut entries: Vec<(String, bool)> = Vec::new();
-        if let Ok(dir_entries) = std::fs::read_dir(&dir_to_read) {
-            for entry in dir_entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                entries.push((name, is_dir));
-                if entries.len() >= 2000 {
-                    break;
-                }
-            }
-        }
-
+        let entries = directory_snapshot(&dir_to_read);
         if entries.is_empty() {
             return Vec::new();
         }
 
         let kind = fuzzy::choose_kind(entries.len());
         let prepared = fuzzy::PreparedQuery::new(&file_prefix);
-        let mut scored: Vec<(isize, String, bool)> = entries
-            .into_iter()
+        let mut scored: Vec<(isize, &str, bool)> = entries
+            .iter()
             .filter_map(|(name, is_dir)| {
-                fuzzy::fuzzy_score_prepared(&prepared, &name, kind).map(|s| (s, name, is_dir))
+                fuzzy::fuzzy_score_prepared(&prepared, name, kind)
+                    .map(|score| (score, name.as_str(), *is_dir))
             })
             .collect();
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
         scored.truncate(fuzzy::MAX_RESULTS);
 
         let user_prefix = match unquoted_owned.rfind('/') {
@@ -210,7 +218,11 @@ pub fn complete_files_at(
                     path_str
                 };
 
-                let desc = file_completion_description(&dir_to_read, &name, is_dir);
+                let desc = if is_dir {
+                    Some("Directory".to_string())
+                } else {
+                    file_completion_description(&dir_to_read, name, false)
+                };
                 let item_kind = if is_dir {
                     CompletionKind::Directory
                 } else {
@@ -231,6 +243,53 @@ pub fn complete_files_at(
     };
 
     perform_read()
+}
+
+fn directory_snapshot(dir: &std::path::Path) -> DirectoryEntries {
+    let cache_key = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(dir))
+            .unwrap_or_else(|_| dir.to_path_buf())
+    };
+
+    if let Ok(cache) = DIRECTORY_SNAPSHOTS.lock()
+        && let Some(snapshot) = cache.get(&cache_key)
+        && snapshot.loaded_at.elapsed() < DIRECTORY_SNAPSHOT_TTL
+    {
+        return Arc::clone(&snapshot.entries);
+    }
+
+    let mut entries = Vec::new();
+    if let Ok(dir_entries) = std::fs::read_dir(dir) {
+        for entry in dir_entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false);
+            entries.push((name, is_dir));
+            if entries.len() >= MAX_DIRECTORY_ENTRIES {
+                break;
+            }
+        }
+    }
+    let entries = Arc::new(entries);
+
+    if let Ok(mut cache) = DIRECTORY_SNAPSHOTS.lock() {
+        if !cache.contains_key(&cache_key) && cache.len() >= MAX_CACHED_DIRECTORIES {
+            cache.shift_remove_index(0);
+        }
+        cache.insert(
+            cache_key,
+            DirectorySnapshot {
+                loaded_at: Instant::now(),
+                entries: Arc::clone(&entries),
+            },
+        );
+    }
+    entries
 }
 
 pub fn file_completion_description(
