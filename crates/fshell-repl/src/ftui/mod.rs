@@ -487,19 +487,21 @@ pub async fn run_ftui_repl(
                     if d > 0 {
                         scroll_d = d;
                         must_recreate = true;
-                        let mut stdout = std::io::stdout();
+                        let mut scroll_buf = Vec::with_capacity(32 + d as usize * 8);
                         let _ = fshell_terminal::ansi::move_to(
-                            &mut stdout,
+                            &mut scroll_buf,
                             0,
                             term_h.saturating_sub(1),
                         );
                         for _ in 0..d {
-                            let _ = fshell_terminal::ansi::print(&mut stdout, "\r\n");
-                            let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
+                            let _ = fshell_terminal::ansi::print(&mut scroll_buf, "\r\n");
+                            let _ = fshell_terminal::ansi::move_to_column(&mut scroll_buf, 0);
                         }
                         origin_y = origin_y.saturating_sub(d);
                         prompt_origin_y = Some(origin_y);
-                        let _ = fshell_terminal::ansi::move_to(&mut stdout, 0, origin_y);
+                        let _ = fshell_terminal::ansi::move_to(&mut scroll_buf, 0, origin_y);
+                        let mut stdout = std::io::stdout();
+                        let _ = std::io::Write::write_all(&mut stdout, &scroll_buf);
                         let _ = std::io::Write::flush(&mut stdout);
                     }
                 }
@@ -524,16 +526,18 @@ pub async fn run_ftui_repl(
                     let rows_to_erase = old_height
                         .max(needed_height)
                         .min(limit_row.saturating_sub(origin_y));
-                    let mut stdout = std::io::stdout();
+                    let mut erase_buf = Vec::with_capacity(rows_to_erase as usize * 16 + 16);
                     for row in 0..rows_to_erase {
-                        let _ = fshell_terminal::ansi::move_to(&mut stdout, 0, origin_y + row);
+                        let _ = fshell_terminal::ansi::move_to(&mut erase_buf, 0, origin_y + row);
                         let _ = fshell_terminal::ansi::print(
-                            &mut stdout,
+                            &mut erase_buf,
                             fshell_terminal::ansi::CLEAR_CURRENT_LINE,
                         );
                     }
                     // Place cursor at origin_y so ratatui's Inline(needed_height) binds to origin_y
-                    let _ = fshell_terminal::ansi::move_to(&mut stdout, 0, origin_y);
+                    let _ = fshell_terminal::ansi::move_to(&mut erase_buf, 0, origin_y);
+                    let mut stdout = std::io::stdout();
+                    let _ = std::io::Write::write_all(&mut stdout, &erase_buf);
                     let _ = std::io::Write::flush(&mut stdout);
 
                     let stdout = std::io::stdout();

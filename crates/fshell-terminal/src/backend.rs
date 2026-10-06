@@ -25,6 +25,7 @@ use fshell_tty::{ansi, raw};
 pub struct FshellBackend<W: Write> {
     writer: W,
     cursor_position: Option<Position>,
+    draw_buffer: Vec<u8>,
 }
 
 impl<W: Write> FshellBackend<W> {
@@ -33,6 +34,7 @@ impl<W: Write> FshellBackend<W> {
         Self {
             writer,
             cursor_position: None,
+            draw_buffer: Vec::new(),
         }
     }
 
@@ -44,6 +46,7 @@ impl<W: Write> FshellBackend<W> {
         Self {
             writer,
             cursor_position: Some(position),
+            draw_buffer: Vec::new(),
         }
     }
 }
@@ -65,6 +68,7 @@ impl<W: Write> Backend for FshellBackend<W> {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
+        self.draw_buffer.clear();
         let mut fg = Color::Reset;
         let mut bg = Color::Reset;
         let mut underline_color = Color::Reset;
@@ -73,29 +77,32 @@ impl<W: Write> Backend for FshellBackend<W> {
         for (x, y, cell) in content {
             // A cell directly right of the previous one needs no move.
             if !matches!(last, Some(previous) if x == previous.x + 1 && y == previous.y) {
-                ansi::move_to(&mut self.writer, x, y)?;
+                ansi::move_to(&mut self.draw_buffer, x, y)?;
             }
             last = Some(Position { x, y });
             if cell.modifier != modifier {
-                write_modifier_diff(&mut self.writer, modifier, cell.modifier)?;
+                write_modifier_diff(&mut self.draw_buffer, modifier, cell.modifier)?;
                 modifier = cell.modifier;
             }
             if cell.fg != fg || cell.bg != bg {
-                write_colors(&mut self.writer, cell.fg, cell.bg)?;
+                write_colors(&mut self.draw_buffer, cell.fg, cell.bg)?;
                 fg = cell.fg;
                 bg = cell.bg;
             }
             if cell.underline_color != underline_color {
-                write_underline_color(&mut self.writer, cell.underline_color)?;
+                write_underline_color(&mut self.draw_buffer, cell.underline_color)?;
                 underline_color = cell.underline_color;
             }
-            self.writer.write_all(cell.symbol().as_bytes())?;
+            self.draw_buffer.write_all(cell.symbol().as_bytes())?;
         }
         self.cursor_position = None;
         // Reset colors and attributes as four commands, the shape the
         // reference backend emits at the end of every diff.
-        self.writer.write_all(b"\x1b[39m\x1b[49m\x1b[59m")?;
-        write_sgr(&mut self.writer, 0)
+        self.draw_buffer.write_all(b"\x1b[39m\x1b[49m\x1b[59m")?;
+        write_sgr(&mut self.draw_buffer, 0)?;
+
+        self.writer.write_all(&self.draw_buffer)?;
+        self.writer.flush()
     }
 
     fn hide_cursor(&mut self) -> io::Result<()> {
