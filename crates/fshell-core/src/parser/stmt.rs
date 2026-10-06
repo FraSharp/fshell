@@ -1192,7 +1192,8 @@ impl Parser {
         }
     }
 
-    /// Parse a command name, allowing dots for extensions like .sh
+    /// Parse a bare command name, including punctuation commonly used in executable
+    /// names (for example `clang++`, `g++-14`, and `tool.sh`).
     pub(crate) fn parse_command_name(&mut self) -> Result<String, ParseError> {
         if matches!(self.peek(), Some('/') | Some('~') | Some('.')) {
             let path_expr = self.parse_bare_path_or_string()?;
@@ -1235,19 +1236,16 @@ impl Parser {
                 })?);
             }
             name.push_str(&self.parse_identifier()?);
-            // Allow dots in command names for extensions like .sh
-            while self.peek() == Some('.') {
-                name.push(self.next_char().ok_or_else(|| ParseError::UnexpectedEof {
-                    span: self.current_span(),
-                })?);
-                while let Some(c) = self.peek() {
-                    if c.is_alphanumeric() || c == '_' || c == '-' {
-                        name.push(self.next_char().ok_or_else(|| ParseError::UnexpectedEof {
-                            span: self.current_span(),
-                        })?);
-                    } else {
-                        break;
-                    }
+            // Keep punctuation that is valid within a shell word attached to the
+            // executable name. `+` matters for compiler commands such as `clang++`
+            // and `c++`; dot support preserves names like `tool.sh`.
+            while let Some(c) = self.peek() {
+                if c.is_alphanumeric() || matches!(c, '_' | '-' | '+' | '.') {
+                    name.push(self.next_char().ok_or_else(|| ParseError::UnexpectedEof {
+                        span: self.current_span(),
+                    })?);
+                } else {
+                    break;
                 }
             }
             Ok(name)

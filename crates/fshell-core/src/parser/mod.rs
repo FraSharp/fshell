@@ -2735,6 +2735,66 @@ mod tests {
     }
 
     #[test]
+    fn test_plus_signs_in_command_names_are_preserved() -> Result<(), String> {
+        for (input, expected_name, expected_args) in [
+            (
+                "clang++ -std=c++23 proof.cpp",
+                "clang++",
+                &["-std=c++23", "proof.cpp"][..],
+            ),
+            (
+                "c++ -x c++ proof.cpp",
+                "c++",
+                &["-x", "c++", "proof.cpp"][..],
+            ),
+        ] {
+            let stmts = Parser::new(input)
+                .parse_statements()
+                .map_err(|error| error.to_string())?;
+            let stmt = stmts
+                .first()
+                .ok_or_else(|| format!("expected a statement for `{input}`"))?
+                .unpack();
+            let expr = match stmt {
+                Stmt::Expr(expr) => expr.unpack(),
+                other => {
+                    return Err(format!(
+                        "expected command expression for `{input}`, got {other:?}"
+                    ));
+                }
+            };
+            let pipeline = match expr {
+                Expr::Pipeline(pipeline) => pipeline,
+                other => return Err(format!("expected pipeline for `{input}`, got {other:?}")),
+            };
+            let stage = pipeline
+                .stages
+                .first()
+                .ok_or_else(|| format!("expected a pipeline stage for `{input}`"))?;
+            let (name, args) = match stage {
+                PipelineStage::CommandCall { name, args, .. } => (name, args),
+                other => {
+                    return Err(format!(
+                        "expected command call for `{input}`, got {other:?}"
+                    ));
+                }
+            };
+
+            assert_eq!(name, expected_name, "command name for `{input}`");
+            let actual_args: Vec<String> = args
+                .iter()
+                .map(|arg| match arg.unpack() {
+                    Expr::String(parts) => StringPart::literal_text(parts)
+                        .ok_or_else(|| format!("non-literal argument: {arg:?}")),
+                    other => Err(format!("unexpected argument: {other:?}")),
+                })
+                .collect::<Result<_, _>>()?;
+            assert_eq!(actual_args, expected_args, "arguments for `{input}`");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_escaped_path_with_spaces_is_one_command_argument() {
         let input = r"ls /var/folders/nw/n7d16zv95_9fyvhl5n57v7hh0000gn/T/TemporaryItems/NSIRD_screencaptureui_K3f6Md/Screenshot\ 2026-09-20\ at\ 13.32.09.png";
         let stmts = Parser::new(input).parse_statements().unwrap();
