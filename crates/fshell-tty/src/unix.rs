@@ -233,6 +233,13 @@ impl EventReader for UnixSource {
                 .expect("descriptor opened above")
                 .wait_readable(wait)?;
             if !readable {
+                // A cursor-position query can read input while this source is
+                // waiting, then return those bytes through the shared inbox.
+                // Replay them on the next wait quantum; otherwise they remain
+                // stranded here until an unrelated key makes the fd readable.
+                if self.recover() {
+                    return Ok(true);
+                }
                 // Quantum expired with no input: age out a lone ESC within
                 // ESC_TIMEOUT and surface a lone resize within the quantum.
                 if self.parser.is_lone_esc() && start.elapsed() >= ESC_TIMEOUT {
@@ -635,6 +642,23 @@ mod tests {
             expect_key(source.poll(Duration::from_secs(5))),
             (Key::Character('a'), Modifiers::empty())
         );
+    }
+
+    #[test]
+    fn recovered_bytes_arriving_while_waiting_need_no_new_key() {
+        let _guard = lock();
+        let pipe = Pipe::new().unwrap();
+        let mut source = source_on(&pipe);
+        let producer = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(20));
+            crate::inbox::push_bytes(b"e");
+        });
+
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(1))),
+            (Key::Character('e'), Modifiers::empty())
+        );
+        producer.join().unwrap();
     }
 
     #[test]
