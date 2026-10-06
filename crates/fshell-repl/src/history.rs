@@ -98,10 +98,116 @@ impl ManageConnection for SqliteConnManager {
     }
 }
 
-use fshell_core::lock::Mutex;
+use fshell_core::lock::{Mutex, RwLock};
 
 static DB_POOL: Mutex<Option<r2d2::Pool<SqliteConnManager>>> = Mutex::new(None);
 static RECENT_COMMANDS_CACHE: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+static HISTORY_MEM_CACHE: RwLock<Option<Vec<String>>> = RwLock::new(None);
+const HISTORY_MEM_CACHE_CAPACITY: usize = 5000;
+
+/// Ensure the in-memory history cache is populated from SQLite.
+pub fn ensure_history_mem_cache() {
+    {
+        let guard = HISTORY_MEM_CACHE.read();
+        if guard.is_some() {
+            return;
+        }
+    }
+    let mut guard = HISTORY_MEM_CACHE.write();
+    if guard.is_some() {
+        return;
+    }
+    let commands = load_recent_commands_from_db(HISTORY_MEM_CACHE_CAPACITY);
+    *guard = Some(commands);
+}
+
+fn load_recent_commands_from_db(limit: usize) -> Vec<String> {
+    with_db_conn(|conn| {
+        let mut stmt = conn
+            .prepare("SELECT command FROM history ORDER BY id DESC LIMIT ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut cmds = Vec::new();
+        for cmd in rows.flatten() {
+            let trimmed = cmd.trim();
+            if !trimmed.is_empty() && cmds.last().map(|s: &String| s.as_str()) != Some(trimmed) {
+                cmds.push(trimmed.to_string());
+            }
+        }
+        Ok(cmds)
+    })
+    .unwrap_or_default()
+}
+
+pub fn clear_history_mem_cache() {
+    let mut guard = HISTORY_MEM_CACHE.write();
+    *guard = None;
+}
+
+pub fn record_command_in_memory(command: &str) {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let mut guard = HISTORY_MEM_CACHE.write();
+    if let Some(ref mut cmds) = *guard {
+        if cmds.first().map(|s| s.as_str()) == Some(trimmed) {
+            return;
+        }
+        if let Some(pos) = cmds.iter().position(|c| c == trimmed) {
+            cmds.remove(pos);
+        }
+        cmds.insert(0, trimmed.to_string());
+        if cmds.len() > HISTORY_MEM_CACHE_CAPACITY {
+            cmds.truncate(HISTORY_MEM_CACHE_CAPACITY);
+        }
+    } else {
+        let mut cmds = load_recent_commands_from_db(HISTORY_MEM_CACHE_CAPACITY);
+        if cmds.first().map(|s| s.as_str()) != Some(trimmed) {
+            if let Some(pos) = cmds.iter().position(|c| c == trimmed) {
+                cmds.remove(pos);
+            }
+            cmds.insert(0, trimmed.to_string());
+        }
+        *guard = Some(cmds);
+    }
+}
+
+/// Query the in-memory history cache for a command starting with `prefix`.
+/// Returns the suffix matching `prefix` (i.e. `command[prefix.len()..]`).
+///
+/// Guaranteed zero disk I/O and zero SQLite queries on the keystroke hot path.
+pub fn query_history_hint(prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    // Fast path: try read lock on initialized cache
+    {
+        let guard = HISTORY_MEM_CACHE.read();
+        if let Some(ref cmds) = *guard {
+            for cmd in cmds {
+                if cmd.starts_with(prefix) && cmd.len() > prefix.len() {
+                    return Some(cmd[prefix.len()..].to_string());
+                }
+            }
+            return None;
+        }
+    }
+
+    // Slow path: populate once
+    ensure_history_mem_cache();
+    let guard = HISTORY_MEM_CACHE.read();
+    if let Some(ref cmds) = *guard {
+        for cmd in cmds {
+            if cmd.starts_with(prefix) && cmd.len() > prefix.len() {
+                return Some(cmd[prefix.len()..].to_string());
+            }
+        }
+    }
+    None
+}
 
 pub fn get_recent_commands_cached() -> std::collections::HashSet<String> {
     {
@@ -143,6 +249,10 @@ fn get_pool() -> Result<r2d2::Pool<SqliteConnManager>, String> {
 pub fn clear_connection_cache() {
     let mut cache = DB_POOL.lock();
     *cache = None;
+    let mut mem_cache = HISTORY_MEM_CACHE.write();
+    *mem_cache = None;
+    let mut recent = RECENT_COMMANDS_CACHE.lock();
+    *recent = None;
 }
 
 pub fn with_db_conn<F, R>(f: F) -> Result<R, String>
@@ -188,6 +298,8 @@ pub fn init_db() -> Result<(), String> {
         [],
     );
 
+    ensure_history_mem_cache();
+
     Ok(())
 }
 
@@ -206,6 +318,7 @@ pub fn log_command(
         let mut guard = RECENT_COMMANDS_CACHE.lock();
         *guard = None;
     }
+    record_command_in_memory(command);
     with_db_conn(|conn| {
         conn.execute(
             "INSERT INTO history (command, cwd, timestamp, duration_ms, exit_code, hostname, username, session_id)
@@ -243,6 +356,7 @@ pub fn update_history_entry(id: i64, duration_ms: i64, exit_code: i64) -> Result
 
 /// Delete a single history entry by its ID.
 pub fn delete_history_entry(id: i64) -> Result<(), String> {
+    clear_history_mem_cache();
     with_db_conn(|conn| {
         conn.execute("DELETE FROM history WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
@@ -357,6 +471,32 @@ pub fn query_frequent_by_prefix(prefix: &str, limit: usize) -> Result<Vec<(Strin
 /// Used by FTUI arrow-up navigation to find commands starting with the typed prefix.
 /// When `limit` is 0, all matching entries are returned (no LIMIT clause).
 pub fn query_history_prefix(prefix: &str, limit: usize) -> Result<Vec<String>, String> {
+    ensure_history_mem_cache();
+    let mem_result = {
+        let guard = HISTORY_MEM_CACHE.read();
+        if let Some(ref cmds) = *guard {
+            let mut result = Vec::new();
+            for cmd in cmds {
+                if cmd.starts_with(prefix) && result.last() != Some(cmd) {
+                    result.push(cmd.clone());
+                    if limit > 0 && result.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            if !result.is_empty() || cmds.len() < HISTORY_MEM_CACHE_CAPACITY {
+                Some(result)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(result) = mem_result {
+        return Ok(result);
+    }
+
     with_db_conn(|conn| {
         let mut stmt = if limit > 0 {
             conn.prepare(
@@ -576,5 +716,30 @@ mod tests {
         clear_connection_cache();
         let _ = std::fs::remove_file(test_db_file);
         remove_var("FSH_TEST_DB_PATH");
+    }
+
+    #[test]
+    fn test_in_memory_history_cache() {
+        let _guard = TEST_DB_LOCK.lock();
+        clear_history_mem_cache();
+        record_command_in_memory("__test_cmd_prefix_build --release");
+        record_command_in_memory("__test_cmd_prefix_test -p fshell-repl");
+
+        assert_eq!(
+            query_history_hint("__test_cmd_prefix_b"),
+            Some("uild --release".to_string())
+        );
+        assert_eq!(
+            query_history_hint("__test_cmd_prefix_t"),
+            Some("est -p fshell-repl".to_string())
+        );
+        assert_eq!(query_history_hint("__test_cmd_nonexistent"), None);
+
+        let prefix_matches = query_history_prefix("__test_cmd_prefix_", 10).expect("prefix query should succeed");
+        assert_eq!(prefix_matches.len(), 2);
+        assert_eq!(prefix_matches[0], "__test_cmd_prefix_test -p fshell-repl");
+        assert_eq!(prefix_matches[1], "__test_cmd_prefix_build --release");
+
+        clear_history_mem_cache();
     }
 }

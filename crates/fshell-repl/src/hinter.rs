@@ -18,12 +18,10 @@ pub struct FshellHinter {
     current_hint: String,
     path_cache: Arc<Mutex<Option<DirCache>>>,
     path_updating: Arc<std::sync::atomic::AtomicBool>,
-    history_cache: Arc<Mutex<Option<HistoryHintCache>>>,
     env: Option<Env>,
 }
 
 type DirCache = (String, std::time::Instant, Vec<(String, bool)>);
-type HistoryHintCache = (String, std::time::Instant, Option<String>);
 
 impl Default for FshellHinter {
     fn default() -> Self {
@@ -33,7 +31,6 @@ impl Default for FshellHinter {
             current_hint: String::new(),
             path_cache: Arc::new(Mutex::new(None)),
             path_updating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            history_cache: Arc::new(Mutex::new(None)),
             env: None,
         }
     }
@@ -56,37 +53,13 @@ impl FshellHinter {
     }
 
     const PATH_CACHE_TTL_MS: u64 = 400;
-    const HISTORY_CACHE_TTL_MS: u64 = 150;
 
     /// Try to find a history-based hint.
     pub fn history_hint(&self, line: &str) -> Option<String> {
         if line.len() < self.min_chars {
             return None;
         }
-        let now = std::time::Instant::now();
-        if let Ok(cache) = self.history_cache.lock()
-            && let Some((cached_line, ts, res)) = cache.as_ref()
-            && cached_line == line
-            && ts.elapsed().as_millis() < Self::HISTORY_CACHE_TTL_MS as u128
-        {
-            return res.clone();
-        }
-
-        let result = crate::history::query_history(Some(10), Some(line), None, None, None, None)
-            .ok()
-            .and_then(|entries| {
-                for entry in entries {
-                    if entry.command.starts_with(line) && entry.command.len() > line.len() {
-                        return Some(entry.command[line.len()..].to_string());
-                    }
-                }
-                None
-            });
-
-        if let Ok(mut cache) = self.history_cache.lock() {
-            *cache = Some((line.to_string(), now, result.clone()));
-        }
-        result
+        crate::history::query_history_hint(line)
     }
 
     /// Try to find a path-based hint when the current token looks like a file path.
@@ -313,5 +286,13 @@ mod tests {
         let mut h = FshellHinter::default().with_env(env);
         let result = h.handle("mycmd -", 7, false);
         assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_history_hint_in_memory() {
+        crate::history::record_command_in_memory("git checkout main");
+        let h = FshellHinter::default();
+        let hint = h.history_hint("git ch");
+        assert_eq!(hint.as_deref(), Some("eckout main"));
     }
 }
