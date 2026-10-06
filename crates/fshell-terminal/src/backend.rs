@@ -25,7 +25,7 @@ use fshell_tty::{ansi, raw};
 pub struct FshellBackend<W: Write> {
     writer: W,
     cursor_position: Option<Position>,
-    draw_buffer: Vec<u8>,
+    output_buffer: Vec<u8>,
 }
 
 impl<W: Write> FshellBackend<W> {
@@ -34,7 +34,7 @@ impl<W: Write> FshellBackend<W> {
         Self {
             writer,
             cursor_position: None,
-            draw_buffer: Vec::new(),
+            output_buffer: Vec::new(),
         }
     }
 
@@ -46,18 +46,19 @@ impl<W: Write> FshellBackend<W> {
         Self {
             writer,
             cursor_position: Some(position),
-            draw_buffer: Vec::new(),
+            output_buffer: Vec::new(),
         }
     }
 }
 
 impl<W: Write> Write for FshellBackend<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.writer.write(buf)
+        self.output_buffer.extend_from_slice(buf);
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()
+        self.flush_output()
     }
 }
 
@@ -68,7 +69,6 @@ impl<W: Write> Backend for FshellBackend<W> {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
-        self.draw_buffer.clear();
         let mut fg = Color::Reset;
         let mut bg = Color::Reset;
         let mut underline_color = Color::Reset;
@@ -77,46 +77,44 @@ impl<W: Write> Backend for FshellBackend<W> {
         for (x, y, cell) in content {
             // A cell directly right of the previous one needs no move.
             if !matches!(last, Some(previous) if x == previous.x + 1 && y == previous.y) {
-                ansi::move_to(&mut self.draw_buffer, x, y)?;
+                ansi::move_to(&mut self.output_buffer, x, y)?;
             }
             last = Some(Position { x, y });
             if cell.modifier != modifier {
-                write_modifier_diff(&mut self.draw_buffer, modifier, cell.modifier)?;
+                write_modifier_diff(&mut self.output_buffer, modifier, cell.modifier)?;
                 modifier = cell.modifier;
             }
             if cell.fg != fg || cell.bg != bg {
-                write_colors(&mut self.draw_buffer, cell.fg, cell.bg)?;
+                write_colors(&mut self.output_buffer, cell.fg, cell.bg)?;
                 fg = cell.fg;
                 bg = cell.bg;
             }
             if cell.underline_color != underline_color {
-                write_underline_color(&mut self.draw_buffer, cell.underline_color)?;
+                write_underline_color(&mut self.output_buffer, cell.underline_color)?;
                 underline_color = cell.underline_color;
             }
-            self.draw_buffer.write_all(cell.symbol().as_bytes())?;
+            self.output_buffer.write_all(cell.symbol().as_bytes())?;
         }
         self.cursor_position = None;
         // Reset colors and attributes as four commands, the shape the
         // reference backend emits at the end of every diff.
-        self.draw_buffer.write_all(b"\x1b[39m\x1b[49m\x1b[59m")?;
-        write_sgr(&mut self.draw_buffer, 0)?;
-
-        self.writer.write_all(&self.draw_buffer)?;
-        self.writer.flush()
+        self.output_buffer.write_all(b"\x1b[39m\x1b[49m\x1b[59m")?;
+        write_sgr(&mut self.output_buffer, 0)
     }
 
     fn hide_cursor(&mut self) -> io::Result<()> {
-        ansi::hide_cursor(&mut self.writer)
+        ansi::hide_cursor(&mut self.output_buffer)
     }
 
     fn show_cursor(&mut self) -> io::Result<()> {
-        ansi::show_cursor(&mut self.writer)
+        ansi::show_cursor(&mut self.output_buffer)
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
         if let Some(pos) = self.cursor_position {
             return Ok(pos);
         }
+        self.flush_output()?;
         let pos = raw::cursor_position(&mut self.writer).map(|(x, y)| Position { x, y })?;
         self.cursor_position = Some(pos);
         Ok(pos)
@@ -124,9 +122,9 @@ impl<W: Write> Backend for FshellBackend<W> {
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
         let Position { x, y } = position.into();
-        ansi::move_to(&mut self.writer, x, y)?;
+        ansi::move_to(&mut self.output_buffer, x, y)?;
         self.cursor_position = Some(Position { x, y });
-        self.writer.flush()
+        Ok(())
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -141,18 +139,17 @@ impl<W: Write> Backend for FshellBackend<W> {
             ClearType::CurrentLine => ansi::CLEAR_CURRENT_LINE,
             ClearType::UntilNewLine => ansi::CLEAR_UNTIL_NEW_LINE,
         };
-        self.writer.write_all(sequence.as_bytes())?;
-        self.writer.flush()
+        self.output_buffer.write_all(sequence.as_bytes())
     }
 
     fn append_lines(&mut self, n: u16) -> io::Result<()> {
         for _ in 0..n {
-            self.writer.write_all(b"\n")?;
+            self.output_buffer.write_all(b"\n")?;
         }
         if let Some(ref mut pos) = self.cursor_position {
             pos.y = pos.y.saturating_add(n);
         }
-        self.writer.flush()
+        Ok(())
     }
 
     fn size(&self) -> io::Result<Size> {
@@ -172,6 +169,17 @@ impl<W: Write> Backend for FshellBackend<W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        self.flush_output()
+    }
+}
+
+impl<W: Write> FshellBackend<W> {
+    /// Commit queued terminal operations with one write/flush boundary.
+    fn flush_output(&mut self) -> io::Result<()> {
+        if !self.output_buffer.is_empty() {
+            self.writer.write_all(&self.output_buffer)?;
+            self.output_buffer.clear();
+        }
         self.writer.flush()
     }
 }
@@ -352,6 +360,7 @@ mod tests {
                 .map(|(index, cell)| ((index % width) as u16, (index / width) as u16, cell)),
         )
         .unwrap();
+        Backend::flush(&mut backend).unwrap();
         backend.writer
     }
 
@@ -501,6 +510,7 @@ mod tests {
         for (clear_type, expected) in cases {
             let mut backend = FshellBackend::new(Vec::new());
             backend.clear_region(clear_type).unwrap();
+            Backend::flush(&mut backend).unwrap();
             assert_eq!(String::from_utf8(backend.writer).unwrap(), expected);
         }
     }
@@ -509,23 +519,99 @@ mod tests {
     fn append_lines_writes_newlines() {
         let mut backend = FshellBackend::new(Vec::new());
         backend.append_lines(2).unwrap();
+        Backend::flush(&mut backend).unwrap();
         assert_eq!(backend.writer, b"\n\n");
     }
 
     #[test]
     fn test_with_cursor_position_avoids_query() {
         let mut backend = FshellBackend::with_cursor_position(Vec::new(), Position { x: 5, y: 12 });
-        let pos = backend.get_cursor_position().expect("should return cached position");
+        let pos = backend
+            .get_cursor_position()
+            .expect("should return cached position");
         assert_eq!(pos, Position { x: 5, y: 12 });
         // The writer had no DSR query emitted because the position was known
         assert!(backend.writer.is_empty());
 
-        backend.append_lines(3).expect("append_lines should succeed");
-        let pos2 = backend.get_cursor_position().expect("should return updated cached position");
+        backend
+            .append_lines(3)
+            .expect("append_lines should succeed");
+        let pos2 = backend
+            .get_cursor_position()
+            .expect("should return updated cached position");
         assert_eq!(pos2, Position { x: 5, y: 15 });
 
-        backend.set_cursor_position(Position { x: 1, y: 2 }).expect("set_cursor_position should succeed");
-        let pos3 = backend.get_cursor_position().expect("should return set position");
+        backend
+            .set_cursor_position(Position { x: 1, y: 2 })
+            .expect("set_cursor_position should succeed");
+        let pos3 = backend
+            .get_cursor_position()
+            .expect("should return set position");
         assert_eq!(pos3, Position { x: 1, y: 2 });
+        Backend::flush(&mut backend).expect("queued terminal operations should flush");
+        assert_eq!(backend.writer, b"\n\n\n\x1b[3;2H");
+    }
+
+    #[derive(Default)]
+    struct WriteCounts {
+        writes: usize,
+        flushes: usize,
+        bytes: Vec<u8>,
+    }
+
+    struct CountingWriter(std::sync::Arc<std::sync::Mutex<WriteCounts>>);
+
+    impl Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let mut counts = self.0.lock().expect("count lock should not be poisoned");
+            counts.writes += 1;
+            counts.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.0
+                .lock()
+                .expect("count lock should not be poisoned")
+                .flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn frame_operations_are_committed_together() {
+        let counts = std::sync::Arc::new(std::sync::Mutex::new(WriteCounts::default()));
+        let mut backend = FshellBackend::with_cursor_position(
+            CountingWriter(counts.clone()),
+            Position { x: 0, y: 0 },
+        );
+        let mut cell = ratatui::buffer::Cell::default();
+        cell.set_symbol("x");
+
+        Backend::draw(&mut backend, std::iter::once((0, 0, &cell)))
+            .expect("frame cells should be buffered");
+        Backend::show_cursor(&mut backend).expect("cursor visibility should be buffered");
+        Backend::set_cursor_position(&mut backend, Position { x: 1, y: 0 })
+            .expect("cursor movement should be buffered");
+
+        {
+            let counts = counts.lock().expect("count lock should not be poisoned");
+            assert_eq!(counts.writes, 0);
+            assert_eq!(counts.flushes, 0);
+        }
+
+        Backend::flush(&mut backend).expect("frame should be committed");
+        let counts = counts.lock().expect("count lock should not be poisoned");
+        assert_eq!(counts.writes, 1);
+        assert_eq!(counts.flushes, 1);
+        let output = String::from_utf8_lossy(&counts.bytes);
+        let drawn_cell = output.find('x').expect("drawn cell should be present");
+        let shown_cursor = output
+            .find("\x1b[?25h")
+            .expect("cursor show sequence should be present");
+        let moved_cursor = output
+            .find("\x1b[1;2H")
+            .expect("cursor move should be present");
+        assert!(drawn_cell < shown_cursor && shown_cursor < moved_cursor);
     }
 }
