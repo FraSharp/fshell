@@ -23,8 +23,7 @@ pub mod widgets;
 use chrono::TimeZone;
 use fshell_terminal::FshellBackend;
 use fshell_terminal::input::{
-    EventSource, InputError, InputEvent, InputPoll, Key, KeyAction, Modifiers, MouseAction,
-    MouseButton, UnixEventSource,
+    InputEvent, InputPoll, Key, KeyAction, Modifiers, MouseAction, MouseButton, UnixEventStream,
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
@@ -136,20 +135,6 @@ impl Drop for CaptureStateGuard<'_> {
     }
 }
 
-async fn poll_terminal_event(
-    source: Arc<std::sync::Mutex<dyn EventSource>>,
-    timeout: Duration,
-) -> Result<InputPoll, InputError> {
-    tokio::task::spawn_blocking(move || {
-        let mut source = source
-            .lock()
-            .map_err(|error| InputError::Worker(format!("event source lock poisoned: {error}")))?;
-        source.poll(timeout)
-    })
-    .await
-    .map_err(|error| InputError::Worker(error.to_string()))?
-}
-
 use crate::alias_expansion::AliasExpansionState;
 use crate::highlighter::FshellHighlighter;
 use crate::theme_ext::ThemeColorRatatui;
@@ -206,8 +191,7 @@ pub async fn run_ftui_repl(
             return;
         }
     };
-    let event_source: Arc<std::sync::Mutex<dyn EventSource>> =
-        Arc::new(std::sync::Mutex::new(UnixEventSource::new()));
+    let mut event_stream = UnixEventStream::new();
 
     // Wait for deferred initialization (login shell env, PATH cache warmup) to finish
     init_done.notified().await;
@@ -1815,39 +1799,27 @@ pub async fn run_ftui_repl(
                 );
             }
 
-            // Read keystroke/mouse input through the shared fshell input
-            // contract. Crossterm reports an interrupted source read as a
-            // poll timeout; the surrounding signal checks remain authoritative.
-            let poll_start = std::time::Instant::now();
-            let polled = match poll_terminal_event(event_source.clone(), poll_timeout).await {
-                Ok(InputPoll::Event(event)) => Some(event),
-                Ok(InputPoll::Timeout) => None,
-                Ok(InputPoll::Closed) => {
-                    cpu_dbg!("terminal input closed — breaking repl_loop");
-                    break 'repl_loop;
-                }
-                Err(error) => {
-                    cpu_dbg!("terminal input returned error: {:?}", error);
-                    break 'repl_loop;
-                }
+            // Keep one terminal reader alive for the whole session. Polling an
+            // EventSource through spawn_blocking once per wait added a scheduler
+            // handoff on every key; the stream's reader thread wakes the async
+            // loop directly when input arrives.
+            let polled = tokio::select! {
+                event = event_stream.next() => match event {
+                    InputPoll::Event(event) => Some(event),
+                    InputPoll::Timeout => None,
+                    InputPoll::Closed => {
+                        cpu_dbg!("terminal input closed — breaking repl_loop");
+                        break 'repl_loop;
+                    }
+                },
+                _ = tokio::time::sleep(poll_timeout) => None,
             };
 
-            let poll_elapsed = poll_start.elapsed();
             if polled.is_none() {
                 #[cfg(unix)]
                 if raw::SignalGuard::hup_received() {
                     cpu_dbg!("GOT_SIGHUP (in !polled path) — breaking repl_loop");
                     break 'repl_loop;
-                }
-
-                if poll_elapsed < poll_timeout / 2 {
-                    cpu_dbg!(
-                        "event::poll({:?}) returned Ok(false) in {:?} — busy-poll! (has_anim={})",
-                        poll_timeout,
-                        poll_elapsed,
-                        has_active_animations
-                    );
-                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
 
