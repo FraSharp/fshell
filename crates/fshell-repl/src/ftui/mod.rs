@@ -275,6 +275,7 @@ pub async fn run_ftui_repl(
     let mut drag_anchor: Option<usize> = None;
     let anchor_output = std::env::var("FSH_REPL_ANCHOR_OUTPUT").as_deref() == Ok("1");
     let capability_prompt = capability_prompt::CapabilityPromptTask::spawn(&env);
+    let mut next_prompt_origin_y: Option<u16> = None;
 
     'repl_loop: loop {
         status_bar.visible = StatusBar::is_enabled(&env);
@@ -332,7 +333,7 @@ pub async fn run_ftui_repl(
         let mut terminal: Option<Terminal<FshellBackend<std::io::Stdout>>> = None;
         let mut status_terminal: Option<Terminal<FshellBackend<std::io::Stdout>>> = None;
         let mut current_viewport_height = 0u16;
-        let mut prompt_origin_y: Option<u16> = None;
+        let mut prompt_origin_y: Option<u16> = next_prompt_origin_y.take();
         let mut _last_relative_cursor_y = 0u16;
         let mut last_status_state: Option<StatusBarState> = None;
         let mut resized = false;
@@ -536,7 +537,10 @@ pub async fn run_ftui_repl(
                     let _ = std::io::Write::flush(&mut stdout);
 
                     let stdout = std::io::stdout();
-                    let backend = FshellBackend::new(stdout);
+                    let backend = FshellBackend::with_cursor_position(
+                        stdout,
+                        ratatui::layout::Position { x: 0, y: origin_y },
+                    );
                     if let Ok(t) = Terminal::with_options(
                         backend,
                         TerminalOptions {
@@ -3062,6 +3066,17 @@ pub async fn run_ftui_repl(
                                 println!("\r\x1b[2K{}", final_ansi);
                                 let _ = std::io::Write::flush(&mut std::io::stdout());
                                 text_buf.clear();
+                                let terminal_height = fshell_terminal::size()
+                                    .map(|(_, height)| height)
+                                    .unwrap_or(u16::MAX);
+                                let limit_row = if status_bar.visible {
+                                    terminal_height.saturating_sub(2)
+                                } else {
+                                    terminal_height
+                                };
+                                next_prompt_origin_y = prompt_origin_y.map(|oy| {
+                                    oy.saturating_add(1).min(limit_row.saturating_sub(1))
+                                });
                             } else {
                                 // Empty line on continuation — present it
                                 // This cancels continuation
@@ -3302,6 +3317,8 @@ pub async fn run_ftui_repl(
                     limit_row,
                 );
                 let _ = queue_clear_status_rows(&mut stdout, limit_row, terminal_height);
+                next_prompt_origin_y =
+                    Some(origin_y.saturating_add(committed_rows).min(limit_row.saturating_sub(1)));
             }
             let _ = stdout.flush();
             status_bar.end_command_timer();
@@ -3487,13 +3504,21 @@ pub async fn run_ftui_repl(
 
             // The suspend guard has restored the session-owned raw state before
             // we inspect the cursor or begin the next prompt.
-            if let Some((cursor_x, _)) = safe_cursor_position() {
+            let terminal_height = fshell_terminal::size()
+                .map(|(_, height)| height)
+                .unwrap_or(u16::MAX);
+            next_prompt_origin_y = if let Some((cursor_x, cursor_y)) = safe_cursor_position() {
                 if cursor_x > 0 {
                     let mut stdout = std::io::stdout();
                     let _ = fshell_terminal::ansi::print(&mut stdout, "\r\n");
                     let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
+                    Some(cursor_y.saturating_add(1).min(terminal_height.saturating_sub(1)))
+                } else {
+                    Some(cursor_y)
                 }
-            }
+            } else {
+                None
+            };
 
             // Check for DYM deferred 'e' edit suggestion (FTUI path with line_editor=None)
             if let Some(suggestion) = env.prompt.edit_suggestion.write().take() {

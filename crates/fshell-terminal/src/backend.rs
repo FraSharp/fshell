@@ -24,12 +24,27 @@ use fshell_tty::{ansi, raw};
 #[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
 pub struct FshellBackend<W: Write> {
     writer: W,
+    cursor_position: Option<Position>,
 }
 
 impl<W: Write> FshellBackend<W> {
     /// Create a backend over `writer`.
     pub const fn new(writer: W) -> Self {
-        Self { writer }
+        Self {
+            writer,
+            cursor_position: None,
+        }
+    }
+
+    /// Create a backend over `writer` with a pre-seeded cursor position.
+    ///
+    /// Avoids an ANSI DSR (`\x1b[6n`) device query over the wire when the caller
+    /// already knows or just positioned the cursor.
+    pub const fn with_cursor_position(writer: W, position: Position) -> Self {
+        Self {
+            writer,
+            cursor_position: Some(position),
+        }
     }
 }
 
@@ -76,6 +91,7 @@ impl<W: Write> Backend for FshellBackend<W> {
             }
             self.writer.write_all(cell.symbol().as_bytes())?;
         }
+        self.cursor_position = None;
         // Reset colors and attributes as four commands, the shape the
         // reference backend emits at the end of every diff.
         self.writer.write_all(b"\x1b[39m\x1b[49m\x1b[59m")?;
@@ -91,12 +107,18 @@ impl<W: Write> Backend for FshellBackend<W> {
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
-        raw::cursor_position(&mut self.writer).map(|(x, y)| Position { x, y })
+        if let Some(pos) = self.cursor_position {
+            return Ok(pos);
+        }
+        let pos = raw::cursor_position(&mut self.writer).map(|(x, y)| Position { x, y })?;
+        self.cursor_position = Some(pos);
+        Ok(pos)
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
         let Position { x, y } = position.into();
         ansi::move_to(&mut self.writer, x, y)?;
+        self.cursor_position = Some(Position { x, y });
         self.writer.flush()
     }
 
@@ -119,6 +141,9 @@ impl<W: Write> Backend for FshellBackend<W> {
     fn append_lines(&mut self, n: u16) -> io::Result<()> {
         for _ in 0..n {
             self.writer.write_all(b"\n")?;
+        }
+        if let Some(ref mut pos) = self.cursor_position {
+            pos.y = pos.y.saturating_add(n);
         }
         self.writer.flush()
     }
@@ -478,5 +503,22 @@ mod tests {
         let mut backend = FshellBackend::new(Vec::new());
         backend.append_lines(2).unwrap();
         assert_eq!(backend.writer, b"\n\n");
+    }
+
+    #[test]
+    fn test_with_cursor_position_avoids_query() {
+        let mut backend = FshellBackend::with_cursor_position(Vec::new(), Position { x: 5, y: 12 });
+        let pos = backend.get_cursor_position().expect("should return cached position");
+        assert_eq!(pos, Position { x: 5, y: 12 });
+        // The writer had no DSR query emitted because the position was known
+        assert!(backend.writer.is_empty());
+
+        backend.append_lines(3).expect("append_lines should succeed");
+        let pos2 = backend.get_cursor_position().expect("should return updated cached position");
+        assert_eq!(pos2, Position { x: 5, y: 15 });
+
+        backend.set_cursor_position(Position { x: 1, y: 2 }).expect("set_cursor_position should succeed");
+        let pos3 = backend.get_cursor_position().expect("should return set position");
+        assert_eq!(pos3, Position { x: 1, y: 2 });
     }
 }
