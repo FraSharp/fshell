@@ -1311,6 +1311,7 @@ pub fn eval_expr_flow<'a>(
                                 PipelinePayload::Data(v) => write_val_stdout(&v),
                                 PipelinePayload::Bytes(b) => {
                                     use std::io::Write;
+                                    fshell_tty::mark_cursor_state_unknown_for_stdout_output(&b);
                                     let _ = std::io::stdout().write_all(&b);
                                 }
                                 PipelinePayload::Structured(_) => {}
@@ -1997,6 +1998,7 @@ pub(crate) fn write_val_stdout(v: &Val) {
     let mut h = out.lock();
     match v {
         Val::Blob(b) => {
+            fshell_tty::mark_cursor_state_unknown_for_stdout_output(b);
             let _ = h.write_all(b);
         }
         Val::String(s) => {
@@ -2004,7 +2006,9 @@ pub(crate) fn write_val_stdout(v: &Val) {
                 return;
             }
             if s.ends_with('\0') {
-                let _ = write!(h, "{}", &s[..s.len() - 1]);
+                let output = &s[..s.len() - 1];
+                fshell_tty::mark_cursor_state_unknown_for_stdout_output(output.as_bytes());
+                let _ = write!(h, "{output}");
             } else {
                 let _ = writeln!(h, "{s}");
             }
@@ -3080,9 +3084,11 @@ async fn eval_stmt_inner(
                 .map_err(|e| EngineError::from(format!("Failed to spawn sh: {}", e)))?;
                 use std::io::Write;
                 if !output.stdout.is_empty() {
+                    fshell_tty::mark_cursor_state_unknown_for_stdout_output(&output.stdout);
                     let _ = std::io::stdout().write_all(&output.stdout);
                 }
                 if !output.stderr.is_empty() {
+                    fshell_tty::mark_cursor_state_unknown_for_stderr_output(&output.stderr);
                     let _ = std::io::stderr().write_all(&output.stderr);
                 }
                 let code = output.status.code().unwrap_or(0);

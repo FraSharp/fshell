@@ -1438,6 +1438,7 @@ async fn handle_line_generic_inner(
         let items = picker::get_recursive_files(pwd, false, None, None);
         let mut p = picker::Picker::new("files:", items);
         let _ = p.run();
+        fshell_tty::mark_cursor_state_unknown();
         return Ok(());
     }
     if line == "interactive-dir-search" {
@@ -1449,6 +1450,7 @@ async fn handle_line_generic_inner(
                 eprintln!("cd error: {}", e);
             }
         }
+        fshell_tty::mark_cursor_state_unknown();
         return Ok(());
     }
     if line == "interactive-git-branch" {
@@ -1476,6 +1478,7 @@ async fn handle_line_generic_inner(
                 let _ = check_cmd.status();
             }
         }
+        fshell_tty::mark_cursor_state_unknown();
         return Ok(());
     }
 

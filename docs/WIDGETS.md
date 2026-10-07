@@ -18,7 +18,7 @@ this document specifies fshell's interactive line editor widgets, terminal user 
 - [interactive ftui components](#interactive-ftui-components)
   - [sqlite history explorer (`Ctrl+H`)](#sqlite-history-explorer-ctrlh)
   - [fuzzy search & picker (`Ctrl+R`)](#fuzzy-search--picker-ctrlr)
-  - [bottom status bar](#bottom-status-bar)
+  - [inline status panel](#inline-status-panel)
   - [interactive config tui (`config edit`)](#interactive-config-tui-config-edit)
 - [custom keybinding configuration (`bind`)](#custom-keybinding-configuration-bind)
 
@@ -161,13 +161,17 @@ an interactive full-screen TUI for analyzing command history:
 
 in-line fuzzy picker over history with real-time substring highlighting and instant buffer insertion.
 
-### bottom status bar
+### inline status panel
 
-displays real-time system and session telemetry (enabled via `setopt status_bar` or `$FSH_STATUS_BAR=1`):
+displays real-time system and session telemetry below the prompt and any active output, completion, or history panel (enabled via `setopt status_bar` or `$FSH_STATUS_BAR=1`):
 
 ```text
  ~/dev/fshell [main*] ── venv:(fsh-dev) ── jobs:0 ── 2026-08-24 16:20 ── [sess:default]
 ```
+
+The regular inline prompt does not capture mouse input because its origin is
+stream-relative and has no absolute screen row for hit testing. Full-screen
+interfaces manage mouse reporting within their own known screen coordinates.
 
 ### interactive config tui (`config edit`)
 

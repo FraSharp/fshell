@@ -4,8 +4,9 @@
 //! REPL terminal-session policy.
 //!
 //! The mechanics live in `fshell-tty`; this module fixes the REPL's policy
-//! (refuse raw mode under the test harness, keep every auxiliary mode on for
-//! the whole session) and re-exports the guards `ftui` installs.
+//! (refuse raw mode under the test harness, keep the input modes needed by the
+//! prompt, and leave mouse reporting to full-screen interfaces) and re-exports
+//! the guards `ftui` installs.
 
 use std::io;
 
@@ -13,11 +14,12 @@ use fshell_terminal::{RawSession, RawSessionModes};
 
 pub use fshell_terminal::{PanicHookGuard, SignalGuard};
 
-/// The REPL keeps every auxiliary mode on for the whole session.
+/// The inline prompt has no absolute screen origin for mouse hit testing.
+/// Keep keyboard input modes enabled and leave mouse reporting disabled.
 const MODES: RawSessionModes = RawSessionModes {
     bracketed_paste: true,
     focus_change: true,
-    mouse: true,
+    mouse: false,
     disable_blinking: true,
 };
 

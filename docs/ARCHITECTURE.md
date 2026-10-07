@@ -378,6 +378,30 @@ implements subprocess sandboxing via OS-level security primitives:
 ### fshell-repl
 the interactive terminal frontend. integrates Reedline for line editing, FTUI for TUI rendering, interactive configuration visual editor (`config tui`), prompt customizer studio, SQLite history storage, fuzzy completion menus, and real-time syntax highlighting.
 
+The ordinary FTUI prompt uses a stream-oriented Ratatui backend. It saves the
+terminal's current cursor as an opaque origin, emits frame rows from that origin,
+and lets the terminal perform natural soft wrapping. The REPL tracks whether the
+origin column is known: fshell-owned CRLF transitions establish column zero,
+while a command that may hand the real TTY to a child invalidates that knowledge.
+Only an unknown or nonzero origin reserves one possible first-row wrap while
+sizing and clearing the surface. Known column-zero transitions use the terminal's
+bottom row without a permanent spacer. The editor restores its origin and replays
+the same row content to place the cursor, so cursor placement follows the
+terminal's own wrapping decisions. On submission, it commits the prompt and
+command before releasing the real TTY to the child process; after the child exits,
+it restores terminal modes without unconditionally appending another line feed.
+Output that already ended a line is therefore followed directly by the next
+prompt.
+Right prompts use a separate following row so their alignment starts from a
+known column.
+
+The origin is a cursor position, not a full terminal-state snapshot: relative
+row reservation can clear a deferred wrap left at the right margin by a child.
+That exact-margin child handoff remains terminal-specific without a cursor
+query or a PTY-mediated terminal model.
+Full-screen interfaces keep their own Ratatui terminal lifecycle and
+known-coordinate model.
+
 ---
 
 ## security & sandboxing

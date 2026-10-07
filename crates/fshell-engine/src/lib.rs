@@ -3611,6 +3611,7 @@ pub(crate) fn write_stderr_stream(text: &str) {
     let err = std::io::stderr();
     let mut handle = err.lock();
     if let Some(text) = text.strip_suffix('\0') {
+        fshell_tty::mark_cursor_state_unknown_for_stderr_output(text.as_bytes());
         let _ = handle.write_all(text.as_bytes());
     } else if text.ends_with('\n') {
         let _ = handle.write_all(text.as_bytes());

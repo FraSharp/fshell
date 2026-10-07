@@ -137,7 +137,13 @@ fn enter_raw_mode(modes: RawSessionModes) -> std::io::Result<()> {
         }
         if modes.mouse {
             out.write_all(ansi::ENABLE_MOUSE_CAPTURE.as_bytes())?;
+        } else {
+            out.write_all(ansi::DISABLE_MOUSE_CAPTURE.as_bytes())?;
         }
+        // Hide the child's cursor immediately when returning ownership to the
+        // interactive editor. The next completed render moves it before
+        // showing it again; otherwise it flashes at the child's exit point.
+        ansi::hide_cursor(&mut out)?;
         out.flush()
     })();
     if result.is_err() {

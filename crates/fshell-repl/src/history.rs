@@ -735,7 +735,8 @@ mod tests {
         );
         assert_eq!(query_history_hint("__test_cmd_nonexistent"), None);
 
-        let prefix_matches = query_history_prefix("__test_cmd_prefix_", 10).expect("prefix query should succeed");
+        let prefix_matches =
+            query_history_prefix("__test_cmd_prefix_", 10).expect("prefix query should succeed");
         assert_eq!(prefix_matches.len(), 2);
         assert_eq!(prefix_matches[0], "__test_cmd_prefix_test -p fshell-repl");
         assert_eq!(prefix_matches[1], "__test_cmd_prefix_build --release");

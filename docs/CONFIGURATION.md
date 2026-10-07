@@ -78,7 +78,7 @@ unsetopt pipefail   # disable option
 | `expand_aliases` | `true` | expand a command-position alias in the editor when you type the space after it |
 | `error_color` | `true` | colorize error diagnostics |
 | `json_auto_parse`| `true` | automatically parse external JSON stdout into `Val` objects when a downstream stage consumes a value |
-| `status_bar` | `false` | display interactive bottom status bar in FTUI |
+| `status_bar` | `false` | display the inline status panel below the prompt and active overlays in FTUI |
 | `confirm_destructive` | `true` | require confirmation for destructive commands (`rm -rf /` etc.) |
 | `quiet_aliases` | `false` | suppress warnings when an alias shadows a builtin or user function |
 | `nullglob` | `false` | glob patterns matching nothing expand to empty rather than literal pattern |
@@ -233,7 +233,7 @@ on exit {
 | `FSH_HOME` | overrides root home directory for fshell |
 | `FSH_PROMPT` | overrides prompt theme path or inline specification |
 | `FSH_KEYBINDING_MODE` | sets editor keymap (`emacs` or `vi`) |
-| `FSH_STATUS_BAR` | enables/disables the bottom status bar (`1` or `0`) |
+| `FSH_STATUS_BAR` | enables/disables the inline status panel (`1` or `0`) |
 | `FSH_PIPELINE_CHANNEL_SIZE` | default channel capacity for pipeline stages |
 | `FSH_CNF_DEBUG` | enables verbose debug logging for "did you mean" resolution |
 | `FSH_TRACE_FILE` | appends opt-in startup and command timing spans as versioned JSONL; see [Timing traces](TRACE.md) |

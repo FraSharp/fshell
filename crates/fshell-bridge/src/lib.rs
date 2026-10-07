@@ -22,6 +22,24 @@ use ustr::ustr;
 mod cmdnotfound;
 mod structured;
 
+struct CursorStateGuard {
+    invalidate_on_drop: bool,
+}
+
+impl CursorStateGuard {
+    fn new(invalidate_on_drop: bool) -> Self {
+        Self { invalidate_on_drop }
+    }
+}
+
+impl Drop for CursorStateGuard {
+    fn drop(&mut self) {
+        if self.invalidate_on_drop {
+            fshell_tty::mark_cursor_state_unknown();
+        }
+    }
+}
+
 fn terminate_process_group(pid: i32) {
     if pid > 0 {
         // The child is placed in a process group whose id is its pid. Sending
@@ -850,6 +868,10 @@ pub async fn run_external(
             .maybe_with_span(span));
         }
     };
+    // A child with a controlling terminal can address it through inherited
+    // stderr or `/dev/tty` even when pipeline stdio is redirected. Its cursor
+    // effects therefore invalidate the REPL's known origin as well.
+    let _cursor_state_guard = CursorStateGuard::new(has_controlling_terminal);
 
     let pid = child.id() as i32;
     let mut io_span = env.trace.span(

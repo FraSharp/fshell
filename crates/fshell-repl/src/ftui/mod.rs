@@ -23,8 +23,7 @@ pub mod widgets;
 use chrono::TimeZone;
 use fshell_terminal::FshellBackend;
 use fshell_terminal::input::{
-    EventSource, InputError, InputEvent, InputPoll, Key, KeyAction, Modifiers, MouseAction,
-    MouseButton, UnixEventSource,
+    EventSource, InputError, InputEvent, InputPoll, Key, KeyAction, Modifiers, UnixEventSource,
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
@@ -160,7 +159,6 @@ use buffer::TextBuffer;
 use completions::CompletionsManager;
 use cursor::{Coord, CursorConfig, CursorState};
 use history::HistoryManager;
-use mouse::{MouseMode, MouseStateManager};
 use prompt::PromptManager;
 use statusbar::{StatusBar, StatusBarWidget};
 
@@ -217,6 +215,18 @@ pub async fn run_ftui_repl(
         print!("\x1B[2J\x1B[1;1H");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
+    let mut stdout = std::io::stdout();
+    let initial_boundary = if clear_screen {
+        PromptBoundary::PreserveCursor
+    } else {
+        PromptBoundary::NextLine
+    };
+    if normalize_prompt_boundary(&mut stdout, initial_boundary).is_err() {
+        return;
+    }
+    // Both startup policies above leave the cursor at column zero: either
+    // `NextLine` emitted CRLF or the clear-screen path homed it first.
+    let mut origin_column = Some(0_u16);
 
     // Set up TUI state managers
     let alias_state = Arc::new(AliasExpansionState::new());
@@ -239,7 +249,6 @@ pub async fn run_ftui_repl(
     let mut text_buf = TextBuffer::new();
     let mut cursor_state = CursorState::new();
     let mut comp_mgr = CompletionsManager::new_async(env.clone());
-    let mut mouse_mgr = MouseStateManager::new();
     let mut history_mgr = HistoryManager::new();
     let mut agent_state = AgentModeState::new();
 
@@ -252,7 +261,6 @@ pub async fn run_ftui_repl(
     let hostname = crate::history::get_hostname();
     let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
     let mut status_bar = StatusBar::new(hostname.clone(), username).with_env(&env);
-    mouse_mgr.set_mode(MouseMode::Smart);
 
     // Event poll timeout (no longer drives redraws — only on input)
     let tick_rate = Duration::from_millis(50);
@@ -267,16 +275,11 @@ pub async fn run_ftui_repl(
     let mut help_visible = false;
     let mut widget_explorer = widget_explorer::WidgetExplorerManager::new();
     let mut output_lines: Vec<String> = Vec::new();
-    // A6 long-term: output cap is unified — anchored mode sizes the output to
-    // the actual viewport height available after prompt+popup. The 500-line
-    // safety cap from the phase-1 patch is now retired; truncation reuses
-    // `cap` so long outputs obey the same anchored pane boundary.
+    // Bound retained output in anchored mode independently from the current
+    // compact inline viewport; the visible pane is sized during layout.
     const ANCHORED_OUTPUT_SAFETY_CAP: usize = 2000;
-    let mut drag_anchor: Option<usize> = None;
     let anchor_output = std::env::var("FSH_REPL_ANCHOR_OUTPUT").as_deref() == Ok("1");
     let capability_prompt = capability_prompt::CapabilityPromptTask::spawn(&env);
-    let mut next_prompt_origin_y: Option<u16> = None;
-
     'repl_loop: loop {
         status_bar.visible = StatusBar::is_enabled(&env);
 
@@ -315,27 +318,12 @@ pub async fn run_ftui_repl(
             prompt_mgr.refresh_snapshot(&current_dir);
         }
 
-        if mouse_mgr.mode != MouseMode::Disabled {
-            mouse_mgr.is_captured = false;
-            // In session-wide raw mode auxiliary modes are already on from
-            // `raw::enter_session`; re-enabling is idempotent, so just call
-            // through so Smart mode's `is_captured` stays coherent.
-            mouse_mgr.enable_capture();
-        }
-
-        let mut stdout = std::io::stdout();
-        let _ = fshell_terminal::ansi::clear_current_line(&mut stdout);
-        let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
-
         let theme = env.active_theme();
         highlighter.update_theme(theme.clone());
         comp_mgr.update_theme(theme.clone());
         let mut terminal: Option<Terminal<FshellBackend<std::io::Stdout>>> = None;
-        let mut status_terminal: Option<Terminal<FshellBackend<std::io::Stdout>>> = None;
         let mut current_viewport_height = 0u16;
-        let mut prompt_origin_y: Option<u16> = next_prompt_origin_y.take();
-        let mut _last_relative_cursor_y = 0u16;
-        let mut last_status_state: Option<StatusBarState> = None;
+        let mut current_viewport_width = 0u16;
         let mut resized = false;
         let mut last_resize = std::time::Instant::now();
 
@@ -348,7 +336,6 @@ pub async fn run_ftui_repl(
         let mut eof_pending = false;
 
         cpu_dbg!("--- entering input_loop ---");
-        let mut completion_popup: Option<Rect> = None;
         let mut pending_completion_tab: Option<u64> = None;
         'input_loop: loop {
             input_iter += 1;
@@ -423,20 +410,39 @@ pub async fn run_ftui_repl(
                 } else {
                     1
                 };
-                let prompt_h = if multi_line_count > 1 {
-                    multi_line_count + 2 // 1 header + N code lines + 1 footer
-                } else {
-                    1
-                };
                 let (term_w, term_h) = fshell_terminal::size().unwrap_or((80, 24));
-                let cap = if status_bar.visible {
-                    term_h.saturating_sub(2)
+                let term_w = term_w.max(1);
+                let term_h = term_h.max(1);
+                let rendered_right_prompt = prompt_mgr.render_prompt_right();
+                let right_prompt = if rendered_right_prompt.width() > 0
+                    && rendered_right_prompt.width() <= usize::from(term_w)
+                {
+                    Some(rendered_right_prompt)
                 } else {
-                    term_h
+                    None
                 };
+                let right_prompt_height = u16::from(right_prompt.is_some());
+                let prompt_h = if multi_line_count > 1 {
+                    multi_line_count
+                        .saturating_add(2) // 1 header + N code lines + 1 footer
+                        .saturating_add(right_prompt_height)
+                } else {
+                    1 + right_prompt_height
+                };
+                // Only an origin reclaimed from a direct-TTY command needs
+                // capacity for a first-row soft wrap. Fshell-owned boundaries
+                // retain their known column and can use the bottom row.
+                let wrap_guard = u16::from(origin_column != Some(0));
+                let stream_height_cap = term_h.saturating_sub(wrap_guard).max(1);
+                let status_height = if status_bar.visible && stream_height_cap > 2 {
+                    2
+                } else {
+                    0
+                };
+                let content_cap = stream_height_cap.saturating_sub(status_height).max(1);
                 let popup_needed_lines: u16 =
                     if history_mgr.active || agent_state.active || widget_explorer.active {
-                        10
+                        10.min(content_cap.saturating_sub(prompt_h))
                     } else if comp_mgr.visible {
                         let needed_rows = comp_mgr
                             .session
@@ -445,188 +451,86 @@ pub async fn run_ftui_repl(
                             .unwrap_or(comp_mgr.suggestions.len());
                         let chrome_lines = 4u16;
                         let needed_h = (needed_rows as u16).saturating_add(chrome_lines);
-                        let max_cap = cap.saturating_sub(prompt_h);
+                        let max_cap = content_cap.saturating_sub(prompt_h);
                         needed_h.clamp(4, 18).min(max_cap)
                     } else if help_visible {
-                        6
+                        6.min(content_cap.saturating_sub(prompt_h))
                     } else {
                         0
                     };
 
-                // A1+A6: viewport now grows to the terminal height when
-                // there is anchored output (true fixed-height anchored pane).
-                // Otherwise it stays compact to prompt+popup (no flicker on
-                // popup open/close — the terminal keeps its height and popups
-                // render in unused rows). This is the durable A1 fix;
-                // B2's growth-only Inline semantics are replaced by a stable
-                // fixed height once output is present.
-                let prompt_and_popup_h = (prompt_h + popup_needed_lines).max(1).min(cap);
-                let needed_height = if output_lines.is_empty() {
+                let prompt_and_popup_h = (prompt_h + popup_needed_lines).max(1).min(content_cap);
+                let content_height = if output_lines.is_empty() {
                     prompt_and_popup_h
                 } else if popup_needed_lines > 0 {
-                    // Popup visible while anchored output present: keep anchored
-                    // output in the viewport but prioritize popup space.
                     let min_for_content = prompt_and_popup_h;
-                    let min_for_output = 1u16; // at least one output line
-                    let max_for_output = cap.saturating_sub(min_for_content);
-                    let shown_output =
-                        (output_lines.len() as u16).min(max_for_output.max(min_for_output));
-                    (shown_output + min_for_content).min(cap)
+                    let max_for_output = content_cap.saturating_sub(min_for_content);
+                    let shown_output = (output_lines.len() as u16).min(max_for_output.max(1));
+                    (shown_output + min_for_content).min(content_cap)
                 } else {
-                    // Anchored pane: output gets the height that remains after
-                    // reserving prompt, truncated to cap. This ties truncation
-                    // to the viewport rather than an arbitrary constant (A6).
-                    let reserved = prompt_h.max(1).min(cap);
-                    let max_output_h = cap.saturating_sub(reserved).max(1);
+                    let reserved = prompt_h.max(1).min(content_cap);
+                    let max_output_h = content_cap.saturating_sub(reserved).max(1);
                     let shown_output = (output_lines.len() as u16).min(max_output_h);
-                    (shown_output + reserved).min(cap)
+                    (shown_output + reserved).min(content_cap)
                 };
-
-                if prompt_origin_y.is_none() {
-                    prompt_origin_y = safe_cursor_position().map(|(_, y)| y);
-                }
-
-                let limit_row = if status_bar.visible {
-                    term_h.saturating_sub(2)
-                } else {
-                    term_h
-                };
-
-                let mut scroll_d = 0u16;
-                let mut must_recreate = false;
-                let mut origin_y = prompt_origin_y.unwrap_or(0);
-                if origin_y + needed_height > limit_row {
-                    let d = (origin_y + needed_height).saturating_sub(limit_row);
-                    if d > 0 {
-                        scroll_d = d;
-                        must_recreate = true;
-                        let mut scroll_buf = Vec::with_capacity(32 + d as usize * 8);
-                        let _ = fshell_terminal::ansi::move_to(
-                            &mut scroll_buf,
-                            0,
-                            term_h.saturating_sub(1),
-                        );
-                        for _ in 0..d {
-                            let _ = fshell_terminal::ansi::print(&mut scroll_buf, "\r\n");
-                            let _ = fshell_terminal::ansi::move_to_column(&mut scroll_buf, 0);
-                        }
-                        origin_y = origin_y.saturating_sub(d);
-                        prompt_origin_y = Some(origin_y);
-                        let _ = fshell_terminal::ansi::move_to(&mut scroll_buf, 0, origin_y);
-                        let mut stdout = std::io::stdout();
-                        let _ = std::io::Write::write_all(&mut stdout, &scroll_buf);
-                        let _ = std::io::Write::flush(&mut stdout);
-                    }
-                }
+                let needed_height = (content_height + status_height)
+                    .max(1)
+                    .min(stream_height_cap);
 
                 if terminal.is_none()
                     || current_viewport_height != needed_height
+                    || current_viewport_width != term_w
                     || resized
-                    || must_recreate
                 {
-                    if resized {
-                        status_terminal = None;
-                        prompt_origin_y = None;
-                    }
                     resized = false;
-                    if let Some(t) = terminal.take() {
-                        drop(t);
-                    }
-                    let old_height = current_viewport_height;
-                    current_viewport_height = needed_height;
-
-                    // Erase the rows that formed the previous viewport and will form the new viewport from origin_y down
-                    let rows_to_erase = old_height
-                        .max(needed_height)
-                        .min(limit_row.saturating_sub(origin_y));
-                    let mut erase_buf = Vec::with_capacity(rows_to_erase as usize * 16 + 16);
-                    for row in 0..rows_to_erase {
-                        let _ = fshell_terminal::ansi::move_to(&mut erase_buf, 0, origin_y + row);
-                        let _ = fshell_terminal::ansi::print(
-                            &mut erase_buf,
-                            fshell_terminal::ansi::CLEAR_CURRENT_LINE,
+                    let backend = if let Some(mut previous) = terminal.take() {
+                        // The Ratatui terminal tracks cursor visibility itself.
+                        // Reanchoring through its backend hides the cursor at
+                        // the ANSI layer, so update Ratatui's state too; its
+                        // Drop guard otherwise shows the cursor at the stale
+                        // pre-resize position.
+                        if previous.hide_cursor().is_err() {
+                            break 'repl_loop;
+                        }
+                        if previous
+                            .backend_mut()
+                            .reanchor_relative_surface(term_w, needed_height)
+                            .is_err()
+                        {
+                            break 'repl_loop;
+                        }
+                        drop(previous);
+                        FshellBackend::resume_cursor_relative_with_origin_column(
+                            std::io::stdout(),
+                            term_w,
+                            needed_height,
+                            origin_column,
+                        )
+                    } else {
+                        let mut backend = FshellBackend::new_cursor_relative_with_origin_column(
+                            std::io::stdout(),
+                            origin_column,
                         );
-                    }
-                    // Place cursor at origin_y so ratatui's Inline(needed_height) binds to origin_y
-                    let _ = fshell_terminal::ansi::move_to(&mut erase_buf, 0, origin_y);
-                    let mut stdout = std::io::stdout();
-                    let _ = std::io::Write::write_all(&mut stdout, &erase_buf);
-                    let _ = std::io::Write::flush(&mut stdout);
-
-                    let stdout = std::io::stdout();
-                    let backend = FshellBackend::with_cursor_position(
-                        stdout,
-                        ratatui::layout::Position { x: 0, y: origin_y },
-                    );
-                    if let Ok(t) = Terminal::with_options(
+                        if backend
+                            .establish_relative_surface(term_w, needed_height)
+                            .is_err()
+                        {
+                            break 'repl_loop;
+                        }
+                        backend
+                    };
+                    let viewport = Rect::new(0, 0, term_w.max(1), needed_height);
+                    let Ok(created) = Terminal::with_options(
                         backend,
                         TerminalOptions {
-                            viewport: Viewport::Inline(needed_height),
+                            viewport: Viewport::Fixed(viewport),
                         },
-                    ) {
-                        terminal = Some(t);
-                    }
-                }
-
-                // Create or recreate status terminal if needed.
-                if status_terminal.is_none() && status_bar.visible {
-                    if term_h > 2 {
-                        let stdout = std::io::stdout();
-                        let backend = FshellBackend::new(stdout);
-                        if let Ok(st) = Terminal::with_options(
-                            backend,
-                            TerminalOptions {
-                                viewport: Viewport::Fixed(Rect::new(0, term_h - 2, term_w, 2)),
-                            },
-                        ) {
-                            status_terminal = Some(st);
-                        }
-                    }
-                }
-
-                // Render status bar BEFORE the inline draw, so the inline
-                // terminal's set_cursor_position is the last cursor command
-                // flushed — no save/restore needed.
-                if status_bar.visible {
-                    // R7: timestamp changes every second and was included in
-                    // StatusBarState diff, forcing a full status-bar redraw every
-                    // wake even when idle. Exclude it from the diff — the bar's
-                    // Widget reads Local::now() itself at render time.
-                    let current_state = StatusBarState {
-                        last_exit_code: status_bar.last_exit_code,
-                        git_branch: status_bar.git_branch.clone(),
-                        git_dirty: status_bar.git_dirty,
-                        git_ahead: status_bar.git_ahead,
-                        git_behind: status_bar.git_behind,
-                        job_count: status_bar.job_count,
-                        mode_indicator: status_bar.mode_indicator.clone(),
-                        last_command_elapsed: status_bar.last_command_elapsed,
-                        visible: status_bar.visible,
-                        term_w,
-                        term_h,
+                    ) else {
+                        break 'repl_loop;
                     };
-
-                    let need_draw = last_status_state.as_ref() != Some(&current_state)
-                        || must_recreate
-                        || scroll_d > 0;
-
-                    if need_draw {
-                        if let Some(st) = status_terminal.as_mut() {
-                            if scroll_d > 0 || must_recreate {
-                                let _ = st.clear();
-                            }
-                            let _ = st.draw(|f| {
-                                f.render_widget(
-                                    StatusBarWidget {
-                                        status_bar: &status_bar,
-                                        theme: &theme,
-                                    },
-                                    f.area(),
-                                );
-                            });
-                            last_status_state = Some(current_state);
-                        }
-                    }
+                    terminal = Some(created);
+                    current_viewport_height = needed_height;
+                    current_viewport_width = term_w;
                 }
 
                 if let Some(term) = terminal.as_mut() {
@@ -775,7 +679,8 @@ pub async fn run_ftui_repl(
                     let render_x = (prefix_width as u16)
                         + (cursor_col as u16).saturating_sub(text_scroll_offset as u16);
                     let target_y = if multi_line_count > 1 {
-                        1 + (cursor_visual_line as u16).min(multi_line_count.saturating_sub(1))
+                        1 + right_prompt_height
+                            + (cursor_visual_line as u16).min(multi_line_count.saturating_sub(1))
                     } else {
                         0
                     };
@@ -784,38 +689,36 @@ pub async fn run_ftui_repl(
                     cursor_state.update_logical_pos(Coord::new(render_x, target_y), &cursor_config);
                     let animated_cursor = cursor_state.get_render_pos(&cursor_config);
 
-                    let mut relative_cursor_y = 0u16;
                     if term
                         .draw(|f| {
-                            let prompt_h = if multi_line_count > 1 {
-                                multi_line_count + 2
-                            } else {
-                                1
-                            };
-                            let (constraints, prompt_area_idx, popup_area_idx) =
+                            let content_height = f.area().height.saturating_sub(status_height);
+                            let (mut constraints, prompt_area_idx, popup_area_idx) =
                                 if !output_lines.is_empty() {
                                     let output_h = output_lines
                                         .len()
-                                        .min(f.area().height.saturating_sub(prompt_h) as usize);
+                                        .min(content_height.saturating_sub(prompt_h) as usize);
                                     (
                                         vec![
-                                            Constraint::Length(output_h as u16), // Output lines at top
-                                            Constraint::Length(prompt_h),        // Prompt line(s)
-                                            Constraint::Min(0),                  // Popup overlays
+                                            Constraint::Length(output_h as u16),
+                                            Constraint::Length(prompt_h),
+                                            Constraint::Min(0),
                                         ],
                                         1usize,
                                         2usize,
                                     )
                                 } else {
                                     (
-                                        vec![
-                                            Constraint::Length(prompt_h), // Prompt line(s) at top
-                                            Constraint::Min(0), // Popup list / overlays below
-                                        ],
+                                        vec![Constraint::Length(prompt_h), Constraint::Min(0)],
                                         0usize,
                                         1usize,
                                     )
                                 };
+                            let status_area_idx = if status_height > 0 {
+                                constraints.push(Constraint::Length(status_height));
+                                Some(constraints.len() - 1)
+                            } else {
+                                None
+                            };
 
                             let chunks = Layout::default()
                                 .direction(Direction::Vertical)
@@ -829,7 +732,7 @@ pub async fn run_ftui_repl(
                             if !output_lines.is_empty() {
                                 let output_h = output_lines
                                     .len()
-                                    .min(f.area().height.saturating_sub(prompt_h) as usize);
+                                    .min(content_height.saturating_sub(prompt_h) as usize);
                                 let output_area = chunks[0]; // Output area at top
                                 let output_height = output_area.height.min(output_h as u16);
                                 let skip =
@@ -858,26 +761,31 @@ pub async fn run_ftui_repl(
                                     available_width,
                                 );
                                 let mut text_lines: Vec<Line> =
-                                    Vec::with_capacity((multi_line_count + 2) as usize);
+                                    Vec::with_capacity(prompt_h as usize);
                                 let left_spans = prompt_left.spans.clone();
-                                let left_width = prompt_len as usize;
                                 let gutter_num_width = format!("{}", multi_line_count).len().max(2);
 
-                                // Row 0: Elevated prompt header (with right prompt if space permits)
-                                let mut header_spans = left_spans.clone();
-                                let right_prompt = prompt_mgr.render_prompt_right();
-                                let right_width = right_prompt.width();
-                                if right_width > 0
-                                    && left_width + right_width + 1 < size.width as usize
-                                {
-                                    let pad = (size.width as usize)
-                                        .saturating_sub(left_width + right_width);
-                                    header_spans.push(Span::raw(" ".repeat(pad)));
-                                    header_spans.extend(right_prompt.spans.clone());
+                                // Row 0 begins at an unknown terminal column,
+                                // so the right prompt gets its own row, which
+                                // starts at column zero after this row break.
+                                text_lines.push(Line::from(left_spans));
+                                if let Some(right_prompt) = &right_prompt {
+                                    let right_width = right_prompt.width();
+                                    let pad = usize::from(size.width).saturating_sub(right_width);
+                                    let mut right_spans = Vec::with_capacity(
+                                        right_prompt.spans.len() + usize::from(pad > 0),
+                                    );
+                                    if pad > 0 {
+                                        right_spans.push(Span::styled(
+                                            " ".repeat(pad),
+                                            theme.status.muted.to_style_dim(),
+                                        ));
+                                    }
+                                    right_spans.extend(right_prompt.spans.clone());
+                                    text_lines.push(Line::from(right_spans));
                                 }
-                                text_lines.push(Line::from(header_spans));
 
-                                // Rows 1..=multi_line_count: Code lines flush at column 0
+                                // Code rows follow the header and optional right-prompt row.
                                 for (line_idx, line_spans) in per_line_spans.iter().enumerate() {
                                     let is_cl = line_idx == cursor_visual_line;
                                     let indicator = if is_cl {
@@ -932,21 +840,6 @@ pub async fn run_ftui_repl(
                                 ]);
                                 text_lines.push(footer_line);
 
-                                // Pad each line with spaces to fill the full terminal width.
-                                // ratatui's Paragraph only writes cells that its spans cover,
-                                // leaving untouched cells with old frame content.
-                                let prompt_area_w = prompt_line.width as usize;
-                                for line in text_lines.iter_mut() {
-                                    let line_w: usize = line
-                                        .spans
-                                        .iter()
-                                        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                                        .sum();
-                                    if line_w < prompt_area_w {
-                                        line.spans
-                                            .push(Span::raw(" ".repeat(prompt_area_w - line_w)));
-                                    }
-                                }
                                 f.render_widget(
                                     Paragraph::new(Text::from(text_lines)),
                                     prompt_line,
@@ -955,6 +848,7 @@ pub async fn run_ftui_repl(
                                 let render_x = animated_cursor.x.min(size.width.saturating_sub(1));
                                 let cursor_y = prompt_line.y
                                     + 1
+                                    + right_prompt_height
                                     + (cursor_visual_line as u16)
                                         .min(multi_line_count.saturating_sub(1));
                                 if let Some(cursor_style) =
@@ -966,7 +860,6 @@ pub async fn run_ftui_repl(
                                         cursor_area,
                                     );
                                 }
-                                relative_cursor_y = cursor_y;
                                 f.set_cursor_position(ratatui::layout::Position::new(
                                     render_x, cursor_y,
                                 ));
@@ -979,36 +872,24 @@ pub async fn run_ftui_repl(
                                 let mut combined_spans = left_spans;
                                 combined_spans.extend(input_line.spans.clone());
 
-                                // B3: Right prompt — pad with spaces to right-align
-                                let right_prompt = prompt_mgr.render_prompt_right();
-                                let right_width = right_prompt.width();
-                                let left_plus_input = combined_spans
-                                    .iter()
-                                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                                    .sum::<usize>();
-                                if right_width > 0
-                                    && left_plus_input + right_width + 1 < size.width as usize
-                                {
-                                    let pad = size.width as usize - left_plus_input - right_width;
-                                    combined_spans.push(Span::raw(" ".repeat(pad)));
-                                    combined_spans.extend(right_prompt.spans.clone());
-                                }
-
-                                // Pad with trailing spaces to fill the full terminal width.
-                                // ratatui's Paragraph only writes cells that its spans cover,
-                                // leaving untouched cells with old frame content. This causes
-                                // ghost text from previous frames when content shrinks.
-                                let total_w: usize = combined_spans
-                                    .iter()
-                                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                                    .sum();
-                                let prompt_area_w = prompt_line.width as usize;
-                                if total_w < prompt_area_w {
-                                    combined_spans
-                                        .push(Span::raw(" ".repeat(prompt_area_w - total_w)));
+                                let mut text_lines = vec![Line::from(combined_spans)];
+                                if let Some(right_prompt) = &right_prompt {
+                                    let right_width = right_prompt.width();
+                                    let pad = usize::from(size.width).saturating_sub(right_width);
+                                    let mut right_spans = Vec::with_capacity(
+                                        right_prompt.spans.len() + usize::from(pad > 0),
+                                    );
+                                    if pad > 0 {
+                                        right_spans.push(Span::styled(
+                                            " ".repeat(pad),
+                                            theme.status.muted.to_style_dim(),
+                                        ));
+                                    }
+                                    right_spans.extend(right_prompt.spans.clone());
+                                    text_lines.push(Line::from(right_spans));
                                 }
                                 f.render_widget(
-                                    Paragraph::new(Line::from(combined_spans)),
+                                    Paragraph::new(Text::from(text_lines)),
                                     prompt_line,
                                 );
 
@@ -1024,7 +905,6 @@ pub async fn run_ftui_repl(
                                     );
                                 }
                                 // Move the system cursor to match
-                                relative_cursor_y = prompt_line.y;
                                 f.set_cursor_position(ratatui::layout::Position::new(
                                     render_x,
                                     prompt_line.y,
@@ -1343,11 +1223,8 @@ pub async fn run_ftui_repl(
                                 let comp_area = Rect::new(popup_x, popup_y, popup_w, comp_h)
                                     .intersection(f.area());
 
-                                if comp_area.height < 3 || comp_area.width < 10 {
-                                    completion_popup = None;
-                                } else {
+                                if comp_area.height >= 3 && comp_area.width >= 10 {
                                     f.render_widget(Clear, comp_area);
-                                    completion_popup = Some(comp_area);
 
                                     let has_footer = comp_area.height >= 6;
                                     let visible_rows = if has_footer {
@@ -1797,8 +1674,20 @@ pub async fn run_ftui_repl(
                             } else {
                                 // Clear the reserved popup area so stale content from
                                 // dismissed completions/help doesn't linger on screen.
-                                // Needed because Viewport::Inline doesn't auto-clear cells.
+                                // The inline backend owns and repaints complete rows.
                                 f.render_widget(Clear, popup_area);
+                            }
+
+                            if let Some(status_area_idx) = status_area_idx
+                                && let Some(status_area) = chunks.get(status_area_idx)
+                            {
+                                f.render_widget(
+                                    StatusBarWidget {
+                                        status_bar: &status_bar,
+                                        theme: &theme,
+                                    },
+                                    *status_area,
+                                );
                             }
                         })
                         .is_err()
@@ -1808,7 +1697,6 @@ pub async fn run_ftui_repl(
                     if let Some(span) = first_prompt_span.take() {
                         span.finish(fshell_engine::trace::SpanOutcome::Ok);
                     }
-                    _last_relative_cursor_y = relative_cursor_y;
                 }
 
                 redraw = false;
@@ -1897,141 +1785,16 @@ pub async fn run_ftui_repl(
                     if now.duration_since(last_resize) > Duration::from_millis(80) {
                         redraw = true;
                         resized = true;
-                        // Resize invalidates Fixed viewport coords (status bar at term_h-2)
-                        // and the inline viewport height derived from term_h. Recompute on next
-                        // redraw and recreate both terminals. Also clear the inline viewport's
-                        // "previous frame" diff so stale padding ghosts don't survive.
-                        status_terminal = None;
-                        current_viewport_height = 0;
+                        // The stream-relative surface must be reanchored after
+                        // a resize because its terminal-cell width changed.
                         last_resize = now;
                     }
                     continue;
                 }
 
-                if let InputEvent::Mouse(mouse) = event {
-                    let action = mouse.action;
-                    let column = mouse.column;
-                    let row = mouse.row;
-                    cpu_dbg!("Mouse event: {:?} col={} row={}", action, column, row);
-                    let size = terminal
-                        .as_ref()
-                        .and_then(|t| t.size().ok())
-                        .unwrap_or_else(|| ratatui::layout::Size::new(80, 24));
-                    let prompt_y = size.height.saturating_sub(1);
-                    mouse_mgr.handle_click(row, prompt_y);
-
-                    if mouse_mgr.is_captured {
-                        match action {
-                            MouseAction::Drag(MouseButton::Left) => {
-                                // History scroll via drag? No — only completions use drag-
-                                // like scroll. When history is active, scroll wheel is
-                                // handled below; drag stays for text selection only.
-                                if history_mgr.active {
-                                    // Let history handle scroll separately; ignore drag.
-                                } else if !comp_mgr.visible {
-                                    let prompt_left = prompt_mgr.render_prompt_left(false);
-                                    let prompt_len = prompt_left.width() as u16;
-                                    if column >= prompt_len {
-                                        let click_x =
-                                            column - prompt_len + text_scroll_offset as u16;
-                                        let cursor =
-                                            text_buf.column_to_char_index(click_x as usize);
-                                        // If we don't have a drag anchor yet, start one at current cursor
-                                        if drag_anchor.is_none() {
-                                            drag_anchor = Some(text_buf.cursor());
-                                        }
-                                        if let Some(anchor) = drag_anchor {
-                                            text_buf.set_selection(anchor, cursor);
-                                            redraw = true;
-                                        }
-                                    }
-                                }
-                            }
-                            MouseAction::ScrollDown => {
-                                if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
-                                    comp_mgr.select_next();
-                                    let visible_rows = if current_viewport_height >= 6 {
-                                        current_viewport_height.saturating_sub(4)
-                                    } else {
-                                        current_viewport_height.saturating_sub(2)
-                                    }
-                                    .max(1)
-                                        as usize;
-                                    let sel_row = comp_mgr.selected_idx;
-                                    if sel_row >= comp_mgr.scroll_offset + visible_rows {
-                                        comp_mgr.scroll_offset = sel_row + 1 - visible_rows;
-                                    }
-                                    redraw = true;
-                                } else if history_mgr.active {
-                                    history_mgr.select_next();
-                                    let max_h = current_viewport_height.saturating_sub(3) as usize;
-                                    history_mgr.adjust_scroll(max_h);
-                                    redraw = true;
-                                } else {
-                                    mouse_mgr.disable_capture();
-                                    redraw = true;
-                                }
-                            }
-                            MouseAction::ScrollUp => {
-                                if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
-                                    comp_mgr.select_prev();
-                                    let sel_row = comp_mgr.selected_idx;
-                                    if sel_row < comp_mgr.scroll_offset {
-                                        comp_mgr.scroll_offset = sel_row;
-                                    }
-                                    redraw = true;
-                                } else if history_mgr.active {
-                                    history_mgr.select_prev();
-                                    let max_h = current_viewport_height.saturating_sub(3) as usize;
-                                    history_mgr.adjust_scroll(max_h);
-                                    redraw = true;
-                                } else {
-                                    mouse_mgr.disable_capture();
-                                    redraw = true;
-                                }
-                            }
-                            MouseAction::Down(MouseButton::Left) => {
-                                if comp_mgr.visible && !comp_mgr.suggestions.is_empty() {
-                                    if let Some(popup_area) = completion_popup
-                                        && let Some(index) = comp_mgr.suggestion_index_at(
-                                            popup_area,
-                                            comp_mgr.scroll_offset,
-                                            column,
-                                            row,
-                                        )
-                                        && let Some(s) = comp_mgr.suggestions.get(index).cloned()
-                                    {
-                                        let line = text_buf.text();
-                                        apply_completion(&mut text_buf, &line, &s);
-                                        comp_mgr.clear();
-                                        redraw = true;
-                                    } else {
-                                        // Click outside the actual popup or on its border.
-                                        redraw = true;
-                                    }
-                                } else {
-                                    // Bug 2.3: Clear drag anchor on new click
-                                    drag_anchor = None;
-                                    // Bug 2.1: Position cursor at click
-                                    let prompt_left = prompt_mgr.render_prompt_left(false);
-                                    let prompt_len = prompt_left.width() as u16;
-                                    if column >= prompt_len {
-                                        let click_x =
-                                            column - prompt_len + text_scroll_offset as u16;
-                                        text_buf.set_cursor(
-                                            text_buf.column_to_char_index(click_x as usize),
-                                        );
-                                        redraw = true;
-                                    }
-                                }
-                            }
-                            MouseAction::Up(MouseButton::Left) => {
-                                // Bug 2.3: End of drag selection — clear anchor
-                                drag_anchor = None;
-                            }
-                            _ => {}
-                        }
-                    }
+                if let InputEvent::Mouse(_) = event {
+                    // The inline editor has no absolute row for mouse hit testing.
+                    // Coordinate-based interaction remains available in full-screen UIs.
                     continue;
                 }
 
@@ -2051,8 +1814,6 @@ pub async fn run_ftui_repl(
                     if key.action == KeyAction::Release {
                         continue;
                     }
-                    mouse_mgr.handle_keypress();
-
                     if history_mgr.active {
                         match key.key {
                             Key::Escape => {
@@ -2492,16 +2253,15 @@ pub async fn run_ftui_repl(
                                         } else if !in_continuation {
                                             prompt_mgr.refresh_snapshot(&current_dir);
                                             let final_ansi = prompt_mgr.render_prompt_final_ansi();
-                                            let mut stdout = std::io::stdout();
-                                            let _ = fshell_terminal::ansi::move_to_column(
-                                                &mut stdout,
-                                                0,
-                                            );
-                                            let _ = fshell_terminal::ansi::clear_current_line(
-                                                &mut stdout,
-                                            );
-                                            println!("\r\x1b[2K{}", final_ansi);
-                                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                                            if commit_surface_lines(&mut terminal, &[final_ansi])
+                                                .is_err()
+                                            {
+                                                break 'repl_loop;
+                                            }
+                                            // This fshell-owned commit ends in CRLF,
+                                            // so the next inline surface starts at
+                                            // the known zero column.
+                                            origin_column = Some(0);
                                             break 'input_loop;
                                         } else {
                                             in_continuation = false;
@@ -2863,13 +2623,6 @@ pub async fn run_ftui_repl(
                         }
                         Key::Escape => {
                             history_index = None;
-                            if mouse_mgr.mode == MouseMode::Simple {
-                                if mouse_mgr.is_captured {
-                                    mouse_mgr.disable_capture();
-                                } else {
-                                    mouse_mgr.enable_capture();
-                                }
-                            }
                             comp_mgr.clear();
                             help_visible = false;
                             redraw = true;
@@ -3080,28 +2833,17 @@ pub async fn run_ftui_repl(
                                     }
                                 }
                             } else if !in_continuation {
-                                // Empty line (not continuation): print the prompt to
-                                // scrollback like a real command, so the user sees a
-                                // "new" prompt appear (like zsh does on bare Enter).
+                                // Empty line (not continuation): commit the visible
+                                // prompt, then anchor the next editor at the live
+                                // cursor without querying its absolute position.
                                 prompt_mgr.refresh_snapshot(&current_dir);
                                 let final_ansi = prompt_mgr.render_prompt_final_ansi();
-                                let mut stdout = std::io::stdout();
-                                let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
-                                let _ = fshell_terminal::ansi::clear_current_line(&mut stdout);
-                                println!("\r\x1b[2K{}", final_ansi);
-                                let _ = std::io::Write::flush(&mut std::io::stdout());
+                                if commit_surface_lines(&mut terminal, &[final_ansi]).is_err() {
+                                    break 'repl_loop;
+                                }
+                                // The fshell-owned commit always ends in CRLF.
+                                origin_column = Some(0);
                                 text_buf.clear();
-                                let terminal_height = fshell_terminal::size()
-                                    .map(|(_, height)| height)
-                                    .unwrap_or(u16::MAX);
-                                let limit_row = if status_bar.visible {
-                                    terminal_height.saturating_sub(2)
-                                } else {
-                                    terminal_height
-                                };
-                                next_prompt_origin_y = prompt_origin_y.map(|oy| {
-                                    oy.saturating_add(1).min(limit_row.saturating_sub(1))
-                                });
                             } else {
                                 // Empty line on continuation — present it
                                 // This cancels continuation
@@ -3223,40 +2965,16 @@ pub async fn run_ftui_repl(
         history_mgr.reset();
         agent_state.active = false;
 
-        // 3. Release the input viewport. Keep its last frame on screen until
-        //    the command handoff replaces the prompt row; clearing from the
-        //    cursor to the bottom here exposed a blank terminal between frames.
-        if let Some(t) = terminal.take() {
-            // There is no next prompt to reuse the viewport on shell exit, so
-            // clear the remaining inline UI only in that case.
-            if exit_repl {
-                let mut stdout = std::io::stdout();
-                let _ = fshell_terminal::ansi::save_position(&mut stdout);
-                let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
-                let _ = fshell_terminal::ansi::clear_from_cursor_down(&mut stdout);
-                let _ = fshell_terminal::ansi::restore_position(&mut stdout);
-                let _ = std::io::Write::flush(&mut std::io::stdout());
-            }
-            drop(t);
-        }
-        // Dropping the inline viewport does not change the session terminal
-        // state; the session owner remains responsible for raw mode.
         if exit_repl {
-            // Drop the inline viewport first so the exit doesn't leave the
-            // alternate row range half-drawn, then restore the session.
+            // Clear only the prompt-owned region before restoring the session.
             // With `FSH_RAW_SESSION=1` raw was session-wide, so we must
             // explicitly drop `Session` before breaking — otherwise the
             // parent shell (cmux/zsh) inherits raw (no echo, no ONLCR →
             // smear on next `ls`). With legacy per-command raw the guard
             // was already dropped above, so this is idempotent. Do NOT
             // break straight to `std::process::exit` elsewhere.
-            if let Some(t) = terminal.take() {
-                let mut stdout = std::io::stdout();
-                let _ = fshell_terminal::ansi::save_position(&mut stdout);
-                let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
-                let _ = fshell_terminal::ansi::clear_from_cursor_down(&mut stdout);
-                let _ = fshell_terminal::ansi::restore_position(&mut stdout);
-                let _ = std::io::Write::flush(&mut std::io::stdout());
+            if let Some(mut t) = terminal.take() {
+                let _ = t.backend_mut().clear_relative_surface();
                 drop(t);
             }
             drop(_raw_session);
@@ -3265,43 +2983,16 @@ pub async fn run_ftui_repl(
 
         if let Some(cmd) = aborted_command {
             let left_ansi = prompt_mgr.render_prompt_left_ansi();
-            // In raw mode \n does not imply \r, so a multiline aborted command would
-            // render as a staircase (each \n keeps the column of the previous line).
-            // Rewrite \n -> \r\n and emit an explicit \r\n terminator so the next
-            // prompt starts at column 0 even while _raw_session is still active.
             let safe_cmd = cmd.replace('\n', "\r\n");
-            let mut stdout = std::io::stdout();
-            use std::io::Write as _;
-            let _ = write!(
-                stdout,
-                "\r\x1b[2K{}{}\x1b[31m ^C\x1b[0m\r\n",
-                left_ansi, safe_cmd
-            );
-            if let Some(origin_y) = prompt_origin_y {
-                let terminal_height = fshell_terminal::size()
-                    .map(|(_, height)| height)
-                    .unwrap_or(u16::MAX);
-                let limit_row = if status_bar.visible {
-                    terminal_height.saturating_sub(2)
-                } else {
-                    terminal_height
-                };
-                let committed_rows = 1u16.saturating_add(cmd.matches('\n').count() as u16);
-                let _ = queue_clear_inline_rows(
-                    &mut stdout,
-                    origin_y,
-                    current_viewport_height,
-                    committed_rows,
-                    limit_row,
-                );
-                let _ = queue_clear_status_rows(&mut stdout, limit_row, terminal_height);
-                next_prompt_origin_y = Some(
-                    origin_y
-                        .saturating_add(committed_rows)
-                        .min(limit_row.saturating_sub(1)),
-                );
+            let aborted_line = format!("{left_ansi}{safe_cmd}\x1b[31m ^C\x1b[0m");
+            if commit_surface_lines(&mut terminal, &[aborted_line]).is_err() {
+                break 'repl_loop;
             }
-            let _ = stdout.flush();
+            // The abort transcript is an fshell-owned CRLF transition.
+            origin_column = Some(0);
+            if let Some(t) = terminal.take() {
+                drop(t);
+            }
             status_bar.end_command_timer();
             status_bar.set_exit_code(130);
             let snap = crate::refresh_prompt_snapshot(&env, &current_dir);
@@ -3316,6 +3007,34 @@ pub async fn run_ftui_repl(
             history_index = None;
             text_scroll_offset = 0;
         } else if let Some(trimmed) = command_to_execute {
+            let ftui_start = std::time::Instant::now();
+            prompt_mgr.refresh_snapshot(&current_dir);
+            let t_refresh = ftui_start.elapsed();
+            let final_ansi = prompt_mgr.render_prompt_final_ansi();
+            if anchor_output {
+                if let Some(mut t) = terminal.take() {
+                    if t.hide_cursor().is_err() {
+                        break 'repl_loop;
+                    }
+                    if t.backend_mut().clear_relative_surface().is_err() {
+                        break 'repl_loop;
+                    }
+                    drop(t);
+                }
+            } else {
+                let transcript = command_transcript_lines(&final_ansi, &trimmed);
+                if commit_surface_lines(&mut terminal, &transcript).is_err() {
+                    break 'repl_loop;
+                }
+                // The echoed command is committed by fshell at column zero;
+                // the command may invalidate this once it takes the TTY.
+                origin_column = Some(0);
+                if let Some(t) = terminal.take() {
+                    drop(t);
+                }
+            }
+            let t_prompt = ftui_start.elapsed();
+
             if anchor_output {
                 let anchor_debug_on = std::env::var("FSH_REPL_ANCHOR_DEBUG").as_deref() == Ok("1");
                 if anchor_debug_on
@@ -3331,6 +3050,7 @@ pub async fn run_ftui_repl(
                 status_bar.start_command_timer();
                 let command_running =
                     CommandRunningGuard::new(&capture_state.env.is_command_running);
+                let cursor_generation = fshell_tty::cursor_state_generation();
                 let handle_result = crate::handle_line_generic(
                     &*capture_state.env,
                     &trimmed,
@@ -3339,6 +3059,9 @@ pub async fn run_ftui_repl(
                 )
                 .await;
                 drop(command_running);
+                if fshell_tty::cursor_state_generation() != cursor_generation {
+                    origin_column = None;
+                }
                 // Flush stdout so any buffered output reaches the pipe before we close it
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
@@ -3356,12 +3079,8 @@ pub async fn run_ftui_repl(
                 for line in cmd_lines.into_iter().rev() {
                     captured.insert(0, line);
                 }
-                // A6: keep only the viewport-height worth of anchored output
-                // plus safety tail (unified cap, not unbounded 500). The pane
-                // height is limited by `cap`, so storing far more lines wastes
-                // memory and hides the anchoring invariant. Keep a bounded safety
-                // tail for tiny terminals where the viewport hides output.
-                // Correctness: never grow past ANCHORED_OUTPUT_SAFETY_CAP.
+                // Retain a bounded tail; the renderer chooses how many lines
+                // fit alongside the prompt, popups, and flowing status panel.
                 let term_cap = {
                     let (_, h) = fshell_terminal::size().unwrap_or((80, 24));
                     if status_bar.visible {
@@ -3394,7 +3113,6 @@ pub async fn run_ftui_repl(
                 }
             } else {
                 let ftui_debug = std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1");
-                let ftui_start = std::time::Instant::now();
                 // Fullscreen apps (vim, less, …) receive a cooked terminal
                 // through this scoped guard. A failed transition is a session
                 // failure: continuing would expose the child to a partially
@@ -3412,49 +3130,32 @@ pub async fn run_ftui_repl(
                     None => break 'repl_loop,
                 };
                 let t_disable = ftui_start.elapsed();
-                let (_, term_h) = fshell_terminal::size().unwrap_or((80, 24));
-                prompt_mgr.refresh_snapshot(&current_dir);
-                let t_refresh = ftui_start.elapsed();
-                let final_ansi = prompt_mgr.render_prompt_final_ansi();
-                if let Some(oy) = prompt_origin_y {
-                    let mut stdout = std::io::stdout();
-                    let limit_row = if status_bar.visible {
-                        term_h.saturating_sub(2)
-                    } else {
-                        term_h
-                    };
-                    let _ = commit_command_line(
-                        &mut stdout,
-                        oy,
-                        current_viewport_height,
-                        limit_row,
-                        term_h,
-                        &final_ansi,
-                        &trimmed,
-                    );
-                } else if trimmed.contains('\n') {
-                    let lines: Vec<&str> = trimmed.split('\n').collect();
-                    println!("\r\x1b[2K{}", final_ansi);
-                    for line in lines {
-                        println!("\r\x1b[2K{}", line);
-                    }
-                } else {
-                    println!("\r\x1b[2K{}{}", final_ansi, trimmed);
-                }
 
                 status_bar.start_command_timer();
-                let t_prompt = ftui_start.elapsed();
 
                 let command_running = CommandRunningGuard::new(&env.is_command_running);
+                let cursor_generation = fshell_tty::cursor_state_generation();
                 let handle_result =
                     crate::handle_line_generic(&env, &trimmed, &current_dir, &session_id).await;
                 drop(command_running);
                 let t_exec = ftui_start.elapsed();
                 let is_exit = handle_result.is_err();
                 drop(_suspend);
+                // Preserve the known column when fshell-owned output ends at
+                // column zero. Direct-TTY children and unterminated byte output
+                // invalidate that knowledge through fshell-tty's generation.
+                origin_column = if fshell_tty::cursor_state_generation() == cursor_generation {
+                    Some(0)
+                } else {
+                    None
+                };
                 let t_reraw = ftui_start.elapsed();
 
                 if is_exit {
+                    // Exit hooks can write without a trailing newline. Leave
+                    // the host shell at a clean prompt boundary as well.
+                    let mut stdout = std::io::stdout();
+                    let _ = normalize_prompt_boundary(&mut stdout, PromptBoundary::NextLine);
                     if _raw_session.is_some() {
                         drop(_raw_session.take());
                     }
@@ -3483,27 +3184,15 @@ pub async fn run_ftui_repl(
                 }
             }
 
-            // The suspend guard has restored the session-owned raw state before
-            // we inspect the cursor or begin the next prompt.
-            let terminal_height = fshell_terminal::size()
-                .map(|(_, height)| height)
-                .unwrap_or(u16::MAX);
-            next_prompt_origin_y = if let Some((cursor_x, cursor_y)) = safe_cursor_position() {
-                if cursor_x > 0 {
-                    let mut stdout = std::io::stdout();
-                    let _ = fshell_terminal::ansi::print(&mut stdout, "\r\n");
-                    let _ = fshell_terminal::ansi::move_to_column(&mut stdout, 0);
-                    Some(
-                        cursor_y
-                            .saturating_add(1)
-                            .min(terminal_height.saturating_sub(1)),
-                    )
-                } else {
-                    Some(cursor_y)
+            // The child ran on the real cooked TTY. Reset terminal modes that
+            // can affect relative cursor movement without adding another line
+            // feed after output that already ended its own line.
+            if !anchor_output {
+                let mut stdout = std::io::stdout();
+                if normalize_prompt_boundary(&mut stdout, PromptBoundary::PreserveCursor).is_err() {
+                    break 'repl_loop;
                 }
-            } else {
-                None
-            };
+            }
 
             // Check for DYM deferred 'e' edit suggestion (FTUI path with line_editor=None)
             if let Some(suggestion) = env.prompt.edit_suggestion.write().take() {
@@ -3526,92 +3215,48 @@ pub async fn run_ftui_repl(
     capability_prompt.shutdown().await;
 }
 
-fn safe_cursor_position() -> Option<(u16, u16)> {
-    let mut stdout = std::io::stdout();
-    fshell_terminal::cursor_position(&mut stdout).ok()
+#[derive(Clone, Copy)]
+enum PromptBoundary {
+    PreserveCursor,
+    NextLine,
 }
 
-/// Commit the visible input line as transcript and remove only the old inline
-/// viewport rows. Queue the whole handoff before flushing so the terminal never
-/// receives a frame where the prompt has disappeared but its replacement has
-/// not been written yet.
-fn commit_command_line(
+fn normalize_prompt_boundary(
     out: &mut impl std::io::Write,
-    origin_y: u16,
-    viewport_height: u16,
-    limit_row: u16,
-    terminal_height: u16,
-    prompt: &str,
-    command: &str,
+    boundary: PromptBoundary,
 ) -> std::io::Result<()> {
-    if limit_row == 0 || origin_y >= limit_row {
-        return out.flush();
+    // Keep the cursor hidden through normalization and the next repaint. Reset
+    // style and scrolling margins, restore the saved cursor, and force autowrap
+    // on so the inline renderer can rely on terminal-native soft wrapping.
+    out.write_all(b"\x1b[?25l\x1b[0m\x1b[s\x1b[r\x1b[u\x1b[?7h")?;
+    if matches!(boundary, PromptBoundary::NextLine) {
+        out.write_all(b"\r\n")?;
     }
-
-    if command.contains('\n') {
-        fshell_terminal::ansi::move_to(out, 0, origin_y)?;
-        fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
-        fshell_terminal::ansi::print(out, &format!("{prompt}\r\n"))?;
-
-        let mut command_rows = 0u16;
-        for (index, line) in command.split('\n').enumerate() {
-            let row = origin_y.saturating_add(1).saturating_add(index as u16);
-            fshell_terminal::ansi::move_to(out, 0, row)?;
-            fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
-            fshell_terminal::ansi::print(out, &format!("{line}\r\n"))?;
-            command_rows = command_rows.saturating_add(1);
-        }
-
-        let committed_rows = 1u16.saturating_add(command_rows);
-        queue_clear_inline_rows(out, origin_y, viewport_height, committed_rows, limit_row)?;
-        queue_clear_status_rows(out, limit_row, terminal_height)?;
-        let cursor_y = origin_y.saturating_add(committed_rows).min(limit_row - 1);
-        fshell_terminal::ansi::move_to(out, 0, cursor_y)?;
-    } else {
-        fshell_terminal::ansi::move_to(out, 0, origin_y)?;
-        fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
-        fshell_terminal::ansi::print(out, &format!("{prompt}{command}\r\n"))?;
-
-        queue_clear_inline_rows(out, origin_y, viewport_height, 1, limit_row)?;
-        queue_clear_status_rows(out, limit_row, terminal_height)?;
-        let cursor_y = origin_y.saturating_add(1).min(limit_row - 1);
-        fshell_terminal::ansi::move_to(out, 0, cursor_y)?;
-    }
-
     out.flush()
 }
 
-fn queue_clear_inline_rows(
-    out: &mut impl std::io::Write,
-    origin_y: u16,
-    viewport_height: u16,
-    start_row: u16,
-    limit_row: u16,
-) -> std::io::Result<()> {
-    let viewport_end = origin_y
-        .saturating_add(viewport_height.min(limit_row.saturating_sub(origin_y)))
-        .min(limit_row);
-    for row_offset in start_row..viewport_height {
-        let row = origin_y.saturating_add(row_offset);
-        if row >= viewport_end {
-            break;
-        }
-        fshell_terminal::ansi::move_to(out, 0, row)?;
-        fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
+fn command_transcript_lines(prompt: &str, command: &str) -> Vec<String> {
+    if command.contains('\n') {
+        std::iter::once(prompt.to_string())
+            .chain(command.split('\n').map(str::to_string))
+            .collect()
+    } else {
+        vec![format!("{prompt}{command}")]
     }
-    Ok(())
 }
 
-fn queue_clear_status_rows(
-    out: &mut impl std::io::Write,
-    limit_row: u16,
-    terminal_height: u16,
+fn commit_surface_lines(
+    terminal: &mut Option<Terminal<FshellBackend<std::io::Stdout>>>,
+    lines: &[String],
 ) -> std::io::Result<()> {
-    for row in limit_row.min(terminal_height)..terminal_height {
-        fshell_terminal::ansi::move_to(out, 0, row)?;
-        fshell_terminal::ansi::print(out, fshell_terminal::ansi::CLEAR_CURRENT_LINE)?;
-    }
-    Ok(())
+    let terminal = terminal.as_mut().ok_or_else(|| {
+        std::io::Error::other("cannot commit a prompt without an active inline surface")
+    })?;
+    // Keep Ratatui's visibility bookkeeping in sync with the backend's
+    // transcript commit. Otherwise Terminal::drop shows the old cursor after
+    // the backend has hidden it, briefly flashing at the previous position.
+    terminal.hide_cursor()?;
+    terminal.backend_mut().commit_relative_lines(lines)
 }
 
 fn slice_spans_by_column(
@@ -4049,21 +3694,6 @@ fn split_spans_by_newline(
     };
     lines.push(slice_spans_by_column(&current, col, len_cols));
     lines
-}
-
-#[derive(Clone, PartialEq)]
-struct StatusBarState {
-    last_exit_code: Option<i64>,
-    git_branch: Option<String>,
-    git_dirty: bool,
-    git_ahead: usize,
-    git_behind: usize,
-    job_count: usize,
-    mode_indicator: String,
-    last_command_elapsed: Option<std::time::Duration>,
-    visible: bool,
-    term_w: u16,
-    term_h: u16,
 }
 
 #[cfg(test)]

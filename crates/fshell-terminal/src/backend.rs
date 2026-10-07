@@ -3,18 +3,19 @@
 
 //! Ratatui backend over fshell's own ANSI terminal primitives.
 //!
-//! Buffered cell diffs, style changes, clearing, sizing, and the cursor
-//! status-report query all go through [`fshell_tty::ansi`] and
+//! Styles, clearing, and sizing go through [`fshell_tty::ansi`] and
 //! [`fshell_tty::raw`], so no third-party terminal crate sits between ratatui
-//! and the device. Named colors use the compact 16-color codes rather than
-//! the 256-color spellings; the rendered result is identical.
+//! and the device. Absolute mode can query the cursor when needed. Inline mode
+//! saves an opaque terminal origin, emits each logical row as a stream, and
+//! lets the terminal perform soft wrapping; it never queries the cursor.
+//! Named colors use compact 16-color codes rather than 256-color spellings.
 //!
 //! Unix only.
 
 use std::io::{self, Write};
 
 use ratatui::backend::{Backend, ClearType, WindowSize};
-use ratatui::buffer::Cell;
+use ratatui::buffer::{Cell, CellWidth};
 use ratatui::layout::{Position, Size};
 use ratatui::style::{Color, Modifier};
 
@@ -26,6 +27,39 @@ pub struct FshellBackend<W: Write> {
     writer: W,
     cursor_position: Option<Position>,
     output_buffer: Vec<u8>,
+    cursor_mode: CursorMode,
+    cursor_show_pending: bool,
+    relative_cells: Vec<Cell>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Hash)]
+enum CursorMode {
+    #[default]
+    Absolute,
+    Relative {
+        surface_height: u16,
+        surface_width: u16,
+        /// Physical column of the anchor when known. `None` means a direct-TTY
+        /// child may have moved the cursor before fshell reclaimed the TTY.
+        origin_column: Option<u16>,
+        anchor_saved: bool,
+        frame_drawn: bool,
+    },
+}
+
+/// Unknown or nonzero columns can consume one physical row when logical row
+/// zero soft-wraps. Column zero cannot wrap before the renderer emits its
+/// explicit CRLF row boundary.
+fn wrap_guard_rows(origin_column: Option<u16>) -> u16 {
+    u16::from(origin_column != Some(0))
+}
+
+/// Number of physical rows after the anchor that belong to the relative
+/// surface, including the possible first-row wrap when its column is opaque.
+fn physical_rows_below(surface_height: u16, origin_column: Option<u16>) -> u16 {
+    surface_height
+        .saturating_sub(1)
+        .saturating_add(wrap_guard_rows(origin_column))
 }
 
 impl<W: Write> FshellBackend<W> {
@@ -35,6 +69,9 @@ impl<W: Write> FshellBackend<W> {
             writer,
             cursor_position: None,
             output_buffer: Vec::new(),
+            cursor_mode: CursorMode::Absolute,
+            cursor_show_pending: false,
+            relative_cells: Vec::new(),
         }
     }
 
@@ -47,6 +84,78 @@ impl<W: Write> FshellBackend<W> {
             writer,
             cursor_position: Some(position),
             output_buffer: Vec::new(),
+            cursor_mode: CursorMode::Absolute,
+            cursor_show_pending: false,
+            relative_cells: Vec::new(),
+        }
+    }
+
+    /// Create a stream-oriented backend for an inline viewport whose origin
+    /// is the terminal's current cursor, including its current column. Call
+    /// [`Self::establish_relative_surface`] before constructing a Ratatui
+    /// terminal with this backend.
+    pub const fn new_cursor_relative(writer: W) -> Self {
+        Self::new_cursor_relative_with_origin_column(writer, None)
+    }
+
+    /// Create an inline backend with explicit knowledge of the current cursor
+    /// column. Use `Some(0)` after an fshell-owned CRLF transition and `None`
+    /// after an arbitrary direct-TTY child.
+    pub const fn new_cursor_relative_with_origin_column(
+        writer: W,
+        origin_column: Option<u16>,
+    ) -> Self {
+        Self {
+            writer,
+            cursor_position: None,
+            output_buffer: Vec::new(),
+            cursor_mode: CursorMode::Relative {
+                surface_height: 1,
+                surface_width: 1,
+                origin_column,
+                anchor_saved: false,
+                frame_drawn: false,
+            },
+            cursor_show_pending: false,
+            relative_cells: Vec::new(),
+        }
+    }
+
+    /// Resume an inline backend at a saved terminal anchor established by
+    /// another backend instance.
+    pub fn resume_cursor_relative(writer: W, surface_width: u16, surface_height: u16) -> Self {
+        Self::resume_cursor_relative_with_origin_column(writer, surface_width, surface_height, None)
+    }
+
+    /// Resume an inline backend while preserving the known-column state of its
+    /// saved anchor across a backend replacement.
+    pub fn resume_cursor_relative_with_origin_column(
+        writer: W,
+        surface_width: u16,
+        surface_height: u16,
+        origin_column: Option<u16>,
+    ) -> Self {
+        Self {
+            writer,
+            cursor_position: Some(Position::ORIGIN),
+            output_buffer: Vec::new(),
+            cursor_mode: CursorMode::Relative {
+                surface_height: if surface_height == 0 {
+                    1
+                } else {
+                    surface_height
+                },
+                surface_width: if surface_width == 0 { 1 } else { surface_width },
+                origin_column,
+                anchor_saved: true,
+                frame_drawn: false,
+            },
+            cursor_show_pending: false,
+            relative_cells: vec![
+                Cell::default();
+                usize::from(surface_width.max(1))
+                    .saturating_mul(usize::from(surface_height.max(1)))
+            ],
         }
     }
 }
@@ -69,13 +178,17 @@ impl<W: Write> Backend for FshellBackend<W> {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
+        let relative = matches!(self.cursor_mode, CursorMode::Relative { .. });
+        if relative {
+            return self.draw_relative(content);
+        }
+
         let mut fg = Color::Reset;
         let mut bg = Color::Reset;
         let mut underline_color = Color::Reset;
         let mut modifier = Modifier::empty();
         let mut last: Option<Position> = None;
         for (x, y, cell) in content {
-            // A cell directly right of the previous one needs no move.
             if !matches!(last, Some(previous) if x == previous.x + 1 && y == previous.y) {
                 ansi::move_to(&mut self.output_buffer, x, y)?;
             }
@@ -103,14 +216,33 @@ impl<W: Write> Backend for FshellBackend<W> {
     }
 
     fn hide_cursor(&mut self) -> io::Result<()> {
+        self.cursor_show_pending = false;
         ansi::hide_cursor(&mut self.output_buffer)
     }
 
     fn show_cursor(&mut self) -> io::Result<()> {
+        if matches!(self.cursor_mode, CursorMode::Relative { .. }) {
+            self.cursor_show_pending = true;
+            return Ok(());
+        }
         ansi::show_cursor(&mut self.output_buffer)
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
+        if let CursorMode::Relative {
+            surface_height,
+            surface_width,
+            ..
+        } = self.cursor_mode
+        {
+            let position = self.cursor_position.ok_or_else(|| {
+                io::Error::other("cursor-relative backend has no tracked cursor position")
+            });
+            return position.map(|position| Position {
+                x: position.x.min(surface_width.saturating_sub(1)),
+                y: position.y.min(surface_height.saturating_sub(1)),
+            });
+        }
         if let Some(pos) = self.cursor_position {
             return Ok(pos);
         }
@@ -122,8 +254,22 @@ impl<W: Write> Backend for FshellBackend<W> {
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
         let Position { x, y } = position.into();
-        ansi::move_to(&mut self.output_buffer, x, y)?;
-        self.cursor_position = Some(Position { x, y });
+        if let CursorMode::Relative {
+            surface_height,
+            surface_width,
+            ..
+        } = self.cursor_mode
+        {
+            let position = Position {
+                x: x.min(surface_width.saturating_sub(1)),
+                y: y.min(surface_height.saturating_sub(1)),
+            };
+            self.cursor_position = Some(position);
+            self.position_relative_cursor(position)?;
+        } else {
+            ansi::move_to(&mut self.output_buffer, x, y)?;
+            self.cursor_position = Some(Position { x, y });
+        }
         Ok(())
     }
 
@@ -132,6 +278,9 @@ impl<W: Write> Backend for FshellBackend<W> {
     }
 
     fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        if matches!(self.cursor_mode, CursorMode::Relative { .. }) {
+            return self.clear_relative_region(clear_type);
+        }
         let sequence = match clear_type {
             ClearType::All => ansi::CLEAR_ALL,
             ClearType::AfterCursor => ansi::CLEAR_FROM_CURSOR_DOWN,
@@ -143,6 +292,11 @@ impl<W: Write> Backend for FshellBackend<W> {
     }
 
     fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        if matches!(self.cursor_mode, CursorMode::Relative { .. }) {
+            return Err(io::Error::other(
+                "append_lines is unsupported for a fixed cursor-relative surface",
+            ));
+        }
         for _ in 0..n {
             self.output_buffer.write_all(b"\n")?;
         }
@@ -174,14 +328,558 @@ impl<W: Write> Backend for FshellBackend<W> {
 }
 
 impl<W: Write> FshellBackend<W> {
+    fn draw_relative<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        let CursorMode::Relative {
+            surface_height,
+            surface_width,
+            ..
+        } = self.cursor_mode
+        else {
+            return Err(io::Error::other("inline draw requires a relative backend"));
+        };
+
+        let expected_cells = usize::from(surface_width).saturating_mul(usize::from(surface_height));
+        if self.relative_cells.len() != expected_cells {
+            self.relative_cells.resize(expected_cells, Cell::default());
+        }
+        for (x, y, cell) in content {
+            if x < surface_width && y < surface_height {
+                let index = usize::from(y) * usize::from(surface_width) + usize::from(x);
+                self.relative_cells[index] = cell.clone();
+            }
+        }
+
+        self.cursor_show_pending = false;
+        ansi::hide_cursor(&mut self.output_buffer)?;
+        self.restore_relative_anchor()?;
+        let frame_drawn = matches!(
+            self.cursor_mode,
+            CursorMode::Relative {
+                frame_drawn: true,
+                ..
+            }
+        );
+        if frame_drawn {
+            let origin_column = match self.cursor_mode {
+                CursorMode::Relative { origin_column, .. } => origin_column,
+                CursorMode::Absolute => None,
+            };
+            self.clear_relative_rows_below(physical_rows_below(surface_height, origin_column))?;
+            self.restore_relative_anchor()?;
+        }
+        self.output_buffer.write_all(b"\x1b[0m")?;
+
+        let mut sgr = SgrState::default();
+        for row in 0..surface_height {
+            let row_extent = relative_row_extent(&self.relative_cells, surface_width, row);
+            append_relative_cells(
+                &mut self.output_buffer,
+                &self.relative_cells,
+                surface_width,
+                row,
+                row_extent,
+                &mut sgr,
+            )?;
+            if row + 1 < surface_height {
+                // CR cancels a pending wrap at the right margin; LF advances
+                // exactly one physical row. The next logical row begins at 0.
+                self.output_buffer.write_all(b"\r\n")?;
+            }
+        }
+        reset_sgr(&mut self.output_buffer, &mut sgr)?;
+        self.cursor_position = Some(Position::ORIGIN);
+        if let CursorMode::Relative { frame_drawn, .. } = &mut self.cursor_mode {
+            *frame_drawn = true;
+        }
+        Ok(())
+    }
+
+    fn position_relative_cursor(&mut self, target: Position) -> io::Result<()> {
+        let CursorMode::Relative {
+            surface_height,
+            surface_width,
+            ..
+        } = self.cursor_mode
+        else {
+            return Err(io::Error::other(
+                "inline cursor requires a relative backend",
+            ));
+        };
+        let target = Position {
+            x: target.x.min(surface_width.saturating_sub(1)),
+            y: target.y.min(surface_height.saturating_sub(1)),
+        };
+
+        self.restore_relative_anchor()?;
+        self.output_buffer.write_all(b"\x1b[0m")?;
+        let mut sgr = SgrState::default();
+        for row in 0..=target.y {
+            let end = if row == target.y {
+                target.x
+            } else {
+                relative_row_extent(&self.relative_cells, surface_width, row)
+            };
+            append_relative_cells(
+                &mut self.output_buffer,
+                &self.relative_cells,
+                surface_width,
+                row,
+                end,
+                &mut sgr,
+            )?;
+            if row < target.y {
+                self.output_buffer.write_all(b"\r\n")?;
+            }
+        }
+        reset_sgr(&mut self.output_buffer, &mut sgr)?;
+        self.cursor_position = Some(target);
+        Ok(())
+    }
+
+    /// Reserve a cursor-relative surface below the live cursor and save its
+    /// origin without assuming that it starts in column zero. Rows are emitted
+    /// as a stream from this origin so the terminal itself decides soft wraps.
+    pub fn establish_relative_surface(
+        &mut self,
+        surface_width: u16,
+        height: u16,
+    ) -> io::Result<()> {
+        let CursorMode::Relative { anchor_saved, .. } = self.cursor_mode else {
+            return Err(io::Error::other(
+                "cannot establish a relative surface on an absolute backend",
+            ));
+        };
+        if anchor_saved {
+            return Err(io::Error::other(
+                "cursor-relative surface already has an anchor",
+            ));
+        }
+
+        let (_, terminal_height) = raw::size()?;
+        let origin_column = match self.cursor_mode {
+            CursorMode::Relative { origin_column, .. } => origin_column,
+            CursorMode::Absolute => None,
+        };
+        let wrap_guard = wrap_guard_rows(origin_column);
+        let max_surface_height = terminal_height.saturating_sub(wrap_guard).max(1);
+        let height = height.max(1).min(max_surface_height);
+        ansi::hide_cursor(&mut self.output_buffer)?;
+        self.cursor_mode = CursorMode::Relative {
+            surface_height: height,
+            surface_width: surface_width.max(1),
+            origin_column,
+            anchor_saved: false,
+            frame_drawn: false,
+        };
+        self.cursor_position = Some(Position::ORIGIN);
+        self.relative_cells = vec![
+            Cell::default();
+            usize::from(surface_width.max(1))
+                .saturating_mul(usize::from(height))
+        ];
+        // A child-owned cursor can make logical row zero wrap once. Keep an
+        // extra physical row only while the origin column is unknown or
+        // nonzero; fshell-owned column-zero transitions use every row.
+        self.reserve_relative_rows(height.saturating_add(wrap_guard))?;
+        self.save_relative_anchor()?;
+        self.clear_relative_rows_below(physical_rows_below(height, origin_column))?;
+        self.restore_relative_anchor()?;
+        self.flush_output()
+    }
+
+    /// Clear the old owned rows and establish a new local origin after a
+    /// viewport resize. The first row may occupy one extra physical row because
+    /// its starting column is opaque.
+    pub fn reanchor_relative_surface(
+        &mut self,
+        surface_width: u16,
+        surface_height: u16,
+    ) -> io::Result<()> {
+        let CursorMode::Relative {
+            surface_height: old_height,
+            surface_width: old_width,
+            origin_column,
+            ..
+        } = self.cursor_mode
+        else {
+            return Err(io::Error::other(
+                "cannot reanchor an absolute terminal backend",
+            ));
+        };
+        let (_, terminal_height) = raw::size()?;
+        let wrap_guard = wrap_guard_rows(origin_column);
+        let max_surface_height = terminal_height.saturating_sub(wrap_guard).max(1);
+        let surface_height = surface_height.max(1).min(max_surface_height);
+        ansi::hide_cursor(&mut self.output_buffer)?;
+        self.restore_relative_anchor()?;
+        self.clear_relative_rows_below(self.rows_below_after_resize(
+            old_width,
+            old_height,
+            surface_width.max(1),
+            origin_column,
+        ))?;
+        self.restore_relative_anchor()?;
+        self.cursor_mode = CursorMode::Relative {
+            surface_height,
+            surface_width: surface_width.max(1),
+            origin_column,
+            anchor_saved: false,
+            frame_drawn: false,
+        };
+        self.cursor_position = Some(Position::ORIGIN);
+        self.relative_cells = vec![
+            Cell::default();
+            usize::from(surface_width.max(1))
+                .saturating_mul(usize::from(surface_height))
+        ];
+        self.reserve_relative_rows(surface_height.saturating_add(wrap_guard))?;
+        self.save_relative_anchor()?;
+        self.clear_relative_rows_below(physical_rows_below(surface_height, origin_column))?;
+        self.restore_relative_anchor()?;
+        self.flush_output()
+    }
+
+    /// Commit transcript lines at the saved prompt origin. The next editor
+    /// anchors at the current terminal cursor, including any column left by a
+    /// child command.
+    pub fn commit_relative_lines(&mut self, lines: &[String]) -> io::Result<()> {
+        ansi::hide_cursor(&mut self.output_buffer)?;
+        self.restore_relative_anchor()?;
+        let surface_height = self.relative_surface_height()?;
+        if matches!(
+            self.cursor_mode,
+            CursorMode::Relative {
+                frame_drawn: true,
+                ..
+            }
+        ) {
+            let origin_column = match self.cursor_mode {
+                CursorMode::Relative { origin_column, .. } => origin_column,
+                CursorMode::Absolute => None,
+            };
+            self.clear_relative_rows_below(physical_rows_below(surface_height, origin_column))?;
+        }
+        self.restore_relative_anchor()?;
+        for line in lines {
+            let terminal_line = line.replace("\r\n", "\n").replace('\n', "\r\n");
+            self.output_buffer.write_all(terminal_line.as_bytes())?;
+            self.output_buffer.write_all(b"\x1b[0m\r\n")?;
+        }
+        self.flush_output()?;
+        if let CursorMode::Relative { anchor_saved, .. } = &mut self.cursor_mode {
+            *anchor_saved = false;
+        }
+        if let CursorMode::Relative { frame_drawn, .. } = &mut self.cursor_mode {
+            *frame_drawn = false;
+        }
+        if !lines.is_empty()
+            && let CursorMode::Relative { origin_column, .. } = &mut self.cursor_mode
+        {
+            *origin_column = Some(0);
+        }
+        self.cursor_position = None;
+        self.relative_cells.clear();
+        Ok(())
+    }
+
+    /// Remove the live editor surface without disturbing terminal history
+    /// above its origin.
+    pub fn clear_relative_surface(&mut self) -> io::Result<()> {
+        ansi::hide_cursor(&mut self.output_buffer)?;
+        self.restore_relative_anchor()?;
+        let surface_height = self.relative_surface_height()?;
+        if matches!(
+            self.cursor_mode,
+            CursorMode::Relative {
+                frame_drawn: true,
+                ..
+            }
+        ) {
+            let origin_column = match self.cursor_mode {
+                CursorMode::Relative { origin_column, .. } => origin_column,
+                CursorMode::Absolute => None,
+            };
+            self.clear_relative_rows_below(physical_rows_below(surface_height, origin_column))?;
+        }
+        self.restore_relative_anchor()?;
+        self.flush_output()?;
+        if let CursorMode::Relative { anchor_saved, .. } = &mut self.cursor_mode {
+            *anchor_saved = false;
+        }
+        if let CursorMode::Relative { frame_drawn, .. } = &mut self.cursor_mode {
+            *frame_drawn = false;
+        }
+        self.cursor_position = None;
+        self.relative_cells.clear();
+        Ok(())
+    }
+
+    fn reserve_relative_rows(&mut self, height: u16) -> io::Result<()> {
+        // Relative cursor motion clears a terminal's deferred-wrap state. The
+        // saved origin is therefore a local position, not a complete snapshot
+        // of all emulator state left by an arbitrary child process.
+        for _ in 1..height {
+            // IND advances vertically without applying a terminal's newline
+            // mode, which can turn LF into CRLF and lose the opaque column.
+            self.output_buffer.write_all(b"\x1bD")?;
+        }
+        if height > 1 {
+            write!(self.output_buffer, "\x1b[{}A", height - 1)?;
+        }
+        self.cursor_position = Some(Position::ORIGIN);
+        Ok(())
+    }
+
+    fn relative_surface_height(&self) -> io::Result<u16> {
+        match self.cursor_mode {
+            CursorMode::Relative { surface_height, .. } => Ok(surface_height),
+            CursorMode::Absolute => Err(io::Error::other(
+                "cursor-relative operation requires a cursor-relative backend",
+            )),
+        }
+    }
+
+    /// Clear only the editor's stream footprint. The first row is erased from
+    /// its saved starting column; rows below it are full-width owned rows.
+    fn clear_relative_rows_below(&mut self, rows_below: u16) -> io::Result<()> {
+        self.output_buffer.write_all(b"\x1b[0m")?;
+        self.output_buffer
+            .write_all(ansi::CLEAR_UNTIL_NEW_LINE.as_bytes())?;
+        for _ in 0..rows_below {
+            self.output_buffer.write_all(b"\r\x1b[1B\x1b[2K")?;
+        }
+        Ok(())
+    }
+
+    fn rows_below_after_resize(
+        &self,
+        old_width: u16,
+        old_height: u16,
+        new_width: u16,
+        origin_column: Option<u16>,
+    ) -> u16 {
+        let old_width = u32::from(old_width.max(1));
+        let new_width = u32::from(new_width.max(1));
+        let logical_rows = u32::from(old_height.max(1));
+        let rows_per_logical = old_width.div_ceil(new_width);
+        let start_column = origin_column
+            .map(u32::from)
+            .unwrap_or_else(|| new_width.saturating_sub(1))
+            .min(new_width.saturating_sub(1));
+        let first_row = old_width.saturating_add(start_column).div_ceil(new_width);
+        let physical_rows = first_row.saturating_add(
+            logical_rows
+                .saturating_sub(1)
+                .saturating_mul(rows_per_logical),
+        );
+        physical_rows.saturating_sub(1).min(u32::from(u16::MAX)) as u16
+    }
+
+    fn save_relative_anchor(&mut self) -> io::Result<()> {
+        self.output_buffer.write_all(b"\x1b7")?;
+        if let CursorMode::Relative { anchor_saved, .. } = &mut self.cursor_mode {
+            *anchor_saved = true;
+        }
+        self.cursor_position = Some(Position::ORIGIN);
+        Ok(())
+    }
+
+    fn restore_relative_anchor(&mut self) -> io::Result<()> {
+        let CursorMode::Relative { anchor_saved, .. } = self.cursor_mode else {
+            return Err(io::Error::other(
+                "cannot restore a relative anchor on an absolute backend",
+            ));
+        };
+        if !anchor_saved {
+            return Err(io::Error::other(
+                "cursor-relative surface has no saved origin",
+            ));
+        }
+        self.output_buffer.write_all(b"\x1b8")?;
+        self.cursor_position = Some(Position::ORIGIN);
+        Ok(())
+    }
+
+    fn clear_relative_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        let cursor = self.cursor_position.unwrap_or(Position::ORIGIN);
+        let (width, height) = match self.cursor_mode {
+            CursorMode::Relative {
+                surface_height,
+                surface_width,
+                ..
+            } => (surface_width as usize, surface_height as usize),
+            CursorMode::Absolute => return Ok(()),
+        };
+        match clear_type {
+            ClearType::All => self.relative_cells.fill(Cell::default()),
+            ClearType::AfterCursor => {
+                for y in cursor.y as usize..height {
+                    let start = if y == cursor.y as usize {
+                        cursor.x as usize
+                    } else {
+                        0
+                    };
+                    for x in start..width {
+                        if let Some(cell) = self.relative_cells.get_mut(y * width + x) {
+                            *cell = Cell::default();
+                        }
+                    }
+                }
+            }
+            ClearType::BeforeCursor => {
+                for y in 0..=cursor.y as usize {
+                    let end = if y == cursor.y as usize {
+                        cursor.x as usize + 1
+                    } else {
+                        width
+                    };
+                    for x in 0..end.min(width) {
+                        if let Some(cell) = self.relative_cells.get_mut(y * width + x) {
+                            *cell = Cell::default();
+                        }
+                    }
+                }
+            }
+            ClearType::CurrentLine => {
+                let y = cursor.y as usize;
+                for x in 0..width {
+                    if let Some(cell) = self.relative_cells.get_mut(y * width + x) {
+                        *cell = Cell::default();
+                    }
+                }
+            }
+            ClearType::UntilNewLine => {
+                let y = cursor.y as usize;
+                for x in cursor.x as usize..width {
+                    if let Some(cell) = self.relative_cells.get_mut(y * width + x) {
+                        *cell = Cell::default();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Commit queued terminal operations with one write/flush boundary.
     fn flush_output(&mut self) -> io::Result<()> {
+        if self.cursor_show_pending {
+            ansi::show_cursor(&mut self.output_buffer)?;
+            self.cursor_show_pending = false;
+        }
         if !self.output_buffer.is_empty() {
             self.writer.write_all(&self.output_buffer)?;
             self.output_buffer.clear();
         }
         self.writer.flush()
     }
+}
+
+#[derive(Clone, Copy)]
+struct SgrState {
+    fg: Color,
+    bg: Color,
+    underline_color: Color,
+    modifier: Modifier,
+}
+
+impl Default for SgrState {
+    fn default() -> Self {
+        Self {
+            fg: Color::Reset,
+            bg: Color::Reset,
+            underline_color: Color::Reset,
+            modifier: Modifier::empty(),
+        }
+    }
+}
+
+fn append_relative_cells(
+    out: &mut Vec<u8>,
+    cells: &[Cell],
+    width: u16,
+    row: u16,
+    end_x: u16,
+    sgr: &mut SgrState,
+) -> io::Result<()> {
+    let row_start = usize::from(row) * usize::from(width);
+    let end_x = end_x.min(width);
+    let mut x = 0u16;
+    while x < end_x {
+        let Some(cell) = cells.get(row_start + usize::from(x)) else {
+            break;
+        };
+        let cell_width = cell.cell_width();
+        if cell_width == 0 {
+            // Ratatui represents the second cell of a wide grapheme as a
+            // zero-width continuation. Empty continuations must not emit a
+            // second terminal glyph; standalone combining text is retained.
+            if !cell.symbol().is_empty() {
+                append_cell_style(out, cell, sgr)?;
+                out.write_all(cell.symbol().as_bytes())?;
+            }
+            x = x.saturating_add(1);
+            continue;
+        }
+        if x.saturating_add(cell_width) > end_x {
+            break;
+        }
+        append_cell_style(out, cell, sgr)?;
+        let symbol = cell.symbol();
+        if symbol.is_empty() {
+            out.write_all(b" ")?;
+        } else {
+            out.write_all(symbol.as_bytes())?;
+        }
+        x = x.saturating_add(cell_width);
+    }
+
+    Ok(())
+}
+
+fn relative_row_extent(cells: &[Cell], width: u16, row: u16) -> u16 {
+    let row_start = usize::from(row) * usize::from(width);
+    let mut extent = 0;
+    for x in 0..width {
+        let Some(cell) = cells.get(row_start + usize::from(x)) else {
+            break;
+        };
+        let is_default_blank = cell.symbol() == " "
+            && cell.fg == Color::Reset
+            && cell.bg == Color::Reset
+            && cell.underline_color == Color::Reset
+            && cell.modifier.is_empty();
+        if !is_default_blank {
+            extent = extent.max(x.saturating_add(cell.cell_width().max(1)));
+        }
+    }
+    extent.min(width)
+}
+
+fn append_cell_style(out: &mut Vec<u8>, cell: &Cell, sgr: &mut SgrState) -> io::Result<()> {
+    if cell.modifier != sgr.modifier {
+        write_modifier_diff(out, sgr.modifier, cell.modifier)?;
+        sgr.modifier = cell.modifier;
+    }
+    if cell.fg != sgr.fg || cell.bg != sgr.bg {
+        write_colors(out, cell.fg, cell.bg)?;
+        sgr.fg = cell.fg;
+        sgr.bg = cell.bg;
+    }
+    if cell.underline_color != sgr.underline_color {
+        write_underline_color(out, cell.underline_color)?;
+        sgr.underline_color = cell.underline_color;
+    }
+    Ok(())
+}
+
+fn reset_sgr(out: &mut Vec<u8>, sgr: &mut SgrState) -> io::Result<()> {
+    out.write_all(b"\x1b[39m\x1b[49m\x1b[59m")?;
+    write_sgr(out, 0)?;
+    *sgr = SgrState::default();
+    Ok(())
 }
 
 /// Write one SGR parameter sequence.

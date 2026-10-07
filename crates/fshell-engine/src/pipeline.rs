@@ -3915,6 +3915,7 @@ pub(crate) async fn run_pipeline_statement(
             PipelinePayload::Data(v) => crate::eval::write_val_stdout(&v),
             PipelinePayload::Bytes(b) => {
                 use std::io::Write;
+                fshell_tty::mark_cursor_state_unknown_for_stdout_output(&b);
                 let _ = std::io::stdout().write_all(&b);
             }
             PipelinePayload::Structured(d) => {

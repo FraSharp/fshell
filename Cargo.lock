@@ -1484,6 +1484,7 @@ dependencies = [
  "fshell-hash",
  "fshell-render",
  "fshell-terminal",
+ "fshell-tty",
  "futures",
  "hex",
  "libc",
