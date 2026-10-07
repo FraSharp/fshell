@@ -1,291 +1,122 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::repo::Repository;
+use gix::bstr::ByteSlice;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IgnoreRules {
-    patterns: Vec<IgnorePattern>,
-}
-
-#[derive(Debug, Clone)]
-struct IgnorePattern {
-    pattern: String,
-    negated: bool,
-    dir_only: bool,
-    anchored: bool,
+    search: gix::ignore::Search,
 }
 
 impl IgnoreRules {
     pub fn empty() -> Self {
-        IgnoreRules {
-            patterns: Vec::new(),
-        }
+        Self::default()
     }
 
+    /// Parse patterns using Git's ignore parser and matcher.
     pub fn parse(content: &str) -> Self {
-        let patterns = content
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim_end();
-                if line.is_empty() || line.starts_with('#') {
-                    return None;
-                }
-
-                let negated = line.starts_with('!');
-                let line = if negated { &line[1..] } else { line };
-
-                let anchored = line.contains('/') || line.contains('*');
-
-                let line = line.strip_prefix('/').unwrap_or(line);
-
-                let (line, dir_only) = if let Some(l) = line.strip_suffix('/') {
-                    (l, true)
-                } else {
-                    (line, false)
-                };
-
-                Some(IgnorePattern {
-                    pattern: line.to_string(),
-                    negated,
-                    dir_only,
-                    anchored,
-                })
-            })
-            .collect();
-
-        IgnoreRules { patterns }
+        let patterns = content.lines().map(OsString::from);
+        Self {
+            search: gix::ignore::Search::from_overrides(
+                patterns,
+                gix::ignore::search::Ignore::default(),
+            ),
+        }
     }
 
     pub fn extend(&mut self, other: IgnoreRules) {
-        self.patterns.extend(other.patterns);
+        self.search.patterns.extend(other.search.patterns);
     }
 
     pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
-        let path_bytes = path.as_os_str().as_bytes();
-        let mut ignored = false;
-
-        for pattern in &self.patterns {
-            if pattern.dir_only && !is_dir {
-                continue;
-            }
-
-            let matched = if pattern.anchored {
-                // For anchored patterns without globs, match as prefix
-                // (e.g., "target" matches "target/debug/foo.o")
-                if !pattern.pattern.contains('*') && !pattern.pattern.contains('?') {
-                    let pattern_bytes = pattern.pattern.as_bytes();
-                    path_bytes == pattern_bytes
-                        || (path_bytes.starts_with(pattern_bytes)
-                            && path_bytes.get(pattern_bytes.len()) == Some(&b'/'))
-                } else {
-                    glob_match(pattern.pattern.as_bytes(), path_bytes)
-                }
-            } else {
-                let name = path.file_name().map(OsStrExt::as_bytes).unwrap_or_default();
-                glob_match(pattern.pattern.as_bytes(), name)
-            };
-
-            if matched {
-                ignored = !pattern.negated;
-            }
-        }
-
-        ignored
+        self.search
+            .pattern_matching_relative_path(
+                path.as_os_str().as_bytes().as_bstr(),
+                Some(is_dir),
+                gix::ignore::glob::pattern::Case::Sensitive,
+            )
+            .is_some_and(|matched| !matched.pattern.is_negative())
     }
-}
-
-fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
-    glob_match_inner(pattern, text)
-}
-
-fn glob_match_inner(pattern: &[u8], text: &[u8]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = None;
-    let mut star_ti = 0;
-
-    while ti < text.len() {
-        if pi < pattern.len() && pattern[pi] == b'[' {
-            let class_end = pattern[pi..]
-                .iter()
-                .position(|&b| b == b']')
-                .map(|p| pi + p);
-            if let Some(end) = class_end {
-                let class = &pattern[pi + 1..end];
-                let negated = class.starts_with(b"^") || class.starts_with(b"!");
-                let class_content = if negated { &class[1..] } else { class };
-                let matched = char_class_match(class_content, text[ti]);
-                if matched != negated {
-                    pi = end + 1;
-                    ti += 1;
-                    continue;
-                }
-            }
-        } else if pi < pattern.len() && (pattern[pi] == text[ti] || pattern[pi] == b'?') {
-            pi += 1;
-            ti += 1;
-            continue;
-        } else if pi < pattern.len() && pattern[pi] == b'*' {
-            star_pi = Some(pi);
-            star_ti = ti;
-            pi += 1;
-            continue;
-        } else if let Some(sp) = star_pi {
-            pi = sp + 1;
-            star_ti += 1;
-            ti = star_ti;
-            continue;
-        }
-
-        return false;
-    }
-
-    while pi < pattern.len() && pattern[pi] == b'*' {
-        pi += 1;
-    }
-
-    pi == pattern.len()
-}
-
-fn char_class_match(class: &[u8], c: u8) -> bool {
-    let mut i = 0;
-    while i < class.len() {
-        if i + 2 < class.len() && class[i + 1] == b'-' {
-            if c >= class[i] && c <= class[i + 2] {
-                return true;
-            }
-            i += 3;
-        } else {
-            if class[i] == c {
-                return true;
-            }
-            i += 1;
-        }
-    }
-    false
 }
 
 impl Repository {
-    pub fn load_ignore_rules(&self, dir: &Path) -> IgnoreRules {
-        let gitignore = dir.join(".gitignore");
-        if let Ok(content) = fs::read_to_string(&gitignore) {
-            IgnoreRules::parse(&content)
-        } else {
-            IgnoreRules::empty()
-        }
+    pub fn load_ignore_rules(&self, directory: &Path) -> IgnoreRules {
+        let gitignore = directory.join(".gitignore");
+        let Ok(content) = fs::read(&gitignore) else {
+            return IgnoreRules::empty();
+        };
+
+        let mut rules = IgnoreRules::empty();
+        rules.search.add_patterns_buffer(
+            &content,
+            gitignore,
+            Some(self.work_dir()),
+            gix::ignore::search::Ignore::default(),
+        );
+        rules
     }
 
     pub fn collect_ignore_rules(&self, path: &Path) -> IgnoreRules {
-        let mut all_rules = IgnoreRules::empty();
+        let absolute_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.work_dir().join(path)
+        };
+        let directory = if absolute_path.is_dir() {
+            absolute_path.as_path()
+        } else {
+            absolute_path.parent().unwrap_or(self.work_dir())
+        };
 
-        let root_ignore = self.load_ignore_rules(self.work_dir());
-        all_rules.patterns.extend(root_ignore.patterns);
+        let mut directories: Vec<PathBuf> = directory
+            .ancestors()
+            .take_while(|ancestor| ancestor.starts_with(self.work_dir()))
+            .map(Path::to_path_buf)
+            .collect();
+        directories.reverse();
 
-        if let Ok(rel) = path.strip_prefix(self.work_dir()) {
-            let mut current = self.work_dir().to_path_buf();
-            for component in rel.components() {
-                current = current.join(component);
-                let nested_ignore = self.load_ignore_rules(&current);
-                all_rules.patterns.extend(nested_ignore.patterns);
-            }
+        let mut rules = IgnoreRules::empty();
+        for directory in directories {
+            rules.extend(self.load_ignore_rules(&directory));
         }
-
-        all_rules
+        rules
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::init_repo;
 
     #[test]
-    fn parse_simple_patterns() {
-        let rules = IgnoreRules::parse("*.log\nbuild/\n");
-        assert!(rules.is_ignored(Path::new("debug.log"), false));
-        assert!(rules.is_ignored(Path::new("build"), true));
-        assert!(!rules.is_ignored(Path::new("main.rs"), false));
-    }
-
-    #[test]
-    fn negation() {
-        let rules = IgnoreRules::parse("*.log\n!important.log\n");
+    fn gitignore_patterns_follow_git_matching_rules() {
+        let rules = IgnoreRules::parse("*.log\n!important.log\n/cache/**/tmp\n");
         assert!(rules.is_ignored(Path::new("debug.log"), false));
         assert!(!rules.is_ignored(Path::new("important.log"), false));
+        assert!(rules.is_ignored(Path::new("cache/a/b/tmp"), false));
+        assert!(rules.is_ignored(Path::new("nested/debug.log"), false));
     }
 
     #[test]
-    fn anchored_pattern() {
-        let rules = IgnoreRules::parse("/build\n");
-        assert!(rules.is_ignored(Path::new("build"), false));
-        assert!(!rules.is_ignored(Path::new("sub/build"), false));
-    }
+    fn collected_rules_keep_root_and_nested_gitignore_scopes() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        init_repo(directory.path());
+        fs::write(directory.path().join(".gitignore"), "*.log\n")
+            .expect("root ignore file should be written");
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested).expect("nested directory should be created");
+        fs::write(nested.join(".gitignore"), "!keep.log\n")
+            .expect("nested ignore file should be written");
 
-    #[test]
-    fn unanchored_pattern() {
-        let rules = IgnoreRules::parse("build\n");
-        assert!(rules.is_ignored(Path::new("build"), false));
-        assert!(rules.is_ignored(Path::new("sub/build"), false));
-    }
-
-    #[test]
-    fn dir_only_pattern() {
-        let rules = IgnoreRules::parse("build/\n");
-        assert!(rules.is_ignored(Path::new("build"), true));
-        assert!(!rules.is_ignored(Path::new("build"), false));
-    }
-
-    #[test]
-    fn glob_wildcard() {
-        let rules = IgnoreRules::parse("*.o\n");
-        assert!(rules.is_ignored(Path::new("main.o"), false));
-        assert!(!rules.is_ignored(Path::new("main.rs"), false));
-    }
-
-    #[test]
-    fn glob_question_mark() {
-        let rules = IgnoreRules::parse("?.txt\n");
-        assert!(rules.is_ignored(Path::new("a.txt"), false));
-        assert!(!rules.is_ignored(Path::new("ab.txt"), false));
-    }
-
-    #[test]
-    fn char_class() {
-        let rules = IgnoreRules::parse("[abc].txt\n");
-        assert!(rules.is_ignored(Path::new("a.txt"), false));
-        assert!(rules.is_ignored(Path::new("b.txt"), false));
-        assert!(!rules.is_ignored(Path::new("d.txt"), false));
-    }
-
-    #[test]
-    fn char_class_range() {
-        let rules = IgnoreRules::parse("[a-z].txt\n");
-        assert!(rules.is_ignored(Path::new("a.txt"), false));
-        assert!(rules.is_ignored(Path::new("z.txt"), false));
-        assert!(!rules.is_ignored(Path::new("0.txt"), false));
-    }
-
-    #[test]
-    fn comments_and_empty_lines() {
-        let rules = IgnoreRules::parse("# comment\n\n*.log\n");
-        assert!(rules.is_ignored(Path::new("debug.log"), false));
-    }
-
-    #[test]
-    fn nested_gitignore() {
-        let tmp = tempfile::tempdir().unwrap();
-        let git_dir = tmp.path().join(".git");
-        fs::create_dir_all(&git_dir).unwrap();
-        fs::create_dir_all(tmp.path().join("sub")).unwrap();
-        fs::write(tmp.path().join(".gitignore"), "*.log\n").unwrap();
-        fs::write(tmp.path().join("sub/.gitignore"), "*.tmp\n").unwrap();
-
-        let repo = Repository::discover(tmp.path()).unwrap();
-        let rules = repo.collect_ignore_rules(&tmp.path().join("sub/file.tmp"));
-        assert!(rules.is_ignored(Path::new("file.tmp"), false));
+        let repo = Repository::discover(directory.path()).expect("repository should be discovered");
+        let rules = repo.collect_ignore_rules(&nested);
+        assert!(rules.is_ignored(Path::new("nested/drop.log"), false));
+        assert!(!rules.is_ignored(Path::new("nested/keep.log"), false));
     }
 }

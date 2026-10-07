@@ -5,15 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Git integration for fshell — native index inspection without git subprocess"
+description = "Git metadata and status for fshell, backed by gitoxide without git subprocesses"
 repository.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
-flate2 = { workspace = true }
+filetime = { workspace = true }
 hex = { workspace = true }
 fshell-hash = { workspace = true, features = ["std"] }
-memmap2 = { workspace = true }
+gix = { workspace = true }
 
 [lints]
 workspace = true

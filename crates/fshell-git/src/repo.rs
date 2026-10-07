@@ -2,11 +2,22 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Repository {
+    pub(crate) inner: Rc<gix::Repository>,
     pub(crate) git_dir: PathBuf,
     pub(crate) work_dir: PathBuf,
+}
+
+impl std::fmt::Debug for Repository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Repository")
+            .field("git_dir", &self.git_dir)
+            .field("work_dir", &self.work_dir)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -27,40 +38,39 @@ pub enum Error {
     Zlib(String),
     #[error("pack object corrupted at offset {0}")]
     CorruptedPackEntry(usize),
+    #[error("git backend error: {0}")]
+    Backend(String),
+    #[error("unsupported Git feature: {0}")]
+    UnsupportedFeature(String),
+    #[error("unsupported git object hash: {0}")]
+    UnsupportedObjectHash(String),
 }
 
 impl Repository {
     pub fn discover(path: &Path) -> Result<Self, Error> {
-        let mut current = path.to_path_buf();
-        loop {
-            let git_path = current.join(".git");
-            if git_path.is_dir() {
-                return Ok(Repository {
-                    git_dir: git_path,
-                    work_dir: current,
-                });
+        let inner = gix::discover(path).map_err(|error| {
+            if !has_worktree_git_marker(path) {
+                Error::NotFound
+            } else {
+                Error::Backend(error.to_string())
             }
-            if git_path.is_file() {
-                let content = std::fs::read_to_string(&git_path)?;
-                if let Some(first_line) = content.lines().next()
-                    && let Some(gitdir) = first_line.strip_prefix("gitdir: ")
-                {
-                    let git_dir = PathBuf::from(gitdir.trim());
-                    let git_dir = if git_dir.is_absolute() {
-                        git_dir
-                    } else {
-                        current.join(git_dir)
-                    };
-                    return Ok(Repository {
-                        git_dir,
-                        work_dir: current,
-                    });
-                }
-            }
-            if !current.pop() {
-                return Err(Error::NotFound);
-            }
+        })?;
+        if inner.object_hash() != gix::hash::Kind::Sha1 {
+            return Err(Error::UnsupportedObjectHash(
+                inner.object_hash().to_string(),
+            ));
         }
+        let work_dir = inner
+            .workdir()
+            .ok_or_else(|| Error::Backend("bare repositories are unsupported".into()))?
+            .to_path_buf();
+        let git_dir = inner.git_dir().to_path_buf();
+
+        Ok(Repository {
+            inner: Rc::new(inner),
+            git_dir,
+            work_dir,
+        })
     }
 
     pub fn git_dir(&self) -> &Path {
@@ -72,84 +82,69 @@ impl Repository {
     }
 }
 
+fn has_worktree_git_marker(path: &Path) -> bool {
+    path.ancestors()
+        .any(|ancestor| ancestor.join(".git").exists())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{commit_all, git, init_repo};
     use std::fs;
 
     #[test]
     fn discover_in_current_dir() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().expect("test fixture operation should succeed");
+        init_repo(tmp.path());
         let git_dir = tmp.path().join(".git");
-        fs::create_dir_all(&git_dir).unwrap();
-        let repo = Repository::discover(tmp.path()).unwrap();
+        let repo = Repository::discover(tmp.path()).expect("test fixture operation should succeed");
         assert_eq!(repo.git_dir(), git_dir);
         assert_eq!(repo.work_dir(), tmp.path());
     }
 
     #[test]
     fn discover_in_subdir() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        let tmp = tempfile::tempdir().expect("test fixture operation should succeed");
+        init_repo(tmp.path());
         let sub = tmp.path().join("a/b/c");
-        fs::create_dir_all(&sub).unwrap();
-        let repo = Repository::discover(&sub).unwrap();
+        fs::create_dir_all(&sub).expect("test fixture operation should succeed");
+        let repo = Repository::discover(&sub).expect("test fixture operation should succeed");
         assert_eq!(repo.work_dir(), tmp.path());
     }
 
     #[test]
     fn not_found() {
-        let tmp = tempfile::tempdir().unwrap();
-        let err = Repository::discover(tmp.path()).unwrap_err();
+        let tmp = tempfile::tempdir().expect("test fixture operation should succeed");
+        let err = Repository::discover(tmp.path()).expect_err("expected an error");
         assert!(matches!(err, Error::NotFound));
     }
 
     #[test]
     fn worktree_git_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let real_git = tmp.path().join("real-git");
-        fs::create_dir_all(&real_git).unwrap();
-        let worktree = tmp.path().join("worktree");
-        fs::create_dir_all(&worktree).unwrap();
-        fs::write(
-            worktree.join(".git"),
-            format!("gitdir: {}", real_git.display()),
-        )
-        .unwrap();
-        let repo = Repository::discover(&worktree).unwrap();
-        assert_eq!(repo.git_dir(), real_git);
-        assert_eq!(repo.work_dir(), &worktree);
-    }
-
-    #[test]
-    fn worktree_git_file_multiline() {
-        let tmp = tempfile::tempdir().unwrap();
-        let real_git = tmp.path().join("real-git");
-        fs::create_dir_all(&real_git).unwrap();
-        let worktree = tmp.path().join("worktree");
-        fs::create_dir_all(&worktree).unwrap();
-        fs::write(
-            worktree.join(".git"),
-            format!("gitdir: {}\ncommondir: ../..", real_git.display()),
-        )
-        .unwrap();
-        let repo = Repository::discover(&worktree).unwrap();
-        assert_eq!(repo.git_dir(), real_git);
-        assert_eq!(repo.work_dir(), &worktree);
-    }
-
-    #[test]
-    fn worktree_git_file_relative_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let real_git = tmp.path().join(".git/worktrees/feature");
-        fs::create_dir_all(&real_git).unwrap();
-        let worktree = tmp.path().join("worktree");
-        fs::create_dir_all(&worktree).unwrap();
-        fs::write(worktree.join(".git"), "gitdir: ../.git/worktrees/feature").unwrap();
-        let repo = Repository::discover(&worktree).unwrap();
+        let tmp = tempfile::tempdir().expect("test fixture operation should succeed");
+        init_repo(tmp.path());
+        fs::write(tmp.path().join("tracked"), "data")
+            .expect("test fixture operation should succeed");
+        commit_all(tmp.path(), "initial");
+        let worktree = tmp.path().join("feature");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree
+                    .to_str()
+                    .expect("test fixture operation should succeed"),
+            ],
+        );
+        let repo = Repository::discover(&worktree).expect("test fixture operation should succeed");
         assert_eq!(
-            fs::canonicalize(repo.git_dir()).unwrap(),
-            fs::canonicalize(&real_git).unwrap()
+            repo.git_dir(),
+            fs::canonicalize(tmp.path().join(".git/worktrees/feature"))
+                .expect("test fixture operation should succeed")
         );
         assert_eq!(repo.work_dir(), &worktree);
     }

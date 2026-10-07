@@ -133,6 +133,7 @@ fshell-capabilities = { path = "crates/fshell-capabilities", version = "0.2.0" }
 fshell-core = { path = "crates/fshell-core", version = "0.2.0" }
 fshell-engine = { path = "crates/fshell-engine", version = "0.2.0" }
 fshell-git = { path = "crates/fshell-git", version = "0.2.0" }
+gix = { version = "0.88.0", default-features = false, features = ["revision", "sha1", "status"] }
 fshell-hash = { path = "crates/fshell-hash", version = "0.2.0" }
 fshell-ls = { path = "crates/fshell-ls", version = "0.2.0" }
 fshell-posix = { path = "crates/fshell-posix", version = "0.2.0" }
@@ -195,6 +196,7 @@ r2d2 = "0.8"
 lscolors = "0.21"
 hex = "0.4"
 flate2 = "1.1"
+filetime = "0.2"
 memmap2 = "0.9"
 stacker = "0.1.25"
 

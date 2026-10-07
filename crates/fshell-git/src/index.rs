@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+use fshell_hash::FxHashMap;
 use std::ffi::OsStr;
-use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-
-use fshell_hash::FxHashMap;
 
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
@@ -21,12 +19,13 @@ pub struct IndexEntry {
     pub dev: u32,
     pub ino: u32,
     pub flags: u16,
-    pub stage: u8, // 0-3, from flags bits 12-13
+    pub stage: u8,
 }
 
 #[derive(Debug)]
 pub struct Index {
     version: u32,
+    sparse: bool,
     entries: Vec<IndexEntry>,
     path_lookup: FxHashMap<PathBuf, usize>,
 }
@@ -43,191 +42,106 @@ pub enum IndexError {
     TruncatedEntry(usize),
     #[error("index entry corrupted at offset {0}")]
     CorruptedEntry(usize),
+    #[error("invalid index: {0}")]
+    Backend(String),
 }
 
 impl Index {
     pub fn parse(git_dir: &Path) -> Result<Self, IndexError> {
         let path = git_dir.join("index");
-        let data = fs::read(&path)?;
-        Self::parse_bytes(&data)
+        let index = gix::index::File::at(
+            &path,
+            gix::hash::Kind::Sha1,
+            false,
+            gix::index::decode::Options::default(),
+        )
+        .map_err(|error| IndexError::Backend(error.to_string()))?;
+        Self::from_state(&index)
     }
 
+    /// Decode an index with Gitoxide's index reader, including v4 paths and extensions.
     pub fn parse_bytes(data: &[u8]) -> Result<Self, IndexError> {
-        if data.len() < 12 {
-            return Err(IndexError::TruncatedEntry(0));
+        let (state, _) = gix::index::State::from_bytes(
+            data,
+            filetime::FileTime::from_unix_time(0, 0),
+            gix::hash::Kind::Sha1,
+            gix::index::decode::Options {
+                thread_limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .map_err(|error| IndexError::Backend(error.to_string()))?;
+        let checksum_start = data
+            .len()
+            .checked_sub(gix::hash::Kind::Sha1.len_in_bytes())
+            .ok_or(IndexError::TruncatedEntry(data.len()))?;
+        let stored_checksum = &data[checksum_start..];
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(&data[..checksum_start]);
+        let actual = hasher
+            .try_finalize()
+            .map_err(|error| IndexError::Backend(error.to_string()))?;
+        if actual.as_bytes() != stored_checksum {
+            return Err(IndexError::Backend("index checksum mismatch".into()));
+        }
+        Self::from_state(&state)
+    }
+
+    fn from_state(state: &gix::index::State) -> Result<Self, IndexError> {
+        if state.object_hash() != gix::hash::Kind::Sha1 {
+            return Err(IndexError::Backend(format!(
+                "unsupported object hash: {}",
+                state.object_hash()
+            )));
         }
 
-        let sig = &data[0..4];
-        if sig != b"DIRC" {
-            return Err(IndexError::InvalidSignature);
-        }
-        let version = u32::from_be_bytes(
-            data[4..8]
-                .try_into()
-                .map_err(|_| IndexError::CorruptedEntry(4))?,
-        );
-        let num_entries = u32::from_be_bytes(
-            data[8..12]
-                .try_into()
-                .map_err(|_| IndexError::CorruptedEntry(8))?,
-        );
-
-        if version != 2 && version != 3 && version != 4 {
-            return Err(IndexError::UnsupportedVersion(version));
-        }
-
-        let max_entries = data.len().saturating_sub(12) / 64;
-        if num_entries as usize > max_entries {
-            return Err(IndexError::TruncatedEntry(data.len()));
-        }
-        let mut entries = Vec::with_capacity(num_entries as usize);
-        let mut offset: usize = 12;
-        let mut previous_path = Vec::new();
-
-        for _ in 0..num_entries {
-            let entry_start = offset;
-            if offset.checked_add(62).is_none_or(|end| end > data.len()) {
-                return Err(IndexError::TruncatedEntry(offset));
-            }
-
-            let ctime_secs = u32::from_be_bytes(
-                data[offset..offset + 4]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset))?,
-            ) as i64;
-            let ctime_nanos = u32::from_be_bytes(
-                data[offset + 4..offset + 8]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 4))?,
-            );
-            let mtime_secs = u32::from_be_bytes(
-                data[offset + 8..offset + 12]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 8))?,
-            ) as i64;
-            let mtime_nanos = u32::from_be_bytes(
-                data[offset + 12..offset + 16]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 12))?,
-            );
-            let dev = u32::from_be_bytes(
-                data[offset + 16..offset + 20]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 16))?,
-            );
-            let ino = u32::from_be_bytes(
-                data[offset + 20..offset + 24]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 20))?,
-            );
-            let mode = u32::from_be_bytes(
-                data[offset + 24..offset + 28]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 24))?,
-            );
-            let _uid = u32::from_be_bytes(
-                data[offset + 28..offset + 32]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 28))?,
-            );
-            let _gid = u32::from_be_bytes(
-                data[offset + 32..offset + 36]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 32))?,
-            );
-            let size = u32::from_be_bytes(
-                data[offset + 36..offset + 40]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 36))?,
-            );
-
-            let mut sha1 = [0u8; 20];
-            sha1.copy_from_slice(&data[offset + 40..offset + 60]);
-            let flags = u16::from_be_bytes(
-                data[offset + 60..offset + 62]
-                    .try_into()
-                    .map_err(|_| IndexError::CorruptedEntry(offset + 60))?,
-            );
-
-            // Stage is bits 12-13 of flags (0-3)
-            let stage = ((flags >> 12) & 0x3) as u8;
-
-            let path_start = entry_start + 62;
-            offset = path_start;
-            let path = if version == 4 {
-                let strip_len = decode_v4_strip_len(data, &mut offset)?;
-                let prefix_len = previous_path
-                    .len()
-                    .checked_sub(strip_len)
-                    .ok_or(IndexError::CorruptedEntry(offset))?;
-                let suffix_start = offset;
-                let suffix_len = data[suffix_start..]
-                    .iter()
-                    .position(|&byte| byte == 0)
-                    .ok_or(IndexError::TruncatedEntry(suffix_start))?;
-                let mut path = Vec::with_capacity(prefix_len + suffix_len);
-                path.extend_from_slice(&previous_path[..prefix_len]);
-                path.extend_from_slice(&data[suffix_start..suffix_start + suffix_len]);
-                offset = suffix_start + suffix_len + 1;
-                path
-            } else {
-                let path_end = data[path_start..]
-                    .iter()
-                    .position(|&byte| byte == 0)
-                    .ok_or(IndexError::TruncatedEntry(path_start))?;
-                let path = data[path_start..path_start + path_end].to_vec();
-                let entry_len = 62usize
-                    .checked_add(path_end)
-                    .and_then(|len| len.checked_add(1))
-                    .ok_or(IndexError::CorruptedEntry(offset))?;
-                let padded_len = entry_len
-                    .checked_add(7)
-                    .ok_or(IndexError::CorruptedEntry(offset))?
-                    & !7;
-                offset = entry_start
-                    .checked_add(padded_len)
-                    .ok_or(IndexError::CorruptedEntry(entry_start))?;
-                path
-            };
-            previous_path = path.clone();
-
-            entries.push(IndexEntry {
-                path: PathBuf::from(OsStr::from_bytes(&path)),
-                sha1,
-                mode,
-                size,
-                ctime_secs,
-                ctime_nanos,
-                mtime_secs,
-                mtime_nanos,
-                dev,
-                ino,
-                flags,
-                stage,
-            });
-        }
-
+        let mut entries = Vec::with_capacity(state.entries().len());
         let mut path_lookup = FxHashMap::default();
-        for (i, entry) in entries.iter().enumerate() {
-            path_lookup.insert(entry.path.clone(), i);
+        for entry in state.entries() {
+            let path = PathBuf::from(OsStr::from_bytes(entry.path(state).as_ref()));
+            let oid =
+                entry.id.as_bytes().try_into().map_err(|_| {
+                    IndexError::Backend("expected a 20-byte SHA-1 object id".into())
+                })?;
+            let stat = entry.stat;
+            let index_entry = IndexEntry {
+                path: path.clone(),
+                sha1: oid,
+                mode: entry.mode.bits(),
+                size: stat.size,
+                ctime_secs: i64::from(stat.ctime.secs),
+                ctime_nanos: stat.ctime.nsecs,
+                mtime_secs: i64::from(stat.mtime.secs),
+                mtime_nanos: stat.mtime.nsecs,
+                dev: stat.dev,
+                ino: stat.ino,
+                flags: entry.flags.to_storage().bits(),
+                stage: entry.stage_raw() as u8,
+            };
+            path_lookup.insert(path, entries.len());
+            entries.push(index_entry);
         }
 
         Ok(Index {
-            version,
+            version: state.version() as u32,
+            sparse: state.is_sparse(),
             entries,
             path_lookup,
         })
     }
 
     pub fn get(&self, path: &Path) -> Option<&IndexEntry> {
-        self.path_lookup.get(path).and_then(|&i| {
-            let entry = &self.entries[i];
-            if entry.stage == 0 { Some(entry) } else { None }
+        self.path_lookup.get(path).and_then(|&index| {
+            let entry = &self.entries[index];
+            (entry.stage == 0).then_some(entry)
         })
     }
 
     pub fn get_all(&self, path: &Path) -> Vec<&IndexEntry> {
-        self.entries.iter().filter(|e| e.path == path).collect()
+        self.entries
+            .iter()
+            .filter(|entry| entry.path == path)
+            .collect()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &IndexEntry> {
@@ -245,121 +159,64 @@ impl Index {
     pub fn version(&self) -> u32 {
         self.version
     }
-}
 
-fn decode_v4_strip_len(data: &[u8], offset: &mut usize) -> Result<usize, IndexError> {
-    let start = *offset;
-    let mut byte = *data
-        .get(*offset)
-        .ok_or(IndexError::TruncatedEntry(*offset))?;
-    *offset += 1;
-    let mut value = usize::from(byte & 0x7f);
-
-    while byte & 0x80 != 0 {
-        byte = *data
-            .get(*offset)
-            .ok_or(IndexError::TruncatedEntry(*offset))?;
-        *offset += 1;
-        value = value
-            .checked_add(1)
-            .and_then(|current| current.checked_mul(128))
-            .and_then(|current| current.checked_add(usize::from(byte & 0x7f)))
-            .ok_or(IndexError::CorruptedEntry(start))?;
+    /// Whether this is a sparse index whose directory entries summarize trees.
+    pub fn is_sparse(&self) -> bool {
+        self.sparse
     }
-
-    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn build_test_index(entries: &[(&str, [u8; 20], u32, u32)]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"DIRC");
-        buf.extend_from_slice(&3u32.to_be_bytes());
-        buf.extend_from_slice(&(entries.len() as u32).to_be_bytes());
-
-        for (path, sha1, mode, size) in entries {
-            buf.extend_from_slice(&0i64.to_be_bytes());
-            buf.extend_from_slice(&0i64.to_be_bytes());
-            buf.extend_from_slice(&0u32.to_be_bytes());
-            buf.extend_from_slice(&0u32.to_be_bytes());
-            buf.extend_from_slice(&mode.to_be_bytes());
-            buf.extend_from_slice(&0u32.to_be_bytes());
-            buf.extend_from_slice(&0u32.to_be_bytes());
-            buf.extend_from_slice(&size.to_be_bytes());
-            buf.extend_from_slice(sha1);
-            buf.extend_from_slice(&0u16.to_be_bytes());
-            buf.extend_from_slice(path.as_bytes());
-            buf.push(0);
-            let entry_len = 62 + path.len() + 1;
-            let padded = (entry_len + 7) & !7;
-            buf.extend(std::iter::repeat(0u8).take(padded - entry_len));
-        }
-        buf
-    }
+    use crate::test_support::{git, init_repo};
+    use std::fs;
 
     #[test]
-    fn parse_empty_index() {
-        let data = build_test_index(&[]);
-        let index = Index::parse_bytes(&data).unwrap();
-        assert_eq!(index.len(), 0);
-        assert_eq!(index.version(), 3);
-    }
+    fn parses_git_index_and_rejects_truncation() {
+        let directory = tempfile::tempdir().expect("test fixture operation should succeed");
+        init_repo(directory.path());
+        fs::write(directory.path().join("tracked.txt"), "content")
+            .expect("test fixture operation should succeed");
+        git(directory.path(), &["add", "tracked.txt"]);
 
-    #[test]
-    fn parse_single_entry() {
-        let sha1 = [1u8; 20];
-        let data = build_test_index(&[("src/main.rs", sha1, 0o100644, 1024)]);
-        let index = Index::parse_bytes(&data).unwrap();
-        let entry = index.get(Path::new("src/main.rs")).unwrap();
-        assert_eq!(entry.sha1, sha1);
+        let index_path = directory.path().join(".git/index");
+        let bytes = fs::read(&index_path).expect("test fixture operation should succeed");
+        let index = Index::parse_bytes(&bytes).expect("test fixture operation should succeed");
+        let entry = index
+            .get(Path::new("tracked.txt"))
+            .expect("test fixture operation should succeed");
         assert_eq!(entry.mode, 0o100644);
-        assert_eq!(entry.size, 1024);
         assert_eq!(entry.stage, 0);
+        assert_eq!(entry.size, 7);
+
+        assert!(Index::parse_bytes(&bytes[..bytes.len() - 1]).is_err());
+
+        let mut corrupt = bytes;
+        let last_byte = corrupt
+            .last_mut()
+            .expect("Git index includes a trailing checksum");
+        *last_byte ^= 0xff;
+        assert!(Index::parse_bytes(&corrupt).is_err());
     }
 
     #[test]
-    fn parse_multiple_entries() {
-        let data = build_test_index(&[
-            ("Cargo.toml", [2u8; 20], 0o100644, 512),
-            ("src/lib.rs", [3u8; 20], 0o100644, 2048),
-            ("README.md", [4u8; 20], 0o100644, 256),
-        ]);
-        let index = Index::parse_bytes(&data).unwrap();
-        assert_eq!(index.len(), 3);
-        assert!(index.get(Path::new("Cargo.toml")).is_some());
-        assert!(index.get(Path::new("missing.txt")).is_none());
-    }
+    fn parses_index_file_and_rejects_a_bad_checksum() {
+        let directory = tempfile::tempdir().expect("test fixture operation should succeed");
+        init_repo(directory.path());
+        fs::write(directory.path().join("tracked.txt"), "content")
+            .expect("test fixture operation should succeed");
+        git(directory.path(), &["add", "tracked.txt"]);
 
-    #[test]
-    fn invalid_signature() {
-        let mut data = build_test_index(&[]);
-        data[0] = b'X';
-        assert!(matches!(
-            Index::parse_bytes(&data),
-            Err(IndexError::InvalidSignature)
-        ));
-    }
+        let index_path = directory.path().join(".git/index");
+        let mut bytes = fs::read(&index_path).expect("Git index should be readable");
+        assert!(Index::parse(directory.path().join(".git").as_path()).is_ok());
+        let last_byte = bytes
+            .last_mut()
+            .expect("Git index should include its trailing checksum");
+        *last_byte ^= 0xff;
+        fs::write(index_path, bytes).expect("corrupt Git index should be writable");
 
-    #[test]
-    fn unsupported_version() {
-        let mut data = build_test_index(&[]);
-        data[7] = 5;
-        assert!(matches!(
-            Index::parse_bytes(&data),
-            Err(IndexError::UnsupportedVersion(5))
-        ));
-    }
-
-    #[test]
-    fn iter_entries() {
-        let data = build_test_index(&[
-            ("a.txt", [1u8; 20], 0o100644, 10),
-            ("b.txt", [2u8; 20], 0o100644, 20),
-        ]);
-        let index = Index::parse_bytes(&data).unwrap();
-        assert_eq!(index.iter().count(), 2);
+        assert!(Index::parse(directory.path().join(".git").as_path()).is_err());
     }
 }

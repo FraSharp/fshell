@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::repo::{Error, Repository};
+use gix::bstr::ByteSlice;
 use std::collections::HashMap;
 use std::fs;
 
@@ -12,49 +13,26 @@ pub struct Config {
 
 impl Config {
     pub fn parse(content: &str) -> Result<Self, Error> {
+        let file = gix::config::File::try_from(content)
+            .map_err(|error| Error::InvalidConfig(error.to_string()))?;
         let mut sections = HashMap::new();
-        let mut current_section = String::new();
 
-        for line in content.lines() {
-            let line = line.trim();
-
-            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-                continue;
-            }
-
-            if line.starts_with('[') {
-                if let Some(end) = line.find(']') {
-                    let header = &line[1..end];
-                    current_section = if let Some(sub_start) = header.find('"') {
-                        if let Some(sub_end) = header.rfind('"') {
-                            let main = header[..sub_start].trim();
-                            let sub = &header[sub_start + 1..sub_end];
-                            format!("{main}.{sub}")
-                        } else {
-                            header.to_string()
-                        }
-                    } else {
-                        header.to_string()
-                    };
-                    sections
-                        .entry(current_section.clone())
-                        .or_insert_with(HashMap::new);
+        for section in file.sections() {
+            let header = section.header();
+            let section_name = header.name().to_str_lossy();
+            let section_key = match header.subsection_name() {
+                Some(subsection) => {
+                    format!("{section_name}.{}", subsection.to_str_lossy())
                 }
-                continue;
-            }
-
-            if let Some(eq_pos) = line.find('=') {
-                let key = line[..eq_pos].trim().to_string();
-                let value = line[eq_pos + 1..].trim().to_string();
-                let value = if (value.starts_with('"') && value.ends_with('"'))
-                    || (value.starts_with('\'') && value.ends_with('\''))
+                None => section_name.into_owned(),
+            };
+            let values = sections.entry(section_key).or_insert_with(HashMap::new);
+            let body = section.body();
+            for key in body.value_names() {
+                if let Some(value) = body.values(&key).last()
+                    && let Ok(value) = value.to_str()
                 {
-                    &value[1..value.len() - 1]
-                } else {
-                    &value
-                };
-                if let Some(section) = sections.get_mut(&current_section) {
-                    section.insert(key, value.to_string());
+                    values.insert(key, value.to_owned());
                 }
             }
         }
@@ -65,47 +43,45 @@ impl Config {
     pub fn get(&self, section: &str, key: &str) -> Option<&str> {
         self.sections
             .get(section)
-            .and_then(|s| s.get(key))
-            .map(|s| s.as_str())
+            .and_then(|values| values.get(key))
+            .map(String::as_str)
     }
 }
 
 impl Repository {
+    /// Return the repository's shared local configuration file.
     pub fn config(&self) -> Result<Config, Error> {
-        let config_path = self.git_dir().join("config");
-        let content = match fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Config {
-                    sections: HashMap::new(),
-                });
-            }
-            Err(e) => return Err(e.into()),
-        };
-        Config::parse(&content)
+        let config_path = self
+            .inner
+            .config_path(gix::config::Source::Local)
+            .map_err(|error| Error::Backend(error.to_string()))?;
+        match fs::read_to_string(config_path) {
+            Ok(content) => Config::parse(&content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::parse(""),
+            Err(error) => Err(error.into()),
+        }
     }
 
+    /// Find the configured upstream's tracking ref and object id for a branch.
     pub fn find_upstream(&self, branch: &str) -> Result<Option<(String, [u8; 20])>, Error> {
-        let config = self.config()?;
-
-        let section = format!("branch.\"{branch}\"");
-        let remote = config.get(&section, "remote");
-        let merge = config.get(&section, "merge");
-
-        if let (Some(remote), Some(merge)) = (remote, merge) {
-            let short_merge = merge.strip_prefix("refs/heads/").unwrap_or(merge);
-            let ref_name = format!("{remote}/{short_merge}");
-            match self.resolve_ref(&ref_name) {
-                Ok(oid) => Ok(Some((remote.to_string(), oid))),
-                Err(_) => Ok(None),
-            }
-        } else {
-            let ref_name = format!("refs/remotes/origin/{branch}");
-            match self.resolve_ref(&ref_name) {
-                Ok(oid) => Ok(Some(("origin".to_string(), oid))),
-                Err(_) => Ok(None),
-            }
-        }
+        let branch_name = gix::refs::FullName::try_from(format!("refs/heads/{branch}"))
+            .map_err(|error| Error::InvalidRef(error.to_string()))?;
+        let Some(tracking_ref) = self
+            .inner
+            .branch_remote_tracking_ref_name(branch_name.as_ref(), gix::remote::Direction::Fetch)
+        else {
+            return Ok(None);
+        };
+        let tracking_ref = tracking_ref.map_err(|error| Error::Backend(error.to_string()))?;
+        let remote = self
+            .inner
+            .config_snapshot()
+            .string(&format!("branch.{branch}.remote"))
+            .map(|value| value.to_str_lossy().into_owned())
+            .unwrap_or_default();
+        let tracking_ref_name = tracking_ref.as_ref().as_bstr().to_str_lossy();
+        let oid = self.resolve_ref(&tracking_ref_name)?;
+        Ok(Some((remote, oid)))
     }
 }
 
@@ -114,82 +90,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_simple_config() {
-        let content = r#"[core]
-    autocrlf = true
-    repositoryformatversion = 0
-[branch "main"]
-    remote = origin
-    merge = refs/heads/main
-"#;
-        let config = Config::parse(content).unwrap();
-        assert_eq!(config.get("core", "autocrlf"), Some("true"));
-        assert_eq!(config.get("branch.main", "remote"), Some("origin"));
-        assert_eq!(config.get("branch.main", "merge"), Some("refs/heads/main"));
-    }
+    fn parses_git_config_sections_comments_and_quoted_values() {
+        let config = Config::parse(
+            "# comment\n[core]\n\tbare = false\n[user]\n\tname = \"Jane Doe\"\n\tname = Updated\n[branch \"feature/topic\"]\n\tremote = origin\n\tmerge = refs/heads/feature/topic\n",
+        )
+        .expect("valid Git config should parse");
 
-    #[test]
-    fn parse_quoted_values() {
-        let content = "[user]\n    name = \"John Doe\"\n    email = 'john@example.com'\n";
-        let config = Config::parse(content).unwrap();
-        assert_eq!(config.get("user", "name"), Some("John Doe"));
-        assert_eq!(config.get("user", "email"), Some("john@example.com"));
-    }
-
-    #[test]
-    fn parse_comments() {
-        let content = "# comment\n[core]\n; another comment\n    bare = false\n";
-        let config = Config::parse(content).unwrap();
         assert_eq!(config.get("core", "bare"), Some("false"));
-    }
-
-    #[test]
-    fn missing_section() {
-        let content = "[core]\n    bare = false\n";
-        let config = Config::parse(content).unwrap();
-        assert_eq!(config.get("nonexistent", "key"), None);
-    }
-
-    #[test]
-    fn find_upstream_from_config() {
-        let tmp = tempfile::tempdir().unwrap();
-        let git_dir = tmp.path().join(".git");
-        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
-        fs::create_dir_all(git_dir.join("refs/remotes/origin")).unwrap();
-        fs::write(
-            git_dir.join("config"),
-            "[branch \"main\"]\n    remote = origin\n    merge = refs/heads/main\n",
-        )
-        .unwrap();
-        fs::write(
-            git_dir.join("refs/remotes/origin/main"),
-            "abc123def456789012345678901234567890abcd\n",
-        )
-        .unwrap();
-
-        let repo = Repository::discover(tmp.path()).unwrap();
-        let upstream = repo.find_upstream("main").unwrap().unwrap();
-        assert_eq!(upstream.0, "origin");
-        assert_eq!(
-            hex::encode(upstream.1),
-            "abc123def456789012345678901234567890abcd"
-        );
-    }
-
-    #[test]
-    fn find_upstream_fallback() {
-        let tmp = tempfile::tempdir().unwrap();
-        let git_dir = tmp.path().join(".git");
-        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
-        fs::create_dir_all(git_dir.join("refs/remotes/origin")).unwrap();
-        fs::write(
-            git_dir.join("refs/remotes/origin/feature"),
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
-        )
-        .unwrap();
-
-        let repo = Repository::discover(tmp.path()).unwrap();
-        let upstream = repo.find_upstream("feature").unwrap().unwrap();
-        assert_eq!(upstream.0, "origin");
+        assert_eq!(config.get("user", "name"), Some("Updated"));
+        assert_eq!(config.get("branch.feature/topic", "remote"), Some("origin"));
+        assert_eq!(config.get("missing", "key"), None);
     }
 }
