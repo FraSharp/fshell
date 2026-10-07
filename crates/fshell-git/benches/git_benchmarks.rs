@@ -8,148 +8,107 @@ use fshell_git::repo::Repository;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
-// Helpers
-fn create_loose_object(git_dir: &Path, oid_hex: &str, obj_type: &str, content: &[u8]) {
-    let dir = git_dir.join("objects").join(&oid_hex[..2]);
-    fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(&oid_hex[2..]);
+use std::process::{Command, Output};
 
-    use flate2::Compression;
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-
-    let header = format!("{} {}\0", obj_type, content.len());
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(header.as_bytes()).unwrap();
-    encoder.write_all(content).unwrap();
-    let compressed = encoder.finish().unwrap();
-    fs::write(&path, compressed).unwrap();
+fn git(directory: &Path, args: &[&str]) -> Output {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "fshell-git benchmarks")
+        .env("GIT_AUTHOR_EMAIL", "fshell-git@example.invalid")
+        .env("GIT_COMMITTER_NAME", "fshell-git benchmarks")
+        .env("GIT_COMMITTER_EMAIL", "fshell-git@example.invalid")
+        .output()
+        .expect("git must be available to prepare benchmark repositories");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
 }
 
-fn oid_from_hex(hex_str: &str) -> [u8; 20] {
-    let mut oid = [0u8; 20];
-    for i in 0..20 {
-        oid[i] = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16).unwrap();
-    }
-    oid
+fn git_text(directory: &Path, args: &[&str]) -> String {
+    String::from_utf8(git(directory, args).stdout)
+        .expect("git output should be UTF-8")
+        .trim()
+        .to_owned()
 }
 
-fn setup_repo_with_files(n: usize) -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().unwrap();
-    let git_dir = tmp.path().join(".git");
-    fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
-    fs::create_dir_all(git_dir.join("refs/remotes/origin")).unwrap();
+fn init_repo(directory: &Path) {
+    git(directory, &["init", "-b", "main"]);
+    git(directory, &["config", "user.name", "fshell-git benchmarks"]);
+    git(
+        directory,
+        &["config", "user.email", "fshell-git@example.invalid"],
+    );
+}
 
-    // Create index entries
-    let mut index_entries = Vec::new();
-    for i in 0..n {
+fn commit_all(directory: &Path, message: &str) {
+    git(directory, &["add", "--all"]);
+    git(directory, &["commit", "--message", message]);
+}
+
+fn setup_repo_with_files(count: usize) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("temporary directory should be created");
+    init_repo(tmp.path());
+
+    for i in 0..count {
         let name = format!("file_{i:04}.txt");
-        let size = (i * 100 + 50) as u32;
-        index_entries.push((name, 0o100644u32, size));
+        fs::write(tmp.path().join(name), format!("benchmark file {i}\n"))
+            .expect("benchmark worktree file should be written");
     }
-
-    // Build index bytes
-    let mut buf = Vec::new();
-    buf.extend_from_slice(b"DIRC");
-    buf.extend_from_slice(&3u32.to_be_bytes());
-    buf.extend_from_slice(&(n as u32).to_be_bytes());
-
-    for (path, mode, size) in &index_entries {
-        buf.extend_from_slice(&0i64.to_be_bytes());
-        buf.extend_from_slice(&0i64.to_be_bytes());
-        buf.extend_from_slice(&0u32.to_be_bytes());
-        buf.extend_from_slice(&0u32.to_be_bytes());
-        buf.extend_from_slice(&mode.to_be_bytes());
-        buf.extend_from_slice(&0u32.to_be_bytes());
-        buf.extend_from_slice(&0u32.to_be_bytes());
-        buf.extend_from_slice(&size.to_be_bytes());
-        buf.extend_from_slice(&[0u8; 20]);
-        buf.extend_from_slice(&0u16.to_be_bytes());
-        buf.extend_from_slice(path.as_bytes());
-        buf.push(0);
-        let entry_len = 62 + path.len() + 1;
-        let padded = (entry_len + 7) & !7;
-        buf.extend(std::iter::repeat_n(0u8, padded - entry_len));
-    }
-    fs::write(git_dir.join("index"), &buf).unwrap();
-
-    // Create the actual files with matching sizes
-    for (name, _, size) in &index_entries {
-        let content = vec![b'x'; *size as usize];
-        fs::write(tmp.path().join(name), &content).unwrap();
-    }
-
+    commit_all(tmp.path(), "benchmark baseline");
     tmp
 }
-// Benchmarks: Index parsing
+
 fn bench_index_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("index_parse");
 
-    for size in [10, 100, 1000, 5000] {
-        let mut entries = Vec::new();
-        for i in 0..size {
-            let name = format!("src/module/file_{i:04}.rs");
-            entries.push((name, 0o100644u32, (i * 200) as u32));
-        }
+    for count in [10, 100, 1000, 5000] {
+        let repository = setup_repo_with_files(count);
+        let bytes = fs::read(repository.path().join(".git/index"))
+            .expect("Git-generated index should be readable");
 
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"DIRC");
-        buf.extend_from_slice(&3u32.to_be_bytes());
-        buf.extend_from_slice(&(size as u32).to_be_bytes());
-        for (path, mode, size) in &entries {
-            buf.extend_from_slice(&0i64.to_be_bytes());
-            buf.extend_from_slice(&0i64.to_be_bytes());
-            buf.extend_from_slice(&0u32.to_be_bytes());
-            buf.extend_from_slice(&0u32.to_be_bytes());
-            buf.extend_from_slice(&mode.to_be_bytes());
-            buf.extend_from_slice(&0u32.to_be_bytes());
-            buf.extend_from_slice(&0u32.to_be_bytes());
-            buf.extend_from_slice(&size.to_be_bytes());
-            buf.extend_from_slice(&[0u8; 20]);
-            buf.extend_from_slice(&0u16.to_be_bytes());
-            buf.extend_from_slice(path.as_bytes());
-            buf.push(0);
-            let entry_len = 62 + path.len() + 1;
-            let padded = (entry_len + 7) & !7;
-            buf.extend(std::iter::repeat_n(0u8, padded - entry_len));
-        }
-
-        group.bench_with_input(BenchmarkId::from_parameter(size), &buf, |b, data| {
-            b.iter(|| Index::parse_bytes(black_box(data)).unwrap());
+        group.bench_with_input(BenchmarkId::from_parameter(count), &bytes, |b, data| {
+            b.iter(|| Index::parse_bytes(black_box(data)).expect("index should parse"));
         });
     }
     group.finish();
 }
-// Benchmarks: Object reading (loose objects)
+
 fn bench_object_read(c: &mut Criterion) {
     let mut group = c.benchmark_group("object_read");
 
     for size_kb in [1, 10, 100, 1000] {
-        let tmp = tempfile::tempdir().unwrap();
-        let git_dir = tmp.path().join(".git");
-        fs::create_dir_all(&git_dir).unwrap();
-
-        let oid_hex = "abc123def456789012345678901234567890abcd";
-        let content = vec![b'x'; size_kb * 1024];
-        create_loose_object(&git_dir, oid_hex, "blob", &content);
-
-        let repo = Repository::discover(tmp.path()).unwrap();
-        let oid = oid_from_hex(oid_hex);
+        let tmp = tempfile::tempdir().expect("temporary directory should be created");
+        init_repo(tmp.path());
+        fs::write(tmp.path().join("payload.bin"), vec![b'x'; size_kb * 1024])
+            .expect("benchmark object should be written");
+        commit_all(tmp.path(), "benchmark object");
+        let oid = git_text(tmp.path(), &["rev-parse", "HEAD:payload.bin"]);
+        let oid: [u8; 20] = hex::decode(oid)
+            .expect("Git should return a hexadecimal object id")
+            .try_into()
+            .expect("SHA-1 object id should contain 20 bytes");
+        let repo = Repository::discover(tmp.path()).expect("repository should be discovered");
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{size_kb}KB")),
             &oid,
             |b, oid| {
-                b.iter(|| repo.read_object(black_box(oid)).unwrap());
+                b.iter(|| {
+                    repo.read_object(black_box(oid))
+                        .expect("object should be readable")
+                });
             },
         );
     }
     group.finish();
 }
-// Benchmarks: Gitignore matching
+
 fn bench_gitignore(c: &mut Criterion) {
     let mut group = c.benchmark_group("gitignore_match");
-
     let patterns = "*.log\nbuild/\n!important.log\n*.o\n*.pyc\n__pycache__/\n.env\n*.tmp\nnode_modules/\n*.swp\n";
 
     group.bench_function("parse_patterns", |b| {
@@ -157,7 +116,6 @@ fn bench_gitignore(c: &mut Criterion) {
     });
 
     let rules = IgnoreRules::parse(patterns);
-
     let test_paths = [
         ("debug.log", false),
         ("important.log", false),
@@ -174,30 +132,22 @@ fn bench_gitignore(c: &mut Criterion) {
     group.bench_function("match_10_paths", |b| {
         b.iter(|| {
             for (path, is_dir) in &test_paths {
-                let p = Path::new(path);
-                black_box(rules.is_ignored(p, *is_dir));
+                black_box(rules.is_ignored(Path::new(path), *is_dir));
             }
         });
     });
-
     group.finish();
 }
-// Benchmarks: Ref resolution
+
 fn bench_ref_resolve(c: &mut Criterion) {
     let mut group = c.benchmark_group("ref_resolve");
+    let tmp = setup_repo_with_files(1);
 
-    let tmp = tempfile::tempdir().unwrap();
-    let git_dir = tmp.path().join(".git");
-    fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
-    fs::create_dir_all(git_dir.join("refs/remotes/origin")).unwrap();
-
-    // Create 100 loose refs
     for i in 0..100 {
         let name = format!("refs/heads/branch_{i:03}");
-        fs::write(git_dir.join(&name), format!("{:040x}\n", i)).unwrap();
+        git(tmp.path(), &["update-ref", &name, "HEAD"]);
     }
-
-    let repo = Repository::discover(tmp.path()).unwrap();
+    let repo = Repository::discover(tmp.path()).expect("repository should be discovered");
 
     group.bench_function("resolve_100_refs", |b| {
         b.iter(|| {
@@ -207,66 +157,49 @@ fn bench_ref_resolve(c: &mut Criterion) {
             }
         });
     });
-
     group.bench_function("list_refs", |b| {
         b.iter(|| black_box(repo.list_refs("refs/heads/")));
     });
-
     group.finish();
 }
-// Benchmarks: Status diff
+
 fn bench_status(c: &mut Criterion) {
     let mut group = c.benchmark_group("status_diff");
 
-    for n in [10, 100, 500] {
-        let tmp = setup_repo_with_files(n);
-
-        // Make some files modified
-        for i in (0..n).step_by(3) {
+    for count in [10, 100, 500] {
+        let tmp = setup_repo_with_files(count);
+        for i in (0..count).step_by(3) {
             let name = format!("file_{i:04}.txt");
-            fs::write(tmp.path().join(&name), "modified!").unwrap();
+            fs::write(tmp.path().join(name), "modified!")
+                .expect("modified benchmark file should be written");
         }
-
-        // Add some untracked files
-        for i in (0..n).step_by(5) {
+        for i in (0..count).step_by(5) {
             let name = format!("untracked_{i:04}.txt");
-            fs::write(tmp.path().join(&name), "new").unwrap();
+            fs::write(tmp.path().join(name), "new")
+                .expect("untracked benchmark file should be written");
         }
 
-        let repo = Repository::discover(tmp.path()).unwrap();
-
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| black_box(repo.status().unwrap()));
+        let repo = Repository::discover(tmp.path()).expect("repository should be discovered");
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+            b.iter(|| black_box(repo.status().expect("status should be computed")));
         });
     }
     group.finish();
 }
-// Benchmarks: HEAD resolution
+
 fn bench_head(c: &mut Criterion) {
     let mut group = c.benchmark_group("head_resolution");
-
-    let tmp = tempfile::tempdir().unwrap();
-    let git_dir = tmp.path().join(".git");
-    fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
-    fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-    fs::write(
-        git_dir.join("refs/heads/main"),
-        "abc123def456789012345678901234567890abcd\n",
-    )
-    .unwrap();
-
-    let repo = Repository::discover(tmp.path()).unwrap();
+    let tmp = setup_repo_with_files(1);
+    let repo = Repository::discover(tmp.path()).expect("repository should be discovered");
 
     group.bench_function("head", |b| {
-        b.iter(|| black_box(repo.head().unwrap()));
+        b.iter(|| black_box(repo.head().expect("HEAD should resolve")));
     });
-
     group.finish();
 }
-// Benchmarks: Config parsing
+
 fn bench_config(c: &mut Criterion) {
     let mut group = c.benchmark_group("config_parse");
-
     let config_content = r#"[core]
     repositoryformatversion = 0
     filemode = true
@@ -289,12 +222,14 @@ fn bench_config(c: &mut Criterion) {
 "#;
 
     group.bench_function("parse_config", |b| {
-        b.iter(|| fshell_git::config::Config::parse(black_box(config_content)).unwrap());
+        b.iter(|| {
+            fshell_git::config::Config::parse(black_box(config_content))
+                .expect("Git config should parse")
+        });
     });
-
     group.finish();
 }
-// Benchmark groups
+
 criterion_group!(
     benches,
     bench_index_parse,

@@ -365,7 +365,12 @@ contains the POSIX grammar lexer, parser, and interpreter that operates directly
 high-performance file listing library. inspects filesystem metadata, queries `fshell-git` for repo status, formats human-readable file sizes, and renders tree or grid layouts.
 
 ### fshell-git
-fast git repository inspector. reads HEAD, refs, stashes, and dirty worktree states to populate prompt status segments and `ls` metadata columns.
+fshell-owned Git domain API backed by gitoxide. Repository discovery, objects,
+refs, index decoding, ignore matching, and worktree status stay behind this
+crate's public types, so shell consumers do not depend on gitoxide types. It
+currently supports non-bare SHA-1 repositories; sparse-index status returns an
+explicit unsupported-feature error because gitoxide's status diff cannot
+compare sparse indexes.
 
 ### fshell-render
 miette-based diagnostic rendering engine. converts engine and parser errors into graphical terminal snippets with source spans, compact single-line messages, or JSON error objects.
