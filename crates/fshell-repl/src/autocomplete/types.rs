@@ -114,6 +114,39 @@ impl CompletionCandidate {
     }
 }
 
+/// Cooperative cancellation token for background completion computes.
+///
+/// `spawn_blocking` tasks cannot be aborted mid-scan (abort only detaches the
+/// thread), so long-running providers poll this token at phase boundaries and
+/// return early with partial results. The worker advances `current` past a
+/// compute's `generation` as soon as newer input arrives.
+#[derive(Debug, Clone)]
+pub struct CompletionCancel {
+    generation: u64,
+    current: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl CompletionCancel {
+    pub fn new(generation: u64, current: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self {
+            generation,
+            current,
+        }
+    }
+
+    /// A token that never cancels, for synchronous/test computes.
+    pub fn never() -> Self {
+        Self {
+            generation: 0,
+            current: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.current.load(std::sync::atomic::Ordering::SeqCst) != self.generation
+    }
+}
+
 /// Core completer trait implemented by `FshellCompleter`.
 pub trait Completer: Send + Sync {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<CompletionCandidate>;

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
 use crate::FshellCompleter;
-use crate::autocomplete::ranking::{RankedCompletion, rank_candidates};
+use crate::autocomplete::ranking::RankedCompletion;
 use crate::autocomplete::{Completer, CompletionCandidate, CompletionKind, TextSpan};
 use crate::theme_ext::ThemeColorRatatui;
 use fshell_core::theme::{CompletionsTheme, Theme};
@@ -465,8 +465,18 @@ fn spawn_completion_worker(
     let runtime = tokio::runtime::Handle::try_current().ok()?;
     let (request_tx, mut request_rx) = watch::channel::<Option<CompletionRequest>>(None);
     let (result_tx, result_rx) = mpsc::unbounded_channel();
+    // Tracks the newest generation observed by the worker. Compute tasks poll
+    // it through their cancellation token; advancing it here is what makes an
+    // in-flight scan stop early instead of running to completion pointlessly.
+    // `spawn_blocking` abort only detaches the thread, so cooperative polling
+    // is the only correct cancellation mechanism.
+    let current_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     runtime.spawn(async move {
+        // Keystroke bursts coalesce here: wait out fast typing before spawning
+        // blocking work. Explicit Tab (`force_visible`) skips the wait so the
+        // first paint is immediate.
+        const TYPE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(60);
         loop {
             if request_rx.changed().await.is_err() {
                 break;
@@ -476,10 +486,26 @@ fn spawn_completion_worker(
             };
 
             loop {
+                current_gen.store(request.generation, std::sync::atomic::Ordering::SeqCst);
+                if !request.force_visible {
+                    tokio::time::sleep(TYPE_DEBOUNCE).await;
+                    match request_rx.borrow_and_update().clone() {
+                        Some(latest) if latest.generation != request.generation => {
+                            request = latest;
+                            continue;
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
                 let worker_env = env.clone();
                 let worker_request = request.clone();
+                let cancel = crate::autocomplete::types::CompletionCancel::new(
+                    worker_request.generation,
+                    std::sync::Arc::clone(&current_gen),
+                );
                 let task = tokio::task::spawn_blocking(move || {
-                    compute_completion_candidates(&worker_env, &worker_request)
+                    compute_completion_candidates(&worker_env, &worker_request, Some(cancel))
                 });
                 let suggestions = task.await.unwrap_or_default();
 
@@ -506,6 +532,7 @@ fn spawn_completion_worker(
 fn compute_completion_candidates(
     env: &Env,
     request: &CompletionRequest,
+    cancel: Option<crate::autocomplete::types::CompletionCancel>,
 ) -> Vec<CompletionCandidate> {
     if request.line.trim().is_empty() {
         if !request.force_visible {
@@ -560,7 +587,10 @@ fn compute_completion_candidates(
         return raw;
     }
 
-    let mut completer = FshellCompleter { env: env.clone() };
+    let mut completer = FshellCompleter {
+        env: env.clone(),
+        cancel,
+    };
     let cursor_byte = request
         .line
         .char_indices()
@@ -595,6 +625,10 @@ pub struct CompletionsManager {
     pub theme: Arc<Theme>,
     pub layout_kind: CompletionLayoutKind,
     pub inner_width: usize,
+    /// Completion context of the last worker request (cwd + prefix before
+    /// partial + directory part). Typing within the same context filters
+    /// locally without recompute or clearing.
+    last_context_key: Option<String>,
 }
 
 impl CompletionsManager {
@@ -613,7 +647,7 @@ impl CompletionsManager {
             .then(|| spawn_completion_worker(env.clone()))
             .flatten();
         Self {
-            completer: FshellCompleter { env },
+            completer: FshellCompleter { env, cancel: None },
             completion_request_tx: worker.as_ref().map(|(tx, _)| tx.clone()),
             completion_result_rx: worker.map(|(_, rx)| rx),
             generation: 0,
@@ -632,6 +666,7 @@ impl CompletionsManager {
             theme: Arc::new(Theme::default_theme()),
             layout_kind: CompletionLayoutKind::List,
             inner_width: 80,
+            last_context_key: None,
         }
     }
 
@@ -667,6 +702,35 @@ impl CompletionsManager {
             return;
         }
 
+        let cwd = self.completer.env.cwd();
+        let (context_key, partial) = completion_context_key(&line, cursor_pos, &cwd);
+
+        // Filter-only fast path: same candidate set, just a narrower/wider
+        // query. Filter locally, preserve selection, never touch the worker
+        // and never clear. This is what makes per-char typing stable.
+        if !force_visible
+            && self.last_context_key.as_deref() == Some(&context_key)
+            && !self.all_suggestions.is_empty()
+        {
+            self.loading = false;
+            self.filter(&partial);
+            self.visible = !self.suggestions.is_empty();
+            return;
+        }
+        // Tab re-press with identical context and cached results: just ensure
+        // visibility, no recompute.
+        if force_visible
+            && self.last_context_key.as_deref() == Some(&context_key)
+            && !self.all_suggestions.is_empty()
+        {
+            self.loading = false;
+            self.filter(&partial);
+            self.visible = !self.suggestions.is_empty();
+            self.session_active = self.visible;
+            return;
+        }
+
+        self.last_context_key = Some(context_key);
         self.generation = self.generation.wrapping_add(1);
         let request = CompletionRequest {
             generation: self.generation,
@@ -677,15 +741,12 @@ impl CompletionsManager {
 
         if let Some(request_tx) = &self.completion_request_tx {
             request_tx.send_replace(Some(request));
+            // Stale-while-revalidate: keep old suggestions visible with a
+            // loading title. Clearing here is what caused the per-char flash.
             self.loading = true;
             self.visible = true;
-            self.all_suggestions.clear();
-            self.suggestions.clear();
-            self.session = None;
-            self.selected_idx = 0;
-            self.scroll_offset = 0;
         } else {
-            let suggestions = compute_completion_candidates(&self.completer.env, &request);
+            let suggestions = compute_completion_candidates(&self.completer.env, &request, None);
             self.apply_result(&request, suggestions);
         }
     }
@@ -722,19 +783,28 @@ impl CompletionsManager {
 
     fn apply_result(&mut self, request: &CompletionRequest, suggestions: Vec<CompletionCandidate>) {
         self.loading = false;
+        // Preserve selection by value across candidate-set swaps when possible.
+        let prev_selected_value = self
+            .suggestions
+            .get(self.selected_idx)
+            .map(|s| s.value.clone());
         self.all_suggestions = suggestions;
 
         if request.line.trim().is_empty() && request.force_visible {
             self.layout_kind = CompletionLayoutKind::List;
             self.filter(extract_partial_word(&request.line, request.cursor_pos));
-            self.selected_idx = 0;
-            self.scroll_offset = 0;
+            // `filter()` already preserved by value; only reset scroll when
+            // selection fell back to zero.
+            if self.selected_idx == 0 {
+                self.scroll_offset = 0;
+            }
             self.visible = !self.suggestions.is_empty();
             self.session_active = self.visible;
             return;
         }
 
         // Context-driven layout: establish layout mode upon session opening, and keep stable
+        // across filter-only keystrokes and worker swaps to avoid List/Grid flicker.
         if !self.session_active || self.session.is_none() {
             let is_fs = !self.all_suggestions.is_empty()
                 && self.all_suggestions.iter().all(|suggestion| {
@@ -758,9 +828,25 @@ impl CompletionsManager {
             self.scroll_offset = 0;
         } else {
             self.visible = true;
+            // `filter()` preserved by value; if the previous selection is gone
+            // but the index is still in range, keep scroll to avoid jumping.
+            // Only reset when out of bounds.
             if self.selected_idx >= self.suggestions.len() {
-                self.selected_idx = 0;
-                self.scroll_offset = 0;
+                // Try value fallback once more (filter may have reset to 0).
+                if let Some(prev) = prev_selected_value
+                    && let Some(idx) = self.suggestions.iter().position(|s| s.value == prev)
+                {
+                    self.selected_idx = idx;
+                    if let Some(ref mut s) = self.session {
+                        s.selected = idx;
+                    }
+                } else {
+                    self.selected_idx = 0;
+                    self.scroll_offset = 0;
+                    if let Some(ref mut s) = self.session {
+                        s.selected = 0;
+                    }
+                }
             }
         }
     }
@@ -833,13 +919,22 @@ impl CompletionsManager {
 
     /// Fuzzy-filter `all_suggestions` against `partial` word, updating
     /// `suggestions` and `session`. Computes fuzzy match indices for live highlighting.
+    /// Selection is preserved by value when the previously selected item
+    /// survives filtering; scroll is clamped, with render-time adjustment
+    /// keeping the selection visible.
     pub fn filter(&mut self, partial: &str) {
         self.prefix_accepted = false;
         self.filter_query = partial.to_string();
+        let prev_selected_value = self
+            .suggestions
+            .get(self.selected_idx)
+            .map(|s| s.value.clone());
 
         let recent = crate::history::get_recent_commands_cached();
-        let ranked = rank_candidates(
-            self.all_suggestions.clone(),
+        // Borrowed ranking: clones only surviving candidates (≤100 after
+        // truncation) instead of the whole source set per keystroke.
+        let ranked = crate::autocomplete::ranking::rank_candidates_borrowed(
+            &self.all_suggestions,
             partial,
             &mut self.nucleo_matcher,
             Some(&recent),
@@ -869,6 +964,13 @@ impl CompletionsManager {
             self.visible = false;
             self.selected_idx = 0;
             self.scroll_offset = 0;
+        } else if let Some(prev) = prev_selected_value
+            && let Some(idx) = self.suggestions.iter().position(|s| s.value == prev)
+        {
+            self.selected_idx = idx;
+            if let Some(ref mut s) = self.session {
+                s.selected = idx;
+            }
         } else {
             if self.selected_idx >= self.suggestions.len() {
                 self.selected_idx = 0;
@@ -991,6 +1093,7 @@ impl CompletionsManager {
         self.session_active = false;
         self.prefix_accepted = false;
         self.layout_kind = CompletionLayoutKind::List;
+        self.last_context_key = None;
     }
 
     /// After a completion has been applied to the buffer, decide whether to keep
@@ -1589,6 +1692,31 @@ pub fn format_suggestion_legacy(
     ))
 }
 
+/// Completion context key: cwd + line prefix before the partial word +
+/// directory part of the partial. Typing that leaves this key unchanged is a
+/// filter-only change (same candidate set, just narrower query) and must not
+/// trigger a worker recompute or clear the menu.
+pub fn completion_context_key(
+    line: &str,
+    cursor_char_idx: usize,
+    cwd: &std::path::Path,
+) -> (String, String) {
+    let byte_idx = line
+        .char_indices()
+        .nth(cursor_char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
+    let prefix = &line[..byte_idx.min(line.len())];
+    let partial = extract_quote_aware_token(prefix);
+    let context_prefix = &prefix[..prefix.len().saturating_sub(partial.len())];
+    let dir_part = match partial.rfind('/') {
+        Some(idx) => &partial[..=idx],
+        None => "",
+    };
+    let key = format!("{}|{}|{}", cwd.to_string_lossy(), context_prefix, dir_part);
+    (key, partial.to_string())
+}
+
 /// Extract the partial word at cursor for fuzzy filtering.
 /// `cursor_char_idx` is a character index into `line`.
 /// Returns the text from the last word boundary up to cursor.
@@ -1826,5 +1954,94 @@ mod tests {
         assert_eq!(mgr.suggestion_index_at(area, 0, 18, 4), Some(1));
         assert_eq!(mgr.suggestion_index_at(area, 0, 3, 5), Some(2));
         assert_eq!(mgr.suggestion_index_at(area, 0, 18, 5), Some(3));
+    }
+
+    #[test]
+    fn test_context_key_distinguishes_dir_change_from_filter() {
+        let cwd = std::path::Path::new("/tmp");
+        let (key_a, partial_a) = completion_context_key("ls /tmp/ab", 10, cwd);
+        let (key_b, partial_b) = completion_context_key("ls /tmp/abc", 11, cwd);
+        assert_eq!(partial_a, "/tmp/ab");
+        assert_eq!(partial_b, "/tmp/abc");
+        // Same directory part → same context (filter-only).
+        assert_eq!(key_a, key_b);
+
+        let (key_c, _) = completion_context_key("ls /var/a", 8, cwd);
+        assert_ne!(key_a, key_c);
+
+        let (key_d, _) = completion_context_key("ls /tmp/a", 9, cwd);
+        let (key_e, _) = completion_context_key("ls /tmp/a ", 10, cwd);
+        // Trailing space starts a new arg → new context.
+        assert_ne!(key_d, key_e);
+    }
+
+    #[test]
+    fn test_typing_within_context_filters_without_recompute() {
+        let env = fshell_engine::Env::new();
+        let cwd = env.cwd();
+        let mut mgr = CompletionsManager::new(env);
+        // Seed a stable candidate set as if a worker response arrived.
+        let candidates: Vec<CompletionCandidate> = ["checkout", "cherry", "commit"]
+            .into_iter()
+            .map(|v| CompletionCandidate::new(v, CompletionKind::Builtin, TextSpan::new(4, 6)))
+            .collect();
+        mgr.all_suggestions = candidates;
+        mgr.session_active = true;
+        mgr.last_context_key = Some(completion_context_key("git ch", 6, &cwd).0);
+        mgr.filter("ch");
+        assert!(!mgr.suggestions.is_empty());
+        let gen_before = mgr.generation();
+        let selected_before = mgr.suggestions[0].value.clone();
+
+        // Typing another char in the same context must not bump generation
+        // and must not clear the menu.
+        mgr.update("git che", 7, false);
+        assert_eq!(mgr.generation(), gen_before);
+        assert!(!mgr.loading);
+        assert!(mgr.visible);
+        assert!(!mgr.suggestions.is_empty());
+        // Selection preserved by value when possible, or reset without clearing.
+        assert!(
+            mgr.suggestions.iter().any(|s| s.value == selected_before) || mgr.selected_idx == 0
+        );
+    }
+
+    #[test]
+    fn test_context_change_keeps_stale_visible_for_async_manager() {
+        // Async manager without a runtime has no worker channel; fall back to
+        // checking that a context change does not clear synchronously when a
+        // worker is present. Use sync manager to verify recompute path keeps
+        // results visible instead of blanking.
+        let env = fshell_engine::Env::new();
+        let mut mgr = CompletionsManager::new(env);
+        mgr.update("ls /tmp/", 7, true);
+        assert!(mgr.visible || mgr.suggestions.is_empty());
+        let had_results = !mgr.suggestions.is_empty();
+        if had_results {
+            let gen_before = mgr.generation();
+            mgr.update("ls /tmp/a", 8, false);
+            // Sync recompute keeps the menu populated, never blank.
+            assert!(!mgr.suggestions.is_empty());
+            assert!(mgr.generation() >= gen_before);
+        }
+    }
+
+    #[test]
+    fn test_cancelled_file_completion_returns_early() {
+        use crate::autocomplete::types::CompletionCancel;
+        use std::sync::atomic::AtomicU64;
+        // A token whose generation is behind the worker's current generation
+        // is cancelled before any scanning starts.
+        let current = Arc::new(AtomicU64::new(1));
+        let cancel = CompletionCancel::new(0, Arc::clone(&current));
+        assert!(cancel.is_cancelled());
+        let results = crate::autocomplete::complete_files_at(
+            "some_prefix_",
+            12,
+            std::path::Path::new("/tmp"),
+            Some(&cancel),
+        );
+        assert!(results.is_empty());
+        assert!(!CompletionCancel::never().is_cancelled());
     }
 }

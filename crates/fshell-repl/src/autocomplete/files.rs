@@ -3,7 +3,7 @@
 
 //! Filesystem path drilling, fuzzy matching, and metadata lookups.
 
-use super::types::{CompletionCandidate, CompletionKind, TextSpan};
+use super::types::{CompletionCancel, CompletionCandidate, CompletionKind, TextSpan};
 use crate::fuzzy;
 use fshell_core::{FxIndexMap, Val};
 use fshell_engine::Env;
@@ -97,7 +97,7 @@ pub fn expand_env_vars(s: &str) -> String {
 }
 
 pub fn complete_files(last_word: &str, pos: usize) -> Vec<CompletionCandidate> {
-    complete_files_at(last_word, pos, std::path::Path::new("."))
+    complete_files_at(last_word, pos, std::path::Path::new("."), None)
 }
 
 /// Complete filesystem paths relative to the shell's logical working directory.
@@ -105,6 +105,7 @@ pub fn complete_files_at(
     last_word: &str,
     pos: usize,
     cwd: &std::path::Path,
+    cancel: Option<&CompletionCancel>,
 ) -> Vec<CompletionCandidate> {
     let word_len = last_word.len();
     let has_opening_double_quote = last_word.starts_with('"');
@@ -171,20 +172,27 @@ pub fn complete_files_at(
     };
 
     let perform_read = move || {
-        let entries = directory_snapshot(&dir_to_read);
+        if cancel.is_some_and(|c| c.is_cancelled()) {
+            return Vec::new();
+        }
+        let entries = directory_snapshot(&dir_to_read, cancel);
         if entries.is_empty() {
             return Vec::new();
         }
 
         let kind = fuzzy::choose_kind(entries.len());
         let prepared = fuzzy::PreparedQuery::new(&file_prefix);
-        let mut scored: Vec<(isize, &str, bool)> = entries
-            .iter()
-            .filter_map(|(name, is_dir)| {
-                fuzzy::fuzzy_score_prepared(&prepared, name, kind)
-                    .map(|score| (score, name.as_str(), *is_dir))
-            })
-            .collect();
+        let mut scored: Vec<(isize, &str, bool)> = Vec::new();
+        for (name, is_dir) in entries.iter() {
+            // Cooperative cancellation: a superseded keystroke burst must not
+            // score thousands of entries to completion.
+            if scored.len().is_multiple_of(64) && cancel.is_some_and(|c| c.is_cancelled()) {
+                return Vec::new();
+            }
+            if let Some(score) = fuzzy::fuzzy_score_prepared(&prepared, name, kind) {
+                scored.push((score, name.as_str(), *is_dir));
+            }
+        }
 
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
         scored.truncate(fuzzy::MAX_RESULTS);
@@ -218,8 +226,12 @@ pub fn complete_files_at(
                     path_str
                 };
 
+                // Skip per-entry metadata syscalls once superseded; the worker
+                // discards this generation anyway.
                 let desc = if is_dir {
                     Some("Directory".to_string())
+                } else if cancel.is_some_and(|c| c.is_cancelled()) {
+                    None
                 } else {
                     file_completion_description(&dir_to_read, name, false)
                 };
@@ -245,7 +257,10 @@ pub fn complete_files_at(
     perform_read()
 }
 
-fn directory_snapshot(dir: &std::path::Path) -> DirectoryEntries {
+fn directory_snapshot(
+    dir: &std::path::Path,
+    cancel: Option<&CompletionCancel>,
+) -> DirectoryEntries {
     let cache_key = if dir.is_absolute() {
         dir.to_path_buf()
     } else {
@@ -264,6 +279,9 @@ fn directory_snapshot(dir: &std::path::Path) -> DirectoryEntries {
     let mut entries = Vec::new();
     if let Ok(dir_entries) = std::fs::read_dir(dir) {
         for entry in dir_entries.flatten() {
+            if entries.len().is_multiple_of(64) && cancel.is_some_and(|c| c.is_cancelled()) {
+                break;
+            }
             let name = entry.file_name().to_string_lossy().to_string();
             let is_dir = entry
                 .file_type()

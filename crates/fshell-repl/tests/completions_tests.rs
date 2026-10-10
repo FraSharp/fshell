@@ -58,7 +58,7 @@ fn make_completer_with_path(path_dir: &std::path::Path) -> FshellCompleter {
     // Warming is done lazily by get_path_executables; no extra call needed,
     // but we prime it so the first complete() doesn't pay rebuild cost inside the assert.
     let _ = get_path_executables(Some(&path_dir.to_string_lossy().to_string()));
-    FshellCompleter { env }
+    FshellCompleter { env, cancel: None }
 }
 
 fn make_completer() -> FshellCompleter {
@@ -69,7 +69,7 @@ fn make_completer() -> FshellCompleter {
     }
     builtins_init(&env);
     bridge_init(&env);
-    FshellCompleter { env }
+    FshellCompleter { env, cancel: None }
 }
 
 #[tokio::test]
@@ -103,7 +103,7 @@ async fn test_empty_path_argument_lists_the_current_directory() {
     bridge_init(&env);
     env.set_cwd(current.clone());
 
-    let mut completer = FshellCompleter { env };
+    let mut completer = FshellCompleter { env, cancel: None };
     let results = completer.complete("ls ", 3);
     let values: Vec<&str> = results
         .iter()
@@ -243,7 +243,7 @@ async fn test_job_id_completion() {
             },
         );
     }
-    let mut c = FshellCompleter { env };
+    let mut c = FshellCompleter { env, cancel: None };
     let results = c.complete("fg %", 4);
     assert!(!results.is_empty(), "should suggest job IDs");
     assert_eq!(results[0].value, "%42");
@@ -276,7 +276,7 @@ async fn test_job_id_completion_via_percent_prefix() {
             },
         );
     }
-    let mut c = FshellCompleter { env };
+    let mut c = FshellCompleter { env, cancel: None };
     let results = c.complete("%", 1);
     assert!(!results.is_empty(), "should suggest jobs when typing %");
     assert_eq!(results[0].value, "%1");
@@ -288,7 +288,7 @@ async fn test_function_completion() {
     env.fns
         .write()
         .insert("myfunc".to_string(), (vec![], None, vec![]));
-    let mut c = FshellCompleter { env };
+    let mut c = FshellCompleter { env, cancel: None };
     let results = c.complete("myf", 3);
     assert!(
         results.iter().any(|s| s.value == "myfunc"),
@@ -386,7 +386,7 @@ async fn test_variable_completion() {
     env.vars
         .write()
         .insert("MYVAR".to_string(), fshell_core::Val::Int(42));
-    let mut c = FshellCompleter { env };
+    let mut c = FshellCompleter { env, cancel: None };
     // Variable matching is key-based (without $ prefix): "MY" matches "MYVAR"
     let results = c.complete("MY", 2);
     assert!(
@@ -463,7 +463,7 @@ async fn test_exact_match_prioritized_over_prefix() {
     env.fns
         .write()
         .insert("ls".to_string(), (vec![], None, vec![]));
-    let mut c = FshellCompleter { env };
+    let mut c = FshellCompleter { env, cancel: None };
     let results = c.complete("ls", 2);
     assert!(!results.is_empty());
     // Both the builtin and the fn match "ls" exactly
@@ -525,7 +525,10 @@ async fn test_dotfile_completion_with_alias_prefix() {
     bridge_init(&env);
     // Register hx as an alias (mimics the user's real config)
     env.register_alias("hx", "hx");
-    let mut c = FshellCompleter { env: env.clone() };
+    let mut c = FshellCompleter {
+        env: env.clone(),
+        cancel: None,
+    };
 
     let results_dotco = c.complete("hx .co", 6);
     let results_dotcom = c.complete("hx .com", 7);
@@ -1038,7 +1041,10 @@ async fn test_completions_update_after_cd() {
 
     // Change to dir_a via env.set_cwd
     env.set_cwd(dir_a.canonicalize().unwrap());
-    let mut c = FshellCompleter { env: env.clone() };
+    let mut c = FshellCompleter {
+        env: env.clone(),
+        cancel: None,
+    };
 
     let results_a = c.complete("alp", 3);
     assert!(
@@ -1146,7 +1152,7 @@ async fn test_path_completion_with_quoted_drilling() {
     bridge_init(&env);
     env.set_cwd(tmp.canonicalize().unwrap());
 
-    let mut c = FshellCompleter { env };
+    let mut c = FshellCompleter { env, cancel: None };
     let input = "\"my folder/";
     let res = c.complete(input, input.len());
 
@@ -1224,8 +1230,13 @@ async fn test_first_selected_completion_candidate_available_for_enter() {
 
 #[tokio::test]
 async fn test_non_prefix_fuzzy_matching_for_builtins() {
-    let mut c = make_completer();
+    // Hermetic PATH: the machine's /usr/bin corpus would otherwise outrank
+    // builtin 'count' past the top-100 truncation on binary-rich systems.
+    let dir = std::env::temp_dir().join(format!("fsh-cnt-hermetic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut c = make_completer_with_path(&dir);
     let results = c.complete("cnt", 3);
+    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         results.iter().any(|s| s.value == "count"),
         "fuzzy query 'cnt' should match builtin 'count', got: {:?}",
@@ -1251,8 +1262,13 @@ async fn test_exact_match_beats_fuzzy_and_ranking_survives() {
 
 #[tokio::test]
 async fn test_fuzzy_match_indices_computed() {
-    let mut c = make_completer();
+    // Hermetic PATH, same reasoning as
+    // test_non_prefix_fuzzy_matching_for_builtins.
+    let dir = std::env::temp_dir().join(format!("fsh-idx-hermetic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut c = make_completer_with_path(&dir);
     let results = c.complete("cnt", 3);
+    let _ = std::fs::remove_dir_all(&dir);
     let count_cand = results
         .iter()
         .find(|s| s.value == "count")

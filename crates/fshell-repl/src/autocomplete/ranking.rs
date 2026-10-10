@@ -18,8 +18,23 @@ pub struct RankedCompletion {
 
 /// Authoritative ranking engine combining Nucleo fuzzy matching with
 /// exact, prefix, word-boundary, and contextual bonuses.
+///
+/// Takes candidates by value for callers that already own a temporary vector.
 pub fn rank_candidates(
     candidates: Vec<CompletionCandidate>,
+    query: &str,
+    matcher: &mut Matcher,
+    recent_commands: Option<&HashSet<String>>,
+) -> Vec<RankedCompletion> {
+    rank_candidates_borrowed(&candidates, query, matcher, recent_commands)
+}
+
+/// Borrowed ranking engine: identical scoring, dedup and truncation as
+/// [`rank_candidates`], but clones only surviving candidates. Per-keystroke
+/// filtering must not clone the whole source set (plus a second clone into
+/// the filtered list) when most entries do not match.
+pub fn rank_candidates_borrowed(
+    candidates: &[CompletionCandidate],
     query: &str,
     matcher: &mut Matcher,
     recent_commands: Option<&HashSet<String>>,
@@ -31,7 +46,7 @@ pub fn rank_candidates(
     if query.is_empty() {
         // Empty query: preserve base source relevance and alphabetical order
         let mut ranked: Vec<RankedCompletion> = candidates
-            .into_iter()
+            .iter()
             .map(|c| {
                 let base_score = match c.kind {
                     CompletionKind::Builtin | CompletionKind::UserFunction => 2000,
@@ -47,7 +62,7 @@ pub fn rank_candidates(
                     0
                 };
                 RankedCompletion {
-                    candidate: c,
+                    candidate: c.clone(),
                     score: base_score + boost,
                     match_indices: Vec::new(),
                 }
@@ -76,8 +91,8 @@ pub fn rank_candidates(
     let query_lower = query.to_lowercase();
     let mut ranked = Vec::new();
 
-    for mut candidate in candidates {
-        let haystack = Utf32String::from(candidate.value.as_str());
+    for source in candidates {
+        let haystack = Utf32String::from(source.value.as_str());
         let mut indices = Vec::new();
         let nucleo_score = pattern.indices(haystack.slice(..), matcher, &mut indices);
 
@@ -89,7 +104,7 @@ pub fn rank_candidates(
         let match_indices: Vec<usize> = indices.into_iter().map(|idx| idx as usize).collect();
 
         let mut score = n_score as i64;
-        let val_lower = candidate.value.to_lowercase();
+        let val_lower = source.value.to_lowercase();
         let val_clean = val_lower
             .trim_matches(['"', '\''])
             .strip_prefix('$')
@@ -111,14 +126,14 @@ pub fn rank_candidates(
         if let Some(&first_idx) = match_indices.first()
             && first_idx > 0
         {
-            let prev_char = candidate.value.chars().nth(first_idx.saturating_sub(1));
+            let prev_char = source.value.chars().nth(first_idx.saturating_sub(1));
             if matches!(prev_char, Some('-' | '_' | '/' | '.')) {
                 score += 10_000;
             }
         }
 
         // 5. Semantic / context bonus
-        match candidate.kind {
+        match source.kind {
             CompletionKind::Builtin | CompletionKind::UserFunction => score += 2_000,
             CompletionKind::ExternalCommand => score += 1_000,
             CompletionKind::Keyword => score += 500,
@@ -126,11 +141,12 @@ pub fn rank_candidates(
         }
 
         if let Some(recent) = recent_commands
-            && recent.contains(&candidate.value)
+            && recent.contains(&source.value)
         {
             score += 500;
         }
 
+        let mut candidate = source.clone();
         candidate.match_indices = Some(match_indices.clone());
 
         ranked.push(RankedCompletion {
@@ -152,4 +168,28 @@ pub fn rank_candidates(
     ranked.truncate(100);
 
     ranked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::autocomplete::types::TextSpan;
+
+    fn sample_candidates() -> Vec<CompletionCandidate> {
+        ["checkout", "cherry", "commit", "status", "stash"]
+            .into_iter()
+            .map(|v| CompletionCandidate::new(v, CompletionKind::Builtin, TextSpan::new(0, 2)))
+            .collect()
+    }
+
+    #[test]
+    fn borrowed_ranking_matches_owned() {
+        for query in ["", "ch", "co", "zzz"] {
+            let mut a = Matcher::new(nucleo_matcher::Config::DEFAULT);
+            let mut b = Matcher::new(nucleo_matcher::Config::DEFAULT);
+            let owned = rank_candidates(sample_candidates(), query, &mut a, None);
+            let borrowed = rank_candidates_borrowed(&sample_candidates(), query, &mut b, None);
+            assert_eq!(owned, borrowed, "mismatch for query {query:?}");
+        }
+    }
 }

@@ -33,6 +33,9 @@ const Z_FRECENCY_TTL: Duration = Duration::from_secs(300);
 
 pub struct FshellCompleter {
     pub env: Env,
+    /// Cooperative cancellation for the current compute. `None` (or a
+    /// never-cancelling token) in synchronous contexts.
+    pub cancel: Option<types::CompletionCancel>,
 }
 
 /// Common external commands that should appear in first-word completions.
@@ -179,6 +182,15 @@ pub fn builtin_flags(cmd: &str) -> &'static [(&'static str, &'static str)] {
     }
 }
 
+impl FshellCompleter {
+    /// File completion honoring this completer's cancellation token. All file
+    /// listing paths funnel through here so superseded background computes
+    /// stop at phase boundaries instead of scanning to completion.
+    fn files_at(&self, last_word: &str, pos: usize) -> Vec<CompletionCandidate> {
+        complete_files_at(last_word, pos, &self.env.cwd(), self.cancel.as_ref())
+    }
+}
+
 impl Completer for FshellCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<CompletionCandidate> {
         let pos = crate::text::floor_char_boundary(line, pos);
@@ -287,11 +299,7 @@ impl Completer for FshellCompleter {
                     return results;
                 }
             }
-            let mut results = complete_files_at(
-                if starting_new_arg { "" } else { last_word },
-                pos,
-                &self.env.cwd(),
-            );
+            let mut results = self.files_at(if starting_new_arg { "" } else { last_word }, pos);
             results.retain(|s| s.value.ends_with('/'));
             return results;
         }
@@ -299,14 +307,14 @@ impl Completer for FshellCompleter {
         // cd: directory-only completion
         if is_cd {
             let file_word = if starting_new_arg { "" } else { last_word };
-            let mut results = complete_files_at(file_word, pos, &self.env.cwd());
+            let mut results = self.files_at(file_word, pos);
             results.retain(|s| s.value.ends_with('/'));
             return results;
         }
 
         // General path completion
         if is_path {
-            return complete_files_at(last_word, pos, &self.env.cwd());
+            return self.files_at(last_word, pos);
         }
 
         // Job ID completion for fg/bg
@@ -423,11 +431,7 @@ impl Completer for FshellCompleter {
         }
 
         if is_external && !last_word.starts_with('-') && (starting_new_arg || is_path) {
-            return complete_files_at(
-                if starting_new_arg { "" } else { last_word },
-                pos,
-                &self.env.cwd(),
-            );
+            return self.files_at(if starting_new_arg { "" } else { last_word }, pos);
         }
 
         let mut suggestions = Vec::new();
@@ -580,7 +584,7 @@ impl Completer for FshellCompleter {
                 );
             if is_cmd {
                 let file_word = if starting_new_arg { "" } else { last_word };
-                return complete_files_at(file_word, pos, &self.env.cwd());
+                return self.files_at(file_word, pos);
             }
         }
 
@@ -772,16 +776,16 @@ impl Completer for FshellCompleter {
 
         // In command position, also offer files/executables in current directory
         if stmt.len() <= 1 {
-            let files = complete_files_at(last_word, pos, &self.env.cwd());
+            let files = self.files_at(last_word, pos);
             suggestions.extend(files);
         }
 
         if suggestions.is_empty() {
             if starting_new_arg {
-                return complete_files_at("", pos, &self.env.cwd());
+                return self.files_at("", pos);
             }
             if !last_word.is_empty() {
-                return complete_files_at(last_word, pos, &self.env.cwd());
+                return self.files_at(last_word, pos);
             }
         }
 

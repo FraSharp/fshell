@@ -41,7 +41,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
-use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 // CPU usage debug logging (FSH_DBG_CPU_USG=1)
@@ -1274,17 +1273,23 @@ pub async fn run_ftui_repl(
                                         comp_mgr.scroll_offset = selected_row;
                                     }
 
-                                    let (list_items, total_display) = if comp_mgr.loading {
-                                        (
-                                            vec![ListItem::new(Line::from(Span::styled(
-                                                "Loading completions…",
-                                                theme.status.muted.to_style_dim(),
-                                            )))],
-                                            1,
-                                        )
-                                    } else {
-                                        comp_mgr.render_popup(popup_w, visible_rows)
-                                    };
+                                    // Stale-while-revalidate: while a context change
+                                    // recomputes in the background, keep showing
+                                    // cached suggestions with a loading title.
+                                    // Only show the placeholder when there is
+                                    // nothing cached to display.
+                                    let (list_items, total_display) =
+                                        if comp_mgr.loading && comp_mgr.suggestions.is_empty() {
+                                            (
+                                                vec![ListItem::new(Line::from(Span::styled(
+                                                    "Loading completions…",
+                                                    theme.status.muted.to_style_dim(),
+                                                )))],
+                                                1,
+                                            )
+                                        } else {
+                                            comp_mgr.render_popup(popup_w, visible_rows)
+                                        };
 
                                     let is_files = comp_mgr.is_all_files_or_dirs();
                                     let header_label =

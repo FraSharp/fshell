@@ -2436,7 +2436,10 @@ mod tests {
         env.vars.write().insert("my_var".to_string(), Val::Int(42));
         env.vars.write().insert("other".to_string(), Val::Int(1));
 
-        let mut completer = FshellCompleter { env: env.clone() };
+        let mut completer = FshellCompleter {
+            env: env.clone(),
+            cancel: None,
+        };
 
         let suggestions = completer.complete("echo $m", 7);
         println!("SUGGESTIONS for echo $m: {:?}", suggestions);
