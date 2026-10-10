@@ -1620,6 +1620,7 @@ dependencies = [
  "libc",
  "lscolors",
  "miette",
+ "notify",
  "nu-ansi-term",
  "nucleo-matcher",
  "r2d2",

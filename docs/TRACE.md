@@ -17,8 +17,17 @@ Tracing covers process and runtime entry, CLI routing, shell initialization,
 interactive session setup, first prompt readiness, command preparation and
 parsing, script parsing/evaluation, pipelines and their concurrent stages,
 external command resolution/capability checks/spawn/I/O/wait, history updates,
-and process exit or replacement. Names and attributes are intended to describe
-work without recording command text, arguments, environment values, or output.
+and process exit or replacement. Interactive `repl.frame` spans include input
+validation, highlighting, prompt resolution, layout and backend drawing (not
+the input poll). `repl.submit` covers transcript commit, terminal handoff,
+command handling and post-command refresh; it excludes Enter classification
+and the next prompt's frame. These are session-level spans, not children of
+`command`, because they also cover work outside command execution.
+
+For a repeatable PTY audit, run
+`python3 scripts/audit-interactive.py target/release/fsh`. Names and attributes
+are intended to describe work without recording command text, arguments,
+environment values, or output.
 
 Pipeline stages run concurrently. Their durations may overlap, and must not be
 added together to estimate total pipeline time. Use parent spans and timestamps

@@ -201,6 +201,12 @@ pub struct PromptManager {
     pub last_snapshot_update: Instant,
     pub cached_snapshot: PromptSnapshot,
     pub last_known_widget_outputs: Vec<String>,
+    last_animation_frames: Vec<String>,
+    last_osc7_pwd: Option<String>,
+    /// Last pwd the shared git service was pointed at. The service itself
+    /// owns the watcher, cache and dirty flag; this just avoids redundant
+    /// `ensure_watching` discovery on every input-loop iteration.
+    watched_pwd: Option<String>,
 }
 
 impl PromptManager {
@@ -219,6 +225,8 @@ impl PromptManager {
             started_at: Instant::now(),
         }];
 
+        crate::prompt::git_ensure_watching(&current_pwd);
+
         Self {
             env,
             widgets: Vec::new(),
@@ -226,38 +234,102 @@ impl PromptManager {
             last_snapshot_update: Instant::now(),
             cached_snapshot: snapshot,
             last_known_widget_outputs: Vec::new(),
+            last_animation_frames: Vec::new(),
+            last_osc7_pwd: None,
+            watched_pwd: Some(current_pwd),
         }
+    }
+
+    /// Keep the manager's view of the world in sync with the live REPL env.
+    /// `Env` is Arc-backed so this clone is cheap; without it theme/vars
+    /// changes made by commands would never reach the prompt.
+    pub fn sync_env(&mut self, env: &Env) {
+        self.env = env.clone();
+    }
+
+    /// Emit OSC7 only when the directory actually changed. Called outside
+    /// frame draws so the side-channel never interleaves with prompt rows.
+    /// Returns true when an emission was attempted.
+    pub fn maybe_emit_osc7(&mut self, pwd: &str) -> bool {
+        if self.last_osc7_pwd.as_deref() == Some(pwd) {
+            return false;
+        }
+        self.last_osc7_pwd = Some(pwd.to_string());
+        crate::emit_osc7(pwd);
+        true
     }
 
     pub fn refresh_snapshot(&mut self, cwd: &str) {
         self.cached_snapshot = refresh_prompt_snapshot(&self.env, cwd);
         self.last_snapshot_update = Instant::now();
+        // Explicit refresh (command end, cd): re-point the shared watcher and
+        // consume any pending dirty flag so the next idle `update()` stays silent.
+        if self.watched_pwd.as_deref() != Some(cwd) {
+            crate::prompt::git_ensure_watching(cwd);
+            self.watched_pwd = Some(cwd.to_string());
+        }
+        let _ = crate::prompt::git_take_dirty();
     }
 
     /// Returns true if any prompt state changed (warranting a redraw).
+    /// Idle-selection guarantee: returns false (zero bytes) when the snapshot,
+    /// widget outputs and animation frames are all identical. Git refreshes
+    /// are event-driven (fs watcher, pwd change, explicit refresh) with a
+    /// slow safety-net fallback; there is no 1s poll.
     pub fn update(&mut self) -> bool {
         let mut changed = false;
         let current_pwd = self.env.cwd().to_string_lossy().to_string();
 
-        // Update database/environment status snapshot every 1 second
-        if self.last_snapshot_update.elapsed() > Duration::from_millis(1000) {
-            cpu_dbg!("PromptManager::update snapshot refresh (every 1s)");
-            self.cached_snapshot = refresh_prompt_snapshot(&self.env, &current_pwd);
-            self.last_snapshot_update = Instant::now();
-            changed = true;
+        // Re-point the shared fs watcher on directory change (cheap string
+        // compare; `ensure_watching` does discovery only then).
+        if self.watched_pwd.as_deref() != Some(&current_pwd) {
+            crate::prompt::git_ensure_watching(&current_pwd);
+            self.watched_pwd = Some(current_pwd.clone());
+        }
 
-            // Trigger updates for widgets that have expired (e.g. run every 5s or if empty)
-            for widget in &mut self.widgets {
-                let should_run = {
-                    let lr = widget.last_run.lock();
-                    match *lr {
-                        None => true,
-                        Some(last_run) => last_run.elapsed() > Duration::from_secs(5),
-                    }
-                };
-                if should_run {
-                    widget.trigger_update(&self.env);
+        let pwd_changed = current_pwd != self.cached_snapshot.pwd;
+        let git_event = crate::prompt::git_take_dirty();
+        let fallback_due =
+            self.last_snapshot_update.elapsed() > crate::prompt::GIT_FALLBACK_INTERVAL;
+
+        if pwd_changed || git_event || fallback_due {
+            cpu_dbg!(
+                "PromptManager::update snapshot refresh (pwd_changed={} git_event={} fallback={})",
+                pwd_changed,
+                git_event,
+                fallback_due
+            );
+            let fresh = refresh_prompt_snapshot(&self.env, &current_pwd);
+            self.last_snapshot_update = Instant::now();
+            if fresh != self.cached_snapshot {
+                self.cached_snapshot = fresh;
+                changed = true;
+            }
+        }
+
+        // Trigger updates for widgets that have expired (e.g. run every 5s or if empty).
+        // Independent of git refreshes so widgets stay fresh on long idle.
+        for widget in &mut self.widgets {
+            let should_run = {
+                let lr = widget.last_run.lock();
+                match *lr {
+                    None => true,
+                    Some(last_run) => last_run.elapsed() > Duration::from_secs(5),
                 }
+            };
+            if should_run {
+                widget.trigger_update(&self.env);
+            }
+        }
+
+        // Animation frames change over time, but only matter when the template
+        // actually references them. Otherwise an idle spinner definition must
+        // never wake the renderer.
+        if self.spinner_in_use() {
+            let frames: Vec<String> = self.animations.iter().map(|a| a.get_frame()).collect();
+            if frames != self.last_animation_frames {
+                self.last_animation_frames = frames;
+                changed = true;
             }
         }
 
@@ -283,30 +355,32 @@ impl PromptManager {
         changed
     }
 
+    /// True when the current prompt templates reference a time-based animation.
+    fn spinner_in_use(&self) -> bool {
+        if self.animations.is_empty() {
+            return false;
+        }
+        let vars = self.env.vars.read();
+        if let Some(fshell_core::Val::String(tpl)) = vars.get("FSH_PROMPT")
+            && (tpl.contains("{SPINNER}") || tpl.contains("{spinner}"))
+        {
+            return true;
+        }
+        if let Some(fshell_core::Val::String(tpl)) = vars.get("FSH_PROMPT_RIGHT")
+            && (tpl.contains("{SPINNER}") || tpl.contains("{spinner}"))
+        {
+            return true;
+        }
+        false
+    }
+
     /// Returns true if any animation or widget is active (for poll timeout calculation).
+    /// Kept for compatibility; prefer `next_poll_timeout` for deadline-based
+    /// scheduling which wakes exactly when the next dynamic source needs it.
     pub fn has_active_animations(&self) -> bool {
-        // Check animations — spinner is always "active" in the sense that it changes over time.
-        // Instead of checking if any animation is defined, check if any animation's frame
-        // depends on time (which is always true). More practically: check if any animation
-        // references exist in the prompt configuration.
-        if !self.animations.is_empty() {
-            // The speed at which the animation frame changes is exactly frame_rate_ms.
-            // Since animation frames change every 80ms, we need fast polls when animations
-            // are referenced in the prompt template.
-            let vars = self.env.vars.read();
-            if let Some(fshell_core::Val::String(tpl)) = vars.get("FSH_PROMPT")
-                && (tpl.contains("{SPINNER}") || tpl.contains("{spinner}"))
-            {
-                cpu_dbg!("has_active_animations=TRUE: FSH_PROMPT contains spinner");
-                return true;
-            }
-            // Also check right prompt
-            if let Some(fshell_core::Val::String(tpl)) = vars.get("FSH_PROMPT_RIGHT")
-                && (tpl.contains("{SPINNER}") || tpl.contains("{spinner}"))
-            {
-                cpu_dbg!("has_active_animations=TRUE: FSH_PROMPT_RIGHT contains spinner");
-                return true;
-            }
+        if self.spinner_in_use() {
+            cpu_dbg!("has_active_animations=TRUE: spinner in use");
+            return true;
         }
 
         // Check async widgets
@@ -317,6 +391,125 @@ impl PromptManager {
         widgets_busy
     }
 
+    /// Fastest poll interval required by prompt-owned dynamic sources.
+    /// Returns None when the prompt itself needs no timed wakeups.
+    fn prompt_poll_interval(&self) -> Option<Duration> {
+        // Async widgets completing in background need a fast poll to pick up
+        // output changes via `update()`.
+        if self.widgets.iter().any(|w| *w.is_running.lock()) {
+            return Some(Duration::from_millis(50));
+        }
+        // Spinner advances every `frame_rate_ms` but only when referenced.
+        if self.spinner_in_use() {
+            let fastest = self
+                .animations
+                .iter()
+                .map(|a| a.frame_rate_ms.max(1))
+                .min()
+                .unwrap_or(80);
+            return Some(Duration::from_millis(fastest));
+        }
+        None
+    }
+
+    /// Deadline-based poll timeout. Wakes exactly when the next dynamic
+    /// source needs it, otherwise falls back to a slow idle poll so external
+    /// git changes are eventually picked up (until the fs watcher lands).
+    /// `status_visible` enables second-boundary wakeups for the clock;
+    /// `external_busy` covers agent/completion loaders owned by the loop.
+    pub fn next_poll_timeout(&self, status_visible: bool, external_busy: bool) -> Duration {
+        if external_busy {
+            return Duration::from_millis(50);
+        }
+        if let Some(interval) = self.prompt_poll_interval() {
+            return interval;
+        }
+        if status_visible {
+            // Wake on the next second boundary so the clock ticks exactly
+            // once per second instead of drifting on a fixed 1000ms poll.
+            let now_ms = chrono::Local::now().timestamp_millis();
+            let until_next = 1000 - (now_ms.rem_euclid(1000));
+            return Duration::from_millis(until_next.clamp(50, 1000) as u64);
+        }
+        // Idle: no animation, no clock, no busy widgets. Slow poll as safety
+        // net for external changes; `update()` diffing keeps it silent.
+        Duration::from_millis(1000)
+    }
+
+    /// Single prompt pipeline: every prompt surface (live `Line`, committed
+    /// ANSI transcript, right side, transient final) resolves through an ANSI
+    /// string first and converts once via `ansi_to_spans`. Previously the live
+    /// path used direct segment→ratatui rendering while transcripts used ANSI
+    /// strings, so the same prompt could diverge between screen and scrollback.
+    /// Value formats are intentionally frozen per source (template
+    /// interpolation keeps its backward-compatible `{duration_human}` etc.;
+    /// segments keep their typed formatters); what is unified here is the
+    /// resolution pipeline, not the value dialects. A template→segment
+    /// compiler would be needed for full semantic unification.
+    fn left_template(&self) -> Option<String> {
+        self.env
+            .vars
+            .read()
+            .get("FSH_PROMPT")
+            .and_then(|v| match v {
+                fshell_core::Val::String(s) => Some(s.clone()),
+                _ => None,
+            })
+    }
+
+    fn right_template(&self) -> Option<String> {
+        self.env
+            .vars
+            .read()
+            .get("FSH_PROMPT_RIGHT")
+            .and_then(|v| match v {
+                fshell_core::Val::String(s) => Some(s.clone()),
+                _ => None,
+            })
+    }
+
+    fn segment_list_ansi(&self, left: bool) -> String {
+        let config = self.env.prompt_config.read();
+        let theme = self.env.active_theme();
+        let list = if left { &config.left } else { &config.right };
+        crate::prompt::render_segment_list(
+            list,
+            &config,
+            &self.cached_snapshot.pwd,
+            &self.cached_snapshot.git_status,
+            self.cached_snapshot.exit_code,
+            self.cached_snapshot.duration,
+            self.cached_snapshot.job_count,
+            left,
+            &theme,
+        )
+    }
+
+    /// Resolve the left prompt to an ANSI string without a trailing reset.
+    fn resolve_left_text(&self) -> String {
+        if let Some(tpl) = self.left_template() {
+            interpolate_template(&tpl, &self.cached_snapshot, &self.animations, &self.widgets)
+        } else {
+            self.segment_list_ansi(true)
+        }
+    }
+
+    /// Resolve the right prompt to an ANSI string without a trailing reset.
+    fn resolve_right_text(&self) -> String {
+        if let Some(tpl) = self.right_template() {
+            interpolate_template(&tpl, &self.cached_snapshot, &self.animations, &self.widgets)
+        } else {
+            self.segment_list_ansi(false)
+        }
+    }
+
+    /// Live prompt contract: the inline viewport reserves exactly one row for
+    /// each prompt side, so the live `Line` is the first visual line. The full
+    /// (possibly multiline) text is preserved in committed transcripts.
+    fn first_line(text: &str) -> &str {
+        text.split('\n').next().unwrap_or(text)
+    }
+
     pub fn render_prompt_left(&self, continuation: bool) -> Line<'static> {
         if continuation {
             return Line::from(vec![Span::styled(
@@ -325,94 +518,20 @@ impl PromptManager {
             )]);
         }
 
-        // Check if user has a custom string template override
-        let vars = self.env.vars.read();
-        let prompt_tpl = vars.get("FSH_PROMPT").and_then(|v| match v {
-            fshell_core::Val::String(s) => Some(s),
-            _ => None,
-        });
-
-        if let Some(tpl) = prompt_tpl {
-            let resolved =
-                interpolate_template(tpl, &self.cached_snapshot, &self.animations, &self.widgets);
-            Line::from(ansi_to_spans(&resolved))
-        } else {
-            // High-performance direct AST/segment -> Ratatui Span path (zero ANSI string roundtrip)
-            let config = self.env.prompt_config.read();
-            let theme = self.env.active_theme();
-            let lines = crate::prompt::render_segment_list_to_ratatui_lines(
-                &config.left,
-                &config,
-                &self.cached_snapshot.pwd,
-                &self.cached_snapshot.git_status,
-                self.cached_snapshot.exit_code,
-                self.cached_snapshot.duration,
-                self.cached_snapshot.job_count,
-                true,
-                &theme,
-            );
-            lines.into_iter().next().unwrap_or_default()
-        }
+        Line::from(ansi_to_spans(Self::first_line(&self.resolve_left_text())))
     }
 
     pub fn render_prompt_left_ansi(&self) -> String {
-        let config = self.env.prompt_config.read();
-        let theme = self.env.active_theme();
-        let rendered_ansi = crate::prompt::render_segment_list(
-            &config.left,
-            &config,
-            &self.cached_snapshot.pwd,
-            &self.cached_snapshot.git_status,
-            self.cached_snapshot.exit_code,
-            self.cached_snapshot.duration,
-            self.cached_snapshot.job_count,
-            true,
-            &theme,
-        );
-
-        let vars = self.env.vars.read();
-        let prompt_tpl = vars.get("FSH_PROMPT").and_then(|v| match v {
-            fshell_core::Val::String(s) => Some(s),
-            _ => None,
-        });
-
-        if let Some(tpl) = prompt_tpl {
-            let mut resolved =
-                interpolate_template(tpl, &self.cached_snapshot, &self.animations, &self.widgets);
+        let mut resolved = self.resolve_left_text();
+        // Template path historically terminates with an explicit reset.
+        if self.left_template().is_some() {
             resolved.push_str("\x1b[0m");
-            resolved
-        } else {
-            rendered_ansi
         }
+        resolved
     }
 
     pub fn render_prompt_right(&self) -> Line<'static> {
-        let vars = self.env.vars.read();
-        let right_tpl = vars.get("FSH_PROMPT_RIGHT").and_then(|v| match v {
-            fshell_core::Val::String(s) => Some(s),
-            _ => None,
-        });
-
-        if let Some(tpl) = right_tpl {
-            let resolved =
-                interpolate_template(tpl, &self.cached_snapshot, &self.animations, &self.widgets);
-            Line::from(ansi_to_spans(&resolved))
-        } else {
-            let config = self.env.prompt_config.read();
-            let theme = self.env.active_theme();
-            let lines = crate::prompt::render_segment_list_to_ratatui_lines(
-                &config.right,
-                &config,
-                &self.cached_snapshot.pwd,
-                &self.cached_snapshot.git_status,
-                self.cached_snapshot.exit_code,
-                self.cached_snapshot.duration,
-                self.cached_snapshot.job_count,
-                false,
-                &theme,
-            );
-            lines.into_iter().next().unwrap_or_default()
-        }
+        Line::from(ansi_to_spans(Self::first_line(&self.resolve_right_text())))
     }
 
     // Erase multi-line components and render transient prompts on submit
@@ -525,5 +644,87 @@ mod tests {
             ..animation
         };
         assert_eq!(zero_rate.frame_at(Duration::ZERO), "a");
+    }
+
+    #[test]
+    fn test_maybe_emit_osc7_only_on_change() {
+        let env = fshell_engine::Env::new();
+        let mut mgr = super::PromptManager::new(env);
+        assert!(mgr.maybe_emit_osc7("/tmp/a"));
+        assert!(!mgr.maybe_emit_osc7("/tmp/a"));
+        assert!(mgr.maybe_emit_osc7("/tmp/b"));
+    }
+
+    #[test]
+    fn test_next_poll_timeout_deadlines() {
+        let env = fshell_engine::Env::new();
+        let mgr = super::PromptManager::new(env);
+        // Idle, no clock, no busy: slow poll.
+        assert_eq!(
+            mgr.next_poll_timeout(false, false),
+            Duration::from_millis(1000)
+        );
+        // External busy (agent/completions): fast poll.
+        assert_eq!(
+            mgr.next_poll_timeout(false, true),
+            Duration::from_millis(50)
+        );
+        // Clock visible: wake on second boundary (50..=1000ms).
+        let clock = mgr.next_poll_timeout(true, false);
+        assert!(clock >= Duration::from_millis(50) && clock <= Duration::from_millis(1000));
+    }
+
+    /// Strip SGR escape sequences for visible-text comparison.
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_live_line_and_ansi_transcript_agree() {
+        // Pipeline unity: the live `Line` and the committed ANSI transcript
+        // must carry the same visible text in both template and segment modes.
+        let env = fshell_engine::Env::new();
+        {
+            let mut vars = env.vars.write();
+            vars.insert(
+                "FSH_PROMPT".to_string(),
+                fshell_core::Val::String("{user}@{pwd}> ".to_string()),
+            );
+        }
+        let mgr = super::PromptManager::new(env.clone());
+        let line_text: String = mgr
+            .render_prompt_left(false)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        let ansi_text = strip_sgr(&mgr.render_prompt_left_ansi());
+        assert_eq!(line_text, ansi_text);
+
+        {
+            env.vars.write().remove("FSH_PROMPT");
+        }
+        let mgr = super::PromptManager::new(env);
+        let line_text: String = mgr
+            .render_prompt_left(false)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        let ansi_text = strip_sgr(&mgr.render_prompt_left_ansi());
+        assert_eq!(line_text, ansi_text);
     }
 }

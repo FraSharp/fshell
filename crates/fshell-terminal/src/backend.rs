@@ -264,7 +264,10 @@ impl<W: Write> Backend for FshellBackend<W> {
                 x: x.min(surface_width.saturating_sub(1)),
                 y: y.min(surface_height.saturating_sub(1)),
             };
-            self.cursor_position = Some(position);
+            // Do not pre-set `cursor_position` here: `position_relative_cursor`
+            // owns tracking and uses the previous value for no-op suppression.
+            // Pre-setting would make every cursor-only move look like a no-op
+            // (freezing arrow-key movement whenever the draw diff is empty).
             self.position_relative_cursor(position)?;
         } else {
             ansi::move_to(&mut self.output_buffer, x, y)?;
@@ -345,16 +348,6 @@ impl<W: Write> FshellBackend<W> {
         if self.relative_cells.len() != expected_cells {
             self.relative_cells.resize(expected_cells, Cell::default());
         }
-        for (x, y, cell) in content {
-            if x < surface_width && y < surface_height {
-                let index = usize::from(y) * usize::from(surface_width) + usize::from(x);
-                self.relative_cells[index] = cell.clone();
-            }
-        }
-
-        self.cursor_show_pending = false;
-        ansi::hide_cursor(&mut self.output_buffer)?;
-        self.restore_relative_anchor()?;
         let frame_drawn = matches!(
             self.cursor_mode,
             CursorMode::Relative {
@@ -362,6 +355,94 @@ impl<W: Write> FshellBackend<W> {
                 ..
             }
         );
+        // Suppress no-op frames: when the diff carries no visual change and a
+        // frame is already on screen, emit zero bytes so terminal selection
+        // and scrollback are untouched. This is the idle-selection guarantee.
+        let mut visual_changed = false;
+        let mut dirty_ranges = vec![(surface_width, 0u16); usize::from(surface_height)];
+        for (x, y, cell) in content {
+            if x < surface_width && y < surface_height {
+                let index = usize::from(y) * usize::from(surface_width) + usize::from(x);
+                if let Some(existing) = self.relative_cells.get(index)
+                    && existing == cell
+                {
+                    continue;
+                }
+                if let Some(slot) = self.relative_cells.get_mut(index) {
+                    let range = &mut dirty_ranges[usize::from(y)];
+                    // Include the preceding cell in case this diff replaces the
+                    // continuation of an old wide grapheme.
+                    range.0 = range.0.min(x.saturating_sub(1));
+                    range.1 = range.1.max(
+                        x.saturating_add(slot.cell_width().max(cell.cell_width()).max(1))
+                            .min(surface_width),
+                    );
+                    *slot = cell.clone();
+                    visual_changed = true;
+                }
+            }
+        }
+        if !visual_changed && frame_drawn {
+            return Ok(());
+        }
+
+        self.cursor_show_pending = false;
+        ansi::hide_cursor(&mut self.output_buffer)?;
+
+        // With a known column-zero origin, logical rows map directly to
+        // physical rows. Patch only changed ranges: typing must not erase
+        // PS1, and a clock tick must not repaint the input row. Opaque child
+        // origins retain the stream/wrap-safe full-frame path below.
+        if frame_drawn
+            && matches!(
+                self.cursor_mode,
+                CursorMode::Relative {
+                    origin_column: Some(0),
+                    ..
+                }
+            )
+        {
+            self.output_buffer.write_all(b"\x1b[0m")?;
+            let mut sgr = SgrState::default();
+            for (row, (mut start, end)) in dirty_ranges.into_iter().enumerate() {
+                if start >= end {
+                    continue;
+                }
+                let row = row as u16;
+                while start > 0
+                    && self.relative_cells
+                        [usize::from(row) * usize::from(surface_width) + usize::from(start)]
+                    .cell_width()
+                        == 0
+                {
+                    start -= 1;
+                }
+                self.restore_relative_anchor()?;
+                self.output_buffer.write_all(b"\x1b[0m")?;
+                sgr = SgrState::default();
+                if row > 0 {
+                    write!(self.output_buffer, "\x1b[{row}B")?;
+                }
+                if start > 0 {
+                    write!(self.output_buffer, "\x1b[{start}C")?;
+                }
+                append_relative_cells_from(
+                    &mut self.output_buffer,
+                    &self.relative_cells,
+                    surface_width,
+                    row,
+                    start,
+                    end,
+                    &mut sgr,
+                )?;
+            }
+            reset_sgr(&mut self.output_buffer, &mut sgr)?;
+            // The last patch leaves the physical cursor at an arbitrary cell.
+            self.cursor_position = None;
+            return Ok(());
+        }
+
+        self.restore_relative_anchor()?;
         if frame_drawn {
             let origin_column = match self.cursor_mode {
                 CursorMode::Relative { origin_column, .. } => origin_column,
@@ -401,6 +482,7 @@ impl<W: Write> FshellBackend<W> {
         let CursorMode::Relative {
             surface_height,
             surface_width,
+            origin_column,
             ..
         } = self.cursor_mode
         else {
@@ -412,6 +494,43 @@ impl<W: Write> FshellBackend<W> {
             x: target.x.min(surface_width.saturating_sub(1)),
             y: target.y.min(surface_height.saturating_sub(1)),
         };
+
+        // Same guarantee as draw_relative: repositioning to the already-tracked
+        // cursor with no visual change must not touch the terminal. A pending
+        // frame in `output_buffer` means draw() just rewrote rows and left the
+        // physical cursor at the surface end, so positioning is still required
+        // even when the logical target equals ORIGIN.
+        if self.cursor_position == Some(target)
+            && self.output_buffer.is_empty()
+            && !self.cursor_show_pending
+        {
+            return Ok(());
+        }
+
+        // Fast path: move the cursor with motion sequences (CUD/CUF/CUB) from
+        // the restored anchor instead of rewriting row contents. Rewriting
+        // identical text still counts as output on those rows and clears mouse
+        // selection; pure motion does not. Falls back to the rewrite path when
+        // the origin column is unknown.
+        if let Some(origin) = origin_column
+            && let Some((down, col)) =
+                logical_to_physical(&self.relative_cells, surface_width, origin, target)
+        {
+            self.restore_relative_anchor()?;
+            if down > 0 {
+                write!(self.output_buffer, "\x1b[{down}B")?;
+            }
+            // CUD preserves the column, so the horizontal leg always starts
+            // from the anchor column regardless of the vertical distance.
+            let diff = col as i32 - origin as i32;
+            if diff > 0 {
+                write!(self.output_buffer, "\x1b[{diff}C")?;
+            } else if diff < 0 {
+                write!(self.output_buffer, "\x1b[{}D", -diff)?;
+            }
+            self.cursor_position = Some(target);
+            return Ok(());
+        }
 
         self.restore_relative_anchor()?;
         self.output_buffer.write_all(b"\x1b[0m")?;
@@ -443,6 +562,16 @@ impl<W: Write> FshellBackend<W> {
     /// origin without assuming that it starts in column zero. Rows are emitted
     /// as a stream from this origin so the terminal itself decides soft wraps.
     pub fn establish_relative_surface(
+        &mut self,
+        surface_width: u16,
+        height: u16,
+    ) -> io::Result<()> {
+        self.queue_establish_relative_surface(surface_width, height)?;
+        self.flush_output()
+    }
+
+    /// Queue establishment so its clearing and first frame share one flush.
+    pub fn queue_establish_relative_surface(
         &mut self,
         surface_width: u16,
         height: u16,
@@ -487,13 +616,23 @@ impl<W: Write> FshellBackend<W> {
         self.save_relative_anchor()?;
         self.clear_relative_rows_below(physical_rows_below(height, origin_column))?;
         self.restore_relative_anchor()?;
-        self.flush_output()
+        Ok(())
     }
 
     /// Clear the old owned rows and establish a new local origin after a
     /// viewport resize. The first row may occupy one extra physical row because
     /// its starting column is opaque.
     pub fn reanchor_relative_surface(
+        &mut self,
+        surface_width: u16,
+        surface_height: u16,
+    ) -> io::Result<()> {
+        self.queue_reanchor_relative_surface(surface_width, surface_height)?;
+        self.flush_output()
+    }
+
+    /// Queue a reanchor so the old surface is not visibly blanked before draw.
+    pub fn queue_reanchor_relative_surface(
         &mut self,
         surface_width: u16,
         surface_height: u16,
@@ -539,7 +678,7 @@ impl<W: Write> FshellBackend<W> {
         self.save_relative_anchor()?;
         self.clear_relative_rows_below(physical_rows_below(surface_height, origin_column))?;
         self.restore_relative_anchor()?;
-        self.flush_output()
+        Ok(())
     }
 
     /// Commit transcript lines at the saved prompt origin. The next editor
@@ -770,6 +909,15 @@ impl<W: Write> FshellBackend<W> {
             self.cursor_show_pending = false;
         }
         if !self.output_buffer.is_empty() {
+            if matches!(self.cursor_mode, CursorMode::Relative { .. }) {
+                // One write is not an atomic display update: terminal emulators
+                // can paint between erase and redraw, especially across CRLFs.
+                // DEC synchronized output keeps each inline batch invisible
+                // until complete. Unsupported terminals ignore these modes.
+                self.output_buffer
+                    .splice(0..0, b"\x1b[?2026h".iter().copied());
+                self.output_buffer.extend_from_slice(b"\x1b[?2026l");
+            }
             self.writer.write_all(&self.output_buffer)?;
             self.output_buffer.clear();
         }
@@ -804,9 +952,21 @@ fn append_relative_cells(
     end_x: u16,
     sgr: &mut SgrState,
 ) -> io::Result<()> {
+    append_relative_cells_from(out, cells, width, row, 0, end_x, sgr)
+}
+
+fn append_relative_cells_from(
+    out: &mut Vec<u8>,
+    cells: &[Cell],
+    width: u16,
+    row: u16,
+    start_x: u16,
+    end_x: u16,
+    sgr: &mut SgrState,
+) -> io::Result<()> {
     let row_start = usize::from(row) * usize::from(width);
     let end_x = end_x.min(width);
-    let mut x = 0u16;
+    let mut x = start_x;
     while x < end_x {
         let Some(cell) = cells.get(row_start + usize::from(x)) else {
             break;
@@ -856,6 +1016,67 @@ fn relative_row_extent(cells: &[Cell], width: u16, row: u16) -> u16 {
         }
     }
     extent.min(width)
+}
+
+/// Display-column width of the first `up_to_x` cells of a logical row,
+/// summing grapheme widths so wide characters count correctly. Used to map a
+/// Ratatui cell coordinate to a physical terminal column.
+fn row_display_width_up_to(cells: &[Cell], width: u16, row: u16, up_to_x: u16) -> u32 {
+    let row_start = usize::from(row) * usize::from(width);
+    let mut disp = 0u32;
+    for x in 0..up_to_x.min(width) {
+        let Some(cell) = cells.get(row_start + usize::from(x)) else {
+            break;
+        };
+        disp += u32::from(cell.cell_width());
+    }
+    disp
+}
+
+/// Physical rows a logical row occupies when emitted from a fresh column.
+/// Row zero starts at `origin`; later rows start at column zero after CRLF.
+fn physical_rows_for_row(extent_disp: u32, start_col: u32, term_width: u32) -> u32 {
+    if term_width == 0 {
+        return 1;
+    }
+    ((start_col + extent_disp).max(1).div_ceil(term_width)).max(1)
+}
+
+/// Map a logical surface coordinate to physical `(rows_down, column)` from
+/// the restored anchor. Returns `None` when the geometry is degenerate and
+/// the caller should fall back to rewriting rows.
+fn logical_to_physical(
+    cells: &[Cell],
+    surface_width: u16,
+    origin: u16,
+    target: Position,
+) -> Option<(u16, u16)> {
+    let w = u32::from(surface_width.max(1));
+    if target.x >= surface_width {
+        return None;
+    }
+    let extents: Vec<u32> = (0..=target.y)
+        .map(|r| u32::from(relative_row_extent(cells, surface_width, r)))
+        .collect();
+    // Physical base row of each logical row. Row zero starts at the anchor;
+    // every later row starts at column zero after its CRLF.
+    let mut base = 0u32;
+    for (r, extent) in extents.iter().enumerate() {
+        let row_idx = r as u16;
+        if row_idx == target.y {
+            break;
+        }
+        let start = if r == 0 { u32::from(origin) } else { 0 };
+        base += physical_rows_for_row(*extent, start, w);
+    }
+    let width_up_to = row_display_width_up_to(cells, surface_width, target.y, target.x);
+    let (down, col) = if target.y == 0 {
+        let total = u32::from(origin) + width_up_to;
+        (total / w, (total % w) as u16)
+    } else {
+        (base + width_up_to / w, (width_up_to % w) as u16)
+    };
+    Some((down.min(u32::from(u16::MAX)) as u16, col))
 }
 
 fn append_cell_style(out: &mut Vec<u8>, cell: &Cell, sgr: &mut SgrState) -> io::Result<()> {
@@ -1311,5 +1532,192 @@ mod tests {
             .find("\x1b[1;2H")
             .expect("cursor move should be present");
         assert!(drawn_cell < shown_cursor && shown_cursor < moved_cursor);
+    }
+
+    #[test]
+    fn relative_noop_frame_emits_zero_bytes() {
+        // Idle-selection guarantee: a second identical relative frame plus a
+        // repeated cursor positioning must not write anything.
+        let mut backend = FshellBackend::resume_cursor_relative(Vec::new(), 20, 2);
+        let mut cell = ratatui::buffer::Cell::default();
+        cell.set_symbol("x");
+
+        Backend::draw(&mut backend, std::iter::once((0, 0, &cell)))
+            .expect("first draw should succeed");
+        Backend::set_cursor_position(&mut backend, Position { x: 1, y: 0 })
+            .expect("first cursor position should succeed");
+        Backend::flush(&mut backend).expect("first flush should succeed");
+        assert!(!backend.writer.is_empty(), "first frame must emit bytes");
+        let first_len = backend.writer.len();
+
+        Backend::draw(&mut backend, std::iter::once((0, 0, &cell)))
+            .expect("identical draw should succeed");
+        Backend::set_cursor_position(&mut backend, Position { x: 1, y: 0 })
+            .expect("identical cursor position should succeed");
+        Backend::flush(&mut backend).expect("second flush should succeed");
+        assert_eq!(
+            backend.writer.len(),
+            first_len,
+            "no-op frame must emit zero additional bytes"
+        );
+
+        // An empty diff must also be silent.
+        Backend::draw(&mut backend, std::iter::empty()).expect("empty draw should succeed");
+        Backend::flush(&mut backend).expect("empty flush should succeed");
+        assert_eq!(
+            backend.writer.len(),
+            first_len,
+            "empty diff must emit zero additional bytes"
+        );
+    }
+
+    #[test]
+    fn relative_cursor_move_emits_motion_not_text() {
+        // Arrow-key style move with unchanged cells must not rewrite row text:
+        // only the anchor restore plus CUD/CUF/CUB motions may be emitted.
+        let mut backend =
+            FshellBackend::resume_cursor_relative_with_origin_column(Vec::new(), 20, 2, Some(0));
+        let mut cell = ratatui::buffer::Cell::default();
+        cell.set_symbol("x");
+
+        Backend::draw(&mut backend, std::iter::once((0, 0, &cell)))
+            .expect("first draw should succeed");
+        Backend::set_cursor_position(&mut backend, Position { x: 1, y: 0 })
+            .expect("first position should succeed");
+        Backend::flush(&mut backend).expect("first flush should succeed");
+        let first_len = backend.writer.len();
+        assert!(first_len > 0);
+
+        // Same content, cursor one cell right: draw is a no-op, position moves.
+        Backend::draw(&mut backend, std::iter::once((0, 0, &cell)))
+            .expect("identical draw should succeed");
+        Backend::set_cursor_position(&mut backend, Position { x: 2, y: 0 })
+            .expect("moved position should succeed");
+        Backend::flush(&mut backend).expect("second flush should succeed");
+        let added = &backend.writer[first_len..];
+        let added_str = String::from_utf8_lossy(added);
+        assert!(
+            added_str.contains("\x1b8"),
+            "motion path must restore the anchor, got {added_str:?}"
+        );
+        assert!(
+            added_str.contains("\x1b[2C") || added_str.contains("\x1b[1C"),
+            "motion path must move right with CUF, got {added_str:?}"
+        );
+        // The cell text must not be rewritten: only one 'x' total (from frame one).
+        assert_eq!(
+            backend.writer.iter().filter(|b| **b == b'x').count(),
+            1,
+            "cursor move must not rewrite cell text"
+        );
+    }
+
+    #[test]
+    fn relative_typing_patches_input_without_erasing_prompt() {
+        let mut backend =
+            FshellBackend::resume_cursor_relative_with_origin_column(Vec::new(), 30, 1, Some(0));
+        let mut before = Buffer::empty(Rect::new(0, 0, 30, 1));
+        before.set_string(0, 0, "PROMPT> ab", Style::default());
+        Backend::draw(
+            &mut backend,
+            Buffer::empty(before.area).diff(&before).into_iter(),
+        )
+        .unwrap();
+        Backend::flush(&mut backend).unwrap();
+        let first_len = backend.writer.len();
+
+        let mut after = before.clone();
+        after.set_string(10, 0, "c", Style::default());
+        Backend::draw(&mut backend, before.diff(&after).into_iter()).unwrap();
+        Backend::flush(&mut backend).unwrap();
+        let added = String::from_utf8_lossy(&backend.writer[first_len..]);
+        assert!(
+            !added.contains("PROMPT>"),
+            "prompt was repainted: {added:?}"
+        );
+        assert!(!added.contains("\x1b[K"), "input row was erased: {added:?}");
+        assert!(added.contains("bc"), "changed suffix missing: {added:?}");
+        assert!(added.starts_with("\x1b[?2026h"));
+        assert!(added.ends_with("\x1b[?2026l"));
+    }
+
+    #[test]
+    fn relative_deletion_overwrites_old_wide_grapheme() {
+        let mut backend =
+            FshellBackend::resume_cursor_relative_with_origin_column(Vec::new(), 30, 1, Some(0));
+        let mut before = Buffer::empty(Rect::new(0, 0, 30, 1));
+        before.set_string(0, 0, "PROMPT> 界x", Style::default());
+        Backend::draw(
+            &mut backend,
+            Buffer::empty(before.area).diff(&before).into_iter(),
+        )
+        .unwrap();
+        Backend::flush(&mut backend).unwrap();
+        let first_len = backend.writer.len();
+
+        let mut after = Buffer::empty(before.area);
+        after.set_string(0, 0, "PROMPT> a", Style::default());
+        Backend::draw(&mut backend, before.diff(&after).into_iter()).unwrap();
+        Backend::flush(&mut backend).unwrap();
+        let added = String::from_utf8_lossy(&backend.writer[first_len..]);
+        assert!(!added.contains("PROMPT>"));
+        assert!(
+            added.contains("a  "),
+            "old wide glyph/tail not erased: {added:?}"
+        );
+    }
+
+    #[test]
+    fn relative_second_row_update_leaves_first_row_untouched() {
+        let mut backend =
+            FshellBackend::resume_cursor_relative_with_origin_column(Vec::new(), 30, 2, Some(0));
+        let mut before = Buffer::empty(Rect::new(0, 0, 30, 2));
+        before.set_string(0, 0, "PROMPT> ", Style::default());
+        before.set_string(0, 1, "12:00:00", Style::default().fg(Color::Red));
+        Backend::draw(
+            &mut backend,
+            Buffer::empty(before.area).diff(&before).into_iter(),
+        )
+        .unwrap();
+        Backend::flush(&mut backend).unwrap();
+        let first_len = backend.writer.len();
+        let mut after = before.clone();
+        after.set_string(0, 1, "12:00:01", Style::default().fg(Color::Red));
+        Backend::draw(&mut backend, before.diff(&after).into_iter()).unwrap();
+        Backend::flush(&mut backend).unwrap();
+        let added = String::from_utf8_lossy(&backend.writer[first_len..]);
+        assert!(!added.contains("PROMPT>"));
+        assert!(!added.contains("\x1b[K"));
+        assert!(added.contains("\x1b[1B"));
+        assert!(added.contains("\x1b[31;49m01"));
+    }
+
+    #[test]
+    fn logical_to_physical_accounts_for_origin_and_wraps() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        // Row 0: "abc" at origin 0, width 80 → (x,0) maps to (0,x).
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 2));
+        buf.set_string(0, 0, "abc", ratatui::style::Style::default());
+        let cells = buf.content.clone();
+        assert_eq!(
+            super::logical_to_physical(&cells, 80, 0, Position { x: 3, y: 0 }),
+            Some((0, 3))
+        );
+        // Same row at origin 5 shifts the column.
+        assert_eq!(
+            super::logical_to_physical(&cells, 80, 5, Position { x: 3, y: 0 }),
+            Some((0, 8))
+        );
+        // Narrow terminal: origin 78 + x=3 wraps to the next physical row.
+        assert_eq!(
+            super::logical_to_physical(&cells, 80, 78, Position { x: 3, y: 0 }),
+            Some((1, 1))
+        );
+        // Second logical row starts on its own physical row.
+        assert_eq!(
+            super::logical_to_physical(&cells, 80, 0, Position { x: 0, y: 1 }),
+            Some((1, 0))
+        );
     }
 }

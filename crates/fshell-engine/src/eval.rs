@@ -92,7 +92,7 @@ fn flow_into_outcome(flow: Flow) -> ExprOutcome {
     }
 }
 
-fn stmt_label(stmt: &Stmt) -> String {
+pub(crate) fn stmt_label(stmt: &Stmt) -> String {
     match stmt {
         Stmt::Local { name, .. } => format!("local {name}"),
         Stmt::Let { name, .. } => format!("let {name}"),

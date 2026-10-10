@@ -4,7 +4,7 @@
 use crate::Flow;
 use crate::eval::{
     decode_csv_records, decode_yaml_documents, json_value_to_val, run_document_boundary,
-    val_to_json_value,
+    stmt_label, val_to_json_value,
 };
 use crate::{
     CapAction, EngineError, Env, ExprOutcome, LocalScope, PendingSuggestion, PipeSender,
@@ -3837,6 +3837,15 @@ async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
                 }
             }
         }
+        // Per-statement profiling, mirroring the `source` path in eval.rs:
+        // without this, `profile` on `-c`/script runs only ever shows Init
+        // rows and command breakdown is impossible. Disabled profilers pay a
+        // single uncontended lock check and get None back.
+        let _stmt_guard = crate::profiler::ProfilerState::guard(
+            &env.profiler,
+            &stmt_label(&stmt),
+            crate::profiler::ProfilerCategory::Source,
+        );
         match run_script_stmt(&stmt, env).await {
             Err(e) => {
                 env.set_last_error_with_source(

@@ -460,7 +460,7 @@ async fn explore_async_builtin(
     Ok(())
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 /// Snapshot of env values used for prompt rendering.
 /// Refreshed once per command execution instead of reading 5+ locks per keypress.
 pub struct PromptSnapshot {
@@ -534,6 +534,9 @@ pub fn emit_osc7(pwd: &str) {
 }
 
 /// Batch-read all env data into a PromptSnapshot (single lock acquisition per field).
+/// Note: never emits OSC7 here. OSC7 is a terminal side-channel and must only
+/// be emitted on actual cwd changes via `maybe_emit_osc7`, otherwise idle
+/// refreshes would write bytes every second and break selection.
 pub fn refresh_prompt_snapshot(env: &Env, pwd: &str) -> PromptSnapshot {
     let _start = std::time::Instant::now();
     let mut trace_span = env.trace.span(
@@ -542,7 +545,6 @@ pub fn refresh_prompt_snapshot(env: &Env, pwd: &str) -> PromptSnapshot {
         env.trace_mode,
         serde_json::Map::new(),
     );
-    emit_osc7(pwd);
     let exit_code = *env.prompt.last_exit_code.read();
     let duration = *env.prompt.last_duration.read();
     let job_count = env.job_control.jobs.read().len();
@@ -610,6 +612,41 @@ pub fn refresh_prompt_snapshot(env: &Env, pwd: &str) -> PromptSnapshot {
         span.finish(fshell_engine::trace::SpanOutcome::Ok);
     }
     snapshot
+}
+
+/// Resolve a prompt snapshot to its left ANSI string through the single
+/// prompt pipeline (template interpolation or segment list). Used by
+/// non-interactive consumers (session logging) so they cannot drift from the
+/// live prompt's resolution. Animation/widget placeholders are left for the
+/// interactive manager, which interpolates them per frame.
+pub(crate) fn render_snapshot_left_ansi(snapshot: &PromptSnapshot, env: &Env) -> String {
+    if let Some(ref template) = snapshot.prompt_template {
+        let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+        render_prompt_template(
+            template,
+            &user,
+            &snapshot.pwd,
+            snapshot.branch.as_deref(),
+            snapshot.exit_code,
+            snapshot.duration,
+            snapshot.job_count,
+            snapshot.duration_color.as_deref().unwrap_or("\x1b[37m"),
+        )
+    } else {
+        let config = env.prompt_config.read();
+        let theme = env.active_theme();
+        prompt::render_segment_list(
+            &config.left,
+            &config,
+            &snapshot.pwd,
+            &snapshot.git_status,
+            snapshot.exit_code,
+            snapshot.duration,
+            snapshot.job_count,
+            true,
+            &theme,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1391,34 +1428,8 @@ async fn handle_line_generic_inner(
         if let Some(cfg_dir) = fshell_engine::config_dir() {
             let log_path = cfg_dir.join("sessions").join(format!("{}.log", session_id));
             let snapshot = refresh_prompt_snapshot(env, pwd);
-            // Render prompt left side directly (same logic as FshellPrompt::render_prompt_left)
-            let left = if let Some(ref template) = snapshot.prompt_template {
-                let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-                render_prompt_template(
-                    template,
-                    &user,
-                    &snapshot.pwd,
-                    snapshot.branch.as_deref(),
-                    snapshot.exit_code,
-                    snapshot.duration,
-                    snapshot.job_count,
-                    snapshot.duration_color.as_deref().unwrap_or("\x1b[37m"),
-                )
-            } else {
-                let config = env.prompt_config.read();
-                let theme = env.active_theme();
-                prompt::render_segment_list(
-                    &config.left,
-                    &config,
-                    &snapshot.pwd,
-                    &snapshot.git_status,
-                    snapshot.exit_code,
-                    snapshot.duration,
-                    snapshot.job_count,
-                    true,
-                    &theme,
-                )
-            };
+            // Same single pipeline as the live prompt (template or segments).
+            let left = render_snapshot_left_ansi(&snapshot, env);
             let indicator = " > ";
             let line_owned = line.to_string();
             if let Some(tx) = SESSION_LOG_TX.get() {

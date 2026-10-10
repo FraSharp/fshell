@@ -86,7 +86,12 @@ impl ManageConnection for SqliteConnManager {
     type Error = rusqlite::Error;
 
     fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        Connection::open(&self.path)
+        let conn = Connection::open(&self.path)?;
+        // synchronous is connection-local, unlike the persistent WAL mode.
+        // Setting it only in init_db left other pooled connections at FULL,
+        // adding an fsync to each interactive history insert/update.
+        conn.execute_batch("PRAGMA synchronous=NORMAL")?;
+        Ok(conn)
     }
 
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
@@ -268,7 +273,6 @@ pub fn init_db() -> Result<(), String> {
     let pool = get_pool()?;
     let conn = pool.get().map_err(|e| e.to_string())?;
     let _ = conn.execute("PRAGMA journal_mode=WAL", []);
-    let _ = conn.execute("PRAGMA synchronous=NORMAL", []);
     conn.execute(
         "CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -619,6 +623,23 @@ pub fn get_stats() -> Result<HistoryStats, String> {
 mod tests {
     use super::*;
     use fshell_core::{remove_var, set_var};
+
+    #[test]
+    fn all_pooled_connections_use_normal_synchronous_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SqliteConnManager {
+            path: dir.path().join("history.db"),
+        };
+        let pool = r2d2::Pool::builder().max_size(4).build(manager).unwrap();
+        // Keep every checkout alive so this inspects four distinct connections.
+        let connections: Vec<_> = (0..4).map(|_| pool.get().unwrap()).collect();
+        for conn in connections {
+            let mode: i64 = conn
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, 1, "each history connection must use NORMAL, not FULL");
+        }
+    }
 
     #[test]
     fn test_sqlite_history_flow() {

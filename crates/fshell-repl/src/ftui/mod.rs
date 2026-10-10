@@ -15,6 +15,8 @@ pub mod margins;
 pub mod mouse;
 pub mod prompt;
 pub mod raw;
+pub mod render;
+pub mod schedule;
 pub mod splash;
 pub mod statusbar;
 pub mod widget_explorer;
@@ -135,6 +137,14 @@ impl Drop for CaptureStateGuard<'_> {
     }
 }
 
+/// Log REPL loop exits with context. Silent `break 'repl_loop` on I/O errors
+/// hides the next backend/PTY bug; every terminal-failure exit must leave a
+/// trace in both opt-in sinks (cpu + ftui debug files, never the live terminal).
+fn log_repl_exit(context: &str, error: &dyn std::fmt::Display) {
+    cpu_dbg!("repl_loop exit: {context}: {error}");
+    ftui_debug_log(format_args!("repl_loop exit: {context}: {error}"));
+}
+
 async fn poll_terminal_event(
     source: Arc<std::sync::Mutex<dyn EventSource>>,
     timeout: Duration,
@@ -154,6 +164,14 @@ use crate::highlighter::FshellHighlighter;
 use crate::theme_ext::ThemeColorRatatui;
 use fshell_engine::Env;
 
+pub(crate) use self::render::append_slash_if_dir;
+pub use self::render::apply_completion;
+use self::render::{
+    PromptBoundary, accept_first_tab_completion, apply_style_override, command_transcript_lines,
+    commit_surface_lines, get_command_for_cursor, normalize_prompt_boundary, slice_spans_by_column,
+    split_spans_by_newline, try_inline_alias_expansion,
+};
+use self::schedule::RenderScheduler;
 use agent::AgentModeState;
 use buffer::TextBuffer;
 use completions::CompletionsManager;
@@ -262,9 +280,6 @@ pub async fn run_ftui_repl(
     let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
     let mut status_bar = StatusBar::new(hostname.clone(), username).with_env(&env);
 
-    // Event poll timeout (no longer drives redraws — only on input)
-    let tick_rate = Duration::from_millis(50);
-
     let mut exit_repl = false;
     let mut in_continuation = false;
 
@@ -314,6 +329,10 @@ pub async fn run_ftui_repl(
         // the session for its entire lifetime; command execution may only
         // borrow a scoped suspend guard for a real interactive child.
         current_dir = env.cwd().to_string_lossy().to_string();
+        prompt_mgr.sync_env(&env);
+        // OSC7 is a cwd side-channel: emit once per directory change, never
+        // per refresh, and outside frame draws.
+        prompt_mgr.maybe_emit_osc7(&current_dir);
         if prompt_mgr.cached_snapshot.pwd != current_dir {
             prompt_mgr.refresh_snapshot(&current_dir);
         }
@@ -331,6 +350,9 @@ pub async fn run_ftui_repl(
         let mut command_to_execute = None;
         let mut aborted_command = None;
         let mut input_iter: u64 = 0;
+        // Render wakeup policy (poll deadlines, clock dirtiness) lives in the
+        // scheduler module; the loop only aggregates input state for it.
+        let mut render_scheduler = RenderScheduler::new();
 
         // ignoreeof handling: first Ctrl-D with empty buffer warns, second exits
         let mut eof_pending = false;
@@ -390,12 +412,24 @@ pub async fn run_ftui_repl(
                 pending_completion_tab = None;
             }
 
-            // Update prompt timers / background widgets (triggers at most every 1s internally)
+            // Update prompt timers / background widgets (diffed; silent when idle).
             if prompt_mgr.update() {
+                redraw = true;
+            }
+            // Status-bar clock dirtiness is owned by the render scheduler:
+            // exactly one redraw per second boundary when visible, zero
+            // otherwise. This is opt-in per-second output.
+            if render_scheduler.check_clock(status_bar.visible) {
                 redraw = true;
             }
 
             if redraw {
+                let frame_span = env.trace.span(
+                    env.trace_context,
+                    "repl.frame",
+                    env.trace_mode,
+                    serde_json::Map::new(),
+                );
                 let display_text = text_buf.text();
 
                 let validation = if display_text.trim().is_empty() {
@@ -483,52 +517,44 @@ pub async fn run_ftui_repl(
                     || resized
                 {
                     resized = false;
-                    let backend = if let Some(mut previous) = terminal.take() {
-                        // The Ratatui terminal tracks cursor visibility itself.
-                        // Reanchoring through its backend hides the cursor at
-                        // the ANSI layer, so update Ratatui's state too; its
-                        // Drop guard otherwise shows the cursor at the stale
-                        // pre-resize position.
-                        if previous.hide_cursor().is_err() {
-                            break 'repl_loop;
-                        }
-                        if previous
-                            .backend_mut()
-                            .reanchor_relative_surface(term_w, needed_height)
-                            .is_err()
+                    let viewport = Rect::new(0, 0, term_w.max(1), needed_height);
+                    if let Some(previous) = terminal.as_mut() {
+                        // Keep the same backend and queue reanchoring with the
+                        // next frame. Flushing the clear before recreating the
+                        // terminal exposed a blank PS1 on every popup resize.
+                        if previous.hide_cursor().is_err()
+                            || previous
+                                .backend_mut()
+                                .queue_reanchor_relative_surface(term_w, needed_height)
+                                .is_err()
+                            || previous.resize(viewport).is_err()
                         {
+                            log_repl_exit("reanchor_relative_surface", &"reanchor failed");
                             break 'repl_loop;
                         }
-                        drop(previous);
-                        FshellBackend::resume_cursor_relative_with_origin_column(
-                            std::io::stdout(),
-                            term_w,
-                            needed_height,
-                            origin_column,
-                        )
                     } else {
                         let mut backend = FshellBackend::new_cursor_relative_with_origin_column(
                             std::io::stdout(),
                             origin_column,
                         );
                         if backend
-                            .establish_relative_surface(term_w, needed_height)
+                            .queue_establish_relative_surface(term_w, needed_height)
                             .is_err()
                         {
+                            log_repl_exit("establish_relative_surface", &"establish failed");
                             break 'repl_loop;
                         }
-                        backend
-                    };
-                    let viewport = Rect::new(0, 0, term_w.max(1), needed_height);
-                    let Ok(created) = Terminal::with_options(
-                        backend,
-                        TerminalOptions {
-                            viewport: Viewport::Fixed(viewport),
-                        },
-                    ) else {
-                        break 'repl_loop;
-                    };
-                    terminal = Some(created);
+                        let Ok(created) = Terminal::with_options(
+                            backend,
+                            TerminalOptions {
+                                viewport: Viewport::Fixed(viewport),
+                            },
+                        ) else {
+                            log_repl_exit("Terminal::with_options", &"viewport creation failed");
+                            break 'repl_loop;
+                        };
+                        terminal = Some(created);
+                    }
                     current_viewport_height = needed_height;
                     current_viewport_width = term_w;
                 }
@@ -1692,6 +1718,7 @@ pub async fn run_ftui_repl(
                         })
                         .is_err()
                     {
+                        log_repl_exit("Terminal::draw", &"backend draw failed");
                         break 'repl_loop;
                     }
                     if let Some(span) = first_prompt_span.take() {
@@ -1699,34 +1726,34 @@ pub async fn run_ftui_repl(
                     }
                 }
 
+                if let Some(span) = frame_span {
+                    span.finish(fshell_engine::trace::SpanOutcome::Ok);
+                }
                 redraw = false;
             }
 
-            // Bug 7.2: Check prompt_mgr.has_active_animations() which includes
-            // both async widgets AND spinner/prompt animations.
-            let has_active_animations = agent_state.is_loading
+            // Deadline-based scheduling lives in the render scheduler: wake
+            // exactly when the next dynamic source needs it (spinner 80ms,
+            // busy widgets 50ms, clock on second boundary), otherwise slow
+            // idle poll. `update()` diffing above keeps idle wakeups silent
+            // (zero bytes).
+            let external_busy = agent_state.is_loading
                 || comp_mgr.loading
                 || (comp_mgr.visible
                     && comp_mgr
                         .suggestions
                         .iter()
-                        .any(|s| s.description.as_ref().is_some_and(|d| d.contains('\t'))))
-                || prompt_mgr.has_active_animations();
+                        .any(|s| s.description.as_ref().is_some_and(|d| d.contains('\t'))));
+            let poll_timeout =
+                render_scheduler.poll_timeout(&prompt_mgr, status_bar.visible, external_busy);
 
             // Also try idle-based auto-commit for undo granularity (Bug 6.2)
             text_buf.try_idle_commit();
 
-            // Determine poll timeout dynamically: fast (50ms) for active animations/widgets, slow (1000ms) for idle
-            let poll_timeout = if has_active_animations {
-                tick_rate
-            } else {
-                Duration::from_millis(1000)
-            };
-
             if input_iter <= 5 || input_iter.is_multiple_of(200) {
                 cpu_dbg!(
-                    "poll: has_anim={} timeout={:?} iter={}",
-                    has_active_animations,
+                    "poll: external_busy={} timeout={:?} iter={}",
+                    external_busy,
                     poll_timeout,
                     input_iter
                 );
@@ -1759,10 +1786,10 @@ pub async fn run_ftui_repl(
 
                 if poll_elapsed < poll_timeout / 2 {
                     cpu_dbg!(
-                        "event::poll({:?}) returned Ok(false) in {:?} — busy-poll! (has_anim={})",
+                        "event::poll({:?}) returned Ok(false) in {:?} — busy-poll! (external_busy={})",
                         poll_timeout,
                         poll_elapsed,
-                        has_active_animations
+                        external_busy
                     );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
@@ -2944,19 +2971,11 @@ pub async fn run_ftui_repl(
                     }
                 }
             } else {
-                // Event poll timed out (no user input)
-                // Check if we need to force a redraw for animations/widgets
-                let has_active_animations = agent_state.is_loading
-                    || (comp_mgr.visible
-                        && comp_mgr
-                            .suggestions
-                            .iter()
-                            .any(|s| s.description.as_ref().is_some_and(|d| d.contains('\t'))))
-                    || prompt_mgr.widgets.iter().any(|w| *w.is_running.lock());
-
-                if has_active_animations {
-                    redraw = true;
-                }
+                // Event poll timed out (no user input). No forced redraw here:
+                // the next iteration's `update()` diff (snapshot/widgets/
+                // animation frames) plus second-boundary clock check decide.
+                // Forcing redraw while busy-but-unchanged would emit bytes and
+                // clear selection.
             }
         }
 
@@ -2986,6 +3005,7 @@ pub async fn run_ftui_repl(
             let safe_cmd = cmd.replace('\n', "\r\n");
             let aborted_line = format!("{left_ansi}{safe_cmd}\x1b[31m ^C\x1b[0m");
             if commit_surface_lines(&mut terminal, &[aborted_line]).is_err() {
+                log_repl_exit("commit aborted transcript", &"commit failed");
                 break 'repl_loop;
             }
             // The abort transcript is an fshell-owned CRLF transition.
@@ -3007,6 +3027,12 @@ pub async fn run_ftui_repl(
             history_index = None;
             text_scroll_offset = 0;
         } else if let Some(trimmed) = command_to_execute {
+            let submit_span = env.trace.span(
+                env.trace_context,
+                "repl.submit",
+                env.trace_mode,
+                serde_json::Map::new(),
+            );
             let ftui_start = std::time::Instant::now();
             prompt_mgr.refresh_snapshot(&current_dir);
             let t_refresh = ftui_start.elapsed();
@@ -3014,9 +3040,11 @@ pub async fn run_ftui_repl(
             if anchor_output {
                 if let Some(mut t) = terminal.take() {
                     if t.hide_cursor().is_err() {
+                        log_repl_exit("anchored hide_cursor", &"hide_cursor failed");
                         break 'repl_loop;
                     }
                     if t.backend_mut().clear_relative_surface().is_err() {
+                        log_repl_exit("anchored clear_relative_surface", &"clear failed");
                         break 'repl_loop;
                     }
                     drop(t);
@@ -3024,6 +3052,7 @@ pub async fn run_ftui_repl(
             } else {
                 let transcript = command_transcript_lines(&final_ansi, &trimmed);
                 if commit_surface_lines(&mut terminal, &transcript).is_err() {
+                    log_repl_exit("commit command transcript", &"commit failed");
                     break 'repl_loop;
                 }
                 // The echoed command is committed by fshell at column zero;
@@ -3124,10 +3153,14 @@ pub async fn run_ftui_repl(
                             eprintln!(
                                 "\r\n\x1b[1;31merror:\x1b[0m cannot suspend the terminal for command execution: {error}"
                             );
+                            log_repl_exit("command suspend", &error);
                             break 'repl_loop;
                         }
                     },
-                    None => break 'repl_loop,
+                    None => {
+                        log_repl_exit("command suspend", &"no raw session for fullscreen child");
+                        break 'repl_loop;
+                    }
                 };
                 let t_disable = ftui_start.elapsed();
 
@@ -3190,6 +3223,7 @@ pub async fn run_ftui_repl(
             if !anchor_output {
                 let mut stdout = std::io::stdout();
                 if normalize_prompt_boundary(&mut stdout, PromptBoundary::PreserveCursor).is_err() {
+                    log_repl_exit("normalize_prompt_boundary", &"boundary failed");
                     break 'repl_loop;
                 }
             }
@@ -3206,6 +3240,9 @@ pub async fn run_ftui_repl(
             history_mgr.reset();
             history_index = None;
             text_scroll_offset = 0;
+            if let Some(span) = submit_span {
+                span.finish(fshell_engine::trace::SpanOutcome::Ok);
+            }
         } else if !exit_repl {
             history_mgr.reset();
             history_index = None;
@@ -3213,638 +3250,4 @@ pub async fn run_ftui_repl(
         }
     }
     capability_prompt.shutdown().await;
-}
-
-#[derive(Clone, Copy)]
-enum PromptBoundary {
-    PreserveCursor,
-    NextLine,
-}
-
-fn normalize_prompt_boundary(
-    out: &mut impl std::io::Write,
-    boundary: PromptBoundary,
-) -> std::io::Result<()> {
-    // Keep the cursor hidden through normalization and the next repaint. Reset
-    // style and scrolling margins, restore the saved cursor, and force autowrap
-    // on so the inline renderer can rely on terminal-native soft wrapping.
-    out.write_all(b"\x1b[?25l\x1b[0m\x1b[s\x1b[r\x1b[u\x1b[?7h")?;
-    if matches!(boundary, PromptBoundary::NextLine) {
-        out.write_all(b"\r\n")?;
-    }
-    out.flush()
-}
-
-fn command_transcript_lines(prompt: &str, command: &str) -> Vec<String> {
-    if command.contains('\n') {
-        std::iter::once(prompt.to_string())
-            .chain(command.split('\n').map(str::to_string))
-            .collect()
-    } else {
-        vec![format!("{prompt}{command}")]
-    }
-}
-
-fn commit_surface_lines(
-    terminal: &mut Option<Terminal<FshellBackend<std::io::Stdout>>>,
-    lines: &[String],
-) -> std::io::Result<()> {
-    let terminal = terminal.as_mut().ok_or_else(|| {
-        std::io::Error::other("cannot commit a prompt without an active inline surface")
-    })?;
-    // Keep Ratatui's visibility bookkeeping in sync with the backend's
-    // transcript commit. Otherwise Terminal::drop shows the old cursor after
-    // the backend has hidden it, briefly flashing at the previous position.
-    terminal.hide_cursor()?;
-    terminal.backend_mut().commit_relative_lines(lines)
-}
-
-fn slice_spans_by_column(
-    spans: &[Span<'static>],
-    start_col: usize,
-    len_cols: usize,
-) -> Vec<Span<'static>> {
-    if len_cols == 0 {
-        return Vec::new();
-    }
-    let mut result = Vec::new();
-    let end_col = start_col + len_cols;
-    let mut current_col = 0;
-
-    for span in spans {
-        let span_width = UnicodeWidthStr::width(span.content.as_ref());
-        let span_end_col = current_col + span_width;
-
-        if span_end_col <= start_col || current_col >= end_col {
-            current_col = span_end_col;
-            continue;
-        }
-
-        let local_start = start_col.saturating_sub(current_col);
-        let local_end = end_col.saturating_sub(current_col).min(span_width);
-
-        if local_start < local_end {
-            let sub = extract_columns_by_width(&span.content, local_start, local_end);
-            if !sub.is_empty() {
-                result.push(Span::styled(sub, span.style));
-            }
-        }
-
-        current_col = span_end_col;
-    }
-    result
-}
-
-fn extract_columns_by_width(s: &str, start_col: usize, end_col: usize) -> String {
-    let mut out = String::new();
-    let mut col = 0;
-    for c in s.chars() {
-        let w = c.width().unwrap_or(0);
-        if w == 0 {
-            continue;
-        }
-        let next_col = col + w;
-        if next_col <= start_col {
-            col = next_col;
-            continue;
-        }
-        if col >= end_col {
-            break;
-        }
-        if col < start_col && next_col > start_col {
-            // Wide char straddles the left edge — replace with single-width
-            // space so the column alignment stays correct (R10). Truncating
-            // the char to half would corrupt UTF-8 width.
-            if start_col < end_col {
-                out.push(' ');
-            }
-            col = next_col;
-            if col >= end_col {
-                break;
-            }
-            continue;
-        }
-        if next_col > end_col && w > 1 {
-            // Wide char would overflow right edge — omit rather than clip.
-            break;
-        }
-        out.push(c);
-        col = next_col;
-        if col >= end_col {
-            break;
-        }
-    }
-    out
-}
-
-fn apply_style_override(
-    spans: Vec<Span<'static>>,
-    start_char_idx: usize,
-    end_char_idx: usize,
-    override_style: Style,
-) -> Vec<Span<'static>> {
-    let mut result = Vec::new();
-    let mut current_char_idx = 0;
-
-    for span in spans {
-        let content = span.content.as_ref();
-        let chars: Vec<char> = content.chars().collect();
-        let span_len = chars.len();
-
-        if current_char_idx + span_len <= start_char_idx || current_char_idx >= end_char_idx {
-            // Span is entirely outside the override range
-            result.push(span);
-        } else {
-            // Span intersects with the override range
-            // 1. Before override
-            let before_len = start_char_idx.saturating_sub(current_char_idx);
-            if before_len > 0 {
-                let part1: String = chars[0..before_len].iter().collect();
-                result.push(Span::styled(part1, span.style));
-            }
-
-            // 2. Overlapping override
-            let overlap_start = start_char_idx.saturating_sub(current_char_idx);
-            let overlap_end = (end_char_idx.saturating_sub(current_char_idx)).min(span_len);
-            if overlap_end > overlap_start {
-                let part2: String = chars[overlap_start..overlap_end].iter().collect();
-                let combined_style = span.style.patch(override_style);
-                result.push(Span::styled(part2, combined_style));
-            }
-
-            // 3. After override
-            let after_start = (end_char_idx.saturating_sub(current_char_idx)).min(span_len);
-            if after_start < span_len {
-                let part3: String = chars[after_start..].iter().collect();
-                result.push(Span::styled(part3, span.style));
-            }
-        }
-        current_char_idx += span_len;
-    }
-    result
-}
-
-fn get_command_for_cursor(text: &str, cursor_char_idx: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let cursor = cursor_char_idx.min(chars.len());
-
-    // Find the start of the current pipeline stage or statement by scanning backward
-    let mut boundary = cursor;
-    while boundary > 0 {
-        let prev = chars[boundary - 1];
-        if prev == '|' || prev == ';' || prev == '&' || prev == '(' || prev == '{' {
-            break;
-        }
-        boundary -= 1;
-    }
-
-    // Find the first word after the boundary
-    let mut pos = boundary;
-    // Skip leading whitespace
-    while pos < chars.len() && chars[pos].is_whitespace() {
-        pos += 1;
-    }
-
-    // Read the word
-    let mut word = String::new();
-    while pos < chars.len() {
-        let c = chars[pos];
-        if c.is_whitespace()
-            || c == '|'
-            || c == ';'
-            || c == '&'
-            || c == '('
-            || c == ')'
-            || c == '{'
-            || c == '}'
-        {
-            break;
-        }
-        word.push(c);
-        pos += 1;
-    }
-
-    word
-}
-
-// Completion helpers
-
-/// Accept a completion: replace the byte span given by `span` with `value`.
-/// Uses the Suggestion span (byte offsets into the current line) rather than
-/// scanning backward for whitespace — this is the correct behavior (Bug 1.1).
-fn accept_completion_at_span(
-    text_buf: &mut buffer::TextBuffer,
-    line: &str,
-    span: crate::autocomplete::TextSpan,
-    value: &str,
-    append_whitespace: bool,
-) {
-    let line_chars: Vec<char> = line.chars().collect();
-    let total_chars = line_chars.len();
-
-    // Convert byte span to char indices
-    let start_char = byte_offset_to_char_index(line, span.start).min(total_chars);
-    let end_char = byte_offset_to_char_index(line, span.end).min(total_chars);
-
-    // Delete the entire span range [start_char..end_char]
-    if start_char <= end_char && start_char <= total_chars {
-        text_buf.set_cursor(start_char);
-        let len_to_delete = end_char.saturating_sub(start_char);
-        for _ in 0..len_to_delete {
-            text_buf.delete_right();
-        }
-        text_buf.insert_str(value);
-        append_completion_tail(text_buf, value, append_whitespace);
-    }
-}
-
-/// Convert a byte offset to a character index.
-fn byte_offset_to_char_index(s: &str, byte_offset: usize) -> usize {
-    let byte_offset = byte_offset.min(s.len());
-    s[..byte_offset].chars().count()
-}
-
-/// Dispatch function: use span-aware completion when the suggestion has a valid span,
-/// otherwise fall back to the legacy word-boundary approach.
-pub fn apply_completion(
-    text_buf: &mut buffer::TextBuffer,
-    line: &str,
-    suggestion: &crate::autocomplete::CompletionCandidate,
-) {
-    let span = suggestion.span;
-    let append_ws = suggestion.kind.append_whitespace();
-    // A meaningful span has start < end and covers a range that matches the buffer
-    if span.start < span.end && span.end <= line.len() {
-        accept_completion_at_span(text_buf, line, span, &suggestion.value, append_ws);
-    } else {
-        // Fallback: delete back to word boundary (legacy behavior for suggestions
-        // from completers that don't return proper spans)
-        let chars: Vec<char> = line.chars().collect();
-        let cursor = text_buf.cursor();
-        let last_word_start = chars[..cursor]
-            .iter()
-            .rposition(|&c| c.is_whitespace() || c == '|' || c == '>' || c == '<')
-            .map(|idx| idx + 1)
-            .unwrap_or(0);
-        let len_to_delete = cursor - last_word_start;
-        for _ in 0..len_to_delete {
-            text_buf.delete_left();
-        }
-        accept_completion_legacy(text_buf, &suggestion.value, append_ws);
-    }
-}
-
-/// Legacy accept method — deletes back to the last word boundary.
-/// Used only when a Suggestion has no meaningful span (e.g., default span of (0,0)).
-fn accept_completion_legacy(
-    text_buf: &mut buffer::TextBuffer,
-    value: &str,
-    append_whitespace: bool,
-) {
-    text_buf.insert_str(value);
-    append_completion_tail(text_buf, value, append_whitespace);
-}
-
-fn accept_first_tab_completion(
-    comp_mgr: &mut CompletionsManager,
-    text_buf: &mut buffer::TextBuffer,
-) {
-    if !comp_mgr.visible || comp_mgr.suggestions.is_empty() {
-        return;
-    }
-
-    if comp_mgr.suggestions.len() == 1 {
-        if let Some(suggestion) = comp_mgr.suggestions.first() {
-            let line = text_buf.text();
-            apply_completion(text_buf, &line, suggestion);
-        }
-        comp_mgr.refresh_after_completion(&text_buf.text(), text_buf.cursor());
-    } else if !comp_mgr.prefix_accepted {
-        if let Some(prefix) = comp_mgr.longest_common_prefix() {
-            let cursor = text_buf.cursor();
-            let chars = text_buf.chars();
-            let last_word_start = chars[..cursor]
-                .iter()
-                .rposition(|&c| c.is_whitespace() || c == '|' || c == '>' || c == '<')
-                .map(|index| index + 1)
-                .unwrap_or(0);
-            let current_word: String = chars[last_word_start..cursor].iter().collect();
-            if prefix.len() > current_word.len() {
-                for c in prefix[current_word.len()..].chars() {
-                    text_buf.insert_char(c);
-                }
-                append_slash_if_dir(text_buf, &prefix);
-            }
-        }
-        comp_mgr.prefix_accepted = true;
-    } else {
-        comp_mgr.select_next();
-    }
-}
-
-pub(crate) fn append_slash_if_dir(text_buf: &mut buffer::TextBuffer, value: &str) {
-    if text_buf.cursor() == text_buf.len() && !value.ends_with('/') && is_dir_expanded(value) {
-        text_buf.insert_char('/');
-    }
-}
-
-/// Complete the accepted suggestion at the cursor: directories get a trailing
-/// '/', command/flag completions that request it get a trailing space, so
-/// `git<Tab>` leaves `git ` and the user can keep typing.
-fn append_completion_tail(text_buf: &mut buffer::TextBuffer, value: &str, append_whitespace: bool) {
-    if text_buf.cursor() != text_buf.len() {
-        return;
-    }
-    if !value.ends_with('/') && is_dir_expanded(value) {
-        text_buf.insert_char('/');
-    } else if append_whitespace && !value.ends_with(' ') {
-        text_buf.insert_char(' ');
-    }
-}
-
-/// Expand a command-position alias in the buffer when its word terminator is
-/// typed. Returns true when the buffer changed. See [`crate::alias_expansion`].
-fn try_inline_alias_expansion(
-    text_buf: &mut TextBuffer,
-    env: &fshell_engine::Env,
-    alias_state: &crate::alias_expansion::AliasExpansionState,
-) -> bool {
-    use crate::alias_expansion::{is_in_command_position, should_expand, word_range_before};
-
-    if !env.options.read().expand_aliases {
-        return false;
-    }
-    let chars = text_buf.chars().to_vec();
-    let cursor = text_buf.cursor();
-    if cursor > chars.len() {
-        return false;
-    }
-    let line: String = chars.iter().collect();
-    let cursor_byte = chars[..cursor].iter().map(|c| c.len_utf8()).sum();
-    let Some((word_start, word_end)) = word_range_before(&line, cursor_byte) else {
-        return false;
-    };
-    if !is_in_command_position(&line, word_start) {
-        return false;
-    }
-    let word = &line[word_start..word_end];
-    let Some(expansion) = should_expand(word, env) else {
-        return false;
-    };
-
-    let char_start = line[..word_start].chars().count();
-    let char_end = char_start + word.chars().count();
-    let expansion_chars = expansion.chars().count();
-
-    // Replace the word with the expansion through the buffer's edit path so the
-    // change lands in its undo history.
-    text_buf.set_selection(char_start, char_end);
-    text_buf.delete_selection();
-    text_buf.insert_str(&expansion);
-    text_buf.set_cursor(char_start + expansion_chars);
-
-    alias_state.record_expansion(
-        word,
-        &expansion,
-        char_start,
-        char_start + expansion_chars,
-        word_start,
-        word_start + expansion.len(),
-    );
-    true
-}
-
-fn is_dir_expanded(path: &str) -> bool {
-    let expanded = if let Some(rest) = path.strip_prefix('~') {
-        if let Some(home) = std::env::var("HOME")
-            .ok()
-            .or_else(|| dirs::home_dir().map(|p| p.to_string_lossy().to_string()))
-        {
-            format!("{home}{rest}")
-        } else {
-            path.to_string()
-        }
-    } else {
-        path.to_string()
-    };
-    std::path::Path::new(&expanded).is_dir()
-}
-
-// Feature 8: multi-line gutter helpers
-
-/// Split highlighted spans into per-line Vec<Vec<Span>> at '\n' boundaries.
-/// Each Span's content may contain embedded '\n' characters. The `start_col`
-/// and `len_cols` are passed through to `slice_spans_by_column` for horizontal
-/// scroll clipping. Correctly handles leading and consecutive newlines (R3).
-fn split_spans_by_newline(
-    spans: &[Span<'static>],
-    active_line: usize,
-    start_col: usize,
-    len_cols: usize,
-) -> Vec<Vec<Span<'static>>> {
-    // Flatten all span contents into a single char stream with per-char style,
-    // then split at '\n'. This avoids the multi-span byte_offset bug where
-    // consecutive spans each starting with '\n' were miscounted.
-    let mut styled_chars: Vec<(char, Style)> = Vec::new();
-    for span in spans {
-        for ch in span.content.chars() {
-            styled_chars.push((ch, span.style));
-        }
-    }
-    if styled_chars.is_empty() {
-        return vec![slice_spans_by_column(&[], start_col, len_cols)];
-    }
-    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
-    let mut current: Vec<Span<'static>> = Vec::new();
-    let mut cur_text = String::new();
-    let mut cur_style: Option<Style> = None;
-    let flush =
-        |cur_text: &mut String, cur_style: &mut Option<Style>, current: &mut Vec<Span<'static>>| {
-            if !cur_text.is_empty()
-                && let Some(st) = cur_style.take()
-            {
-                current.push(Span::styled(std::mem::take(cur_text), st));
-            }
-        };
-    for (ch, style) in styled_chars {
-        if ch == '\n' {
-            flush(&mut cur_text, &mut cur_style, &mut current);
-            let line_idx = lines.len();
-            let col = if line_idx == active_line {
-                start_col
-            } else {
-                0
-            };
-            lines.push(slice_spans_by_column(&current, col, len_cols));
-            current = Vec::new();
-        } else {
-            if cur_style != Some(style) {
-                flush(&mut cur_text, &mut cur_style, &mut current);
-                cur_style = Some(style);
-            }
-            cur_text.push(ch);
-        }
-    }
-    flush(&mut cur_text, &mut cur_style, &mut current);
-    let line_idx = lines.len();
-    let col = if line_idx == active_line {
-        start_col
-    } else {
-        0
-    };
-    lines.push(slice_spans_by_column(&current, col, len_cols));
-    lines
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_split_spans_by_newline_basic() {
-        let spans = vec![Span::raw("fn foo() {\n    echo 1\n}")];
-        let lines = split_spans_by_newline(&spans, 0, 0, 80);
-        assert_eq!(lines.len(), 3);
-        assert_eq!(
-            lines[0]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            "fn foo() {"
-        );
-        assert_eq!(
-            lines[1]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            "    echo 1"
-        );
-        assert_eq!(
-            lines[2]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            "}"
-        );
-    }
-
-    #[test]
-    fn test_split_spans_by_newline_active_line_scrolling() {
-        let spans = vec![Span::raw(
-            "first line is long and scrolling\nsecond line\nthird line",
-        )];
-        // Line 0 is active and scrolled by 6 columns
-        let lines = split_spans_by_newline(&spans, 0, 6, 80);
-        assert_eq!(lines.len(), 3);
-        assert_eq!(
-            lines[0]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            "line is long and scrolling"
-        );
-        // Non-active lines are NOT scrolled
-        assert_eq!(
-            lines[1]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            "second line"
-        );
-        assert_eq!(
-            lines[2]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            "third line"
-        );
-    }
-
-    #[test]
-    fn test_split_spans_by_newline_consecutive_and_trailing_newlines() {
-        let spans = vec![Span::raw("a\n\nb\n")];
-        let lines = split_spans_by_newline(&spans, 0, 0, 80);
-        assert_eq!(lines.len(), 4);
-        assert_eq!(
-            lines[0]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            "a"
-        );
-        assert_eq!(
-            lines[1]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            ""
-        );
-        assert_eq!(
-            lines[2]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            "b"
-        );
-        assert_eq!(
-            lines[3]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            ""
-        );
-    }
-
-    #[test]
-    fn inline_alias_expansion_edits_and_collapses() {
-        let env = fshell_engine::Env::new();
-        env.register_alias("gco", "git checkout");
-        let state = crate::alias_expansion::AliasExpansionState::new();
-
-        let mut buf = TextBuffer::new();
-        buf.insert_str("gco");
-
-        // Typing the word terminator expands the word before it lands.
-        assert!(try_inline_alias_expansion(&mut buf, &env, &state));
-        assert_eq!(buf.text(), "git checkout");
-        assert_eq!(buf.cursor(), "git checkout".chars().count());
-
-        // The terminator the user typed still gets inserted.
-        buf.insert_char(' ');
-        assert_eq!(buf.text(), "git checkout ");
-
-        // One backspace collapses back to the alias name, keeping the space.
-        let collapse = state
-            .try_collapse(buf.chars(), buf.cursor())
-            .expect("collapse");
-        buf.set_selection(collapse.start, collapse.end);
-        buf.delete_selection();
-        buf.insert_str(&collapse.replacement);
-        assert_eq!(buf.text(), "gco ");
-    }
-
-    #[test]
-    fn inline_alias_expansion_respects_disabled_option() {
-        let env = fshell_engine::Env::new();
-        env.register_alias("gco", "git checkout");
-        env.options.write().expand_aliases = false;
-        let state = crate::alias_expansion::AliasExpansionState::new();
-
-        let mut buf = TextBuffer::new();
-        buf.insert_str("gco");
-        assert!(!try_inline_alias_expansion(&mut buf, &env, &state));
-        assert_eq!(buf.text(), "gco");
-    }
-
-    #[test]
-    fn inline_alias_expansion_skips_argument_position() {
-        let env = fshell_engine::Env::new();
-        env.register_alias("gco", "git checkout");
-        let state = crate::alias_expansion::AliasExpansionState::new();
-
-        let mut buf = TextBuffer::new();
-        buf.insert_str("echo gco");
-        assert!(!try_inline_alias_expansion(&mut buf, &env, &state));
-        assert_eq!(buf.text(), "echo gco");
-    }
 }

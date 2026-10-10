@@ -6,6 +6,7 @@ use fshell_core::prompt_config::{
     ColorSpec, PromptConfig, SegmentConfig, SegmentType, SeparatorStyle,
 };
 use fshell_git::repo::Repository;
+use notify::Watcher;
 use nu_ansi_term::{Color, Style};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,13 +20,101 @@ struct GitStatusCacheEntry {
     status_checked_at: Instant,
 }
 
-static GIT_STATUS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, GitStatusCacheEntry>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 const GIT_STATUS_TTL: Duration = Duration::from_secs(1);
+/// Slow safety-net refresh for git when the fs watcher misses an event
+/// (network fs, watcher limits). Event-driven path clears `dirty` immediately;
+/// this only catches strays. Diffing keeps it silent.
+pub(crate) const GIT_FALLBACK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Single owner for git prompt state: status cache, background full-update
+/// gate, fs watcher and dirty flag. Previously three separate mechanisms (TTL
+/// cache + `GIT_UPDATING` thread + watcher trio scattered across statics and
+/// `PromptManager` fields); all invalidation now flows through here.
+pub struct GitStatusService {
+    cache: Mutex<HashMap<String, GitStatusCacheEntry>>,
+    updating: AtomicBool,
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    watched_git_dir: Mutex<Option<std::path::PathBuf>>,
+    dirty: std::sync::Arc<AtomicBool>,
+}
+
+impl GitStatusService {
+    fn new() -> Self {
+        Self {
+            cache: Mutex::new(HashMap::new()),
+            updating: AtomicBool::new(false),
+            watcher: Mutex::new(None),
+            watched_git_dir: Mutex::new(None),
+            dirty: std::sync::Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Consume the pending fs-event flag.
+    fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::SeqCst)
+    }
+
+    fn clear(&self) {
+        self.cache.lock().clear();
+    }
+
+    /// Ensure the watcher follows `pwd`'s repo. Returns true when the watched
+    /// repo changed (caller should treat as dirty).
+    fn ensure_watching(&self, pwd: &str) -> bool {
+        let git_dir = Repository::discover(std::path::Path::new(pwd))
+            .ok()
+            .map(|r| r.git_dir().to_path_buf());
+        {
+            let watched = self.watched_git_dir.lock();
+            if *watched == git_dir {
+                return false;
+            }
+        }
+        *self.watched_git_dir.lock() = git_dir.clone();
+        *self.watcher.lock() = None;
+        if let Some(dir) = git_dir {
+            let dirty_clone = std::sync::Arc::clone(&self.dirty);
+            let watcher_result = notify::RecommendedWatcher::new(
+                move |res: Result<notify::Event, notify::Error>| {
+                    if res.is_ok() {
+                        dirty_clone.store(true, Ordering::SeqCst);
+                    }
+                },
+                notify::Config::default(),
+            );
+            if let Ok(mut w) = watcher_result {
+                // Watch the git dir recursively; any HEAD/index/refs change
+                // marks dirty. Extra events are harmless: `update()` diffs.
+                if w.watch(&dir, notify::RecursiveMode::Recursive).is_ok() {
+                    *self.watcher.lock() = Some(w);
+                }
+            }
+        }
+        // Repo changed: force a refresh.
+        self.mark_dirty();
+        true
+    }
+}
+
+static GIT_STATUS: std::sync::LazyLock<GitStatusService> =
+    std::sync::LazyLock::new(GitStatusService::new);
 
 pub fn clear_git_status_cache() {
-    let mut cache = GIT_STATUS_CACHE.lock();
-    cache.clear();
+    GIT_STATUS.clear();
+}
+
+/// Ensure the shared watcher follows `pwd`'s repo; true when it changed.
+pub fn git_ensure_watching(pwd: &str) -> bool {
+    GIT_STATUS.ensure_watching(pwd)
+}
+
+/// Consume the shared watcher dirty flag set by `.git` fs events.
+pub fn git_take_dirty() -> bool {
+    GIT_STATUS.take_dirty()
 }
 
 struct CachedSegment {
@@ -69,7 +158,7 @@ pub struct PromptSegment {
     pub italic: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RichGitStatus {
     pub branch: String,
     pub ahead: usize,
@@ -79,130 +168,138 @@ pub struct RichGitStatus {
     pub clean: bool,
 }
 
-static GIT_UPDATING: AtomicBool = AtomicBool::new(false);
-
 pub fn get_rich_git_status(pwd: &str) -> Option<RichGitStatus> {
-    let _timer = std::time::Instant::now();
+    GIT_STATUS.status(pwd)
+}
 
-    // 1. Fast cache check
-    {
-        let cache = GIT_STATUS_CACHE.lock();
-        if let Some(entry) = cache.get(pwd) {
-            if let Some(ref git_dir) = entry.git_dir {
-                let head_mtime = std::fs::metadata(git_dir.join("HEAD"))
-                    .ok()
-                    .and_then(|m| m.modified().ok());
-                let index_mtime = std::fs::metadata(git_dir.join("index"))
-                    .ok()
-                    .and_then(|m| m.modified().ok());
-                if entry.head_mtime == head_mtime
-                    && entry.index_mtime == index_mtime
-                    && entry.status_checked_at.elapsed() < GIT_STATUS_TTL
-                {
-                    return entry.status.clone();
+impl GitStatusService {
+    /// Fast synchronous read: mtime-valid cache hit, else stale or
+    /// branch-only status immediately while a background thread computes the
+    /// full status (stale-while-revalidate, never blocks the input loop).
+    fn status(&self, pwd: &str) -> Option<RichGitStatus> {
+        let _timer = std::time::Instant::now();
+
+        // 1. Fast cache check
+        {
+            let cache = self.cache.lock();
+            if let Some(entry) = cache.get(pwd) {
+                if let Some(ref git_dir) = entry.git_dir {
+                    let head_mtime = std::fs::metadata(git_dir.join("HEAD"))
+                        .ok()
+                        .and_then(|m| m.modified().ok());
+                    let index_mtime = std::fs::metadata(git_dir.join("index"))
+                        .ok()
+                        .and_then(|m| m.modified().ok());
+                    if entry.head_mtime == head_mtime
+                        && entry.index_mtime == index_mtime
+                        && entry.status_checked_at.elapsed() < GIT_STATUS_TTL
+                    {
+                        return entry.status.clone();
+                    }
+                } else if entry.status_checked_at.elapsed() < GIT_STATUS_TTL {
+                    return None;
                 }
-            } else if entry.status_checked_at.elapsed() < GIT_STATUS_TTL {
+            }
+        }
+
+        // 2. Discover git repository
+        let repo = match Repository::discover(std::path::Path::new(pwd)) {
+            Ok(r) => r,
+            Err(_) => {
+                let mut cache = self.cache.lock();
+                if cache.len() >= 64 {
+                    cache.clear();
+                }
+                cache.insert(
+                    pwd.to_string(),
+                    GitStatusCacheEntry {
+                        git_dir: None,
+                        status: None,
+                        head_mtime: None,
+                        index_mtime: None,
+                        status_checked_at: Instant::now(),
+                    },
+                );
                 return None;
             }
-        }
-    }
+        };
 
-    // 2. Discover git repository
-    let repo = match Repository::discover(std::path::Path::new(pwd)) {
-        Ok(r) => r,
-        Err(_) => {
-            let mut cache = GIT_STATUS_CACHE.lock();
-            if cache.len() >= 64 {
-                cache.clear();
+        let git_dir = repo.git_dir().to_path_buf();
+        let head_mtime = std::fs::metadata(git_dir.join("HEAD"))
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let index_mtime = std::fs::metadata(git_dir.join("index"))
+            .ok()
+            .and_then(|m| m.modified().ok());
+
+        // 3. Return stale status or fast branch-only status immediately
+        let stale_status = {
+            let cache = self.cache.lock();
+            cache.get(pwd).and_then(|e| e.status.clone())
+        };
+
+        let fast_status = stale_status.unwrap_or_else(|| {
+            let head = repo.head().ok();
+            let branch = head
+                .as_ref()
+                .and_then(|h| h.branch.clone())
+                .unwrap_or_else(|| {
+                    head.as_ref()
+                        .map(|h| format!("{}...", &hex::encode(h.oid)[..7]))
+                        .unwrap_or_else(|| "HEAD".to_string())
+                });
+            RichGitStatus {
+                branch,
+                ahead: 0,
+                behind: 0,
+                modified: 0,
+                untracked: 0,
+                clean: true,
             }
-            cache.insert(
-                pwd.to_string(),
-                GitStatusCacheEntry {
-                    git_dir: None,
-                    status: None,
-                    head_mtime: None,
-                    index_mtime: None,
-                    status_checked_at: Instant::now(),
-                },
-            );
-            return None;
-        }
-    };
-
-    let git_dir = repo.git_dir().to_path_buf();
-    let head_mtime = std::fs::metadata(git_dir.join("HEAD"))
-        .ok()
-        .and_then(|m| m.modified().ok());
-    let index_mtime = std::fs::metadata(git_dir.join("index"))
-        .ok()
-        .and_then(|m| m.modified().ok());
-
-    // 3. Return stale status or fast branch-only status immediately
-    let stale_status = {
-        let cache = GIT_STATUS_CACHE.lock();
-        cache.get(pwd).and_then(|e| e.status.clone())
-    };
-
-    let fast_status = stale_status.unwrap_or_else(|| {
-        let head = repo.head().ok();
-        let branch = head
-            .as_ref()
-            .and_then(|h| h.branch.clone())
-            .unwrap_or_else(|| {
-                head.as_ref()
-                    .map(|h| format!("{}...", &hex::encode(h.oid)[..7]))
-                    .unwrap_or_else(|| "HEAD".to_string())
-            });
-        RichGitStatus {
-            branch,
-            ahead: 0,
-            behind: 0,
-            modified: 0,
-            untracked: 0,
-            clean: true,
-        }
-    });
-
-    {
-        let mut cache = GIT_STATUS_CACHE.lock();
-        if !cache.contains_key(pwd) {
-            cache.insert(
-                pwd.to_string(),
-                GitStatusCacheEntry {
-                    git_dir: Some(git_dir.clone()),
-                    status: Some(fast_status.clone()),
-                    head_mtime,
-                    index_mtime,
-                    status_checked_at: Instant::now(),
-                },
-            );
-        }
-    }
-
-    // 4. Trigger non-blocking background async update
-    if !GIT_UPDATING.swap(true, Ordering::SeqCst) {
-        let pwd_owned = pwd.to_string();
-        std::thread::spawn(move || {
-            let result = get_rich_git_status_uncached(&pwd_owned);
-            let mut cache = GIT_STATUS_CACHE.lock();
-            if cache.len() >= 64 {
-                cache.clear();
-            }
-            cache.insert(
-                pwd_owned,
-                GitStatusCacheEntry {
-                    git_dir: Some(git_dir),
-                    status: result,
-                    head_mtime,
-                    index_mtime,
-                    status_checked_at: Instant::now(),
-                },
-            );
-            GIT_UPDATING.store(false, Ordering::SeqCst);
         });
-    }
 
-    Some(fast_status)
+        {
+            let mut cache = self.cache.lock();
+            if !cache.contains_key(pwd) {
+                cache.insert(
+                    pwd.to_string(),
+                    GitStatusCacheEntry {
+                        git_dir: Some(git_dir.clone()),
+                        status: Some(fast_status.clone()),
+                        head_mtime,
+                        index_mtime,
+                        status_checked_at: Instant::now(),
+                    },
+                );
+            }
+        }
+
+        // 4. Trigger non-blocking background full update through the shared
+        // service gate (single in-flight update, not one per caller).
+        if !self.updating.swap(true, Ordering::SeqCst) {
+            let pwd_owned = pwd.to_string();
+            std::thread::spawn(move || {
+                let result = get_rich_git_status_uncached(&pwd_owned);
+                let mut cache = GIT_STATUS.cache.lock();
+                if cache.len() >= 64 {
+                    cache.clear();
+                }
+                cache.insert(
+                    pwd_owned,
+                    GitStatusCacheEntry {
+                        git_dir: Some(git_dir),
+                        status: result,
+                        head_mtime,
+                        index_mtime,
+                        status_checked_at: Instant::now(),
+                    },
+                );
+                GIT_STATUS.updating.store(false, Ordering::SeqCst);
+            });
+        }
+
+        Some(fast_status)
+    }
 }
 
 fn get_rich_git_status_uncached(pwd: &str) -> Option<RichGitStatus> {
@@ -1272,5 +1369,24 @@ mod tests {
             &theme,
         );
         assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn test_git_service_watcher_follows_pwd_without_crashing() {
+        // Local service instance: deterministic, no shared global state.
+        let service = GitStatusService::new();
+        let tmp = std::env::temp_dir().join("fsh-no-repo-watcher-test");
+        let tmp_str = tmp.to_string_lossy().to_string();
+        // Non-git dir: nothing to watch, no-op, flag stays clear.
+        assert!(!service.ensure_watching(&tmp_str));
+        assert!(!service.take_dirty());
+        // The crate itself lives inside a git repo: watching it marks dirty
+        // once, then repeats are no-ops. (The flag itself is live against a
+        // real repo, so only the no-op return value is asserted here.)
+        let repo_dir = env!("CARGO_MANIFEST_DIR");
+        assert!(service.ensure_watching(repo_dir));
+        assert!(service.take_dirty());
+        assert!(!service.ensure_watching(repo_dir));
+        let _ = service.take_dirty();
     }
 }
