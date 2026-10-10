@@ -12,7 +12,9 @@ use fshell_bridge::init as bridge_init;
 use fshell_builtins::init as builtins_init;
 use fshell_core::lock::Mutex;
 use fshell_core::{Val, remove_var, set_var};
-use fshell_engine::{Env, Job, JobStatus, get_path_executables, invalidate_path_cache};
+use fshell_engine::{
+    Env, Job, JobStatus, get_path_executables, invalidate_path_cache, refresh_path_cache_blocking,
+};
 use fshell_repl::FshellCompleter;
 use fshell_repl::autocomplete::{Completer, CompletionCandidate, CompletionKind, TextSpan};
 use std::os::unix::fs::PermissionsExt;
@@ -54,10 +56,10 @@ fn make_completer_with_path(path_dir: &std::path::Path) -> FshellCompleter {
         Val::String(path_dir.to_string_lossy().to_string()),
     );
     // Ensure the global PATH cache reflects this isolated PATH.
+    // Synchronous fill: enumeration serves stale-or-empty in prod, so tests
+    // asserting on cache contents establish the precondition explicitly.
     invalidate_path_cache();
-    // Warming is done lazily by get_path_executables; no extra call needed,
-    // but we prime it so the first complete() doesn't pay rebuild cost inside the assert.
-    let _ = get_path_executables(Some(&path_dir.to_string_lossy().to_string()));
+    refresh_path_cache_blocking(Some(&path_dir.to_string_lossy().to_string()), &env.cwd());
     FshellCompleter { env, cancel: None }
 }
 
@@ -931,6 +933,11 @@ async fn test_path_completion_env_path_isolation_over_os_path() {
     let mut c = make_completer_with_path(&dir);
 
     // Direct engine check should also respect env_path isolation
+    // (synchronous precondition: prod serves stale-or-empty on a miss).
+    refresh_path_cache_blocking(
+        Some(&dir.to_string_lossy().to_string()),
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+    );
     let via_env = get_path_executables(Some(&dir.to_string_lossy().to_string()));
     assert!(
         via_env.contains(&"arborist-isolated-test".to_string()),
@@ -1007,6 +1014,10 @@ async fn test_get_path_executables_direct_happy_and_missing() {
     let _guard = TEST_PATH_MUTEX.lock();
     let dir = create_temp_bins("arbo_engine", &["arborist", "mytool"]);
     invalidate_path_cache();
+    refresh_path_cache_blocking(
+        Some(&dir.to_string_lossy().to_string()),
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+    );
 
     let listed = get_path_executables(Some(&dir.to_string_lossy().to_string()));
     assert!(listed.contains(&"arborist".to_string()));

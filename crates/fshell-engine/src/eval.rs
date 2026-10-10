@@ -3768,15 +3768,22 @@ pub(crate) struct PathCache {
     last_updated: std::time::Instant,
 }
 
-pub(crate) static PATH_CACHE: fshell_core::lock::Mutex<Option<PathCache>> =
-    fshell_core::lock::Mutex::new(None);
+/// One enumeration slot per normalized PATH string. A single slot starves
+/// concurrent fills: a fill for PATH-B is dropped while PATH-A is cached, so
+/// B's enumeration stays empty forever under alternation (and tests sharing
+/// the process-global cache livelock the same way). Eight slots cover REPL +
+/// scripts + tests with room to spare; eviction prefers expired entries.
+pub(crate) const MAX_CACHED_PATHS: usize = 8;
+
+pub(crate) static PATH_CACHE: std::sync::LazyLock<
+    fshell_core::lock::RwLock<std::collections::HashMap<String, PathCache>>,
+> = std::sync::LazyLock::new(|| fshell_core::lock::RwLock::new(std::collections::HashMap::new()));
 
 pub(crate) const PATH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Invalidate the PATH cache (e.g. when a cached path turns out to be broken)
 pub fn invalidate_path_cache() {
-    let mut cache = PATH_CACHE.lock();
-    *cache = None;
+    PATH_CACHE.write().clear();
     let mut val_cache = COMMAND_VALIDATION_CACHE.lock();
     val_cache.clear();
 }
@@ -3862,6 +3869,141 @@ pub fn is_external_command_cached_at(
     result
 }
 
+/// Executable check shared by the full scan and the direct probe so both
+/// tiers classify files identically (regular-or-symlink plus exec bit;
+/// broken symlinks excluded via the follow-metadata lookup).
+#[cfg(unix)]
+fn path_is_executable(path: &std::path::Path, is_symlink: bool) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = if is_symlink {
+        std::fs::metadata(path)
+    } else {
+        std::fs::symlink_metadata(path)
+    };
+    meta.is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn path_is_executable(path: &std::path::Path, is_symlink: bool) -> bool {
+    if is_symlink { path.exists() } else { true }
+}
+
+/// Tier-1 exact resolution: probe `dir/name` in PATH order without reading
+/// any directory listing. Costs ≤ N stats for N PATH dirs and is correct
+/// regardless of cache state, so exact lookups never trigger a full scan.
+/// Returns the full path of the first executable match.
+///
+/// Slash-containing names bypass PATH per POSIX; they keep the historical
+/// answer (never found via PATH) so dispatch behavior is unchanged.
+fn probe_command_in_path(name: &str, current_path: &str) -> Option<String> {
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    for dir in current_path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = std::path::Path::new(dir).join(name);
+        let file_type = match std::fs::symlink_metadata(&candidate) {
+            Ok(meta) => meta.file_type(),
+            Err(_) => continue,
+        };
+        if (file_type.is_file() || file_type.is_symlink())
+            && path_is_executable(&candidate, file_type.is_symlink())
+        {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Fresh-cache read guard for `current_path`: same PATH string and inside the
+/// TTL. One definition so every lookup tier agrees on what "fresh" means.
+/// Read guards never block each other; only the pointer swap takes a writer.
+fn fresh_cache_for(
+    current_path: &str,
+) -> Option<fshell_core::lock::MappedRwLockReadGuard<'static, PathCache>> {
+    let guard = PATH_CACHE.read();
+    if guard
+        .get(current_path)
+        .is_some_and(|c| c.last_updated.elapsed() < PATH_CACHE_TTL)
+    {
+        Some(fshell_core::lock::RwLockReadGuard::map(guard, |caches| {
+            caches.get(current_path).expect("fresh cache checked above")
+        }))
+    } else {
+        None
+    }
+}
+
+/// Swap freshly built enumeration data into its own PATH slot. Slots are
+/// keyed, so concurrent fills for different PATHs never clobber each other
+/// (the single-slot predecessor starved them permanently). Eviction prefers
+/// expired entries, else the stalest slot.
+fn publish_enumeration(fresh: PathCache) {
+    let mut cache_guard = PATH_CACHE.write();
+    if cache_guard.len() >= MAX_CACHED_PATHS && !cache_guard.contains_key(&fresh.path) {
+        cache_guard.retain(|_, cached| cached.last_updated.elapsed() < PATH_CACHE_TTL);
+        if cache_guard.len() >= MAX_CACHED_PATHS
+            && let Some(oldest) = cache_guard
+                .iter()
+                .min_by_key(|(_, cached)| cached.last_updated)
+                .map(|(key, _)| key.clone())
+        {
+            cache_guard.remove(&oldest);
+        }
+    }
+    cache_guard.insert(fresh.path.clone(), fresh);
+}
+
+/// Coalescing flag for background enumeration fills: at most one scan runs at
+/// a time. Every lookup whose cache is unmet kicks; losing kicks are harmless
+/// because the next lookup re-kicks while still unmet (self-healing by
+/// construction, so no wakeup bookkeeping can lose a fill).
+static FILL_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Fill guard: a panicking fill thread must not wedge the coalescing flag and
+/// silently stop all future background fills.
+struct FillGuard;
+
+impl Drop for FillGuard {
+    fn drop(&mut self) {
+        FILL_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Build the full enumeration cache for `current_path` off the hot path.
+/// Construction holds no lock; only the pointer swap does, so concurrent
+/// lookups keep serving (probe tier or stale data) while a fill is in flight.
+fn kick_background_fill(current_path: String) {
+    if FILL_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let _guard = FillGuard;
+        let build_start = std::time::Instant::now();
+        let fresh = rebuild_path_cache(&current_path, build_start);
+        publish_enumeration(fresh);
+    });
+}
+
+/// Filesystem identity for PATH-dir dedupe: `/bin` and `/usr/bin` are usually
+/// the same directory, and scanning both doubles the work for identical
+/// listings. Shared by the scan and the watcher so both agree on which
+/// strings alias. `None` when the identity is unknowable (missing dir,
+/// non-Unix) — callers then proceed without deduping rather than risk
+/// skipping a distinct directory.
+#[cfg(unix)]
+fn dir_identity(dir: &str) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn dir_identity(_dir: &str) -> Option<(u64, u64)> {
+    None
+}
+
 pub(crate) fn rebuild_path_cache(current_path: &str, now: std::time::Instant) -> PathCache {
     if std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1") {
         eprintln!(
@@ -3874,7 +4016,19 @@ pub(crate) fn rebuild_path_cache(current_path: &str, now: std::time::Instant) ->
     let mut executables = fshell_hash::FxHashMap::default();
     let mut dir_count = 0;
     let mut total_entries = 0;
+    let mut deduped_dirs = 0;
+    let mut seen_dirs: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
     for dir in current_path.split(':') {
+        // Alias skip: same inode as an already-scanned dir contributes an
+        // identical listing (`or_insert` keeps first wins anyway), so scanning
+        // it again is pure I/O. A directory changed between the two reads
+        // refreshes on the next fs-event/TTL cycle like any other change.
+        if let Some(id) = dir_identity(dir)
+            && !seen_dirs.insert(id)
+        {
+            deduped_dirs += 1;
+            continue;
+        }
         if let Ok(entries) = std::fs::read_dir(dir) {
             dir_count += 1;
             for entry in entries.flatten() {
@@ -3924,17 +4078,24 @@ pub(crate) fn rebuild_path_cache(current_path: &str, now: std::time::Instant) ->
     if std::env::var("FSH_CNF_DEBUG").as_deref() == Ok("1") {
         let elapsed = now.elapsed().as_millis();
         eprintln!(
-            "[cnf_debug] {}:{}: rebuild_path_cache done in {}ms, {} dirs, {} entries scanned, {} executables cached",
+            "[cnf_debug] {}:{}: rebuild_path_cache done in {}ms, {} dirs, {} entries scanned, {} executables cached ({} alias dirs skipped)",
             file!(),
             line!(),
             elapsed,
             dir_count,
             total_entries,
-            result.executables.len()
+            result.executables.len(),
+            deduped_dirs
         );
     }
     result
 }
+
+/// Channel feeding shell-PATH directories to the watcher thread, which owns
+/// the only `notify` watcher. Lookups register the normalized PATH they used;
+/// the thread dedupes, so repeat registrations are free.
+static WATCH_TX: std::sync::OnceLock<std::sync::mpsc::Sender<Vec<String>>> =
+    std::sync::OnceLock::new();
 
 pub(crate) fn start_path_watcher() {
     use notify::{EventKind, RecursiveMode, Watcher};
@@ -3945,12 +4106,12 @@ pub(crate) fn start_path_watcher() {
         return;
     }
 
-    std::thread::spawn(move || {
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        if current_path.is_empty() {
-            return;
-        }
+    // Created and published before spawning: registrations can never be lost
+    // to a thread-scheduling race between start and first note.
+    let (dir_tx, dir_rx) = std::sync::mpsc::channel::<Vec<String>>();
+    WATCH_TX.set(dir_tx).ok();
 
+    std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher =
             match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
@@ -3967,37 +4128,49 @@ pub(crate) fn start_path_watcher() {
                 Err(_) => return,
             };
 
-        for dir in current_path.split(':') {
-            if !dir.is_empty() {
-                let _ = watcher.watch(dir.as_ref(), RecursiveMode::NonRecursive);
-            }
-        }
+        // Union of every PATH ever registered: PATH changes mid-session
+        // (`export PATH=...`) are covered without ever removing watches
+        // (removed dirs drop their watches kernel-side via IN_IGNORE).
+        // Keyed by filesystem identity (shared with the scan's dedupe), so
+        // alias strings like `/bin` + `/usr/bin` cost one watch, not two.
+        let mut desired: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_ids: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
 
-        // Rebuild the cache periodically (every 30s) and on filesystem events.
-        // This keeps the cache fresh without blocking the command dispatch path.
         loop {
+            // Drain pending registrations without blocking.
+            while let Ok(dirs) = dir_rx.try_recv() {
+                for dir in dirs {
+                    watch_path_dir(&mut watcher, &mut desired, &mut seen_ids, dir);
+                }
+            }
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
                 Ok(_) => {
-                    // Filesystem change in a PATH directory — mark cache stale
+                    // Filesystem change in a PATH directory — mark every slot
+                    // stale. Data is kept (stale-serve) and the next lookup
+                    // refreshes in the background; the watcher thread itself
+                    // never scans. Over-invalidation is harmless: events are
+                    // rare and refresh is async.
                     {
-                        let mut cache = PATH_CACHE.lock();
-                        if let Some(ref mut c) = *cache {
-                            c.last_updated = std::time::Instant::now()
-                                - PATH_CACHE_TTL
-                                - std::time::Duration::from_secs(1);
+                        let mut cache = PATH_CACHE.write();
+                        let now = std::time::Instant::now();
+                        for slot in cache.values_mut() {
+                            slot.last_updated =
+                                now - PATH_CACHE_TTL - std::time::Duration::from_secs(1);
                         }
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Periodic refresh — rebuild the cache from scratch
-                    let os_path = std::env::var("PATH").unwrap_or_default();
-                    if os_path.is_empty() {
-                        continue;
+                    // No periodic rebuild: fs events plus TTL expiry already
+                    // drive freshness, and a timer-driven scan would inject a
+                    // latency/CPU spike into long-lived sessions for no gain.
+                    // Re-assert watches so directories created after startup
+                    // (e.g. a late `~/.local/bin`) get picked up.
+                    while let Ok(dirs) = dir_rx.try_recv() {
+                        for dir in dirs {
+                            watch_path_dir(&mut watcher, &mut desired, &mut seen_ids, dir);
+                        }
                     }
-                    let now = std::time::Instant::now();
-                    let fresh = rebuild_path_cache(&os_path, now);
-                    let mut cache = PATH_CACHE.lock();
-                    *cache = Some(fresh);
+                    reassert_path_watches(&mut watcher, &desired);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -4005,14 +4178,73 @@ pub(crate) fn start_path_watcher() {
     });
 }
 
-/// Pre-warm the PATH cache at startup so the first interactive command
-/// is not delayed by scanning every directory on PATH.
+/// Register one PATH directory string with the watcher. Alias strings collapse
+/// to a single watch via the shared [`dir_identity`] dedupe; unknowable
+/// identities (missing dir, non-Unix) fall through to a plain watch — a
+/// duplicate watch is harmless (idempotent stale-marks).
+fn watch_path_dir(
+    watcher: &mut notify::RecommendedWatcher,
+    desired: &mut std::collections::HashSet<String>,
+    seen_ids: &mut std::collections::HashSet<(u64, u64)>,
+    dir: String,
+) {
+    use notify::Watcher;
+    if let Some(id) = dir_identity(&dir)
+        && !seen_ids.insert(id)
+    {
+        return;
+    }
+    if desired.insert(dir.clone()) {
+        let _ = watcher.watch(dir.as_ref(), notify::RecursiveMode::NonRecursive);
+    }
+}
+
+/// Re-assert every watch: directories created after startup (a late
+/// `~/.local/bin`) or dropped kernel-side (IN_IGNORE on deletion) get picked
+/// up again without tracking watch descriptors.
+fn reassert_path_watches(
+    watcher: &mut notify::RecommendedWatcher,
+    desired: &std::collections::HashSet<String>,
+) {
+    use notify::Watcher;
+    for dir in desired {
+        let _ = watcher.watch(dir.as_ref(), notify::RecursiveMode::NonRecursive);
+    }
+}
+
+/// Register shell-PATH directories with the watcher thread. Idempotent and
+/// cheap (a Tab-rate channel send; the thread dedupes), so every lookup site
+/// that normalizes a PATH calls it and mid-session `export PATH=...` stays
+/// covered. Uses the shell's normalized PATH — never the process PATH, which
+/// skews after login enrichment.
+fn note_path_dirs(normalized_path: &str) {
+    start_path_watcher();
+    if let Some(tx) = WATCH_TX.get()
+        && !normalized_path.is_empty()
+    {
+        let dirs: Vec<String> = normalized_path
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(|d| d.to_string())
+            .collect();
+        let _ = tx.send(dirs);
+    }
+}
+
+/// Ensure the PATH subsystem is ready: the fs watcher is started and pointed
+/// at the shell's current PATH so later enumeration fills stay fresh.
 ///
-/// If `env` is provided, reads PATH from fsh's `$PATH` variable (which may
-/// have been enriched by login-env loading or init.fsh) rather than from the
-/// OS process environment. Rebuilds the cache whenever the PATH changes.
+/// This deliberately performs NO synchronous scan. Exact command lookups use
+/// the Tier-1 direct probe (µs, always correct cold), and enumeration
+/// (`get_path_executables_at`) fills in the background while serving stale or
+/// empty data, so no startup or input path ever blocks on an 8k-file scan.
+/// Interactive sessions prefetch via [`prefetch_path_cache`]; one-shot
+/// processes (`-c`, scripts) never scan at all unless they enumerate.
 pub fn warmup_path_cache(env: Option<&crate::Env>) {
     start_path_watcher();
+    // Point the watcher at the shell's PATH (post login-enrichment), not the
+    // process PATH: the two skew, and watching the wrong set silently misses
+    // installs into enriched-only dirs such as `~/.local/bin`.
     let current_path = env
         .and_then(|e| {
             let vars = Some(e.vars.read())?;
@@ -4024,23 +4256,53 @@ pub fn warmup_path_cache(env: Option<&crate::Env>) {
         })
         .or_else(|| std::env::var("PATH").ok())
         .unwrap_or_default();
+    if current_path.is_empty() {
+        return;
+    }
     let cwd = env
         .map(|e| e.cwd())
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("/"));
-    let current_path = normalize_path_for_cwd(&current_path, &cwd);
+    note_path_dirs(&normalize_path_for_cwd(&current_path, &cwd));
+}
+
+/// Kick a background enumeration fill for an explicit shell PATH. Returns
+/// immediately; the fill publishes when done. Interactive startup calls this
+/// so first Tab-completion is usually warm without stalling first paint.
+pub fn prefetch_path_cache(env_path: Option<&str>, cwd: &std::path::Path) {
+    let current_path = normalize_path_for_cwd(
+        env_path
+            .map(|p| p.to_string())
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default()
+            .as_str(),
+        cwd,
+    );
     if current_path.is_empty() {
         return;
     }
-    let mut cache_guard = PATH_CACHE.lock();
-    let needs_rebuild = match &*cache_guard {
-        None => true,
-        Some(cache) => cache.path != current_path,
-    };
-    if needs_rebuild {
-        let now = std::time::Instant::now();
-        *cache_guard = Some(rebuild_path_cache(&current_path, now));
+    note_path_dirs(&current_path);
+    kick_background_fill(current_path);
+}
+
+/// Synchronous enumeration fill: build off-lock and publish. For tests and
+/// one-shot tooling that must assert on cache contents deterministically.
+/// Interactive paths must NOT call this — use the background fill behind
+/// [`get_path_executables_at`] instead, so input never stalls on a scan.
+pub fn refresh_path_cache_blocking(env_path: Option<&str>, cwd: &std::path::Path) {
+    let current_path = normalize_path_for_cwd(
+        env_path
+            .map(|p| p.to_string())
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default()
+            .as_str(),
+        cwd,
+    );
+    if current_path.is_empty() {
+        return;
     }
+    let build_start = std::time::Instant::now();
+    publish_enumeration(rebuild_path_cache(&current_path, build_start));
 }
 
 pub fn is_external_command(name: &str, env_path: Option<&str>) -> bool {
@@ -4073,39 +4335,35 @@ pub fn is_external_command_at(name: &str, env_path: Option<&str>, cwd: &std::pat
         return false;
     }
 
-    let mut cache_guard = PATH_CACHE.lock();
-
-    if let Some(ref cache) = *cache_guard
-        && cache.path == current_path
-        && cache.last_updated.elapsed() < PATH_CACHE_TTL
-    {
-        return cache.executables.contains_key(name);
+    if let Some(hit) = fresh_cache_for(&current_path) {
+        return hit.executables.contains_key(name);
     }
 
-    let rebuild_start = std::time::Instant::now();
-    *cache_guard = Some(rebuild_path_cache(&current_path, rebuild_start));
-    let found = cache_guard
-        .as_ref()
-        .map(|cache| cache.executables.contains_key(name))
-        .unwrap_or(false);
+    // Tier 1: exact probe — µs, always correct, never scans and never kicks
+    // one. Exact lookups must not cause scans in any mode (in particular,
+    // one-shot `-c`/script processes must never pay for enumeration).
+    let found = probe_command_in_path(name, &current_path).is_some();
     if cnf_debug {
         eprintln!(
-            "[cnf_debug] {}:{}: is_external_command {} found={}, cache built in {}ms",
+            "[cnf_debug] {}:{}: is_external_command {} found={} via direct probe",
             file!(),
             line!(),
             name,
             found,
-            rebuild_start.elapsed().as_millis()
         );
     }
     found
 }
 
 /// Returns a snapshot of all executable names on PATH from the cache.
-/// If the cache is missing or stale for the requested PATH it is rebuilt
-/// synchronously. Starts the background watcher so future changes are picked
-/// up without blocking. `env_path` should be the shell's `$PATH` when
-/// available to avoid skew vs the OS environment.
+///
+/// Never blocks on a scan: a fresh cache is served immediately, a stale one
+/// is served while a background fill refreshes it, and a miss serves empty
+/// while a background fill populates (callers — completion, DYM — already
+/// tolerate absent data and re-query on the next keystroke). `env_path`
+/// should be the shell's `$PATH` when available to avoid skew vs the OS
+/// environment. Tests needing deterministic contents use
+/// [`refresh_path_cache_blocking`].
 pub fn get_path_executables(env_path: Option<&str>) -> Vec<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
     get_path_executables_at(env_path, &cwd)
@@ -4125,19 +4383,22 @@ pub fn get_path_executables_at(env_path: Option<&str>, cwd: &std::path::Path) ->
     if current_path.is_empty() {
         return Vec::new();
     }
-    let mut cache_guard = PATH_CACHE.lock();
-    if let Some(ref cache) = *cache_guard
-        && cache.path == current_path
-        && cache.last_updated.elapsed() < PATH_CACHE_TTL
-    {
-        return cache.executables.keys().cloned().collect();
+    // Mid-session `export PATH=...` stays watched: registration is a cheap
+    // channel send and the watcher thread dedupes.
+    note_path_dirs(&current_path);
+    if let Some(hit) = fresh_cache_for(&current_path) {
+        return hit.executables.keys().cloned().collect();
     }
-    let rebuild_start = std::time::Instant::now();
-    *cache_guard = Some(rebuild_path_cache(&current_path, rebuild_start));
-    cache_guard
-        .as_ref()
-        .map(|cache| cache.executables.keys().cloned().collect())
-        .unwrap_or_default()
+    // Unmet (absent or stale): serve stale data if the PATH still matches so
+    // callers never observe a blank-then-full flicker on TTL expiry, and
+    // refresh in the background either way.
+    let stale: Vec<String> = PATH_CACHE
+        .read()
+        .get(current_path.as_str())
+        .map(|cached| cached.executables.keys().cloned().collect())
+        .unwrap_or_default();
+    kick_background_fill(current_path);
+    stale
 }
 
 /// Returns the resolved full path for a command name, using the PATH cache.
@@ -4175,14 +4436,9 @@ pub fn resolve_cached_command_path_at(
         return None;
     }
 
-    let mut cache_guard = PATH_CACHE.lock();
-
     // If cache exists and PATH matches and is still fresh, use it.
-    if let Some(ref cache) = *cache_guard
-        && cache.path == current_path
-        && cache.last_updated.elapsed() < PATH_CACHE_TTL
-    {
-        let result = cache.executables.get(name).cloned();
+    if let Some(hit) = fresh_cache_for(&current_path) {
+        let result = hit.executables.get(name).cloned();
         if cnf_debug {
             eprintln!(
                 "[cnf_debug] {}:{}: resolve cache result={:?}",
@@ -4194,17 +4450,14 @@ pub fn resolve_cached_command_path_at(
         return result;
     }
 
-    let rebuild_start = std::time::Instant::now();
-    *cache_guard = Some(rebuild_path_cache(&current_path, rebuild_start));
-    let result = cache_guard
-        .as_ref()
-        .and_then(|cache| cache.executables.get(name).cloned());
+    // Tier 1: exact probe — µs, always correct, never scans and never kicks
+    // one (see above: exact lookups must not cause scans in any mode).
+    let result = probe_command_in_path(name, &current_path);
     if cnf_debug {
         eprintln!(
-            "[cnf_debug] {}:{}: resolve cache built in {}ms, result={:?}",
+            "[cnf_debug] {}:{}: resolve via direct probe, result={:?}",
             file!(),
             line!(),
-            rebuild_start.elapsed().as_millis(),
             result
         );
     }
@@ -4246,6 +4499,159 @@ pub(crate) fn expand_alias_with_args(expansion: &str, args: &[Val]) -> String {
 mod tests {
     use super::*;
     use fshell_core::ParamModifier;
+
+    /// Tier-1 probe must classify exactly like the full scan: executables,
+    /// non-executables, subdirectories, valid/broken symlinks, missing names
+    /// and slash-containing names must agree between the two tiers.
+    #[test]
+    fn probe_agrees_with_scan() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("mkdir");
+        let exe = bin.join("mytool");
+        std::fs::write(&exe, "#!/bin/sh\n").expect("write exe");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let nonexec = bin.join("plain");
+        std::fs::write(&nonexec, "x").expect("write plain");
+        std::fs::set_permissions(&nonexec, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod plain");
+        std::fs::create_dir(bin.join("subdir")).expect("mkdir subdir");
+        symlink("mytool", bin.join("goodlink")).expect("symlink");
+        symlink("nope-missing", bin.join("badlink")).expect("broken symlink");
+
+        let path = bin.to_string_lossy().to_string();
+        let scan = rebuild_path_cache(&path, std::time::Instant::now());
+        for name in [
+            "mytool", "goodlink", "plain", "subdir", "badlink", "missing",
+        ] {
+            let via_scan = scan.executables.get(name).cloned();
+            let via_probe = probe_command_in_path(name, &path);
+            assert_eq!(via_probe, via_scan, "tier mismatch for {name:?}");
+        }
+        assert!(probe_command_in_path("a/b", &path).is_none());
+        assert!(probe_command_in_path("", &path).is_none());
+        // First PATH entry wins in both tiers.
+        let bin2 = dir.path().join("bin2");
+        std::fs::create_dir(&bin2).expect("mkdir bin2");
+        let shadow = bin2.join("mytool");
+        std::fs::write(&shadow, "#!/bin/sh\n").expect("write shadow");
+        std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod shadow");
+        let both = format!("{}:{}", bin.to_string_lossy(), bin2.to_string_lossy());
+        let scan2 = rebuild_path_cache(&both, std::time::Instant::now());
+        assert_eq!(
+            probe_command_in_path("mytool", &both),
+            scan2.executables.get("mytool").cloned()
+        );
+        assert!(
+            probe_command_in_path("mytool", &both)
+                .expect("probe")
+                .starts_with(bin.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn background_fill_populates_cache_without_blocking() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("fillprobe");
+        std::fs::write(&exe, "#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = dir.path().to_string_lossy().to_string();
+
+        crate::invalidate_path_cache();
+        // Miss serves empty immediately (caller never blocks on the scan)...
+        assert!(crate::get_path_executables(Some(&path)).is_empty());
+        // ...and the kicked background fill publishes shortly after.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let listed = crate::get_path_executables(Some(&path));
+            if listed.contains(&"fillprobe".to_string()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background fill did not publish within 5s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        crate::invalidate_path_cache();
+    }
+
+    #[test]
+    fn watcher_marks_cache_stale_on_fs_event() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("watched");
+        std::fs::write(&exe, "#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = dir.path().to_string_lossy().to_string();
+
+        crate::invalidate_path_cache();
+        crate::refresh_path_cache_blocking(Some(&path), dir.path());
+        assert!(
+            fresh_cache_for(&path).is_some(),
+            "precondition: cache fresh after blocking refresh"
+        );
+        // Register the shell-PATH dirs with the watcher (as warmup/lookups do).
+        note_path_dirs(&path);
+        // A new executable landing in a watched dir must invalidate freshness.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::fs::write(dir.path().join(" newcomer"), "#!/bin/sh\n").expect("write newcomer");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if fresh_cache_for(&path).is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "watcher did not mark cache stale within 10s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        crate::invalidate_path_cache();
+    }
+
+    #[test]
+    fn dir_identity_spots_aliases() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("mkdir");
+        std::os::unix::fs::symlink(&real, dir.path().join("alias")).expect("symlink");
+        let other = dir.path().join("other");
+        std::fs::create_dir(&other).expect("mkdir other");
+
+        let a = super::dir_identity(real.to_str().unwrap()).expect("real has identity");
+        let b = super::dir_identity(dir.path().join("alias").to_str().unwrap())
+            .expect("alias has identity");
+        assert_eq!(a, b, "symlinked dirs share identity");
+        assert_ne!(
+            a,
+            super::dir_identity(other.to_str().unwrap()).expect("other has identity")
+        );
+        assert!(super::dir_identity(dir.path().join("missing").to_str().unwrap()).is_none());
+
+        // The scan through an aliased PATH still resolves first-entry-wins.
+        use std::os::unix::fs::PermissionsExt;
+        let exe = real.join("tool");
+        std::fs::write(&exe, "#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let aliased = format!(
+            "{}:{}",
+            real.to_string_lossy(),
+            dir.path().join("alias").to_string_lossy()
+        );
+        let scan = super::rebuild_path_cache(&aliased, std::time::Instant::now());
+        assert!(scan.executables.contains_key("tool"));
+        assert_eq!(
+            super::probe_command_in_path("tool", &aliased),
+            scan.executables.get("tool").cloned()
+        );
+    }
 
     #[test]
     fn prefix_suffix_trims_never_split_multibyte() {

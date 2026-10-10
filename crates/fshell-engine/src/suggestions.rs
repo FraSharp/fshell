@@ -169,12 +169,15 @@ pub fn get_suggested_command(name: &str, env: &Env, env_path: Option<&str>) -> O
         .unwrap_or_default();
     if !current_path.is_empty() {
         // Use existing cache only — never rebuild synchronously.
-        // The background watcher keeps the cache fresh every 30s.
+        // Freshness comes from fs-event invalidation plus TTL expiry with
+        // background refresh; a miss here simply yields no PATH candidates.
+        // Normalize like every other lookup: cache slots are keyed by the
+        // normalized PATH, and comparing raw would silently miss whenever
+        // relative or empty entries are present.
+        let current_path = crate::eval::normalize_path_for_cwd(&current_path, &env.cwd());
         let first_char = name.chars().next();
-        let cache_guard = PATH_CACHE.lock();
-        if let Some(ref cache) = *cache_guard
-            && cache.path == current_path
-        {
+        let cache_guard = PATH_CACHE.read();
+        if let Some(cache) = cache_guard.get(current_path.as_str()) {
             for exe_name in cache.executables.keys() {
                 if let Some(fc) = first_char
                     && exe_name.chars().next().map(|c| c.to_ascii_lowercase())

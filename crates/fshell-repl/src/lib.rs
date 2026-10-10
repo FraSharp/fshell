@@ -1125,6 +1125,19 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
             serde_json::Map::new(),
         );
         fshell_engine::warmup_path_cache(Some(&env));
+        // Interactive sessions enumerate PATH on nearly every keystroke
+        // (completion, highlighter). Prefetch in the background now so first
+        // Tab is usually warm — without stalling first paint on the scan.
+        // One-shot `-c`/script processes never prefetch: their exact lookups
+        // probe directly and nothing enumerates.
+        {
+            let vars = env.vars.read();
+            let env_path = vars.get("PATH").and_then(|v| match v {
+                Val::String(s) => Some(s.clone()),
+                _ => None,
+            });
+            fshell_engine::prefetch_path_cache(env_path.as_deref(), &env.cwd());
+        }
         if let Some(span) = path_span.take() {
             span.finish(fshell_engine::trace::SpanOutcome::Ok);
         }
