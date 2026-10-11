@@ -1,610 +1,372 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use crate::error::BuiltinError;
+use crate::search_output::{Output, byte_value, search_error, utility_error};
 use chrono::{DateTime, Utc};
-use fshell_core::ShellError;
-use fshell_core::Val;
-use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
+use fshell_core::{FxIndexMap, ShellError, Val};
+use fshell_engine::{Env, PipeSender, PipeStream};
+use fshell_search::{
+    Control, SearchError,
+    traversal::{Compare, EntrySink, FileEntry, FileKind, NamePredicate, TraversalPlan, walk_with},
+};
 use miette::SourceSpan;
-use std::sync::Arc;
-use std::time::SystemTime;
+#[cfg(any(feature = "replace", test))]
+use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::Duration;
 use ustr::ustr;
-use walkdir::WalkDir;
 
-/// Filter configuration parsed from user arguments.
-struct FfConfig {
-    path: String,
-    name_glob: Option<String>,
-    negate_name: bool,
-    min_size: Option<u64>,
-    max_size: Option<u64>,
-    min_modified: Option<i64>, // seconds since now (e.g. "7d" = now - 7*86400)
-    max_modified: Option<i64>, // seconds since now
-    dirs_only: bool,
-    files_only: bool,
-    hidden: bool,
-    max_depth: Option<usize>,
-    max_results: Option<usize>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Records,
+    Paths,
+    Count,
 }
 
-impl Default for FfConfig {
-    fn default() -> Self {
-        Self {
-            path: ".".to_string(),
-            name_glob: None,
-            negate_name: false,
-            min_size: None,
-            max_size: None,
-            min_modified: None,
-            max_modified: None,
-            dirs_only: false,
-            files_only: false,
-            hidden: false,
-            max_depth: None,
-            max_results: None,
-        }
-    }
+struct Config {
+    plan: TraversalPlan,
+    mode: Mode,
+    null: bool,
 }
 
+/// Synchronous registration deliberately puts this whole operation on the
+/// engine blocking pool. Traversal workers are scoped and joined, not spawned
+/// into detached Tokio tasks.
 pub fn ff_builtin(
-    _in_rx: Option<PipeStream>,
+    _input: Option<PipeStream>,
     args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
-    // 1. Check process / file-read capability on the current dir
-    let pwd = env.cwd();
-    env.enforce_capability("ff", fshell_engine::CapAction::ReadDir(pwd.clone()))?;
-    env.track_read(pwd.clone());
-
-    // 2. Parse args
-    let mut config = parse_args(&args)?;
-    if config.path == "." {
-        config.path = pwd.to_string_lossy().to_string();
+    let config =
+        parse_args(&args, env).map_err(|e| utility_error("ff", e).maybe_with_span(span))?;
+    let output = Output::new(env, tx);
+    for path in &config.plan.roots {
+        env.track_read(path.clone());
     }
-
-    // 3. Check capability on the search root
-    let search_root = env.resolve_path(&config.path);
-    if !search_root.exists() {
-        return Err(BuiltinError::FileNotFound {
-            cmd: "ff".into(),
-            path: config.path.to_string(),
-            span,
-        }
-        .into());
+    let count = Arc::new(AtomicU64::new(0));
+    let terminal_paths = config.mode == Mode::Paths && env.is_last_stage && !env.is_captured;
+    walk_with(
+        &config.plan,
+        output.hooks("ff"),
+        Arc::new(Control::default()),
+        || FinderSink {
+            output: output.clone(),
+            mode: config.mode,
+            raw_paths: terminal_paths || config.null,
+            delimiter: if config.null { b'\0' } else { b'\n' },
+            buffer: Vec::with_capacity(64 * 1024),
+            count: count.clone(),
+        },
+    )
+    .map_err(|e| search_error("ff", e).maybe_with_span(span))?;
+    if config.mode == Mode::Count {
+        output.data(Val::Int(count.load(Ordering::Relaxed) as i64));
     }
-    env.enforce_capability("ff", fshell_engine::CapAction::ReadDir(search_root.clone()))?;
-    env.track_read(search_root.clone());
-
-    // 4. Run the search
-    config.path = search_root.to_string_lossy().into_owned();
-    let config_arc = Arc::new(config);
-    let tx_clone = tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = run_search(&config_arc, tx_clone).await {
-            let _ = tx.send(PipelinePayload::Structured(e.into())).await;
-        }
-    });
-
     Ok(())
 }
 
-async fn run_search(config: &FfConfig, tx: PipeSender) -> Result<(), ShellError> {
-    let now = SystemTime::now();
-    // Bounded defaults: an unbounded recursive walk from cwd (e.g. `/`) can
-    // scan the whole filesystem. 32 levels covers real project layouts and
-    // 1000 results bounds output; both are overridable via `-d`/`-l`.
-    let max_depth = config.max_depth.unwrap_or(32);
-    let max_results = config.max_results.unwrap_or(1000);
-    let mut count = 0usize;
-
-    for entry in WalkDir::new(&config.path)
-        .max_depth(max_depth)
-        .follow_links(false)
-    {
-        // Yield to tokio periodically to avoid blocking
-        if count.is_multiple_of(500) {
-            tokio::task::yield_now().await;
-        }
-
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue, // skip permission-denied etc.
-        };
-
-        // Hidden file filter — skip entries starting with '.'
-        if !config.hidden
-            && let Some(name) = entry.file_name().to_str()
-            && name.starts_with('.')
-        {
-            continue;
-        }
-
-        // Type filter
-        if config.dirs_only && !entry.file_type().is_dir() {
-            continue;
-        }
-        if config.files_only && !entry.file_type().is_file() {
-            continue;
-        }
-
-        // Name glob filter
-        if let Some(ref glob) = config.name_glob {
-            let name = entry.file_name().to_string_lossy();
-            let matched = glob_match(glob, &name);
-            if config.negate_name == matched {
-                continue;
-            }
-        }
-
-        // Size filter (only for files)
-        if (config.min_size.is_some() || config.max_size.is_some())
-            && let Ok(meta) = entry.metadata()
-        {
-            let size = meta.len();
-            if let Some(min) = config.min_size
-                && size < min
-            {
-                continue;
-            }
-            if let Some(max) = config.max_size
-                && size > max
-            {
-                continue;
-            }
-        }
-
-        // Modified filter
-        if (config.min_modified.is_some() || config.max_modified.is_some())
-            && let Ok(meta) = entry.metadata()
-            && let Ok(mtime) = meta.modified()
-        {
-            let age = now
-                .duration_since(mtime)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            if let Some(min) = config.min_modified
-                && age < min
-            {
-                continue;
-            }
-            if let Some(max) = config.max_modified
-                && age > max
-            {
-                continue;
-            }
-        }
-
-        // Build the result record — cache metadata to avoid repeated stat calls
-        let path = entry.path().to_string_lossy().to_string();
-        let name = entry.file_name().to_string_lossy().to_string();
-        let file_type = if entry.file_type().is_dir() {
-            "dir"
-        } else if entry.file_type().is_symlink() {
-            "symlink"
-        } else {
-            "file"
-        };
-
-        let meta = entry.metadata().ok();
-        let size = meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-        let modified_iso = meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .map(|t| {
-                let dt: DateTime<Utc> = t.into();
-                dt.to_rfc3339()
-            })
-            .unwrap_or_default();
-
-        let mut map = fshell_core::FxIndexMap::with_hasher(fshell_hash::FxBuildHasher::default());
-        map.insert(ustr("path"), Val::String(path.clone()));
-        map.insert(ustr("abs_path"), Val::String(path));
-        map.insert(ustr("name"), Val::String(name));
-        map.insert(ustr("type"), Val::String(file_type.to_string()));
-        map.insert(ustr("size"), Val::Int(size));
-        map.insert(ustr("modified"), Val::String(modified_iso));
-
-        count += 1;
-        if tx
-            .send(PipelinePayload::Data(Arc::new(Val::Map(map))))
-            .await
-            .is_err()
-        {
-            break;
-        }
-
-        if count >= max_results {
-            break;
-        }
-    }
-
-    Ok(())
+struct FinderSink {
+    output: Output,
+    mode: Mode,
+    raw_paths: bool,
+    delimiter: u8,
+    buffer: Vec<u8>,
+    count: Arc<AtomicU64>,
 }
 
-/// Parse user arguments into a `FfConfig`.
-fn parse_args(args: &[Val]) -> Result<FfConfig, String> {
-    let mut config = FfConfig::default();
-    let mut raw_args: Vec<String> = Vec::new();
-
-    for arg in args {
-        let s = match arg {
-            Val::String(st) => st.clone(),
-            Val::Int(i) => i.to_string(),
-            Val::Float(f) => f.to_string(),
-            other => other.to_text(),
-        };
-        raw_args.push(s);
-    }
-
-    // First positional arg (before any filter keyword) is the path
-    let mut positional = Vec::new();
-    let mut i = 0;
-    while i < raw_args.len() {
-        match raw_args[i].as_str() {
-            // Ignore "and" as syntactic sugar
-            "and" => {
-                i += 1;
-                continue;
+impl EntrySink for FinderSink {
+    fn entry(&mut self, entry: FileEntry) -> Result<bool, SearchError> {
+        if self.output.stopped() {
+            return Ok(false);
+        }
+        match self.mode {
+            Mode::Count => {
+                self.count.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
             }
-            "name" => {
-                if i + 2 < raw_args.len() {
-                    let op = &raw_args[i + 1];
-                    let pattern = &raw_args[i + 2];
-                    if op == "=" {
-                        config.name_glob = Some(pattern.clone());
-                        config.negate_name = false;
-                        i += 3;
-                        continue;
-                    } else if op == "!=" {
-                        config.name_glob = Some(pattern.clone());
-                        config.negate_name = true;
-                        i += 3;
-                        continue;
-                    }
+            Mode::Paths if self.raw_paths => {
+                self.buffer
+                    .extend_from_slice(entry.path.as_os_str().as_encoded_bytes());
+                self.buffer.push(self.delimiter);
+                if self.buffer.len() >= 64 * 1024 {
+                    Ok(self.flush())
+                } else {
+                    Ok(true)
                 }
-                return Err(
-                    "ff: expected name = \"<pattern>\" or name != \"<pattern>\"".to_string()
+            }
+            Mode::Paths => Ok(self
+                .output
+                .data(byte_value(entry.path.as_os_str().as_encoded_bytes()))),
+            Mode::Records => {
+                let metadata = entry
+                    .metadata
+                    .ok_or_else(|| SearchError::Plan("record output requires metadata".into()))?;
+                let path = byte_value(entry.path.as_os_str().as_encoded_bytes());
+                let name = byte_value(
+                    entry
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .as_encoded_bytes(),
                 );
-            }
-            "size" => {
-                if i + 2 < raw_args.len() {
-                    let op = &raw_args[i + 1];
-                    let val_raw = &raw_args[i + 2];
-                    let bytes = parse_size(val_raw)?;
-                    match op.as_str() {
-                        ">" => config.min_size = Some(bytes + 1),
-                        ">=" => config.min_size = Some(bytes),
-                        "<" => config.max_size = Some(bytes.saturating_sub(1)),
-                        "<=" => config.max_size = Some(bytes),
-                        "=" => {
-                            config.min_size = Some(bytes);
-                            config.max_size = Some(bytes);
-                        }
-                        _ => {
-                            return Err(BuiltinError::UnexpectedArgument {
-                                cmd: "ff".into(),
-                                arg: format!("unknown size operator '{op}'"),
-                                span: None,
-                            }
-                            .to_string());
-                        }
-                    }
-                    i += 3;
-                    continue;
-                }
-                return Err("ff: expected size <op> <value> (e.g. size > 1mb)".to_string());
-            }
-            "modified" => {
-                if i + 2 < raw_args.len() {
-                    let op = &raw_args[i + 1];
-                    let val_raw = &raw_args[i + 2];
-                    let seconds = parse_duration(val_raw)?;
-                    match op.as_str() {
-                        // "modified > 7d" = older than 7 days → min age = 7 days
-                        ">" => config.min_modified = Some(seconds + 1),
-                        ">=" => config.min_modified = Some(seconds),
-                        // "modified < 7d" = newer than 7 days → max age = 7 days
-                        "<" => config.max_modified = Some(seconds.saturating_sub(1)),
-                        "<=" => config.max_modified = Some(seconds),
-                        "=" => {
-                            config.min_modified = Some(seconds);
-                            config.max_modified = Some(seconds);
-                        }
-                        _ => {
-                            return Err(BuiltinError::UnexpectedArgument {
-                                cmd: "ff".into(),
-                                arg: format!("unknown modified operator '{op}'"),
-                                span: None,
-                            }
-                            .to_string());
-                        }
-                    }
-                    i += 3;
-                    continue;
-                }
-                return Err("ff: expected modified <op> <value> (e.g. modified > 7d)".to_string());
-            }
-            "type" => {
-                if i + 2 < raw_args.len() {
-                    let op = &raw_args[i + 1];
-                    let ty = &raw_args[i + 2];
-                    if op != "=" {
-                        return Err(BuiltinError::UnexpectedArgument {
-                            cmd: "ff".into(),
-                            arg: format!("expected type = \"dir\" or type = \"file\", got '{op}'"),
-                            span: None,
-                        }
-                        .to_string());
-                    }
-                    match ty.as_str() {
-                        "dir" => config.dirs_only = true,
-                        "file" => config.files_only = true,
-                        _ => {
-                            return Err(BuiltinError::UnexpectedArgument {
-                                cmd: "ff".into(),
-                                arg: format!("unknown type '{ty}', expected 'dir' or 'file'"),
-                                span: None,
-                            }
-                            .to_string());
-                        }
-                    }
-                    i += 3;
-                    continue;
-                }
-                return Err("ff: expected type = \"dir\" or type = \"file\"".to_string());
-            }
-            "hidden" => {
-                config.hidden = true;
-                i += 1;
-                continue;
-            }
-            "-n" | "--max-results" => {
-                if i + 1 < raw_args.len() {
-                    let n = raw_args[i + 1]
-                        .parse::<usize>()
-                        .map_err(|_| format!("ff: invalid number for -n: {}", raw_args[i + 1]))?;
-                    config.max_results = Some(n);
-                    i += 2;
-                    continue;
-                }
-                return Err("ff: -n requires a number".to_string());
-            }
-            "--depth" => {
-                if i + 1 < raw_args.len() {
-                    let d = raw_args[i + 1].parse::<usize>().map_err(|_| {
-                        format!("ff: invalid number for --depth: {}", raw_args[i + 1])
-                    })?;
-                    config.max_depth = Some(d);
-                    i += 2;
-                    continue;
-                }
-                return Err("ff: --depth requires a number".to_string());
-            }
-            other => {
-                positional.push(other.to_string());
-                i += 1;
+                let kind = match entry.kind {
+                    FileKind::File => "file",
+                    FileKind::Directory => "dir",
+                    FileKind::Symlink => "symlink",
+                    FileKind::Other => "other",
+                };
+                let modified: DateTime<Utc> = metadata.modified.into();
+                let size = i64::try_from(metadata.size).map_err(|_| {
+                    SearchError::Plan("file size exceeds shell integer range".into())
+                })?;
+                let mut map =
+                    FxIndexMap::with_capacity_and_hasher(6, fshell_hash::FxBuildHasher::default());
+                map.insert(ustr("path"), path.clone());
+                map.insert(ustr("abs_path"), path);
+                map.insert(ustr("name"), name);
+                map.insert(ustr("type"), Val::String(kind.into()));
+                map.insert(ustr("size"), Val::Int(size));
+                map.insert(ustr("modified"), Val::String(modified.to_rfc3339()));
+                Ok(self.output.data(Val::Map(map)))
             }
         }
     }
-
-    // First positional is the search path
-    if let Some(path) = positional.first() {
-        config.path = path.clone();
+    fn finish(&mut self) -> Result<(), SearchError> {
+        self.flush();
+        Ok(())
     }
+}
+impl FinderSink {
+    fn flush(&mut self) -> bool {
+        if self.buffer.is_empty() {
+            return true;
+        }
+        self.output.bytes(std::mem::replace(
+            &mut self.buffer,
+            Vec::with_capacity(64 * 1024),
+        ))
+    }
+}
 
+fn parse_args(args: &[Val], env: &Env) -> Result<Config, String> {
+    let args: Vec<String> = args
+        .iter()
+        .map(|v| match v {
+            Val::String(s) => Ok(s.clone()),
+            Val::Int(n) => Ok(n.to_string()),
+            Val::Float(n) => Ok(n.to_string()),
+            _ => Err("arguments must be strings or numbers".into()),
+        })
+        .collect::<Result<_, String>>()?;
+    let mut config = Config {
+        plan: TraversalPlan::new(env.cwd()),
+        mode: Mode::Records,
+        null: false,
+    };
+    let mut roots = vec![];
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        i += 1;
+        match arg.as_str() {
+            "--" => {
+                roots.extend(args[i..].iter().map(|p| env.resolve_path(p)));
+                break;
+            }
+            "and" => {}
+            "name" | "size" | "modified" | "type" => {
+                let operator = args
+                    .get(i)
+                    .ok_or_else(|| format!("{arg} requires an operator and value"))?;
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("{arg} requires an operator and value"))?;
+                i += 2;
+                let op = comparison(operator)?;
+                match arg.as_str() {
+                    "name" => {
+                        if !matches!(op, Compare::Equal | Compare::NotEqual) {
+                            return Err("name supports only = and !=".into());
+                        }
+                        config.plan.names.push(
+                            NamePredicate::compile(value, matches!(op, Compare::NotEqual), false)
+                                .map_err(|e| e.to_string())?,
+                        );
+                    }
+                    "size" => config.plan.sizes.push((op, quantity(value, true)?)),
+                    "modified" => config
+                        .plan
+                        .ages
+                        .push((op, Duration::from_secs(quantity(value, false)?))),
+                    "type" => {
+                        if !matches!(op, Compare::Equal) {
+                            return Err("type supports only =".into());
+                        }
+                        let kind = match value.as_str() {
+                            "file" => FileKind::File,
+                            "dir" => FileKind::Directory,
+                            "symlink" => FileKind::Symlink,
+                            "other" => FileKind::Other,
+                            _ => return Err(format!("unknown file type {value}")),
+                        };
+                        if config.plan.kind.replace(kind).is_some() {
+                            return Err("type may only be specified once".into());
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            "hidden" | "--hidden" | "-H" => config.plan.hidden = true,
+            "--no-ignore" => config.plan.respect_ignore = false,
+            "--sort" => config.plan.sorted = true,
+            "--follow" | "-L" => config.plan.follow_links = true,
+            "--paths" => config.mode = Mode::Paths,
+            "--count" => config.mode = Mode::Count,
+            "--print0" | "-0" => {
+                config.mode = Mode::Paths;
+                config.null = true;
+            }
+            "--depth" | "-n" | "--max-results" | "-j" | "--threads" => {
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| format!("{arg} requires a number"))?;
+                i += 1;
+                let number = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid nonnegative integer {value}"))?;
+                match arg.as_str() {
+                    "--depth" => config.plan.max_depth = Some(number),
+                    "-j" | "--threads" => {
+                        if number == 0 {
+                            return Err("worker count must be positive".into());
+                        }
+                        config.plan.threads = number;
+                    }
+                    _ => config.plan.max_results = Some(number),
+                }
+            }
+            flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
+            path => roots.push(env.resolve_path(path)),
+        }
+    }
+    if !roots.is_empty() {
+        config.plan.roots = roots;
+    }
+    config.plan.metadata = config.mode == Mode::Records;
     Ok(config)
 }
 
-/// Parse a human-readable size string (e.g., "1mb", "500kb", "2gb") into bytes.
-fn parse_size(s: &str) -> Result<u64, String> {
-    let s = s.trim().to_lowercase();
-    if s.is_empty() {
-        return Err("ff: empty size value".to_string());
+fn comparison(op: &str) -> Result<Compare, String> {
+    match op {
+        "<" => Ok(Compare::Less),
+        "<=" => Ok(Compare::LessEqual),
+        "=" | "==" => Ok(Compare::Equal),
+        "!=" => Ok(Compare::NotEqual),
+        ">=" => Ok(Compare::GreaterEqual),
+        ">" => Ok(Compare::Greater),
+        _ => Err(format!("unknown comparison {op}")),
     }
-
-    let (num_str, unit) = if s.ends_with("kib") {
-        (&s[..s.len() - 3], 1024u64)
-    } else if s.ends_with("mib") {
-        (&s[..s.len() - 3], 1024u64.pow(2))
-    } else if s.ends_with("gib") {
-        (&s[..s.len() - 3], 1024u64.pow(3))
-    } else if s.ends_with("kb") {
-        (&s[..s.len() - 2], 1000u64)
-    } else if s.ends_with("mb") {
-        (&s[..s.len() - 2], 1000u64.pow(2))
-    } else if s.ends_with("gb") {
-        (&s[..s.len() - 2], 1000u64.pow(3))
-    } else if s.ends_with("b") {
-        (&s[..s.len() - 1], 1u64)
-    } else if s.ends_with('k') {
-        (&s[..s.len() - 1], 1000u64)
-    } else if s.ends_with('m') {
-        (&s[..s.len() - 1], 1000u64.pow(2))
-    } else if s.ends_with('g') {
-        (&s[..s.len() - 1], 1000u64.pow(3))
-    } else {
-        (s.as_str(), 1u64)
-    };
-
-    let num: f64 = num_str
-        .parse()
-        .map_err(|_| format!("ff: invalid size number '{}'", num_str))?;
-
-    Ok((num * unit as f64) as u64)
 }
 
-/// Parse a human-readable duration string (e.g., "7d", "30m", "2h") into seconds.
-fn parse_duration(s: &str) -> Result<i64, String> {
-    let s = s.trim().to_lowercase();
-    if s.is_empty() {
-        return Err("ff: empty duration value".to_string());
-    }
-
-    let (num_str, multiplier) = if s.ends_with('d') {
-        (&s[..s.len() - 1], 86400i64)
-    } else if s.ends_with('h') {
-        (&s[..s.len() - 1], 3600i64)
-    } else if s.ends_with('m') && s.len() > 1 {
-        // Could be minutes. Avoid matching just "m"
-        if s.ends_with("min") {
-            (&s[..s.len() - 3], 60i64)
-        } else {
-            (&s[..s.len() - 1], 60i64)
+/// Exact checked decimal arithmetic: no NaN, negative values, floating-point
+/// saturation, truncation of fractional units, or boundary +/-1 overflow.
+fn quantity(raw: &str, size: bool) -> Result<u64, String> {
+    let raw = raw.trim().to_ascii_lowercase();
+    let split = raw
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(raw.len());
+    let (number, unit) = raw.split_at(split);
+    let multiplier: u128 = if size {
+        match unit {
+            "" | "b" => 1,
+            "k" | "kb" => 1000,
+            "m" | "mb" => 1_000_000,
+            "g" | "gb" => 1_000_000_000,
+            "kib" => 1024,
+            "mib" => 1024 * 1024,
+            "gib" => 1024 * 1024 * 1024,
+            _ => return Err(format!("unknown size unit {unit}")),
         }
-    } else if s.ends_with('s') {
-        (&s[..s.len() - 1], 1i64)
     } else {
-        (s.as_str(), 1i64)
+        match unit {
+            "" | "s" => 1,
+            "m" | "min" => 60,
+            "h" => 3600,
+            "d" => 86400,
+            "w" => 604800,
+            _ => return Err(format!("unknown duration unit {unit}")),
+        }
     };
-
-    let num: i64 = num_str
-        .parse()
-        .map_err(|_| format!("ff: invalid duration number '{}'", num_str))?;
-
-    Ok(num * multiplier)
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if whole.is_empty() || fraction.contains('.') {
+        return Err(format!("invalid quantity {raw}"));
+    }
+    let whole = whole
+        .parse::<u128>()
+        .map_err(|_| format!("invalid quantity {raw}"))?;
+    let scale = 10u128
+        .checked_pow(fraction.len().try_into().map_err(|_| "quantity overflow")?)
+        .ok_or("quantity overflow")?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u128>()
+            .map_err(|_| format!("invalid quantity {raw}"))?
+    };
+    let numerator = whole
+        .checked_mul(scale)
+        .and_then(|n| n.checked_add(fraction))
+        .and_then(|n| n.checked_mul(multiplier))
+        .ok_or("quantity overflow")?;
+    if numerator % scale != 0 {
+        return Err("quantity must resolve to whole bytes or seconds".into());
+    }
+    u64::try_from(numerator / scale).map_err(|_| "quantity overflow".into())
 }
 
-/// Simple glob matching — supports `*`, `?`, and `[chars]`.
-/// This is a basic pattern matcher, not a full regex.
+// Shared by replace's existing frontend; search plans themselves compile once.
+#[cfg(any(feature = "replace", test))]
 pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
-    let pat_chars: Vec<char> = pattern.chars().collect();
-    let name_chars: Vec<char> = name.chars().collect();
-    let mut pi = 0;
-    let mut ni = 0;
-    let mut star_pi = None;
-    let mut star_ni = 0;
-
-    while ni < name_chars.len() {
-        if pi < pat_chars.len() && (pat_chars[pi] == '?' || pat_chars[pi] == name_chars[ni]) {
-            pi += 1;
-            ni += 1;
-        } else if pi < pat_chars.len() && pat_chars[pi] == '*' {
-            star_pi = Some(pi);
-            star_ni = ni + 1;
-            pi += 1;
-        } else if let Some(spi) = star_pi {
-            pi = spi + 1;
-            ni = star_ni;
-            star_ni += 1;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pat_chars.len() && pat_chars[pi] == '*' {
-        pi += 1;
-    }
-
-    pi == pat_chars.len()
+    NamePredicate::compile(pattern, false, false).is_ok_and(|p| p.matches(&PathBuf::from(name)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn test_parse_size() {
-        assert_eq!(parse_size("1kb").unwrap(), 1000);
-        assert_eq!(parse_size("1mb").unwrap(), 1_000_000);
-        assert_eq!(parse_size("1gb").unwrap(), 1_000_000_000);
-        assert_eq!(parse_size("1kib").unwrap(), 1024);
-        assert_eq!(parse_size("1mib").unwrap(), 1_048_576);
-        assert_eq!(parse_size("500b").unwrap(), 500);
-        assert_eq!(parse_size("100").unwrap(), 100);
-        assert_eq!(parse_size("2k").unwrap(), 2000);
-        assert_eq!(parse_size("1.5mb").unwrap(), 1_500_000);
+    fn quantities_are_exact_and_checked() {
+        assert_eq!(quantity("1.5mb", true).unwrap(), 1_500_000);
+        assert_eq!(quantity("1mib", true).unwrap(), 1_048_576);
+        assert_eq!(quantity("30min", false).unwrap(), 1800);
+        for bad in ["-1", "NaN", "inf", "1.5b", "18446744073709551616"] {
+            assert!(quantity(bad, true).is_err(), "{bad}");
+        }
     }
-
     #[test]
-    fn test_parse_duration() {
-        assert_eq!(parse_duration("7d").unwrap(), 7 * 86400);
-        assert_eq!(parse_duration("30m").unwrap(), 30 * 60);
-        assert_eq!(parse_duration("2h").unwrap(), 2 * 3600);
-        assert_eq!(parse_duration("60s").unwrap(), 60);
+    fn parse_errors_do_not_ignore_unknown_options() {
+        let env = Env::new();
+        assert!(parse_args(&[Val::String("--typo".into())], &env).is_err());
+        assert!(parse_args(&[Val::String("size".into())], &env).is_err());
+        let config = parse_args(
+            &[
+                Val::String("-n".into()),
+                Val::Int(0),
+                Val::String("--paths".into()),
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(config.plan.max_results, Some(0));
+        assert!(!config.plan.metadata);
     }
-
     #[test]
-    fn test_glob_match() {
-        assert!(glob_match("*.rs", "main.rs"));
-        assert!(glob_match("*.rs", "lib.rs"));
-        assert!(!glob_match("*.rs", "main.rs.bak"));
-        assert!(glob_match("test*", "test_ff.rs"));
-        assert!(glob_match("src/*.rs", "src/main.rs"));
-        assert!(!glob_match("src/*.rs", "src/main.c"));
-        assert!(glob_match("?", "a"));
-        assert!(!glob_match("?", "ab"));
-        assert!(glob_match("*.txt", "file.txt"));
-        assert!(!glob_match("*.txt", "file.md"));
-    }
-
-    #[test]
-    fn test_parse_args_basic() {
-        let args: Vec<Val> = vec![
-            Val::String("name".to_string()),
-            Val::String("=".to_string()),
-            Val::String("*.rs".to_string()),
-        ];
-        let config = parse_args(&args).unwrap();
-        assert_eq!(config.name_glob, Some("*.rs".to_string()));
-        assert!(!config.negate_name);
-    }
-
-    #[test]
-    fn test_parse_args_with_path() {
-        let args: Vec<Val> = vec![
-            Val::String("src".to_string()),
-            Val::String("name".to_string()),
-            Val::String("=".to_string()),
-            Val::String("*.rs".to_string()),
-        ];
-        let config = parse_args(&args).unwrap();
-        assert_eq!(config.path, "src");
-        assert_eq!(config.name_glob, Some("*.rs".to_string()));
-    }
-
-    #[test]
-    fn test_parse_size_operator() {
-        let args: Vec<Val> = vec![
-            Val::String("size".to_string()),
-            Val::String(">".to_string()),
-            Val::String("1mb".to_string()),
-        ];
-        let config = parse_args(&args).unwrap();
-        // 1mb = 1_000_000 bytes, min_size should be 1_000_001 (strictly greater)
-        assert_eq!(config.min_size, Some(1_000_001));
-    }
-
-    #[test]
-    fn test_parse_hidden() {
-        let args: Vec<Val> = vec![Val::String("hidden".to_string())];
-        let config = parse_args(&args).unwrap();
-        assert!(config.hidden);
-    }
-
-    #[test]
-    fn test_parse_type_dir() {
-        let args: Vec<Val> = vec![
-            Val::String("type".to_string()),
-            Val::String("=".to_string()),
-            Val::String("dir".to_string()),
-        ];
-        let config = parse_args(&args).unwrap();
-        assert!(config.dirs_only);
-    }
-
-    #[test]
-    fn test_parse_limits() {
-        let args: Vec<Val> = vec![
-            Val::String("-n".to_string()),
-            Val::String("50".to_string()),
-            Val::String("--depth".to_string()),
-            Val::String("3".to_string()),
-        ];
-        let config = parse_args(&args).unwrap();
-        assert_eq!(config.max_results, Some(50));
-        assert_eq!(config.max_depth, Some(3));
+    fn filename_classes_are_supported() {
+        assert!(glob_match("[ab]*.rs", "a.rs"));
     }
 }

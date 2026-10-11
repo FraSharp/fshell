@@ -108,6 +108,8 @@ pub struct TraversalPlan {
     pub max_results: Option<usize>,
     pub metadata: bool,
     pub threads: usize,
+    /// Deterministic depth-first, per-directory path ordering (single worker).
+    pub sorted: bool,
 }
 
 impl TraversalPlan {
@@ -125,6 +127,39 @@ impl TraversalPlan {
             max_results: None,
             metadata: false,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(8)),
+            sorted: false,
+        }
+    }
+}
+
+/// Worker-local sinks flush before their owning visitor is destroyed.
+pub trait EntrySink {
+    fn entry(&mut self, entry: FileEntry) -> Result<bool, SearchError>;
+    fn finish(&mut self) -> Result<(), SearchError> {
+        Ok(())
+    }
+}
+
+impl<F: FnMut(FileEntry) -> Result<bool, SearchError>> EntrySink for F {
+    fn entry(&mut self, entry: FileEntry) -> Result<bool, SearchError> {
+        self(entry)
+    }
+}
+
+struct SinkOwner<'a, E: EntrySink> {
+    sink: E,
+    failure: &'a Mutex<Option<SearchError>>,
+    control: &'a Control,
+}
+
+impl<E: EntrySink> Drop for SinkOwner<'_, E> {
+    fn drop(&mut self) {
+        if let Err(error) = self.sink.finish() {
+            let mut failure = self.failure.lock().unwrap_or_else(|p| p.into_inner());
+            if failure.is_none() {
+                *failure = Some(error);
+            }
+            self.control.stop();
         }
     }
 }
@@ -150,7 +185,7 @@ pub fn walk_with<E>(
     make_emit: impl Fn() -> E + Sync,
 ) -> Result<(), SearchError>
 where
-    E: FnMut(FileEntry) -> Result<bool, SearchError> + Send,
+    E: EntrySink + Send,
 {
     if plan.roots.is_empty() || plan.threads == 0 {
         return Err(SearchError::Plan(
@@ -162,7 +197,10 @@ where
     }
     let failure = Arc::new(Mutex::new(None));
     let record = |e| {
-        *failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+        let mut failure = failure.lock().unwrap_or_else(|p| p.into_inner());
+        if failure.is_none() {
+            *failure = Some(e);
+        }
         control.stop();
     };
     for root in &plan.roots {
@@ -216,13 +254,17 @@ where
     });
     let now = SystemTime::now();
     let admitted = Mutex::new(0usize);
-    builder.build_parallel().run(|| {
-        let mut emit = make_emit();
+    let make_visit = || {
+        let mut sink = SinkOwner {
+            sink: make_emit(),
+            failure: &failure,
+            control: &control,
+        };
         let control = &control;
         let hooks = &hooks;
         let admitted = &admitted;
         let record = &record;
-        Box::new(move |result| {
+        Box::new(move |result: Result<ignore::DirEntry, ignore::Error>| {
             if control.is_stopped() || (hooks.cancelled)() {
                 return WalkState::Quit;
             }
@@ -291,14 +333,14 @@ where
                 if *count >= limit {
                     return WalkState::Quit;
                 }
-                let outcome = emit(result);
+                let outcome = sink.sink.entry(result);
                 *count += 1;
                 if *count >= limit {
                     control.stop();
                 }
                 outcome
             } else {
-                emit(result)
+                sink.sink.entry(result)
             };
             match outcome {
                 Ok(true) => WalkState::Continue,
@@ -312,7 +354,19 @@ where
                 }
             }
         })
-    });
+            as Box<dyn FnMut(Result<ignore::DirEntry, ignore::Error>) -> WalkState + Send + '_>
+    };
+    if plan.sorted {
+        builder.sort_by_file_path(Path::cmp);
+        let mut visit = make_visit();
+        for entry in builder.build() {
+            if matches!(visit(entry), WalkState::Quit) {
+                break;
+            }
+        }
+    } else {
+        builder.build_parallel().run(make_visit);
+    }
     let error = failure.lock().unwrap_or_else(|p| p.into_inner()).take();
     match error {
         Some(e) => Err(e),
@@ -348,6 +402,54 @@ fn authorize_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorted_walks_are_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["z.rs", "a.rs", "b.rs"] {
+            std::fs::write(tmp.path().join(name), "").unwrap();
+        }
+        let mut plan = TraversalPlan::new(tmp.path().into());
+        plan.sorted = true;
+        let paths = Mutex::new(vec![]);
+        walk(
+            &plan,
+            Hooks::unrestricted(),
+            Arc::new(Control::default()),
+            |entry| {
+                paths.lock().unwrap().push(entry.path);
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            paths.into_inner().unwrap(),
+            ["a.rs", "b.rs", "z.rs"].map(|p| tmp.path().join(p))
+        );
+    }
+
+    #[test]
+    fn worker_finalization_errors_are_reported() {
+        struct FailingSink;
+        impl EntrySink for FailingSink {
+            fn entry(&mut self, _: FileEntry) -> Result<bool, SearchError> {
+                Ok(true)
+            }
+            fn finish(&mut self) -> Result<(), SearchError> {
+                Err(SearchError::Plan("flush failed".into()))
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            walk_with(
+                &TraversalPlan::new(tmp.path().into()),
+                Hooks::unrestricted(),
+                Arc::new(Control::default()),
+                || FailingSink
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn hidden_subtrees_and_ignore_files_are_pruned() {

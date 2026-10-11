@@ -332,12 +332,12 @@ pub static TOPICS: &[HelpTopic] = &[
         name: "ff",
         category: HelpCategory::Builtin,
         summary: "Find files by name, size, type, and modified time",
-        description: "Recursively search the filesystem for files and directories matching filter criteria. Each match is emitted as a structured record with fields for path, name, size, type, and last modified time.\n\nFilters can be chained with 'and' for readability. The search path is the first positional argument (defaults to current directory).",
+        description: "Search files and directories with compiled name, size, type, and modification-age predicates. Results are complete unless an explicit depth or result limit is set. Hidden directories and root-local .ignore/.gitignore entries are pruned by default. Parallel output is unordered.\n\nRecords include path, abs_path, name, type, size, and modified. --paths avoids output metadata; --count emits only the result count. Predicates can be chained with 'and'. Paths default to the current directory. External find retains POSIX/GNU semantics.",
         syntax: "ff [path] [filters...]",
         examples: &[
             HelpExample {
                 input: "ff",
-                explanation: "List all files and directories recursively from the current directory.",
+                explanation: "List non-hidden, non-ignored entries recursively from the current directory.",
             },
             HelpExample {
                 input: "ff src",
@@ -377,6 +377,13 @@ pub static TOPICS: &[HelpTopic] = &[
                 flag: "hidden",
                 desc: "Include hidden files and directories (those starting with '.')",
             },
+            HelpFlag { flag: "--no-ignore", desc: "Disable .ignore and .gitignore rules" },
+            HelpFlag { flag: "--paths", desc: "Emit paths without metadata records" },
+            HelpFlag { flag: "--count", desc: "Emit only the result count" },
+            HelpFlag { flag: "--print0", desc: "Emit NUL-delimited path bytes" },
+            HelpFlag { flag: "--follow", desc: "Follow symlinks with cycle detection" },
+            HelpFlag { flag: "--sort", desc: "Use deterministic depth-first path order with one worker" },
+            HelpFlag { flag: "-j <N>", desc: "Set the number of traversal workers" },
         ],
         related: &["ls", "cd", "z", "filter", "map"],
     },

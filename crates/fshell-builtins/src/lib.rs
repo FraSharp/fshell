@@ -23,7 +23,6 @@ pub mod csv;
 pub mod dev_env;
 pub mod diff;
 pub mod error;
-#[cfg(feature = "ff")]
 pub mod ff;
 pub mod files;
 pub mod help;
@@ -36,6 +35,7 @@ pub mod read;
 pub mod replace;
 #[cfg(feature = "sandbox")]
 pub mod sandbox;
+mod search_output;
 pub mod select;
 pub mod serve;
 pub mod string_ops;
@@ -171,7 +171,6 @@ pub fn init(env: &Env) {
     #[cfg(feature = "extract")]
     entries.push(("extract".to_string(), Arc::new(extract_builtin)));
 
-    #[cfg(feature = "ff")]
     entries.push(("ff".to_string(), Arc::new(ff::ff_builtin)));
 
     #[cfg(feature = "sandbox")]

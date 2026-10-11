@@ -1544,6 +1544,37 @@ impl Parser {
                     {
                         break;
                     }
+                    // Finder comparisons are arguments with their own grammar,
+                    // not redirections. Only an unquoted predicate keyword opens
+                    // this production; all other `<`/`>` retain shell semantics.
+                    let finder_predicate = name == "ff"
+                        && args.last().is_some_and(|arg| {
+                            matches!(arg, Expr::String(parts) if matches!(parts.as_slice(),
+                            [StringPart::Lit { text, quote: crate::ast::QuoteKind::Unquoted }]
+                            if matches!(text.as_str(), "name" | "size" | "modified" | "type")))
+                        });
+                    if finder_predicate && matches!(c, '<' | '>' | '=' | '!') {
+                        let op_start = self.pos;
+                        let mut operator = String::new();
+                        operator.push(self.next_char().unwrap_or(c));
+                        if self.peek() == Some('=') {
+                            operator.push(self.next_char().unwrap_or('='));
+                        }
+                        if !matches!(
+                            operator.as_str(),
+                            "<" | "<=" | ">" | ">=" | "=" | "!=" | "=="
+                        ) {
+                            return Err(ParseError::SyntaxError {
+                                message: "invalid finder comparison".into(),
+                                span: self.span_from(op_start),
+                            });
+                        }
+                        args.push(Expr::String(vec![StringPart::unquoted(operator)]));
+                        self.skip_horizontal_whitespace();
+                        args.push(self.parse_command_arg()?);
+                        self.skip_horizontal_whitespace();
+                        continue;
+                    }
                     if c == '>'
                         && !(self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '(')
                     {

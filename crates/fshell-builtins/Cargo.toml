@@ -25,6 +25,7 @@ fshell-core = { workspace = true }
 fshell-capabilities = { workspace = true }
 fshell-engine = { workspace = true }
 fshell-semantic = { workspace = true }
+fshell-search = { workspace = true }
 fshell-render = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -44,6 +45,7 @@ fshell-archive = { workspace = true, optional = true }
 bytes = { workspace = true }
 toml_edit = { workspace = true }
 walkdir = { workspace = true }
+globset = { workspace = true }
 nu-ansi-term = { workspace = true }
 ratatui = { workspace = true }
 nucleo-matcher = { workspace = true }
