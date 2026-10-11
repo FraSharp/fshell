@@ -27,6 +27,38 @@ pub fn expand_args_with_words(
         (opts.nullglob, opts.nocaseglob)
     };
 
+    let mut authorize = |path: &std::path::Path| {
+        if env.pipeline_cancelled() {
+            return Err("glob expansion cancelled".to_string());
+        }
+        env.enforce_capability("glob", crate::CapAction::ReadDir(env.resolve_path(path)))
+            .map_err(|e| e.to_string())
+    };
+    let mut expand = |pattern: &str, nullglob: bool| {
+        let relative = !std::path::Path::new(pattern).is_absolute();
+        fshell_core::glob_utils::expand_glob_checked_at(
+            pattern,
+            nullglob,
+            nocaseglob,
+            &env.cwd(),
+            &mut authorize,
+        )
+        .map(|matches| {
+            matches
+                .into_iter()
+                .map(|path| {
+                    if relative {
+                        std::path::Path::new(&path)
+                            .strip_prefix(env.cwd())
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or(path)
+                    } else {
+                        path
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+    };
     let mut expanded_args = Vec::new();
     for (index, arg) in args.into_iter().enumerate() {
         let text = match &arg {
@@ -60,8 +92,7 @@ pub fn expand_args_with_words(
             // whose name happens to equal the pattern. On a miss the word is
             // used literally — as its own text, never as the pattern, or the
             // escaping added above would leak into argv.
-            let matches =
-                fshell_core::glob_utils::expand_glob_with_options(single, true, nocaseglob);
+            let matches = expand(single, true)?;
             if matches.is_empty() {
                 if !nullglob {
                     expanded_args.push(Val::String(text));
@@ -74,9 +105,7 @@ pub fn expand_args_with_words(
         } else {
             // Brace expansion produced several words; each expands on its own.
             for braced in braced {
-                for file in
-                    fshell_core::glob_utils::expand_glob_with_options(&braced, nullglob, nocaseglob)
-                {
+                for file in expand(&braced, nullglob)? {
                     expanded_args.push(Val::String(file));
                 }
             }

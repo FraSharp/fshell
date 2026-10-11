@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use walkdir::WalkDir;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -361,11 +361,46 @@ pub fn expand_glob(pattern: &str) -> Vec<String> {
 }
 
 pub fn expand_glob_with_options(pattern: &str, nullglob: bool, nocaseglob: bool) -> Vec<String> {
+    expand_glob_checked(pattern, nullglob, nocaseglob, &mut |_| Ok(())).unwrap_or_default()
+}
+
+/// Expand one path component at a time, authorizing directories before listing them.
+/// Ordinary wildcards never trigger recursive walks; `**` does not follow symlinks.
+pub fn expand_glob_checked(
+    pattern: &str,
+    nullglob: bool,
+    nocaseglob: bool,
+    authorize: &mut impl FnMut(&Path) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
+    expand_glob_impl(pattern, nullglob, nocaseglob, None, authorize)
+}
+
+/// Keep the physical cwd separate from pattern syntax. Metacharacters in a
+/// directory name are data, never another part of a relative argument's glob.
+pub fn expand_glob_checked_at(
+    pattern: &str,
+    nullglob: bool,
+    nocaseglob: bool,
+    cwd: &Path,
+    authorize: &mut impl FnMut(&Path) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
+    expand_glob_impl(pattern, nullglob, nocaseglob, Some(cwd), authorize)
+}
+
+fn expand_glob_impl(
+    pattern: &str,
+    nullglob: bool,
+    nocaseglob: bool,
+    cwd: Option<&Path>,
+    authorize: &mut impl FnMut(&Path) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
     // Extended globs: prefer the DP matcher (linear, no regex backtracking);
     // its alternates are matched literally so "a.b" is literal, not wildcard.
     if let Some(ext_glob) = crate::extended_glob::ExtendedGlob::parse(pattern) {
         let base = determine_base_dir(pattern);
+        let base = cwd.map_or_else(|| PathBuf::from(&base), |cwd| cwd.join(&base));
         let mut results: Vec<String> = Vec::new();
+        authorize(&base)?;
         if let Ok(entries) = std::fs::read_dir(&base) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -375,7 +410,7 @@ pub fn expand_glob_with_options(pattern: &str, nullglob: bool, nocaseglob: bool)
             }
         }
         results.sort();
-        return results;
+        return Ok(results);
     }
 
     let mut clean_pattern = pattern.to_string();
@@ -392,71 +427,45 @@ pub fn expand_glob_with_options(pattern: &str, nullglob: bool, nocaseglob: bool)
         }
     }
 
-    let raw_matches = if !clean_pattern.contains('*')
-        && !clean_pattern.contains('?')
-        && !clean_pattern.contains('[')
-    {
-        if qualifiers.is_some() {
-            let path = std::path::Path::new(&clean_pattern);
-            if path.exists() {
-                vec![clean_pattern.clone()]
+    let normalized = normalize_shell_pattern(&clean_pattern);
+    let mut raw_matches = if !has_active_wildcard(&normalized) {
+        if qualifiers.is_some()
+            || (clean_pattern.contains('\\') && clean_pattern.contains(['*', '?', '[']))
+        {
+            let literal = unescape_pattern(&normalized);
+            let path = cwd.map_or_else(|| PathBuf::from(&literal), |cwd| cwd.join(&literal));
+            if let Some(parent) = path.parent() {
+                authorize(if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                })?;
+            }
+            if path.symlink_metadata().is_ok() {
+                vec![path.to_string_lossy().into_owned()]
             } else {
                 vec![]
             }
         } else {
-            return vec![clean_pattern];
+            return Ok(vec![clean_pattern]);
         }
     } else {
-        let glob = match globset::GlobBuilder::new(&clean_pattern)
-            .case_insensitive(nocaseglob)
-            .build()
-        {
-            Ok(g) => g.compile_matcher(),
-            Err(_) => return vec![pattern.to_string()],
+        let mut raw = Vec::new();
+        let components: Vec<_> = normalized.split('/').filter(|c| !c.is_empty()).collect();
+        let root = if clean_pattern.starts_with('/') {
+            PathBuf::from("/")
+        } else {
+            cwd.map_or_else(PathBuf::new, Path::to_path_buf)
         };
-
-        let is_recursive = clean_pattern.contains("**");
-        let base = determine_base_dir(&clean_pattern);
-
-        let mut raw: Vec<String> = Vec::new();
-
-        if is_recursive {
-            for entry in WalkDir::new(&base)
-                .min_depth(1)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                let path = entry.path();
-                if let Some(path_str) = path.to_str() {
-                    let clean = path_str.strip_prefix("./").unwrap_or(path_str);
-                    if glob.is_match(clean) || glob.is_match(path_str) {
-                        raw.push(clean.to_string());
-                    }
-                } else {
-                    let display = path.to_string_lossy();
-                    let display_ref: &str = display.as_ref();
-                    let clean = display_ref.strip_prefix("./").unwrap_or(display_ref);
-                    if glob.is_match(clean) || glob.is_match(display_ref) {
-                        raw.push(clean.to_string());
-                    }
-                }
-            }
-        } else if let Ok(dir) = std::fs::read_dir(&base) {
-            for entry in dir.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let full = if base == "." {
-                    name.clone()
-                } else {
-                    format!("{}/{}", base.trim_end_matches('/'), name)
-                };
-                if glob.is_match(&full) || glob.is_match(&name) {
-                    raw.push(full);
-                }
-            }
+        expand_components(&root, &components, nocaseglob, authorize, &mut raw)?;
+        if clean_pattern.ends_with('/') {
+            raw.retain(|p| Path::new(p).is_dir());
         }
         raw
     };
 
+    raw_matches.sort();
+    raw_matches.dedup();
     let mut matches = if let Some(ref q) = qualifiers {
         apply_qualifiers(raw_matches, q)
     } else {
@@ -464,11 +473,11 @@ pub fn expand_glob_with_options(pattern: &str, nullglob: bool, nocaseglob: bool)
     };
 
     if matches.is_empty() {
-        if nullglob {
+        Ok(if nullglob {
             vec![]
         } else {
             vec![pattern.to_string()]
-        }
+        })
     } else {
         let should_sort = if let Some(ref q) = qualifiers {
             q.sort_by.is_none()
@@ -478,13 +487,235 @@ pub fn expand_glob_with_options(pattern: &str, nullglob: bool, nocaseglob: bool)
         if should_sort {
             matches.sort();
         }
-        matches
+        matches.dedup();
+        Ok(matches)
     }
+}
+
+fn expand_components(
+    prefix: &Path,
+    components: &[&str],
+    nocase: bool,
+    authorize: &mut impl FnMut(&Path) -> Result<(), String>,
+    output: &mut Vec<String>,
+) -> Result<(), String> {
+    let Some((component, rest)) = components.split_first() else {
+        if !prefix.as_os_str().is_empty() && prefix.symlink_metadata().is_ok() {
+            output.push(prefix.to_string_lossy().into_owned());
+        }
+        return Ok(());
+    };
+    let dir = if prefix.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        prefix
+    };
+    if *component == "**" {
+        expand_components(prefix, rest, nocase, authorize, output)?;
+        authorize(dir)?;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().as_encoded_bytes().starts_with(b".") {
+                    continue;
+                }
+                let path = prefix.join(entry.file_name());
+                if rest.is_empty() {
+                    expand_components(&path, rest, nocase, authorize, output)?;
+                }
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    expand_components(&path, components, nocase, authorize, output)?;
+                }
+            }
+        }
+    } else if !has_active_wildcard(component) && !nocase {
+        expand_components(
+            &prefix.join(unescape_pattern(component)),
+            rest,
+            nocase,
+            authorize,
+            output,
+        )?;
+    } else {
+        let Ok(glob) = globset::GlobBuilder::new(component)
+            .backslash_escape(true)
+            .literal_separator(true)
+            .case_insensitive(nocase)
+            .build()
+        else {
+            return Ok(());
+        };
+        let matcher = glob.compile_matcher();
+        authorize(dir)?;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if !component.starts_with('.')
+                    && !component.starts_with("\\.")
+                    && entry.file_name().as_encoded_bytes().starts_with(b".")
+                {
+                    continue;
+                }
+                if matcher.is_match(Path::new(&entry.file_name())) {
+                    expand_components(
+                        &prefix.join(entry.file_name()),
+                        rest,
+                        nocase,
+                        authorize,
+                        output,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shell patterns treat unterminated/empty bracket classes literally. Finder
+/// predicates deliberately retain globset's stricter validation instead.
+fn normalize_shell_pattern(pattern: &str) -> String {
+    let chars: Vec<_> = pattern.chars().collect();
+    let mut output = String::with_capacity(pattern.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            output.push(chars[i]);
+            i += 1;
+            if i < chars.len() {
+                output.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+        if chars[i] == '[' {
+            let mut end = i + 1;
+            if end < chars.len() && matches!(chars[end], '!' | '^') {
+                end += 1;
+            }
+            if end < chars.len() && chars[end] == ']' {
+                end += 1;
+            }
+            while end < chars.len() && chars[end] != ']' && chars[end] != '/' {
+                if chars[end] == '\\' && end + 1 < chars.len() {
+                    end += 1;
+                }
+                end += 1;
+            }
+            if end < chars.len() && chars[end] == ']' {
+                output.extend(&chars[i..=end]);
+                i = end + 1;
+                continue;
+            }
+            output.push('\\');
+        }
+        output.push(chars[i]);
+        i += 1;
+    }
+    output
+}
+
+fn has_active_wildcard(pattern: &str) -> bool {
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            chars.next();
+        } else if matches!(c, '*' | '?' | '[') {
+            return true;
+        }
+    }
+    false
+}
+
+fn unescape_pattern(pattern: &str) -> String {
+    let mut result = String::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        result.push(if c == '\\' {
+            chars.next().unwrap_or(c)
+        } else {
+            c
+        });
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cwd_metacharacters_do_not_enter_pattern_syntax() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd[brackets]");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(cwd.join("one.rs"), "").unwrap();
+        assert_eq!(
+            expand_glob_checked_at("*.rs", true, false, &cwd, &mut |_| Ok(())).unwrap(),
+            [cwd.join("one.rs").to_string_lossy()]
+        );
+        assert!(
+            expand_glob_checked_at(r"\*.rs", true, false, &cwd, &mut |_| Ok(()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn malformed_classes_are_literals_without_filesystem_reads() {
+        let result = expand_glob_checked(".users[].name", true, false, &mut |_| {
+            panic!("literal performed directory I/O")
+        })
+        .unwrap();
+        assert_eq!(result, [".users[].name"]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a[b.rs"), "").unwrap();
+        assert_eq!(
+            expand_glob(&format!("{}/a[*.rs", tmp.path().display())).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn component_wildcards_resolve_literal_suffixes() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["policy0", "policy4", ".policy8"] {
+            std::fs::create_dir(tmp.path().join(name)).unwrap();
+            std::fs::write(tmp.path().join(name).join("scaling_cur_freq"), "123").unwrap();
+        }
+        let pattern = format!("{}/policy*/scaling_cur_freq", tmp.path().display());
+        let matches = expand_glob(&pattern);
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().all(|p| p.ends_with("scaling_cur_freq")));
+    }
+
+    #[test]
+    fn recursive_globs_prune_hidden_directories_and_symlink_cycles() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("visible")).unwrap();
+        std::fs::create_dir(tmp.path().join(".hidden")).unwrap();
+        std::fs::write(tmp.path().join("visible/a.rs"), "").unwrap();
+        std::fs::write(tmp.path().join(".hidden/leak.rs"), "").unwrap();
+        std::os::unix::fs::symlink(tmp.path(), tmp.path().join("visible/cycle")).unwrap();
+        let pattern = format!("{}/**/**/*.rs", tmp.path().display());
+        assert_eq!(
+            expand_glob(&pattern),
+            vec![tmp.path().join("visible/a.rs").to_string_lossy()]
+        );
+    }
+
+    #[test]
+    fn checked_globs_authorize_each_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("secret")).unwrap();
+        std::fs::write(tmp.path().join("secret/value"), "").unwrap();
+        let pattern = format!("{}/*/*", tmp.path().display());
+        let result = expand_glob_checked(&pattern, true, false, &mut |path| {
+            if path.ends_with("secret") {
+                Err("denied".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result.unwrap_err(), "denied");
+    }
 
     #[test]
     fn test_expand_glob_no_glob() {
