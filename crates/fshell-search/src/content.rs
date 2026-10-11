@@ -51,8 +51,11 @@ pub enum BinaryPolicy {
     Text,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ScanOptions {
+    /// Report line positions for record/numbered output. Raw consumers can omit
+    /// this work; trailing context still enables positions for limit handling.
+    pub line_numbers: bool,
     pub invert: bool,
     pub before: usize,
     pub after: usize,
@@ -63,10 +66,27 @@ pub struct ScanOptions {
     pub count_only: bool,
 }
 
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            line_numbers: true,
+            invert: false,
+            before: 0,
+            after: 0,
+            binary: BinaryPolicy::default(),
+            encoding: None,
+            max_matches: None,
+            quiet: false,
+            count_only: false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ScanEvent<'a> {
     Line {
         bytes: &'a [u8],
+        /// Zero when line positions were not requested.
         line: u64,
         offset: u64,
         matched: bool,
@@ -81,6 +101,7 @@ pub struct ScanSummary {
 }
 
 /// Reuse one scanner per worker: buffer allocation is not repeated per file.
+#[derive(Clone)]
 pub struct Scanner {
     searcher: Searcher,
     options: ScanOptions,
@@ -96,7 +117,11 @@ impl Scanner {
             .map_err(|e| SearchError::Plan(e.to_string()))?;
         let mut builder = SearcherBuilder::new();
         builder
-            .line_number(true)
+            .line_number(
+                !options.count_only
+                    && !options.quiet
+                    && (options.line_numbers || options.after > 0),
+            )
             .invert_match(options.invert)
             .before_context(options.before)
             .after_context(options.after)
@@ -110,6 +135,10 @@ impl Scanner {
             searcher: builder.build(),
             options,
         })
+    }
+
+    pub fn set_max_matches(&mut self, max: Option<u64>) {
+        self.options.max_matches = max;
     }
 
     pub fn search(
@@ -135,6 +164,7 @@ impl Scanner {
             control,
             cancelled: &cancelled,
             emit: &mut emit,
+            stop_after_line: None,
         };
         self.searcher
             .search_reader(&matcher.regex, reader, &mut sink)?;
@@ -163,6 +193,7 @@ struct SearchSink<'a, C, E> {
     control: &'a Control,
     cancelled: &'a C,
     emit: &'a mut E,
+    stop_after_line: Option<u64>,
 }
 
 impl<C: Fn() -> bool, E: FnMut(ScanEvent<'_>) -> io::Result<bool>> Sink for SearchSink<'_, C, E> {
@@ -170,6 +201,19 @@ impl<C: Fn() -> bool, E: FnMut(ScanEvent<'_>) -> io::Result<bool>> Sink for Sear
     fn matched(&mut self, _: &Searcher, mat: &SinkMatch<'_>) -> io::Result<bool> {
         if self.control.is_stopped() || (self.cancelled)() {
             return Ok(false);
+        }
+        let line = mat.line_number().unwrap_or(0);
+        if let Some(last) = self.stop_after_line {
+            if line > last {
+                return Ok(false);
+            }
+            let keep = (self.emit)(ScanEvent::Line {
+                bytes: mat.bytes(),
+                line,
+                offset: mat.absolute_byte_offset(),
+                matched: false,
+            })?;
+            return Ok(keep && line < last);
         }
         self.summary.matches += 1;
         if !self.options.count_only
@@ -183,11 +227,20 @@ impl<C: Fn() -> bool, E: FnMut(ScanEvent<'_>) -> io::Result<bool>> Sink for Sear
         {
             return Ok(false);
         }
-        Ok(!self.options.quiet
-            && self
-                .options
-                .max_matches
-                .is_none_or(|max| self.summary.matches < max))
+        if self.options.quiet {
+            return Ok(false);
+        }
+        if self
+            .options
+            .max_matches
+            .is_some_and(|max| self.summary.matches >= max)
+        {
+            if self.options.count_only || self.options.after == 0 {
+                return Ok(false);
+            }
+            self.stop_after_line = Some(line.saturating_add(self.options.after as u64));
+        }
+        Ok(true)
     }
     fn context(&mut self, _: &Searcher, context: &SinkContext<'_>) -> io::Result<bool> {
         if self.control.is_stopped() || (self.cancelled)() {
@@ -196,14 +249,22 @@ impl<C: Fn() -> bool, E: FnMut(ScanEvent<'_>) -> io::Result<bool>> Sink for Sear
         if self.options.count_only || self.options.quiet {
             return Ok(true);
         }
-        (self.emit)(ScanEvent::Line {
+        let line = context.line_number().unwrap_or(0);
+        if self.stop_after_line.is_some_and(|last| line > last) {
+            return Ok(false);
+        }
+        let keep = (self.emit)(ScanEvent::Line {
             bytes: context.bytes(),
-            line: context.line_number().unwrap_or(0),
+            line,
             offset: context.absolute_byte_offset(),
             matched: false,
-        })
+        })?;
+        Ok(keep && self.stop_after_line.is_none_or(|last| line < last))
     }
     fn context_break(&mut self, _: &Searcher) -> io::Result<bool> {
+        if self.stop_after_line.is_some() {
+            return Ok(false);
+        }
         if self.options.count_only || self.options.quiet {
             return Ok(true);
         }
@@ -249,6 +310,45 @@ mod tests {
             .unwrap();
         assert_eq!(summary.matches, 1);
         assert_eq!(lines, [(1, false), (2, true), (3, false)]);
+    }
+
+    #[test]
+    fn raw_scans_omit_positions_but_match_limits_keep_trailing_context() {
+        let matcher = CompiledMatcher::compile(&["hit".into()], &MatchOptions::default())
+            .expect("fixture matcher must compile");
+        for after in [0, 1] {
+            let mut scanner = Scanner::new(ScanOptions {
+                line_numbers: false,
+                after,
+                max_matches: Some(1),
+                ..ScanOptions::default()
+            })
+            .expect("fixture scanner must initialize");
+            let mut positions = Vec::new();
+            let summary = scanner
+                .search(
+                    &matcher,
+                    &b"hit\nhit\nlast\n"[..],
+                    &Control::default(),
+                    || false,
+                    |event| {
+                        if let ScanEvent::Line { line, matched, .. } = event {
+                            positions.push((line, matched));
+                        }
+                        Ok(true)
+                    },
+                )
+                .expect("raw scan must succeed");
+            assert_eq!(summary.matches, 1);
+            assert_eq!(
+                positions,
+                if after == 0 {
+                    vec![(0, true)]
+                } else {
+                    vec![(1, true), (2, false)]
+                }
+            );
+        }
     }
 
     #[test]

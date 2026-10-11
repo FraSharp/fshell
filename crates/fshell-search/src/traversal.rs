@@ -107,6 +107,9 @@ pub struct TraversalPlan {
     pub max_depth: Option<usize>,
     pub max_results: Option<usize>,
     pub metadata: bool,
+    /// Request file-read authorization for result callbacks that open contents.
+    /// Discovering names alone requires directory-list authority, not file reads.
+    pub read_contents: bool,
     pub threads: usize,
     /// Deterministic depth-first, per-directory path ordering (single worker).
     pub sorted: bool,
@@ -126,6 +129,7 @@ impl TraversalPlan {
             max_depth: None,
             max_results: None,
             metadata: false,
+            read_contents: false,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(8)),
             sorted: false,
         }
@@ -182,7 +186,7 @@ pub fn walk_with<E>(
     plan: &TraversalPlan,
     hooks: Hooks,
     control: Arc<Control>,
-    make_emit: impl Fn() -> E + Sync,
+    make_emit: impl Fn() -> E,
 ) -> Result<(), SearchError>
 where
     E: EntrySink + Send,
@@ -235,12 +239,12 @@ where
         if filter_control.is_stopped() || (filter_hooks.cancelled)() {
             return false;
         }
-        match authorize_entry(
-            entry.path(),
-            entry.file_type().is_some_and(|t| t.is_dir()),
-            respect_ignore,
-            &filter_hooks,
-        ) {
+        let authorization = if entry.file_type().is_some_and(|t| t.is_dir()) {
+            authorize_entry(entry.path(), true, respect_ignore, &filter_hooks)
+        } else {
+            Ok(())
+        };
+        match authorization {
             Ok(()) => true,
             Err(e) => {
                 let mut failure = filter_failure.lock().unwrap_or_else(|p| p.into_inner());
@@ -297,7 +301,14 @@ where
             {
                 return WalkState::Continue;
             }
-            let metadata = if plan.metadata || !plan.sizes.is_empty() || !plan.ages.is_empty() {
+            let needs_metadata = plan.metadata || !plan.sizes.is_empty() || !plan.ages.is_empty();
+            if (needs_metadata || plan.read_contents)
+                && let Err(error) = (hooks.authorize)(entry.path(), Access::File)
+            {
+                record(SearchError::Denied(error));
+                return WalkState::Quit;
+            }
+            let metadata = if needs_metadata {
                 match entry.metadata().and_then(|m| {
                     m.modified()
                         .map(|modified| Metadata {
@@ -374,6 +385,78 @@ where
     }
 }
 
+/// Execute an explicit file list without directory walking or traversal metadata.
+/// One file runs inline; larger lists use at most the requested number of scoped
+/// workers. Each worker reuses its sink/scanner and finalizes before returning.
+pub fn visit_files<E: EntrySink + Send>(
+    paths: &[PathBuf],
+    hooks: Hooks,
+    control: Arc<Control>,
+    threads: usize,
+    make_sink: impl Fn() -> E,
+) -> Result<(), SearchError> {
+    if threads == 0 {
+        return Err(SearchError::Plan("worker count must be positive".into()));
+    }
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let failure = Mutex::new(None);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let run = |sink: E| {
+        let mut owner = SinkOwner {
+            sink,
+            failure: &failure,
+            control: &control,
+        };
+        while !control.is_stopped() && !(hooks.cancelled)() {
+            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(path) = paths.get(index) else {
+                break;
+            };
+            let result = (hooks.authorize)(path, Access::File)
+                .map_err(SearchError::Denied)
+                .and_then(|()| {
+                    owner.sink.entry(FileEntry {
+                        path: path.clone(),
+                        kind: FileKind::File,
+                        metadata: None,
+                    })
+                });
+            match result {
+                Ok(true) => {}
+                Ok(false) => {
+                    control.stop();
+                    break;
+                }
+                Err(error) => {
+                    let mut failure = failure.lock().unwrap_or_else(|p| p.into_inner());
+                    if failure.is_none() {
+                        *failure = Some(error);
+                    }
+                    control.stop();
+                    break;
+                }
+            }
+        }
+    };
+    if paths.len() == 1 || threads == 1 {
+        run(make_sink());
+    } else {
+        let sinks: Vec<_> = (0..threads.min(paths.len())).map(|_| make_sink()).collect();
+        std::thread::scope(|scope| {
+            for sink in sinks {
+                let run = &run;
+                scope.spawn(move || run(sink));
+            }
+        });
+    }
+    match failure.into_inner().unwrap_or_else(|p| p.into_inner()) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 fn authorize_entry(
     path: &Path,
     directory: bool,
@@ -402,6 +485,49 @@ fn authorize_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn name_discovery_requires_listing_not_file_read_authority() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("value"), "").unwrap();
+        let mut plan = TraversalPlan::new(tmp.path().into());
+        plan.respect_ignore = false;
+        let hooks = Hooks {
+            authorize: Arc::new(|_, access| match access {
+                Access::Directory => Ok(()),
+                Access::File => Err("file read denied".into()),
+            }),
+            ..Hooks::unrestricted()
+        };
+        walk(&plan, hooks.clone(), Arc::new(Control::default()), |_| {
+            Ok(true)
+        })
+        .unwrap();
+        plan.metadata = true;
+        assert!(walk(&plan, hooks, Arc::new(Control::default()), |_| Ok(true)).is_err());
+    }
+
+    #[test]
+    fn one_explicit_file_runs_inline_without_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("value");
+        std::fs::write(&path, "").unwrap();
+        let owner = std::thread::current().id();
+        visit_files(
+            &[path],
+            Hooks::unrestricted(),
+            Arc::new(Control::default()),
+            8,
+            || {
+                |entry: FileEntry| {
+                    assert_eq!(std::thread::current().id(), owner);
+                    assert!(entry.metadata.is_none());
+                    Ok(true)
+                }
+            },
+        )
+        .unwrap();
+    }
 
     #[test]
     fn sorted_walks_are_deterministic() {

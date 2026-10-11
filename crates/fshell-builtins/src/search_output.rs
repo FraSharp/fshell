@@ -3,7 +3,7 @@
 
 //! Owned pipeline adapter used by scoped blocking search workers.
 use fshell_core::{ErrorCode, ShellError, Val};
-use fshell_engine::{Env, PipeSender, PipelinePayload, send_with_backpressure};
+use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload, send_with_backpressure};
 use fshell_search::{Access, SearchError, traversal::Hooks};
 use std::sync::Arc;
 
@@ -36,6 +36,26 @@ impl Output {
     pub fn bytes(&self, bytes: Vec<u8>) -> bool {
         self.send(PipelinePayload::Bytes(bytes.into()))
     }
+    pub fn receive(&self, input: &mut PipeStream) -> Option<PipelinePayload> {
+        if self.stopped() {
+            return None;
+        }
+        // Buffered input needs no runtime entry or cancellation future. Only
+        // an empty, still-connected channel requires notification-driven wait.
+        match input.try_recv() {
+            Ok(payload) => return Some(payload),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return None,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+        }
+        self.runtime.block_on(async {
+            tokio::select! {
+                payload = input.recv() => payload,
+                _ = self.env.wait_pipeline_cancelled() => None,
+                _ = self.tx.closed() => None,
+            }
+        })
+    }
+
     pub fn hooks(&self, command: &'static str) -> Hooks {
         let env = self.env.clone();
         let output = self.clone();

@@ -117,6 +117,7 @@ pub struct Scope {
     #[allow(clippy::type_complexity)]
     pub fns: Arc<RwLock<FxHashMap<String, (Vec<Param>, Option<String>, Vec<Stmt>)>>>,
     pub builtins: Arc<RwLock<FxHashMap<String, BuiltinHandler>>>,
+    pub command_contracts: Arc<RwLock<FxHashMap<String, crate::BuiltinContract>>>,
     pub async_builtins: Arc<RwLock<FxHashMap<String, AsyncBuiltinHandler>>>,
     pub aliases: Arc<RwLock<indexmap::IndexMap<String, String>>>,
     pub fallback: Arc<RwLock<Option<FallbackHandler>>>,
@@ -125,6 +126,25 @@ pub struct Scope {
     pub local_vars: Option<Arc<LocalScope>>,
     pub builtins_cache: Arc<Mutex<Option<Vec<String>>>>,
     pub cwd: Arc<RwLock<std::path::PathBuf>>,
+}
+
+impl Scope {
+    pub(crate) fn new(cwd: std::path::PathBuf) -> Self {
+        Self {
+            vars: Arc::new(RwLock::new(FxHashMap::default())),
+            fns: Arc::new(RwLock::new(FxHashMap::default())),
+            builtins: Arc::new(RwLock::new(FxHashMap::default())),
+            command_contracts: Arc::new(RwLock::new(FxHashMap::default())),
+            async_builtins: Arc::new(RwLock::new(FxHashMap::default())),
+            aliases: Arc::new(RwLock::new(indexmap::IndexMap::new())),
+            fallback: Arc::new(RwLock::new(None)),
+            async_fallback: Arc::new(RwLock::new(None)),
+            config_tui_handler: Arc::new(RwLock::new(None)),
+            builtins_cache: Arc::new(Mutex::new(None)),
+            local_vars: None,
+            cwd: Arc::new(RwLock::new(cwd)),
+        }
+    }
 }
 
 impl std::fmt::Debug for Scope {

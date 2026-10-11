@@ -1028,6 +1028,7 @@ pub(crate) struct StageSlot {
     outcomes: Arc<execution::PipelineOutcomes>,
     slot: execution::Slot,
     stop: Option<tokio::sync::watch::Receiver<bool>>,
+    downstream_input: InputPreference,
 }
 
 impl StageSlot {
@@ -1036,6 +1037,7 @@ impl StageSlot {
             outcomes,
             slot,
             stop: None,
+            downstream_input: InputPreference::Records,
         }
     }
 
@@ -1533,6 +1535,18 @@ impl Env {
         }
     }
 
+    pub(crate) fn attach_downstream_input(&mut self, input: InputPreference) {
+        if let Some(stage) = &mut self.stage {
+            stage.downstream_input = input;
+        }
+    }
+
+    pub fn downstream_input(&self) -> InputPreference {
+        self.stage
+            .as_ref()
+            .map_or(InputPreference::Records, |s| s.downstream_input)
+    }
+
     /// Record a status for this stage.
     ///
     /// A stage owns its own slot, so this cannot race another stage — which is
@@ -1541,6 +1555,12 @@ impl Env {
     pub(crate) fn record_stage_status(&self, status: i64) {
         if let Some(stage) = &self.stage {
             stage.outcomes.record_status(stage.slot, status);
+        }
+    }
+
+    pub(crate) fn complete_stage_success(&self) {
+        if self.recorded_stage_status().is_none() {
+            self.record_stage_status(0);
         }
     }
 
@@ -1973,19 +1993,7 @@ impl Env {
             .filter(|p| p.exists())
             .unwrap_or_else(|| PathBuf::from("/"));
         let env = Env {
-            scope: scope::Scope {
-                vars: Arc::new(RwLock::new(FxHashMap::default())),
-                fns: Arc::new(RwLock::new(FxHashMap::default())),
-                builtins: Arc::new(RwLock::new(FxHashMap::default())),
-                async_builtins: Arc::new(RwLock::new(FxHashMap::default())),
-                aliases: Arc::new(RwLock::new(indexmap::IndexMap::new())),
-                fallback: Arc::new(RwLock::new(None)),
-                async_fallback: Arc::new(RwLock::new(None)),
-                config_tui_handler: Arc::new(RwLock::new(None)),
-                builtins_cache: Arc::new(Mutex::new(None)),
-                local_vars: None,
-                cwd: Arc::new(RwLock::new(initial_cwd.clone())),
-            },
+            scope: scope::Scope::new(initial_cwd.clone()),
             job_control: job_control::JobControl {
                 jobs: Arc::new(RwLock::new(FxHashMap::default())),
                 fg_mutex: Arc::new(Mutex::new(None)),
@@ -2147,19 +2155,7 @@ impl Env {
     pub fn for_command_with_trace(trace: Arc<crate::trace::TraceSink>) -> Self {
         let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let env = Env {
-            scope: scope::Scope {
-                vars: Arc::new(RwLock::new(FxHashMap::default())),
-                fns: Arc::new(RwLock::new(FxHashMap::default())),
-                builtins: Arc::new(RwLock::new(FxHashMap::default())),
-                async_builtins: Arc::new(RwLock::new(FxHashMap::default())),
-                aliases: Arc::new(RwLock::new(indexmap::IndexMap::new())),
-                fallback: Arc::new(RwLock::new(None)),
-                async_fallback: Arc::new(RwLock::new(None)),
-                config_tui_handler: Arc::new(RwLock::new(None)),
-                builtins_cache: Arc::new(Mutex::new(None)),
-                local_vars: None,
-                cwd: Arc::new(RwLock::new(initial_cwd.clone())),
-            },
+            scope: scope::Scope::new(initial_cwd.clone()),
             job_control: job_control::JobControl {
                 jobs: Arc::new(RwLock::new(FxHashMap::default())),
                 fg_mutex: Arc::new(Mutex::new(None)),
@@ -2299,6 +2295,7 @@ impl Env {
                 vars: self.scope.vars.clone(),
                 fns: self.scope.fns.clone(),
                 builtins: self.scope.builtins.clone(),
+                command_contracts: self.scope.command_contracts.clone(),
                 async_builtins: self.scope.async_builtins.clone(),
                 aliases: self.scope.aliases.clone(),
                 fallback: self.scope.fallback.clone(),
@@ -2392,6 +2389,7 @@ impl Env {
     pub fn register_builtin(&self, name: &str, handler: BuiltinHandler) {
         let mut reg = self.builtins.write();
         reg.insert(name.to_string(), handler);
+        self.command_contracts.write().remove(name);
         // Invalidate the builtins cache
         let mut cache = self.builtins_cache.lock();
         *cache = None;
@@ -2419,6 +2417,7 @@ impl Env {
         self.async_builtins
             .write()
             .insert(name.to_string(), handler);
+        self.command_contracts.write().remove(name);
         let mut cache = self.builtins_cache.lock();
         *cache = None;
     }
@@ -2428,11 +2427,37 @@ impl Env {
     pub fn register_builtins(&self, builtins: Vec<(String, BuiltinHandler)>) {
         let mut reg = self.builtins.write();
         for (name, handler) in builtins {
+            self.command_contracts.write().remove(&name);
             reg.insert(name, handler);
         }
         // Invalidate the builtins cache
         let mut cache = self.builtins_cache.lock();
         *cache = None;
+    }
+
+    pub fn register_builtin_with_contract(
+        &self,
+        name: &str,
+        handler: BuiltinHandler,
+        contract: BuiltinContract,
+    ) {
+        self.register_builtin(name, handler);
+        self.command_contracts.write().insert(name.into(), contract);
+    }
+
+    pub fn builtin_contract(&self, name: &str) -> BuiltinContract {
+        if self.fns.read().contains_key(name)
+            || self.posix_fns.read().contains_key(name)
+            || self.get_alias(name).is_some()
+            || (self.get_builtin(name).is_none() && self.get_async_builtin(name).is_none())
+        {
+            return BuiltinContract::default();
+        }
+        self.command_contracts
+            .read()
+            .get(name)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub fn invalidate_builtins_cache(&self) {
@@ -3747,6 +3772,8 @@ pub type AsyncFallbackHandler = Arc<
 
 // Extracted modules
 pub mod compat;
+pub mod contracts;
+pub use contracts::{BuiltinContract, InputPreference};
 pub mod eval;
 pub mod format;
 pub mod glob;

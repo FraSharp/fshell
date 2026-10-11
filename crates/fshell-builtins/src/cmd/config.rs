@@ -1611,9 +1611,6 @@ pub fn format_pipeline(p: &fshell_core::Pipeline) -> String {
                     format!("sort {column}")
                 }
             }
-            fshell_core::PipelineStage::Grep { pattern } => {
-                format!("grep {}", format_expr(pattern))
-            }
             fshell_core::PipelineStage::Count => "count".to_string(),
             fshell_core::PipelineStage::Limit { amount } => {
                 format!("limit {}", format_expr(amount))

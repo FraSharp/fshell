@@ -4,8 +4,8 @@
 use crate::pipeline::check_type_constraint;
 use crate::profiler::{ProfilerCategory, ProfilerState};
 use crate::{
-    BuiltinHandler, EngineError, Env, Flow, IS_TRUSTED_CONTEXT, PipelinePayload, ReactiveEvent,
-    collect_pipeline, dispatch_on_signal, format_pipeline,
+    EngineError, Env, Flow, IS_TRUSTED_CONTEXT, PipelinePayload, ReactiveEvent, collect_pipeline,
+    dispatch_on_signal, format_pipeline,
 };
 use fshell_core::diagnostic::FshDiag;
 use fshell_core::{
@@ -142,7 +142,6 @@ fn expr_label(expr: &Expr) -> String {
             .first()
             .map(|s| match s {
                 PipelineStage::CommandCall { name, .. } => format!("{name} ..."),
-                PipelineStage::Grep { .. } => "grep ...".into(),
                 PipelineStage::Count => "count".into(),
                 PipelineStage::Filter { .. } => "filter ...".into(),
                 PipelineStage::Map { .. } => "map ...".into(),
@@ -2460,9 +2459,19 @@ async fn eval_stmt_inner(
         Stmt::ReactiveCell { name, pipeline } => {
             // Reject mutations unless in unsafe context
             if !unsafe_context {
-                let reg = env.builtins.read();
+                let contracts = pipeline
+                    .stages
+                    .iter()
+                    .filter_map(|stage| {
+                        if let PipelineStage::CommandCall { name, .. } = stage {
+                            Some((name.clone(), env.builtin_contract(name)))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 for stage in &pipeline.stages {
-                    if !is_query_stage(stage, &reg) {
+                    if !is_query_stage(stage, &contracts) {
                         let name = match stage {
                             PipelineStage::CommandCall { name, .. } => name.clone(),
                             _ => "unknown".to_string(),
@@ -3171,29 +3180,18 @@ async fn eval_stmt_inner(
 
 pub(crate) fn is_query_stage(
     stage: &PipelineStage,
-    builtin_registry: &FxHashMap<String, BuiltinHandler>,
+    contracts: &FxHashMap<String, crate::BuiltinContract>,
 ) -> bool {
     match stage {
         PipelineStage::CommandCall { name, .. } => {
             if name.starts_with('$') {
                 return true;
             }
-            // Only CommandCall-dispatched commands go here.
-            // filter, map, sort, grep, count are parsed as distinct PipelineStage variants
-            // and handled in their own match arm below.
-            let query_builtins = ["ls", "pwd", "echo"];
-            if query_builtins.contains(&name.as_str()) {
-                return true;
-            }
-            if builtin_registry.contains_key(name) {
-                return false;
-            }
-            false
+            contracts.get(name).is_some_and(|contract| contract.query)
         }
         PipelineStage::Filter { .. }
         | PipelineStage::Map { .. }
         | PipelineStage::Sort { .. }
-        | PipelineStage::Grep { .. }
         | PipelineStage::Mark { .. }
         | PipelineStage::Count
         | PipelineStage::Hash { .. }

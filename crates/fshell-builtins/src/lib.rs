@@ -23,8 +23,10 @@ pub mod csv;
 pub mod dev_env;
 pub mod diff;
 pub mod error;
+pub mod external;
 pub mod ff;
 pub mod files;
+pub mod grep;
 pub mod help;
 pub mod integrations;
 pub mod intent;
@@ -35,6 +37,7 @@ pub mod read;
 pub mod replace;
 #[cfg(feature = "sandbox")]
 pub mod sandbox;
+mod search_input;
 mod search_output;
 pub mod select;
 pub mod serve;
@@ -171,8 +174,6 @@ pub fn init(env: &Env) {
     #[cfg(feature = "extract")]
     entries.push(("extract".to_string(), Arc::new(extract_builtin)));
 
-    entries.push(("ff".to_string(), Arc::new(ff::ff_builtin)));
-
     #[cfg(feature = "sandbox")]
     {
         entries.push(("caps-profile".to_string(), Arc::new(caps_profile_builtin)));
@@ -225,7 +226,40 @@ pub fn init(env: &Env) {
     entries.push(("vault".to_string(), Arc::new(cmd::vault::vault_builtin)));
 
     env.register_builtins(entries);
+    env.register_builtin_with_contract(
+        "grep",
+        Arc::new(grep::grep_builtin),
+        fshell_engine::BuiltinContract {
+            input: fshell_engine::InputPreference::Bytes,
+            query: true,
+        },
+    );
+    for (name, handler) in [
+        (
+            "ff",
+            Arc::new(ff::ff_builtin) as fshell_engine::BuiltinHandler,
+        ),
+        ("ls", Arc::new(ls_builtin) as fshell_engine::BuiltinHandler),
+        (
+            "pwd",
+            Arc::new(pwd_builtin) as fshell_engine::BuiltinHandler,
+        ),
+        (
+            "echo",
+            Arc::new(echo_builtin) as fshell_engine::BuiltinHandler,
+        ),
+    ] {
+        env.register_builtin_with_contract(
+            name,
+            handler,
+            fshell_engine::BuiltinContract {
+                query: true,
+                ..Default::default()
+            },
+        );
+    }
     env.register_async_builtin("exec", exec_builtin);
+    env.register_async_builtin("command", external::command_builtin);
     #[cfg(feature = "sandbox")]
     env.register_async_builtin("strict", strict_builtin);
     // `string` and `replace` are async so their validation and runtime errors

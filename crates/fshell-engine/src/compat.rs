@@ -294,7 +294,6 @@ fn visit_stage(stage: &PipelineStage, found: &mut Option<PosixRequirement>) {
         PipelineStage::BoundaryOperator { .. }
         | PipelineStage::Count
         | PipelineStage::FdRedirect { .. }
-        | PipelineStage::Grep { .. }
         | PipelineStage::Hash { .. }
         | PipelineStage::Heredoc { .. }
         | PipelineStage::HereString { .. }

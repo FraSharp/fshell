@@ -71,9 +71,6 @@ pub fn format_pipeline(pipeline: &fshell_core::Pipeline) -> String {
                     parts.push(format!("sort {}", column));
                 }
             }
-            PipelineStage::Grep { pattern } => {
-                parts.push(format!("grep {}", format_expr(pattern)));
-            }
             PipelineStage::Mark { pattern } => {
                 parts.push(format!("mark {}", format_expr(pattern)));
             }

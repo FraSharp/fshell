@@ -18,7 +18,6 @@ use ustr::ustr;
 #[cfg(test)]
 mod tests {
     #![allow(clippy::module_inception, clippy::approx_constant)]
-    use super::BuiltinHandler;
     use super::*;
 
     #[test]
@@ -920,7 +919,14 @@ mod tests {
             env: vec![],
             span: SourceSpan::new(0.into(), 0),
         };
-        assert!(is_query_stage(&stage, &FxHashMap::default()));
+        let contracts = FxHashMap::from_iter([(
+            "ls".into(),
+            crate::BuiltinContract {
+                query: true,
+                ..Default::default()
+            },
+        )]);
+        assert!(is_query_stage(&stage, &contracts));
     }
 
     #[test]
@@ -932,12 +938,7 @@ mod tests {
             span: SourceSpan::new(0.into(), 0),
         };
         let mut registry = FxHashMap::default();
-        let handler: BuiltinHandler = Arc::new(
-            |_: Option<PipeStream>, _: Vec<Val>, _: &Env, _: PipeSender, _: Option<SourceSpan>| {
-                Ok(())
-            },
-        );
-        registry.insert("some_builtin".into(), handler);
+        registry.insert("some_builtin".into(), crate::BuiltinContract::default());
         assert!(!is_query_stage(&stage, &registry));
     }
 
@@ -970,12 +971,6 @@ mod tests {
             &PipelineStage::Sort {
                 column: "x".into(),
                 descending: false
-            },
-            &FxHashMap::default()
-        ));
-        assert!(is_query_stage(
-            &PipelineStage::Grep {
-                pattern: Expr::Null
             },
             &FxHashMap::default()
         ));

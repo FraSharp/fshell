@@ -446,9 +446,7 @@ fn listening_ports(
     if platform.os == Os::Linux && platform.utilities.has("ss") {
         let mut stages = vec![call("ss", vec![lit("-lntup")])];
         if let Some(port) = action.port {
-            stages.push(PipelineStage::Grep {
-                pattern: lit(format!(":{port}")),
-            });
+            stages.push(call("grep", vec![lit(format!(":{port}"))]));
         }
         return Ok(stages);
     }

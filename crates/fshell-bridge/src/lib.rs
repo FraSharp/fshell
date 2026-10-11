@@ -1011,7 +1011,8 @@ pub async fn run_external(
         // back in fsh's tagged form and `[1,2]` became two lines), which breaks
         // composability with every ordinary Unix tool that speaks JSON.
         let auto_parse_json = json_auto_parse && has_next;
-        let decode_into_value = is_structured || auto_parse_json;
+        let decode_into_value = env.downstream_input() != fshell_engine::InputPreference::Bytes
+            && (is_structured || auto_parse_json);
         let output_cancelled_clone = output_cancelled.clone();
         io_tasks.push(tokio::spawn(async move {
             use structured::{ParseResult, ParseState};

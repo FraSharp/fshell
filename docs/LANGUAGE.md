@@ -96,11 +96,11 @@ let local fn match try catch with unsafe break continue return for in while if e
 
 reserved pipeline keywords:
 ```fsh
-filter map sort grep mark count hash limit traverse
+filter map sort mark count hash limit traverse
 ```
 
 > [!NOTE]
-> if a reserved pipeline keyword is immediately followed by a flag starting with `-` (e.g. `sort -n` or `grep -E`), the parser treats it as an external command call rather than the built-in fsh pipeline stage.
+> if a reserved pipeline keyword is immediately followed by a flag starting with `-` (e.g. `sort -n` or `map -x`), the parser treats it as an external command call rather than the built-in fsh pipeline stage.
 
 ### bare words & paths
 
@@ -805,10 +805,13 @@ ls | sort name asc
 ```
 
 #### `grep`
-filters rows matching a string pattern or regular expression:
+`grep` is a registered native builtin, not a reserved pipeline keyword. It searches files or filters pipeline text/records using Rust regular expressions; `-F` selects literal matching and invalid expressions are errors:
 ```fsh
-cat server.log | grep "ERROR 500"
+grep -n "ERROR 500" server.log
+cat server.log | grep -F "ERROR 500"
+ff --paths name = "*.rs"
 ```
+File searches print ordinary grep text at the terminal and emit match records (`file`, `line`, `offset`, `text`, `matched`) into pipelines or captures. Stream filtering preserves matching records and searches textual leaf values, not map keys. `-c` counts without constructing match records; `-q` stops after a match. Exit statuses are 0 for matches, 1 for no matches, and 2 for utility errors. Recursive `-r` searches respect root-local ignore rules and prune hidden directories; use `--no-ignore` / `--hidden` to override. POSIX mode retains the external utility's syntax and behavior.
 
 #### `mark`
 adds visual terminal highlighting or markers to matched rows while passing all records downstream:

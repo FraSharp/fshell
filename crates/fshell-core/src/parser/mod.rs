@@ -3021,11 +3021,13 @@ mod tests {
     fn test_raw_string_argument() {
         // `grep r"\.tmp$"` — a raw string in command-argument position.
         let stage = last_stage_of(r#"ls | grep r"\.tmp$""#);
-        let PipelineStage::Grep { pattern } = &stage else {
-            panic!("Expected Grep stage, got {stage:?}");
+        let PipelineStage::CommandCall { name, args, .. } = &stage else {
+            panic!("Expected command call, got {stage:?}");
         };
+        assert_eq!(name, "grep");
+        assert_eq!(args.len(), 1);
         assert_eq!(
-            pattern.unpack(),
+            args[0].unpack(),
             &Expr::String(vec![StringPart::Lit {
                 text: r"\.tmp$".to_string(),
                 quote: QuoteKind::Single,

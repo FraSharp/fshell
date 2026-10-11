@@ -238,9 +238,6 @@ pub enum PipelineStage {
         column: String,
         descending: bool,
     },
-    Grep {
-        pattern: Expr,
-    },
     Mark {
         pattern: Expr,
     },

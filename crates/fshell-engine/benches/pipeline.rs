@@ -219,8 +219,13 @@ fn pipeline_grep_10k(c: &mut Criterion) {
                 env: vec![],
                 span: SourceSpan::new(0.into(), 0),
             },
-            PipelineStage::Grep {
-                pattern: Expr::String(vec![StringPart::unquoted("item_5".to_string())]),
+            PipelineStage::CommandCall {
+                name: "grep".into(),
+                args: vec![Expr::String(vec![StringPart::unquoted(
+                    "item_5".to_string(),
+                )])],
+                env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
         ],
         boundaries: vec![1],
@@ -420,8 +425,11 @@ fn pipeline_multi_stage_all_10k(c: &mut Criterion) {
                 column: "value".to_string(),
                 descending: false,
             },
-            PipelineStage::Grep {
-                pattern: Expr::Ident("item".to_string()),
+            PipelineStage::CommandCall {
+                name: "grep".into(),
+                args: vec![Expr::String(vec![StringPart::unquoted("item".to_string())])],
+                env: vec![],
+                span: SourceSpan::new(0.into(), 0),
             },
             PipelineStage::Map {
                 projections: vec![Expr::Ident("name".to_string())],

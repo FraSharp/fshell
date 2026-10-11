@@ -1047,6 +1047,16 @@ async fn execute_pipeline_inner(
     let (diag_tx, diag_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
     let mut diag_rx = Some(diag_rx);
 
+    let input_preferences: Vec<_> = stages
+        .iter()
+        .map(|stage| match stage {
+            PlannedStage::Ast {
+                stage: PipelineStage::CommandCall { name, .. },
+                ..
+            } => env.builtin_contract(name).input,
+            _ => crate::InputPreference::Records,
+        })
+        .collect();
     for (stage_index, planned_stage) in stages.into_iter().enumerate() {
         if let Some(span) = stage_span.take() {
             span.finish(crate::trace::SpanOutcome::Cancelled);
@@ -1081,6 +1091,12 @@ async fn execute_pipeline_inner(
         };
         env_clone.attach_stage(outcomes.clone(), stage_slot);
         env_clone.attach_pipeline_stop(cancel_rx.clone());
+        env_clone.attach_downstream_input(
+            input_preferences
+                .get(stage_index + 1)
+                .copied()
+                .unwrap_or_default(),
+        );
         let (stage_clone, is_last) = match planned_stage {
             PlannedStage::Ast { stage, is_last } => (Some(stage), is_last),
             PlannedStage::OutputRoute { routes, is_last } => {
@@ -1980,7 +1996,7 @@ async fn execute_pipeline_inner(
                                 )
                                 .await
                                 {
-                                    Ok(()) => env_clone.record_stage_status(0),
+                                    Ok(()) => env_clone.complete_stage_success(),
                                     Err(e) => {
                                         if !e.is_condition_false() && e.reported_status().is_none()
                                         {
@@ -2009,7 +2025,7 @@ async fn execute_pipeline_inner(
                                     out_tx.clone(),
                                     handler_span,
                                 ) {
-                                    Ok(()) => env_clone.record_stage_status(0),
+                                    Ok(()) => env_clone.complete_stage_success(),
                                     Err(e) => {
                                         if !e.is_condition_false() && e.reported_status().is_none()
                                         {
@@ -2394,87 +2410,6 @@ async fn execute_pipeline_inner(
                         });
                         for item in items {
                             let _ = out_tx.send(PipelinePayload::Data(item)).await;
-                        }
-                    }
-                });
-            }
-            PipelineStage::Grep { pattern } => {
-                spawn_stage!(async move {
-                    let pat_val = match eval_expr(&pattern, &env_clone).await {
-                        Ok(Val::String(s)) => s,
-                        Ok(other) => other.to_text(),
-                        Err(e) => {
-                            env_clone.report_stage_error();
-                            let _ = out_tx
-                                .send(PipelinePayload::Structured(e.to_string().into()))
-                                .await;
-                            return;
-                        }
-                    };
-                    // The pattern is a regular expression (documented, e.g.
-                    // `grep r"\.tmp$"`); fall back to a plain substring when it
-                    // does not compile so literal patterns keep working.
-                    let pattern_re = regex::Regex::new(&pat_val).ok();
-                    let matches = |text: &str| match &pattern_re {
-                        Some(re) => re.is_match(text),
-                        None => text.contains(&pat_val),
-                    };
-                    if let Some(mut rx) = current_rx {
-                        while let Some(payload) = rx.recv().await {
-                            if env_clone.pipeline_cancelled() {
-                                break;
-                            }
-                            match payload {
-                                PipelinePayload::Data(val_arc) => {
-                                    let val_str = match &*val_arc {
-                                        Val::String(s) => s.clone(),
-                                        Val::Map(map) => {
-                                            let mut s = String::new();
-                                            for (k, v) in map {
-                                                s.push_str(k.as_str());
-                                                s.push(' ');
-                                                s.push_str(&v.to_text());
-                                                s.push(' ');
-                                            }
-                                            s
-                                        }
-                                        other => other.to_text(),
-                                    };
-                                    // Text-producing builtins such as `printf` emit a
-                                    // structured String value, while external programs
-                                    // arrive as Bytes and are split into lines below.
-                                    // Give multiline text the same grep semantics at
-                                    // either pipeline boundary.
-                                    if matches!(&*val_arc, Val::String(s) if s.contains('\n')) {
-                                        for line in val_str.lines() {
-                                            if matches(line) {
-                                                let _ = out_tx
-                                                    .send(PipelinePayload::Data(Arc::new(
-                                                        Val::String(line.to_string()),
-                                                    )))
-                                                    .await;
-                                            }
-                                        }
-                                    } else if matches(&val_str) {
-                                        let _ = out_tx.send(PipelinePayload::Data(val_arc)).await;
-                                    }
-                                }
-                                PipelinePayload::Bytes(b) => {
-                                    let text = String::from_utf8_lossy(&b);
-                                    for line in text.lines() {
-                                        if matches(line) {
-                                            let _ = out_tx
-                                                .send(PipelinePayload::Data(Arc::new(Val::String(
-                                                    line.to_string(),
-                                                ))))
-                                                .await;
-                                        }
-                                    }
-                                }
-                                PipelinePayload::Structured(d) => {
-                                    let _ = out_tx.send(PipelinePayload::Structured(d)).await;
-                                }
-                            }
                         }
                     }
                 });
