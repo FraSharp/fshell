@@ -34,6 +34,29 @@ fn errno_location() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }
 
+/// Normalize the libc device field to the width used by MetadataExt::dev.
+/// Linux exposes u64 directly; Darwin and several BSD ABIs use narrower fields.
+pub(crate) fn stat_device(stat: &libc::stat) -> u64 {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        stat.st_dev as u64
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
+    {
+        stat.st_dev
+    }
+}
+
 /// Clear errno before a libc iterator whose null return is ambiguous.
 #[inline]
 pub fn clear_errno() {

@@ -17,6 +17,7 @@ async fn filter_payloads(payloads: Vec<PipelinePayload>, args: &[&str]) -> Vec<V
     });
     let search = tokio::task::spawn_blocking(move || {
         fshell_builtins::grep::grep_builtin(Some(input_rx), arguments, &env, output_tx, None)
+            .map_err(Box::new)
     });
     let mut output = vec![];
     while let Some(payload) = output_rx.recv().await {

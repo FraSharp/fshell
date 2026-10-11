@@ -157,6 +157,10 @@ fn list_named_options(opts: &fshell_engine::ShellOptions, as_commands: bool) -> 
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
     use fshell_core::Val;

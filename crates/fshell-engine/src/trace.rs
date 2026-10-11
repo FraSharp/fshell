@@ -332,6 +332,10 @@ impl Drop for TraceSpan {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};

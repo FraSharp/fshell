@@ -7,8 +7,25 @@ use fshell_engine::Env;
 
 use super::type_cmd::{CommandResolution, resolve_command};
 
-/// Search path used by `command -p` for standard utilities on supported hosts.
-pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+/// Search path for standard utilities, independent of the caller's PATH.
+/// POSIX exposes the host's default ordering through confstr(_CS_PATH).
+pub fn default_path() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        // SAFETY: a null destination with zero length queries the required size.
+        let length = unsafe { libc::confstr(libc::_CS_PATH, std::ptr::null_mut(), 0) };
+        if length > 1 {
+            let mut buffer = vec![0u8; length];
+            // SAFETY: buffer is writable for length bytes; confstr includes NUL.
+            let written =
+                unsafe { libc::confstr(libc::_CS_PATH, buffer.as_mut_ptr().cast(), length) };
+            if written > 1 && written <= length {
+                return String::from_utf8_lossy(&buffer[..written - 1]).into_owned();
+            }
+        }
+        "/bin:/usr/bin".to_string()
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {

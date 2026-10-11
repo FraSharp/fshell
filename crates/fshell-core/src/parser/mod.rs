@@ -442,6 +442,11 @@ fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "Test fixture preconditions and failure assertions intentionally panic"
+)]
 mod tests {
     use super::*;
 
@@ -3110,7 +3115,7 @@ mod tests {
             };
             assert!(
                 matches!(&args[0], Expr::String(parts)
-                    if matches!(parts.as_slice(), [StringPart::Lit { text: _, .. }])),
+                    if matches!(parts.as_slice(), [StringPart::Lit { .. }])),
                 "{src}: quoted argument must stay a string, got {:?}",
                 args[0]
             );

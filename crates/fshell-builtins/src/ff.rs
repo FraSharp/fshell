@@ -337,6 +337,10 @@ pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
     #[test]

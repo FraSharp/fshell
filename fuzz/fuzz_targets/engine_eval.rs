@@ -21,7 +21,7 @@ fuzz_target!(|data: &[u8]| {
             };
 
             let env = Env::for_command();
-            let _ = rt.block_on(async {
+            rt.block_on(async {
                 for stmt in stmts {
                     let _ = tokio::select! {
                         res = eval_stmt(&stmt, &env, false) => res.ok(),

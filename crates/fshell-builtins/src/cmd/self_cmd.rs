@@ -234,14 +234,18 @@ fn do_exec(args: Vec<String>, env: &Env, span: Option<SourceSpan>) -> Result<(),
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "Test fixture preconditions and failure assertions intentionally panic"
+)]
 mod tests {
     use super::*;
     use fshell_engine::PipelinePayload;
     use tokio::sync::mpsc;
 
     fn test_env() -> Env {
-        let env = Env::for_command();
-        env
+        Env::for_command()
     }
 
     #[tokio::test]

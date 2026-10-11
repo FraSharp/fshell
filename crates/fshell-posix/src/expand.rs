@@ -1050,6 +1050,10 @@ fn unescape_ansi_c(s: &str) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
 

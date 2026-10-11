@@ -298,6 +298,10 @@ pub fn offset_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
 

@@ -638,6 +638,11 @@ fn unescape_pattern(pattern: &str) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "Test fixture preconditions and failure assertions intentionally panic"
+)]
 mod tests {
     use super::*;
 

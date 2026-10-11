@@ -1360,23 +1360,26 @@ mod tests {
     use super::*;
     use fshell_core::FxIndexMap;
     use fshell_hash::FxBuildHasher;
+    fn fixture_json(value: &Val) -> Vec<u8> {
+        serde_json::to_vec(value).expect("test fixture must serialize to JSON")
+    }
     // coerce_val_to_bytes: per-variant tests
     #[test]
     fn test_coerce_null() {
         let bytes = coerce_val_to_bytes(&Val::Null);
-        assert_eq!(bytes, serde_json::to_vec(&Val::Null).unwrap());
+        assert_eq!(bytes, fixture_json(&Val::Null));
     }
 
     #[test]
     fn test_coerce_bool_true() {
         let bytes = coerce_val_to_bytes(&Val::Bool(true));
-        assert_eq!(bytes, serde_json::to_vec(&Val::Bool(true)).unwrap());
+        assert_eq!(bytes, fixture_json(&Val::Bool(true)));
     }
 
     #[test]
     fn test_coerce_bool_false() {
         let bytes = coerce_val_to_bytes(&Val::Bool(false));
-        assert_eq!(bytes, serde_json::to_vec(&Val::Bool(false)).unwrap());
+        assert_eq!(bytes, fixture_json(&Val::Bool(false)));
     }
 
     #[test]
@@ -1449,8 +1452,8 @@ mod tests {
         ]);
         let bytes = coerce_val_to_bytes(&list);
         // Null and Bool go through the "other" branch (serde_json), Int and String have dedicated arms
-        let null_json = serde_json::to_vec(&Val::Null).unwrap();
-        let bool_json = serde_json::to_vec(&Val::Bool(true)).unwrap();
+        let null_json = fixture_json(&Val::Null);
+        let bool_json = fixture_json(&Val::Bool(true));
         let mut expected = Vec::new();
         expected.extend_from_slice(&null_json);
         expected.push(b'\n');
@@ -1483,7 +1486,7 @@ mod tests {
     #[test]
     fn test_coerce_map_empty() {
         let map = Val::Map(FxIndexMap::with_hasher(FxBuildHasher::default()));
-        assert_eq!(coerce_val_to_bytes(&map), serde_json::to_vec(&map).unwrap());
+        assert_eq!(coerce_val_to_bytes(&map), fixture_json(&map));
     }
 
     #[test]
@@ -1491,7 +1494,7 @@ mod tests {
         let mut m = FxIndexMap::with_hasher(FxBuildHasher::default());
         m.insert(ustr("x"), Val::Int(10));
         let val = Val::Map(m);
-        assert_eq!(coerce_val_to_bytes(&val), serde_json::to_vec(&val).unwrap());
+        assert_eq!(coerce_val_to_bytes(&val), fixture_json(&val));
     }
 
     #[test]
@@ -1500,7 +1503,7 @@ mod tests {
         m.insert(ustr("a"), Val::Int(1));
         m.insert(ustr("b"), Val::String("hello".into()));
         let val = Val::Map(m);
-        assert_eq!(coerce_val_to_bytes(&val), serde_json::to_vec(&val).unwrap());
+        assert_eq!(coerce_val_to_bytes(&val), fixture_json(&val));
     }
 
     #[test]
@@ -1510,37 +1513,37 @@ mod tests {
         m.insert(ustr("flag"), Val::Bool(true));
         m.insert(ustr("pi"), Val::Float(3.14));
         let val = Val::Map(m);
-        assert_eq!(coerce_val_to_bytes(&val), serde_json::to_vec(&val).unwrap());
+        assert_eq!(coerce_val_to_bytes(&val), fixture_json(&val));
     }
 
     #[test]
     fn test_coerce_blob() {
         let blob = Val::Blob(vec![65, 66, 67]);
         let bytes = coerce_val_to_bytes(&blob);
-        assert_eq!(bytes, serde_json::to_vec(&blob).unwrap());
+        assert_eq!(bytes, fixture_json(&blob));
     }
 
     #[test]
     fn test_coerce_blob_empty() {
         let blob = Val::Blob(vec![]);
         let bytes = coerce_val_to_bytes(&blob);
-        assert_eq!(bytes, serde_json::to_vec(&blob).unwrap());
+        assert_eq!(bytes, fixture_json(&blob));
     }
 
     #[test]
     fn test_coerce_datetime() {
-        let dt: Val =
-            serde_json::from_str(r#"{"type":"DateTime","value":"2024-06-15T10:30:00Z"}"#).unwrap();
+        let dt: Val = serde_json::from_str(r#"{"type":"DateTime","value":"2024-06-15T10:30:00Z"}"#)
+            .expect("DateTime fixture must deserialize");
         let bytes = coerce_val_to_bytes(&dt);
-        assert_eq!(bytes, serde_json::to_vec(&dt).unwrap());
+        assert_eq!(bytes, fixture_json(&dt));
     }
 
     #[test]
     fn test_coerce_capability() {
-        let cap: Val =
-            serde_json::from_str(r#"{"type":"Capability","value":{"ReadDir":"/tmp"}}"#).unwrap();
+        let cap: Val = serde_json::from_str(r#"{"type":"Capability","value":{"ReadDir":"/tmp"}}"#)
+            .expect("Capability fixture must deserialize");
         let bytes = coerce_val_to_bytes(&cap);
-        assert_eq!(bytes, serde_json::to_vec(&cap).unwrap());
+        assert_eq!(bytes, fixture_json(&cap));
     }
 
     #[test]
@@ -1548,9 +1551,9 @@ mod tests {
         let og: Val = serde_json::from_str(
             r#"{"type":"ObjectGraph","value":{"root":0,"graph":{"nodes":{},"edges":{}}}}"#,
         )
-        .unwrap();
+        .expect("ObjectGraph fixture must deserialize");
         let bytes = coerce_val_to_bytes(&og);
-        assert_eq!(bytes, serde_json::to_vec(&og).unwrap());
+        assert_eq!(bytes, fixture_json(&og));
     }
     // parse_json_value (private helper)
     #[test]
@@ -1590,7 +1593,7 @@ mod tests {
     fn test_parse_json_float() {
         assert_eq!(
             super::parse_json_value(serde_json::Value::Number(
-                serde_json::Number::from_f64(3.14).unwrap()
+                serde_json::Number::from_f64(3.14).expect("finite float must be a JSON number")
             )),
             Val::Float(3.14)
         );
@@ -1709,7 +1712,7 @@ mod tests {
         let inner_map = Val::Map(inner);
         let list = Val::List(vec![inner_map.clone(), Val::String("end".into())]);
         let bytes = coerce_val_to_bytes(&list);
-        let mut expected = serde_json::to_vec(&inner_map).unwrap();
+        let mut expected = fixture_json(&inner_map);
         expected.push(b'\n');
         expected.extend_from_slice(b"end\n");
         assert_eq!(bytes, expected);
@@ -1720,7 +1723,7 @@ mod tests {
         let mut m = FxIndexMap::with_hasher(FxBuildHasher::default());
         m.insert(ustr("nums"), Val::List(vec![Val::Int(1), Val::Int(2)]));
         let val = Val::Map(m);
-        assert_eq!(coerce_val_to_bytes(&val), serde_json::to_vec(&val).unwrap());
+        assert_eq!(coerce_val_to_bytes(&val), fixture_json(&val));
     }
 
     #[test]
@@ -1744,7 +1747,7 @@ mod tests {
         let list = Val::List(vec![Val::Int(7), map_val.clone()]);
         let bytes = coerce_val_to_bytes(&list);
         let mut expected = b"7\n".to_vec();
-        expected.extend_from_slice(&serde_json::to_vec(&map_val).unwrap());
+        expected.extend_from_slice(&fixture_json(&map_val));
         expected.push(b'\n');
         assert_eq!(bytes, expected);
     }
@@ -1764,13 +1767,13 @@ mod tests {
     fn test_coerce_val_to_bytes_for_cmd_json() {
         let val = Val::Int(42);
         let bytes_jq = coerce_val_to_bytes_for_cmd(&val, "jq");
-        assert_eq!(bytes_jq, serde_json::to_vec(&val).unwrap());
+        assert_eq!(bytes_jq, fixture_json(&val));
 
         let mut map_inner = FxIndexMap::with_hasher(FxBuildHasher::default());
         map_inner.insert(ustr("key"), Val::String("val".into()));
         let map_val = Val::Map(map_inner);
         let bytes_curl = coerce_val_to_bytes_for_cmd(&map_val, "curl");
-        assert_eq!(bytes_curl, serde_json::to_vec(&map_val).unwrap());
+        assert_eq!(bytes_curl, fixture_json(&map_val));
     }
 
     #[test]

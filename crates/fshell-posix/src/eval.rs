@@ -1702,7 +1702,7 @@ async fn eval_simple_command(
                 args = command_args;
                 suppress_function_lookup = true;
                 search_path_override = use_default_path
-                    .then_some(crate::posix_builtins::command::DEFAULT_PATH.to_string());
+                    .then_some(crate::posix_builtins::command::default_path().to_string());
             }
             action => {
                 command_action = Some(action);
@@ -2060,7 +2060,7 @@ async fn eval_simple_command_inner(
                     use_default_path,
                 } => {
                     let path_override =
-                        use_default_path.then_some(crate::posix_builtins::command::DEFAULT_PATH);
+                        use_default_path.then_some(crate::posix_builtins::command::default_path());
                     let (code, rendered) = crate::posix_builtins::command::lookup_commands(
                         &names,
                         verbose,

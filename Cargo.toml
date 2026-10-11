@@ -94,18 +94,13 @@ path = "src/main.rs"
 [[example]]
 name = "argvdump"
 path = "tests/helpers/argvdump.rs"
+test = true
 
 # Deterministic stdout/stderr/exit emitter used by the differential conformance
 # suite for redirection, stream-merging and exit-status cases.
 [[example]]
 name = "emit"
 path = "tests/helpers/emit.rs"
-
-# Keeps the argvdump unit tests running under plain `cargo test`; examples are
-# built but not run as tests.
-[[test]]
-name = "argvdump_units"
-path = "tests/helpers/argvdump.rs"
 
 [dependencies]
 fshell-core = { workspace = true }

@@ -8,7 +8,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 fn make_env() -> (tokio::runtime::Runtime, Env) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new().expect("benchmark runtime must initialize");
     let _guard = runtime.enter();
     let env = Env::new();
     fshell_builtins::init(&env);
@@ -18,7 +18,7 @@ fn make_env() -> (tokio::runtime::Runtime, Env) {
 
 fn builtin_echo_empty(c: &mut Criterion) {
     let (runtime, env) = make_env();
-    let echo = env.get_builtin("echo").unwrap();
+    let echo = env.get_builtin("echo").expect("echo must be registered");
     c.bench_function("builtins/echo_empty", |b| {
         b.to_async(&runtime).iter(|| {
             let e = env.clone();
@@ -33,7 +33,7 @@ fn builtin_echo_empty(c: &mut Criterion) {
 
 fn builtin_echo_string(c: &mut Criterion) {
     let (runtime, env) = make_env();
-    let echo = env.get_builtin("echo").unwrap();
+    let echo = env.get_builtin("echo").expect("echo must be registered");
     let args = vec![Val::String("hello world".to_string())];
     c.bench_function("builtins/echo_string", |b| {
         b.to_async(&runtime).iter(|| {
@@ -50,7 +50,7 @@ fn builtin_echo_string(c: &mut Criterion) {
 
 fn builtin_echo_multi(c: &mut Criterion) {
     let (runtime, env) = make_env();
-    let echo = env.get_builtin("echo").unwrap();
+    let echo = env.get_builtin("echo").expect("echo must be registered");
     let args = vec![
         Val::String("a".to_string()),
         Val::String("b".to_string()),
@@ -73,7 +73,7 @@ fn builtin_echo_multi(c: &mut Criterion) {
 
 fn builtin_pwd(c: &mut Criterion) {
     let (runtime, env) = make_env();
-    let pwd = env.get_builtin("pwd").unwrap();
+    let pwd = env.get_builtin("pwd").expect("pwd must be registered");
     c.bench_function("builtins/pwd", |b| {
         b.to_async(&runtime).iter(|| {
             let e = env.clone();
@@ -88,7 +88,7 @@ fn builtin_pwd(c: &mut Criterion) {
 
 fn builtin_head_stream(c: &mut Criterion) {
     let (runtime, env) = make_env();
-    let head = env.get_builtin("head").unwrap();
+    let head = env.get_builtin("head").expect("head must be registered");
     c.bench_function("builtins/head_stream", |b| {
         b.to_async(&runtime).iter(|| {
             let e = env.clone();
@@ -118,7 +118,7 @@ fn builtin_head_stream(c: &mut Criterion) {
 
 fn builtin_type_found(c: &mut Criterion) {
     let (runtime, env) = make_env();
-    let type_builtin = env.get_builtin("type").unwrap();
+    let type_builtin = env.get_builtin("type").expect("type must be registered");
     c.bench_function("builtins/type_found", |b| {
         b.to_async(&runtime).iter(|| {
             let e = env.clone();
@@ -133,7 +133,7 @@ fn builtin_type_found(c: &mut Criterion) {
 
 fn builtin_type_not_found(c: &mut Criterion) {
     let (runtime, env) = make_env();
-    let type_builtin = env.get_builtin("type").unwrap();
+    let type_builtin = env.get_builtin("type").expect("type must be registered");
     c.bench_function("builtins/type_not_found", |b| {
         b.to_async(&runtime).iter(|| {
             let e = env.clone();

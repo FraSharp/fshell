@@ -271,6 +271,11 @@ pub fn init(env: &Env) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "Test fixture preconditions and failure assertions intentionally panic"
+)]
 mod tests {
     #![allow(
         clippy::await_holding_lock,

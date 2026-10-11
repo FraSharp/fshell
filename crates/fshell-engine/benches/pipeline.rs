@@ -8,7 +8,7 @@ use miette::SourceSpan;
 use std::hint::black_box;
 
 fn make_env_with_items(count: usize) -> (tokio::runtime::Runtime, Env) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new().expect("benchmark runtime must initialize");
     let _guard = runtime.enter();
     let env = Env::new();
     fshell_builtins::init(&env);

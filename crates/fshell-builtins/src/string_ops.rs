@@ -260,6 +260,10 @@ fn parse_substring_args(args: &[String]) -> Result<(String, i64, Option<i64>), S
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
 

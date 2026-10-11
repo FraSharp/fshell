@@ -1123,7 +1123,11 @@ mod tests {
         reg.deny(ResourceHandle::ReadDir(PathBuf::from("/tmp")));
         let result = reg.check_with_deny(&ResourceHandle::ReadDir(PathBuf::from("/tmp")));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("denied"));
+        assert!(
+            result
+                .expect_err("access must be denied")
+                .contains("denied")
+        );
     }
 
     #[test]
@@ -1131,7 +1135,11 @@ mod tests {
         let reg = CapsRegistry::new();
         let result = reg.check_with_deny(&ResourceHandle::ReadDir(PathBuf::from("/tmp")));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not held"));
+        assert!(
+            result
+                .expect_err("capability must not be held")
+                .contains("not held")
+        );
     }
 
     #[test]
@@ -1199,7 +1207,8 @@ mod tests {
     #[test]
     fn test_serde_denied_field_default() {
         let json = r#"{"held":[],"strict_mode":false}"#;
-        let reg: CapsRegistry = serde_json::from_str(json).unwrap();
+        let reg: CapsRegistry =
+            serde_json::from_str(json).expect("capability fixture must deserialize");
         assert!(reg.denied.is_empty());
         assert!(reg.held.is_empty());
         assert!(!reg.strict_mode);
@@ -1210,8 +1219,8 @@ mod tests {
         let mut reg = CapsRegistry::new();
         reg.grant(ResourceHandle::ReadDir(PathBuf::from("/tmp")));
         reg.deny(ResourceHandle::ReadDir(PathBuf::from("/tmp/secret")));
-        let json = serde_json::to_string(&reg).unwrap();
-        let back: CapsRegistry = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&reg).expect("registry must serialize");
+        let back: CapsRegistry = serde_json::from_str(&json).expect("registry must round-trip");
         assert_eq!(reg, back);
         assert!(!back.check_read_dir(Path::new("/tmp/secret")));
         assert!(back.check_read_dir(Path::new("/tmp/public")));
@@ -1319,19 +1328,21 @@ mod parse_tests {
         let old_home = fshell_core::get_var("FSH_HOME").map(|v| v.to_string_lossy().to_string());
         fshell_core::set_var("FSH_HOME", "/home/testuser");
 
-        let cap1 = parse_cap_string("fs.read:~/projects/**", base).unwrap();
+        let cap1 =
+            parse_cap_string("fs.read:~/projects/**", base).expect("read capability must parse");
         assert_eq!(
             cap1,
             ResourceHandle::ReadDir(PathBuf::from("/home/testuser/projects/**"))
         );
 
-        let cap2 = parse_cap_string("process.spawn:/usr/bin/*", base).unwrap();
+        let cap2 = parse_cap_string("process.spawn:/usr/bin/*", base)
+            .expect("spawn capability must parse");
         assert_eq!(
             cap2,
             ResourceHandle::ProcessSpawnPath("/usr/bin/*".to_string())
         );
 
-        let cap3 = parse_cap_string("net.api.*.com", base).unwrap();
+        let cap3 = parse_cap_string("net.api.*.com", base).expect("network capability must parse");
         assert_eq!(cap3, ResourceHandle::NetworkSocket("api.*.com".to_string()));
 
         // Restore env
@@ -1365,9 +1376,9 @@ mod parse_tests {
 
     #[test]
     fn test_cap_file_and_cap_dir() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("fixture directory must be created");
         let file_path = temp.path().join("test_cap.txt");
-        std::fs::write(&file_path, b"hello capability").unwrap();
+        std::fs::write(&file_path, b"hello capability").expect("fixture file must be created");
 
         let mut reg = CapsRegistry::new();
         reg.grant(ResourceHandle::ReadFile(temp.path().to_path_buf()));
@@ -1375,8 +1386,10 @@ mod parse_tests {
 
         let mut cap_file = reg
             .open_file(&file_path, true, false, false, false, false)
-            .unwrap();
-        let content = cap_file.read_to_string().unwrap();
+            .expect("authorized file must open");
+        let content = cap_file
+            .read_to_string()
+            .expect("authorized file must be readable");
         assert_eq!(content, "hello capability");
 
         let denied_path = PathBuf::from("/etc/shadow");
@@ -1385,8 +1398,13 @@ mod parse_tests {
                 .is_err()
         );
 
-        let cap_dir = reg.acquire_dir(temp.path(), true, false).unwrap();
-        let entries: Vec<_> = cap_dir.read_dir().unwrap().collect();
+        let cap_dir = reg
+            .acquire_dir(temp.path(), true, false)
+            .expect("authorized directory must open");
+        let entries: Vec<_> = cap_dir
+            .read_dir()
+            .expect("authorized directory must be readable")
+            .collect();
         assert_eq!(entries.len(), 1);
     }
 }

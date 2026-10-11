@@ -4096,7 +4096,7 @@ static WATCH_TX: std::sync::OnceLock<std::sync::mpsc::Sender<Vec<String>>> =
     std::sync::OnceLock::new();
 
 pub(crate) fn start_path_watcher() {
-    use notify::{EventKind, RecursiveMode, Watcher};
+    use notify::EventKind;
 
     static WATCHER_STARTED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
@@ -4494,6 +4494,10 @@ pub(crate) fn expand_alias_with_args(expansion: &str, args: &[Val]) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
     use fshell_core::ParamModifier;

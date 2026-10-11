@@ -398,6 +398,11 @@ impl From<Val> for serde_json::Value {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "Test fixture preconditions and failure assertions intentionally panic"
+)]
 mod tests {
     use super::*;
     use fshell_hash::FxBuildHasher;

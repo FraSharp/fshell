@@ -176,6 +176,10 @@ pub fn is_glob_qualifier(pattern: &str) -> bool {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
 

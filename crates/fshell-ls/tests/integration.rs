@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

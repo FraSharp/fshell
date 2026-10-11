@@ -12,7 +12,7 @@ use std::hint::black_box;
 use ustr::ustr;
 
 fn make_env() -> (tokio::runtime::Runtime, Env) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new().expect("benchmark runtime must initialize");
     let _guard = runtime.enter();
     let env = Env::new();
     fshell_builtins::init(&env);

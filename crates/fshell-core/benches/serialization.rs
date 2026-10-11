@@ -44,7 +44,7 @@ fn json_decode_10k(c: &mut Criterion) {
     let items = make_test_items(10_000);
     let serialized: Vec<String> = items
         .iter()
-        .map(|item| serde_json::to_string(item).unwrap())
+        .map(|item| serde_json::to_string(item).expect("benchmark fixture must serialize to JSON"))
         .collect();
     c.bench_function("json/decode_10k", |b| {
         b.iter(|| {
@@ -71,7 +71,7 @@ fn yaml_decode_1k(c: &mut Criterion) {
     let items = make_test_items(1_000);
     let serialized: Vec<String> = items
         .iter()
-        .map(|item| serde_yaml::to_string(item).unwrap())
+        .map(|item| serde_yaml::to_string(item).expect("benchmark fixture must serialize to YAML"))
         .collect();
     c.bench_function("yaml/decode_1k", |b| {
         b.iter(|| {
@@ -98,7 +98,9 @@ fn msgpack_decode_1k(c: &mut Criterion) {
     let items = make_test_items(1_000);
     let serialized: Vec<Vec<u8>> = items
         .iter()
-        .map(|item| rmp_serde::to_vec(item).unwrap())
+        .map(|item| {
+            rmp_serde::to_vec(item).expect("benchmark fixture must serialize to MessagePack")
+        })
         .collect();
     c.bench_function("msgpack/decode_1k", |b| {
         b.iter(|| {

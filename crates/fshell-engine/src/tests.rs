@@ -16,6 +16,11 @@ use std::sync::atomic::Ordering;
 use ustr::ustr;
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "Test fixture preconditions and failure assertions intentionally panic"
+)]
 mod tests {
     #![allow(clippy::module_inception, clippy::approx_constant)]
     use super::*;
@@ -2175,6 +2180,10 @@ mod tests {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod proptests {
     use super::*;
     use crate::eval::eval_binop;

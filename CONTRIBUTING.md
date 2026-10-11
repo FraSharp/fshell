@@ -62,11 +62,14 @@ The root package contains the command-line application and domain-split integrat
 | `cargo test --workspace` | Available tests across workspace members |
 | `cargo test --test conformance_tests conformance_composition` | Pipeline and composition compatibility cases |
 | `cargo clippy --all-targets -- -D warnings` | Clippy checks for all root-package targets |
+| `cargo clippy --workspace --exclude fshell-archive --all-targets -- -D warnings` | Workspace libraries, tests, examples, benchmarks, and fuzz targets without native archive dependencies |
 | `cargo check -p fshell-fuzz` | Fuzz-target compilation |
 | `cargo audit` | Dependency vulnerability audit |
 | `cargo bench` | Criterion benchmarks |
 
-CI's Clippy gate covers the root package's targets. A workspace-wide Clippy run currently reports existing `unwrap_used` and `panic` lint violations in member-crate tests, so it is not a required local check.
+CI checks root-package targets on every native runner and the non-archive workspace on `ubuntu-latest`. `fshell-archive` requires the native dependencies above even when checked as a workspace member; omit `--exclude fshell-archive` when those dependencies are installed.
+
+Production panic/unwrap checks remain enabled. Existing test modules that intentionally panic on failed fixture preconditions or assertions use narrowly scoped, documented `#[expect]` attributes, not a global lint exemption. Unfulfilled lint expectations fail the warning-denied gate. Prefer descriptive `expect` messages in new fixtures and propagate errors from search callbacks so unexpected output fails the test.
 
 CI runs on pushes and pull requests to `main`. Both the default (no optional features) and `--features full` configurations build, test, and lint the root package on all four native targets; the `full` job also verifies portable archive linkage:
 

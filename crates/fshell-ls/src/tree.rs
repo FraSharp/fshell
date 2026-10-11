@@ -3,7 +3,7 @@
 
 use crate::args::Config;
 use crate::colors::{BLUE, CYAN, GREEN, RESET};
-use crate::platform::get_dirent_name;
+use crate::platform::{get_dirent_name, stat_device};
 use crate::utils::{escape_name, escape_name_cow};
 use globset::GlobSet;
 use libc::{
@@ -172,7 +172,7 @@ where
     // SAFETY: fstatat succeeded, initializing expected_root.
     let expected_root = unsafe { expected_root.assume_init() };
     let root_identity = result.root_identity;
-    if expected_root.st_dev as u64 != root_identity.device
+    if stat_device(&expected_root) != root_identity.device
         || expected_root.st_ino != root_identity.inode
         || ((expected_root.st_mode & S_IFMT) == S_IFDIR) != root_identity.is_dir
     {
@@ -219,7 +219,7 @@ where
     }
     // SAFETY: fstat succeeded, initializing opened_root.
     let opened_root = unsafe { opened_root.assume_init() };
-    if opened_root.st_dev as u64 != root_identity.device
+    if stat_device(&opened_root) != root_identity.device
         || opened_root.st_ino != root_identity.inode
     {
         return Err(io::Error::new(

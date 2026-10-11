@@ -421,9 +421,10 @@ mod tests {
 
     fn assert_data_map(result: ParseResult) -> FxIndexMap<ustr::Ustr, Val> {
         match result {
-            ParseResult::Data(Val::Map(map)) => map,
-            other => panic!("Expected Data(Map), got {:?}", other),
+            ParseResult::Data(Val::Map(map)) => Ok(map),
+            other => Err(other),
         }
+        .expect("Expected Data(Map)")
     }
 
     // Grep parser tests

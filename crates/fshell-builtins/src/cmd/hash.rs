@@ -262,6 +262,11 @@ fn validate_xof_len(len: usize, span: Option<SourceSpan>) -> Result<usize, Built
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "Test fixture preconditions and failure assertions intentionally panic"
+)]
 mod tests {
     use super::*;
 

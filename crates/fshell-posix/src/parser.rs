@@ -139,6 +139,10 @@ pub fn is_posix_shebang(source: &str) -> bool {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
 

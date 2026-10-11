@@ -82,8 +82,7 @@ fn bench_hasher_comparison(c: &mut Criterion) {
 
 fn bench_map_operations(c: &mut Criterion) {
     let keys: Vec<String> = (0..128).map(|index| format!("field-{index:04}")).collect();
-    let mut deterministic =
-        std::collections::HashMap::with_hasher(fshell_hash::MapBuildHasher::default());
+    let mut deterministic = std::collections::HashMap::with_hasher(fshell_hash::MapBuildHasher);
     let mut randomized = fshell_hash::RandomHashMap::default();
     for (index, key) in keys.iter().cloned().enumerate() {
         deterministic.insert(key.clone(), index);
@@ -109,8 +108,7 @@ fn bench_map_operations(c: &mut Criterion) {
         b.iter_batched(
             || keys.clone(),
             |owned_keys| {
-                let mut map =
-                    std::collections::HashMap::with_hasher(fshell_hash::MapBuildHasher::default());
+                let mut map = std::collections::HashMap::with_hasher(fshell_hash::MapBuildHasher);
                 for (index, key) in owned_keys.into_iter().enumerate() {
                     map.insert(key, index);
                 }

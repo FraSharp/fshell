@@ -29,7 +29,7 @@ fn find_true_command() -> &'static str {
 }
 
 fn sandbox_spawn_off(c: &mut Criterion) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new().expect("benchmark runtime must initialize");
     let env = make_test_env();
     let true_cmd = find_true_command();
 
@@ -42,7 +42,8 @@ fn sandbox_spawn_off(c: &mut Criterion) {
             let cfg = config.clone();
             async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-                fshell_sandbox::run_sandboxed(true_cmd, &[], None, &e, tx, &cfg).unwrap();
+                fshell_sandbox::run_sandboxed(true_cmd, &[], None, &e, tx, &cfg)
+                    .expect("benchmark child must spawn");
                 while let Some(payload) = rx.recv().await {
                     if let PipelinePayload::Data(data) = payload {
                         if let Val::String(s) = &*data {
@@ -59,7 +60,7 @@ fn sandbox_spawn_off(c: &mut Criterion) {
 }
 
 fn sandbox_spawn_kernel(c: &mut Criterion) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new().expect("benchmark runtime must initialize");
     let env = make_test_env();
     let true_cmd = find_true_command();
 
@@ -71,7 +72,8 @@ fn sandbox_spawn_kernel(c: &mut Criterion) {
             let cfg = config.clone();
             async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-                fshell_sandbox::run_sandboxed(true_cmd, &[], None, &e, tx, &cfg).unwrap();
+                fshell_sandbox::run_sandboxed(true_cmd, &[], None, &e, tx, &cfg)
+                    .expect("benchmark child must spawn");
                 while let Some(payload) = rx.recv().await {
                     if let PipelinePayload::Data(data) = payload {
                         if let Val::String(s) = &*data {

@@ -131,13 +131,14 @@ fn test_render_json() {
         is_interactive: false,
     };
     let output = render(diag, None, "", &config);
-    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&output).expect("rendered output must be valid JSON");
     assert_eq!(parsed["code"], "FSH-MATH-001");
     assert_eq!(parsed["name"], "DivisionByZero");
     assert!(
         parsed["message"]
             .as_str()
-            .unwrap()
+            .expect("rendered message must be a string")
             .contains("test error occurred")
     );
     assert_eq!(parsed["fix"], "let x = 1 / 1");

@@ -307,6 +307,7 @@ fn visit_stage(stage: &PipelineStage, found: &mut Option<PosixRequirement>) {
 }
 
 #[cfg(test)]
+#[expect(clippy::panic, reason = "Test failure assertions intentionally panic")]
 mod tests {
     use super::*;
     use fshell_core::Parser;

@@ -486,10 +486,14 @@ fn authorize_entry(
 mod tests {
     use super::*;
 
+    fn fixture_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("fixture directory must be created")
+    }
+
     #[test]
     fn name_discovery_requires_listing_not_file_read_authority() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("value"), "").unwrap();
+        let tmp = fixture_dir();
+        std::fs::write(tmp.path().join("value"), "").expect("fixture file must be created");
         let mut plan = TraversalPlan::new(tmp.path().into());
         plan.respect_ignore = false;
         let hooks = Hooks {
@@ -502,16 +506,16 @@ mod tests {
         walk(&plan, hooks.clone(), Arc::new(Control::default()), |_| {
             Ok(true)
         })
-        .unwrap();
+        .expect("name discovery must succeed with listing authority");
         plan.metadata = true;
         assert!(walk(&plan, hooks, Arc::new(Control::default()), |_| Ok(true)).is_err());
     }
 
     #[test]
     fn one_explicit_file_runs_inline_without_metadata() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let path = tmp.path().join("value");
-        std::fs::write(&path, "").unwrap();
+        std::fs::write(&path, "").expect("fixture file must be created");
         let owner = std::thread::current().id();
         visit_files(
             &[path],
@@ -526,14 +530,14 @@ mod tests {
                 }
             },
         )
-        .unwrap();
+        .expect("explicit file visit must succeed");
     }
 
     #[test]
     fn sorted_walks_are_deterministic() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         for name in ["z.rs", "a.rs", "b.rs"] {
-            std::fs::write(tmp.path().join(name), "").unwrap();
+            std::fs::write(tmp.path().join(name), "").expect("fixture file must be created");
         }
         let mut plan = TraversalPlan::new(tmp.path().into());
         plan.sorted = true;
@@ -543,13 +547,18 @@ mod tests {
             Hooks::unrestricted(),
             Arc::new(Control::default()),
             |entry| {
-                paths.lock().unwrap().push(entry.path);
+                paths
+                    .lock()
+                    .expect("result lock must not be poisoned")
+                    .push(entry.path);
                 Ok(true)
             },
         )
-        .unwrap();
+        .expect("sorted traversal must succeed");
         assert_eq!(
-            paths.into_inner().unwrap(),
+            paths
+                .into_inner()
+                .expect("result lock must not be poisoned"),
             ["a.rs", "b.rs", "z.rs"].map(|p| tmp.path().join(p))
         );
     }
@@ -565,7 +574,7 @@ mod tests {
                 Err(SearchError::Plan("flush failed".into()))
             }
         }
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         assert!(
             walk_with(
                 &TraversalPlan::new(tmp.path().into()),
@@ -579,27 +588,35 @@ mod tests {
 
     #[test]
     fn hidden_subtrees_and_ignore_files_are_pruned() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join(".hidden")).unwrap();
+        let tmp = fixture_dir();
+        std::fs::create_dir(tmp.path().join(".hidden"))
+            .expect("hidden fixture directory must be created");
         for name in ["visible.rs", "ignored.rs", ".hidden/leak.rs"] {
-            std::fs::write(tmp.path().join(name), "").unwrap();
+            std::fs::write(tmp.path().join(name), "").expect("fixture file must be created");
         }
-        std::fs::write(tmp.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "ignored.rs\n")
+            .expect("ignore fixture must be created");
         let mut plan = TraversalPlan::new(tmp.path().into());
-        plan.names
-            .push(NamePredicate::compile("[vi]*.rs", false, false).unwrap());
+        plan.names.push(
+            NamePredicate::compile("[vi]*.rs", false, false).expect("name matcher must compile"),
+        );
         let output = Mutex::new(Vec::new());
         walk(
             &plan,
             Hooks::unrestricted(),
             Arc::new(Control::default()),
             |e| {
-                output.lock().unwrap().push(e);
+                output
+                    .lock()
+                    .expect("result lock must not be poisoned")
+                    .push(e);
                 Ok(true)
             },
         )
-        .unwrap();
-        let output = output.into_inner().unwrap();
+        .expect("ignored traversal must succeed");
+        let output = output
+            .into_inner()
+            .expect("result lock must not be poisoned");
         assert_eq!(output.len(), 1);
         assert!(output[0].path.ends_with("visible.rs"));
         assert!(output[0].metadata.is_none());
@@ -607,9 +624,10 @@ mod tests {
 
     #[test]
     fn results_are_unbounded_unless_an_explicit_limit_is_set() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         for i in 0..1100 {
-            std::fs::write(tmp.path().join(format!("{i}")), "").unwrap();
+            std::fs::write(tmp.path().join(format!("{i}")), "")
+                .expect("fixture file must be created");
         }
         for (limit, expected) in [(None, 1100), (Some(0), 0), (Some(10), 10)] {
             let mut plan = TraversalPlan::new(tmp.path().into());
@@ -624,16 +642,17 @@ mod tests {
                     Ok(true)
                 },
             )
-            .unwrap();
+            .expect("limited traversal must succeed");
             assert_eq!(count.into_inner(), expected);
         }
     }
 
     #[test]
     fn denied_directories_are_not_descended_into() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("secret")).unwrap();
-        std::fs::write(tmp.path().join("secret/value"), "").unwrap();
+        let tmp = fixture_dir();
+        std::fs::create_dir(tmp.path().join("secret"))
+            .expect("denied fixture directory must be created");
+        std::fs::write(tmp.path().join("secret/value"), "").expect("fixture file must be created");
         let hooks = Hooks {
             authorize: Arc::new(|p, _| {
                 if p.ends_with("secret") {
@@ -657,7 +676,7 @@ mod tests {
 
     #[test]
     fn cancellation_before_any_match_stops_without_output() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let hooks = Hooks {
             cancelled: Arc::new(|| true),
             ..Hooks::unrestricted()
@@ -666,8 +685,12 @@ mod tests {
             &TraversalPlan::new(tmp.path().into()),
             hooks,
             Arc::new(Control::default()),
-            |_| panic!("cancelled traversal emitted a result"),
+            |_| {
+                Err(SearchError::Plan(
+                    "cancelled traversal emitted a result".into(),
+                ))
+            },
         )
-        .unwrap();
+        .expect("cancelled traversal must stop without output");
     }
 }

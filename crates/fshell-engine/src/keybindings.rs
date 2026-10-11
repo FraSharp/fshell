@@ -1039,6 +1039,10 @@ pub fn all_widgets() -> &'static [WidgetInfo] {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
 

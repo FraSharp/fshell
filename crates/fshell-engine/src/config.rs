@@ -464,6 +464,10 @@ pub fn collect_settings_lines(s: &SettingsSnapshot) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Test fixture preconditions are assertions"
+)]
 mod tests {
     use super::*;
     use std::fs;

@@ -282,8 +282,8 @@ mod tests {
 
     #[test]
     fn buffered_scanning_preserves_long_lines_and_context() {
-        let matcher =
-            CompiledMatcher::compile(&["^Ax*Z$".into()], &MatchOptions::default()).unwrap();
+        let matcher = CompiledMatcher::compile(&["^Ax*Z$".into()], &MatchOptions::default())
+            .expect("long-line matcher must compile");
         let mut bytes = b"before\nA".to_vec();
         bytes.extend(std::iter::repeat_n(b'x', 200000));
         bytes.extend_from_slice(b"Z\nafter\n");
@@ -292,7 +292,7 @@ mod tests {
             after: 1,
             ..ScanOptions::default()
         })
-        .unwrap();
+        .expect("context scanner must initialize");
         let mut lines = vec![];
         let summary = scanner
             .search(
@@ -307,7 +307,7 @@ mod tests {
                     Ok(true)
                 },
             )
-            .unwrap();
+            .expect("context scan must succeed");
         assert_eq!(summary.matches, 1);
         assert_eq!(lines, [(1, false), (2, true), (3, false)]);
     }
@@ -362,49 +362,50 @@ mod tests {
                     ..MatchOptions::default()
                 }
             )
-            .unwrap()
+            .expect("fixed bracket matcher must compile")
             .is_match(b"[")
-            .unwrap()
+            .expect("fixed matching must succeed")
         );
     }
 
     #[test]
     fn count_and_quiet_do_not_construct_results() {
-        let matcher = CompiledMatcher::compile(&["hit".into()], &MatchOptions::default()).unwrap();
+        let matcher = CompiledMatcher::compile(&["hit".into()], &MatchOptions::default())
+            .expect("count matcher must compile");
         for (quiet, count) in [(false, 2), (true, 1)] {
             let mut scanner = Scanner::new(ScanOptions {
                 count_only: true,
                 quiet,
                 ..ScanOptions::default()
             })
-            .unwrap();
+            .expect("count scanner must initialize");
             let summary = scanner
                 .search(
                     &matcher,
                     &b"hit\nhit\n"[..],
                     &Control::default(),
                     || false,
-                    |_| panic!("count allocated a result"),
+                    |_| Err(io::Error::other("count allocated a result")),
                 )
-                .unwrap();
+                .expect("count scan must succeed without constructing results");
             assert_eq!(summary.matches, count);
         }
     }
 
     #[test]
     fn cancellation_interrupts_reading_without_a_match() {
-        let matcher =
-            CompiledMatcher::compile(&["absent".into()], &MatchOptions::default()).unwrap();
-        let mut scanner = Scanner::new(ScanOptions::default()).unwrap();
+        let matcher = CompiledMatcher::compile(&["absent".into()], &MatchOptions::default())
+            .expect("absent matcher must compile");
+        let mut scanner = Scanner::new(ScanOptions::default()).expect("scanner must initialize");
         let summary = scanner
             .search(
                 &matcher,
                 &b"unmatched\n"[..],
                 &Control::default(),
                 || true,
-                |_| panic!("cancelled search emitted output"),
+                |_| Err(io::Error::other("cancelled search emitted output")),
             )
-            .unwrap();
+            .expect("cancelled scan must stop without output");
         assert_eq!(summary.matches, 0);
     }
 }

@@ -24,7 +24,7 @@ fn make_completer_with_vars() -> FshellCompleter {
         vars.insert("another_variable".to_string(), Val::Bool(true));
     }
 
-    FshellCompleter { env }
+    FshellCompleter { env, cancel: None }
 }
 
 fn autocomplete_bench(c: &mut Criterion) {

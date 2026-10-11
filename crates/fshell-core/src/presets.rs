@@ -219,6 +219,7 @@ fn classic() -> PromptConfig {
 }
 
 #[cfg(test)]
+#[expect(clippy::panic, reason = "Test failure assertions intentionally panic")]
 mod tests {
     use super::*;
 
