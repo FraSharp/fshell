@@ -15,6 +15,8 @@ pub struct ShellError {
     pub suggestions: Vec<String>,
     pub secondary_spans: Vec<(SourceSpan, String)>,
     pub severity: Option<Severity>,
+    /// Utility-reported status, as distinct from a shell/runtime fault.
+    pub exit_status: Option<u8>,
 }
 
 impl fmt::Display for ShellError {
@@ -85,6 +87,7 @@ impl ShellError {
             suggestions: Vec::new(),
             secondary_spans: Vec::new(),
             severity: None,
+            exit_status: None,
         }
     }
 
@@ -123,6 +126,20 @@ impl ShellError {
         self
     }
 
+    pub fn with_exit_status(mut self, status: u8) -> Self {
+        self.exit_status = Some(status);
+        self
+    }
+
+    pub fn reported_status(&self) -> Option<i64> {
+        self.exit_status.map(i64::from).or(match self.code {
+            ErrorCode::CommandNotFound => Some(127),
+            ErrorCode::CommandNotExecutable => Some(126),
+            ErrorCode::RedirectionFailed => Some(1),
+            _ => None,
+        })
+    }
+
     pub fn is_condition_false(&self) -> bool {
         self.code == ErrorCode::ConditionFalse
     }
@@ -137,6 +154,7 @@ impl ShellError {
             suggestions: Vec::new(),
             secondary_spans: Vec::new(),
             severity: None,
+            exit_status: None,
         }
     }
 

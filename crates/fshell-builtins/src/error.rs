@@ -336,6 +336,7 @@ impl From<BuiltinError> for ShellError {
             suggestions,
             secondary_spans: vec![],
             severity: None,
+            exit_status: None,
         }
     }
 }

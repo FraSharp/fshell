@@ -135,6 +135,7 @@ pub struct JobControl {
     pub fg_cvar: Arc<Condvar>,
     pub sigint_pending: Arc<AtomicBool>,
     pub cancellation: Arc<AtomicBool>,
+    pub cancellation_notify: Arc<tokio::sync::Notify>,
     /// Set by `exit` executed inside a pipeline task (e.g. a user function,
     /// which runs in a spawned task and cannot return `Flow::Exit` directly).
     /// The statement driver observes it after the pipeline completes and turns
@@ -160,6 +161,7 @@ impl Clone for JobControl {
             fg_cvar: self.fg_cvar.clone(),
             sigint_pending: self.sigint_pending.clone(),
             cancellation: self.cancellation.clone(),
+            cancellation_notify: self.cancellation_notify.clone(),
             exit_request: self.exit_request.clone(),
         }
     }

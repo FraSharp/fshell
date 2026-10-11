@@ -797,8 +797,10 @@ async fn execute_output_route(
                 continue;
             }
         };
-        if env.pipeline_cancelled() {
-            break;
+        // Cancellation discards stale data, but a diagnostic must still reach
+        // its redirected destination after the failure stops the data workers.
+        if !matches!(&payload, PipelinePayload::Structured(_)) && env.pipeline_cancelled() {
+            continue;
         }
         let route = match &payload {
             PipelinePayload::Structured(diag) => {
@@ -1078,6 +1080,7 @@ async fn execute_pipeline_inner(
             PlannedStage::OutputRoute { .. } => crate::execution::Slot::Boundary,
         };
         env_clone.attach_stage(outcomes.clone(), stage_slot);
+        env_clone.attach_pipeline_stop(cancel_rx.clone());
         let (stage_clone, is_last) = match planned_stage {
             PlannedStage::Ast { stage, is_last } => (Some(stage), is_last),
             PlannedStage::OutputRoute { routes, is_last } => {
@@ -1979,14 +1982,8 @@ async fn execute_pipeline_inner(
                                 {
                                     Ok(()) => env_clone.record_stage_status(0),
                                     Err(e) => {
-                                        let is_hard = !e.is_condition_false()
-                                            && !matches!(
-                                                e.code,
-                                                fshell_core::diagnostic::ErrorCode::CommandNotFound
-                                                    | fshell_core::diagnostic::ErrorCode::CommandNotExecutable
-                                                    | fshell_core::diagnostic::ErrorCode::RedirectionFailed
-                                            );
-                                        if is_hard {
+                                        if !e.is_condition_false() && e.reported_status().is_none()
+                                        {
                                             let _ = cancel.send(true);
                                         }
                                         let diag = FshDiag::new(e);
@@ -2014,14 +2011,8 @@ async fn execute_pipeline_inner(
                                 ) {
                                     Ok(()) => env_clone.record_stage_status(0),
                                     Err(e) => {
-                                        let is_hard = !e.is_condition_false()
-                                            && !matches!(
-                                                e.code,
-                                                fshell_core::diagnostic::ErrorCode::CommandNotFound
-                                                    | fshell_core::diagnostic::ErrorCode::CommandNotExecutable
-                                                    | fshell_core::diagnostic::ErrorCode::RedirectionFailed
-                                            );
-                                        if is_hard {
+                                        if !e.is_condition_false() && e.reported_status().is_none()
+                                        {
                                             let _ = cancel.send(true);
                                         }
                                         let diag = FshDiag::new(e);

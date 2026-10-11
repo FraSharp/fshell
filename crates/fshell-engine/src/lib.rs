@@ -1027,11 +1027,16 @@ pub struct ChatConfig {
 pub(crate) struct StageSlot {
     outcomes: Arc<execution::PipelineOutcomes>,
     slot: execution::Slot,
+    stop: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl StageSlot {
     pub(crate) fn new(outcomes: Arc<execution::PipelineOutcomes>, slot: execution::Slot) -> Self {
-        Self { outcomes, slot }
+        Self {
+            outcomes,
+            slot,
+            stop: None,
+        }
     }
 
     pub(crate) fn outcomes(&self) -> &Arc<execution::PipelineOutcomes> {
@@ -1522,6 +1527,12 @@ impl Env {
         self.stage = Some(StageSlot::new(outcomes, slot));
     }
 
+    pub(crate) fn attach_pipeline_stop(&mut self, stop: tokio::sync::watch::Receiver<bool>) {
+        if let Some(stage) = &mut self.stage {
+            stage.stop = Some(stop);
+        }
+    }
+
     /// Record a status for this stage.
     ///
     /// A stage owns its own slot, so this cannot race another stage — which is
@@ -1981,6 +1992,7 @@ impl Env {
                 fg_cvar: Arc::new(Condvar::new()),
                 sigint_pending: Arc::new(AtomicBool::new(false)),
                 cancellation: Arc::new(AtomicBool::new(false)),
+                cancellation_notify: Arc::new(Notify::new()),
                 exit_request: Arc::new(Mutex::new(None)),
             },
             reactive: reactive::Reactivity {
@@ -2154,6 +2166,7 @@ impl Env {
                 fg_cvar: Arc::new(Condvar::new()),
                 sigint_pending: Arc::new(AtomicBool::new(false)),
                 cancellation: Arc::new(AtomicBool::new(false)),
+                cancellation_notify: Arc::new(Notify::new()),
                 exit_request: Arc::new(Mutex::new(None)),
             },
             reactive: reactive::Reactivity {
@@ -3136,7 +3149,7 @@ pub fn setup_signal_handlers(env: Env) {
                     // Set unconditionally: in-process stages poll `sigint_pending`
                     // (see `Env::pipeline_cancelled`), so a mixed pipeline such as
                     // `ls --tree | wc -l` stops instead of running to completion.
-                    env.job_control.sigint_pending.store(true, Ordering::SeqCst);
+                    env.request_pipeline_interrupt();
                     let env_clone = env.clone();
                     tokio::spawn(async move {
                         run_hooks("sigint", &env_clone).await;
@@ -3159,7 +3172,7 @@ pub fn setup_signal_handlers(env: Env) {
                         unsafe { libc::raise(libc::SIGSTOP); }
                     } else if env.is_command_running.load(Ordering::Relaxed) {
                         // Builtin running in-process: abort it (can't suspend+resume)
-                        env.job_control.sigint_pending.store(true, Ordering::SeqCst);
+                        env.request_pipeline_interrupt();
                     }
                     let env_clone = env.clone();
                     tokio::spawn(async move {
@@ -3172,7 +3185,7 @@ pub fn setup_signal_handlers(env: Env) {
                     tokio::spawn(async move {
                         run_hooks("sigterm", &env_clone).await;
                     });
-                    env.job_control.cancellation.store(true, Ordering::SeqCst);
+                    env.request_shell_cancellation();
                     break 'signal_loop;
                 }
                 _ = sigquit.recv() => {
@@ -3181,7 +3194,7 @@ pub fn setup_signal_handlers(env: Env) {
                     tokio::spawn(async move {
                         run_hooks("sigquit", &env_clone).await;
                     });
-                    env.job_control.cancellation.store(true, Ordering::SeqCst);
+                    env.request_shell_cancellation();
                     break 'signal_loop;
                 }
                 _ = sighup.recv() => {
@@ -3190,7 +3203,7 @@ pub fn setup_signal_handlers(env: Env) {
                     tokio::spawn(async move {
                         run_hooks("sighup", &env_clone).await;
                     });
-                    env.job_control.cancellation.store(true, Ordering::SeqCst);
+                    env.request_shell_cancellation();
                     break 'signal_loop;
                 }
                 _ = sigchld.recv() => {
@@ -3460,6 +3473,9 @@ pub async fn send_with_backpressure(
     tx: &PipeSender,
     payload: PipelinePayload,
 ) -> Result<(), ()> {
+    if env.pipeline_cancelled() {
+        return Err(());
+    }
     match tx.try_send(payload) {
         Ok(()) => Ok(()),
         Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
@@ -3472,7 +3488,10 @@ pub async fn send_with_backpressure(
                 let count = env.backpressure_count.load(Ordering::Relaxed);
                 eprintln!("[fshell] pipeline backpressure ({} events)", count);
             }
-            tx.send(returned).await.map_err(|_| ())
+            tokio::select! {
+                result = tx.send(returned) => result.map_err(|_| ()),
+                _ = env.wait_pipeline_cancelled() => Err(()),
+            }
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(()),
     }
@@ -3775,6 +3794,44 @@ impl Env {
     pub fn pipeline_cancelled(&self) -> bool {
         self.job_control.cancellation.load(Ordering::Acquire)
             || self.job_control.sigint_pending.load(Ordering::Acquire)
+            || self
+                .stage
+                .as_ref()
+                .and_then(|s| s.stop.as_ref())
+                .is_some_and(|rx| *rx.borrow())
+    }
+
+    pub fn request_pipeline_interrupt(&self) {
+        self.job_control
+            .sigint_pending
+            .store(true, Ordering::Release);
+        self.job_control.cancellation_notify.notify_waiters();
+    }
+
+    pub fn request_shell_cancellation(&self) {
+        self.job_control.cancellation.store(true, Ordering::Release);
+        self.job_control.cancellation_notify.notify_waiters();
+    }
+
+    /// Notification-driven cancellation for receivers and backpressured sends.
+    pub async fn wait_pipeline_cancelled(&self) {
+        let mut stop = self.stage.as_ref().and_then(|s| s.stop.clone());
+        loop {
+            let notified = self.job_control.cancellation_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.pipeline_cancelled() {
+                return;
+            }
+            if let Some(rx) = &mut stop {
+                tokio::select! {
+                    _ = &mut notified => {},
+                    result = rx.changed() => { if result.is_err() { stop = None; } }
+                }
+            } else {
+                notified.await;
+            }
+        }
     }
 
     /// Set a shell variable without exporting to the environment.

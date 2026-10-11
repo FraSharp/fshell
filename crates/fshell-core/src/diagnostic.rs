@@ -654,6 +654,11 @@ impl FshDiag {
             // Logical false has its own status (1) and stays silent.
             return None;
         }
+        if let Some(error) = self.report.downcast_ref::<crate::ShellError>()
+            && let Some(status) = error.reported_status()
+        {
+            return Some(status);
+        }
         match self.code? {
             ErrorCode::CommandNotFound => Some(127),
             // POSIX: found but not executable, or its interpreter is missing.

@@ -2332,4 +2332,50 @@ mod proptests {
         env.set_exit_code(accumulated);
         assert_eq!(env.exit_code(), 127);
     }
+
+    #[tokio::test]
+    async fn reported_utility_errors_keep_their_status() {
+        let env = Env::new();
+        let error = fshell_core::ShellError::new(fshell_core::ErrorCode::IoError, "search failed")
+            .with_exit_status(2);
+        let diag = fshell_core::FshDiag::new(error);
+        assert_eq!(diag.reported_status(), Some(2));
+        let failure = crate::classify_diag(diag);
+        let outcome = crate::pipeline_finalize(&ledger(1), vec![failure], false);
+        assert_eq!(outcome.exit_code, 2);
+        assert!(matches!(
+            outcome.failure,
+            Some(crate::PipelineFailure::Reported { .. })
+        ));
+        assert!(!env.pipeline_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancellation_wakes_backpressured_output() {
+        let env = Env::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        tx.send(crate::PipelinePayload::Data(Arc::new(Val::Int(0))))
+            .await
+            .unwrap();
+        let task = tokio::spawn({
+            let env = env.clone();
+            async move {
+                crate::send_with_backpressure(
+                    &env,
+                    &tx,
+                    crate::PipelinePayload::Data(Arc::new(Val::Int(1))),
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        env.request_pipeline_interrupt();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+    }
 }
