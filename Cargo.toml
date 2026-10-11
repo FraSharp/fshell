@@ -5,6 +5,7 @@ members = [
     "crates/fshell-capabilities",
     "crates/fshell-engine",
     "crates/fshell-semantic",
+    "crates/fshell-search",
     "crates/fshell-builtins",
     "crates/fshell-archive",
     "crates/fshell-bridge",
@@ -141,6 +142,7 @@ fshell-render = { path = "crates/fshell-render", version = "0.2.0" }
 fshell-repl = { path = "crates/fshell-repl", version = "0.2.0" }
 fshell-sandbox = { path = "crates/fshell-sandbox", version = "0.2.0" }
 fshell-semantic = { path = "crates/fshell-semantic", version = "0.2.0" }
+fshell-search = { path = "crates/fshell-search", version = "0.2.0" }
 fshell-terminal = { path = "crates/fshell-terminal", version = "0.2.0" }
 fshell-tty = { path = "crates/fshell-tty", version = "0.2.0" }
 strip-ansi-escapes = "0.2.1"
@@ -170,6 +172,10 @@ unicode-width = "0.2"
 unicode-segmentation = "1.12.0"
 terminal_size = "0.4"
 globset = "0.4"
+ignore = "0.4"
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
 walkdir = "2"
 csv = "1.4"
 ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzip"] }

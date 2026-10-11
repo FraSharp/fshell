@@ -1,0 +1,25 @@
+[package]
+name = "fshell-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Typed, cancellable filesystem traversal and content search for fshell"
+repository.workspace = true
+
+[dependencies]
+globset = { workspace = true }
+ignore = { workspace = true }
+grep-matcher = { workspace = true }
+grep-regex = { workspace = true }
+grep-searcher = { workspace = true }
+thiserror = { workspace = true }
+memchr = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[lints]
+workspace = true
