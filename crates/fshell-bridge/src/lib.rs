@@ -955,18 +955,55 @@ pub async fn run_external(
         next_id
     };
 
+    // Child stdio is a pipe, not a regular file. Register nonblocking readiness
+    // once instead of dispatching every read/write through Tokio's file pool.
+    // Prepare all descriptors before starting tasks so failed registration owns
+    // and closes its partial setup, then follows the normal joined wait boundary.
+    let pipes = (|| {
+        let stdin = child
+            .stdin
+            .take()
+            .map(|fd| tokio::net::unix::pipe::Sender::from_owned_fd(fd.into()))
+            .transpose()?;
+        let stdout = child
+            .stdout
+            .take()
+            .map(|fd| tokio::net::unix::pipe::Receiver::from_owned_fd(fd.into()))
+            .transpose()?;
+        let stderr = child
+            .stderr
+            .take()
+            .map(|fd| tokio::net::unix::pipe::Receiver::from_owned_fd(fd.into()))
+            .transpose()?;
+        Ok::<_, std::io::Error>((stdin, stdout, stderr))
+    })();
+    let (stdin, stdout, stderr, io_setup_error) = match pipes {
+        Ok((stdin, stdout, stderr)) => (stdin, stdout, stderr, None),
+        Err(error) => {
+            drop(child.stdin.take());
+            drop(child.stdout.take());
+            drop(child.stderr.take());
+            // SAFETY: this is the spawned pipeline's child process group, not
+            // the shell's group. A failed I/O setup cannot leave children alive.
+            unsafe {
+                libc::kill(-job_pgid, libc::SIGKILL);
+            }
+            (
+                None,
+                None,
+                None,
+                Some(ShellError::new(
+                    ErrorCode::CommandFailed,
+                    format!("failed to register child I/O pipes: {error}"),
+                )),
+            )
+        }
+    };
+
     // Pipe upstream inputs into process stdin, capture stdout/stderr (piped mode only)
     if let Some(mut rx) = in_rx.take()
-        && let Some(child_stdin) = child.stdin.take()
+        && let Some(mut async_stdin) = stdin
     {
-        // SAFETY: from_raw_fd takes ownership of the fd. into_raw_fd consumes
-        // the Stdio wrapper, transferring ownership. The fd is valid because
-        // child.stdin was just taken from a spawned process.
-        let std_stdin = unsafe {
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            std::fs::File::from_raw_fd(child_stdin.into_raw_fd())
-        };
-        let mut async_stdin = tokio::fs::File::from_std(std_stdin);
         let cmd_name = name.to_string();
         io_tasks.push(tokio::spawn(async move {
             while let Some(payload) = rx.recv().await {
@@ -989,15 +1026,7 @@ pub async fn run_external(
     }
 
     // Capture process stdout & stream line-by-line (when stdout was piped)
-    if let Some(child_stdout) = child.stdout.take() {
-        // SAFETY: from_raw_fd takes ownership of the fd. into_raw_fd consumes
-        // the Stdio wrapper, transferring ownership. The fd is valid because
-        // child.stdout was just taken from a spawned process.
-        let std_stdout = unsafe {
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            std::fs::File::from_raw_fd(child_stdout.into_raw_fd())
-        };
-        let mut async_stdout = tokio::fs::File::from_std(std_stdout);
+    if let Some(mut async_stdout) = stdout {
         let tx_clone = tx.clone();
         let name_owned = name.to_string();
         let args_strs = arg_strs.clone();
@@ -1129,15 +1158,7 @@ pub async fn run_external(
     }
 
     // Capture stderr errors (when stderr was piped)
-    if let Some(child_stderr) = child.stderr.take() {
-        // SAFETY: from_raw_fd takes ownership of the fd. into_raw_fd consumes
-        // the Stdio wrapper, transferring ownership. The fd is valid because
-        // child.stderr was just taken from a spawned process.
-        let std_stderr = unsafe {
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            std::fs::File::from_raw_fd(child_stderr.into_raw_fd())
-        };
-        let async_stderr = tokio::fs::File::from_std(std_stderr);
+    if let Some(async_stderr) = stderr {
         let tx_diag = tx.clone();
         let stderr_limit = env.options.read().stderr_max_bytes;
         let output_cancelled_clone = output_cancelled.clone();
@@ -1259,7 +1280,7 @@ pub async fn run_external(
             ));
         }
     }
-    if let Some(error) = io_error {
+    if let Some(error) = io_error.or(io_setup_error) {
         if let Some(trace_span) = io_span.take() {
             trace_span.finish(fshell_engine::trace::SpanOutcome::Error);
         }
