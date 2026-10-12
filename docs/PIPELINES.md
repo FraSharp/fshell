@@ -181,17 +181,24 @@ call instead, per the pipeline-keyword rule.
 
 ### `grep`
 
-filters incoming stream items matching a string or regular expression pattern.
+searches files or filters incoming stream items using a regular expression (`-F` selects literal matching).
 
 ```fsh
+grep "search"                      # terminal stdin: recursively search cwd
+grep --stdin "search"              # explicitly read stdin, including a terminal
+grep "ERROR 500" server.log        # search an explicit file
 cat server.log | grep "ERROR 500"
 ls | grep r"\.tmp$"
 ```
 
 **execution:**
-- the pattern is a regular expression; if it does not compile, a plain substring match is used.
+- with no file paths and terminal stdin, recursively searches the current directory, pruning hidden and ignored entries by default (`--hidden` / `--no-ignore` override this).
+- piped or redirected input is filtered instead; an empty pipeline never falls back to searching files. `--stdin` forces stdin filtering and cannot be combined with file paths.
+- explicit files retain file-search behavior; explicit directories require `-r` or `-R`.
+- invalid regular expressions are errors.
 - multiline string values are filtered one line at a time, like byte-stream input.
-- for maps: serializes fields to text representation before matching and preserves matching records.
+- maps and lists are matched against textual leaf values, preserving matching records and their types.
+- POSIX mode continues to use external grep with its standard behavior.
 
 ### `mark`
 

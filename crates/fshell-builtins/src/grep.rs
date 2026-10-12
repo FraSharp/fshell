@@ -12,7 +12,8 @@ use fshell_search::{
 };
 use miette::SourceSpan;
 use std::collections::VecDeque;
-use std::io;
+use std::io::{self, IsTerminal};
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -35,6 +36,7 @@ struct Config {
     paths: Vec<PathBuf>,
     labels: Vec<PathBuf>,
     recursive: bool,
+    stdin: bool,
     follow_links: bool,
     hidden: bool,
     ignore: bool,
@@ -54,8 +56,15 @@ pub fn grep_builtin(
     tx: PipeSender,
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
-    let config =
+    let mut config =
         parse_args(&args, env).map_err(|e| utility_error("grep", e).maybe_with_span(span))?;
+    // Only an otherwise input-less terminal invocation defaults to searching
+    // cwd. A pipeline (even an empty one) or redirected stdin remains a stream.
+    if config.paths.is_empty() && !config.stdin && input.is_none() && io::stdin().is_terminal() {
+        config.paths.push(env.cwd());
+        config.labels.push(PathBuf::from("."));
+        config.recursive = true;
+    }
     let matcher = CompiledMatcher::compile(&config.patterns, &config.matching)
         .map_err(|e| search_error("grep", e).maybe_with_span(span))?;
     let output = Output::new(env, tx);
@@ -606,13 +615,16 @@ fn stream_search(
             return Err(utility_error("grep", e));
         }
     } else {
-        // Standard input is already a byte stream. Use the buffered file scanner
-        // rather than loading or framing stdin separately.
+        // Keep stdin reads cancellable even when the terminal or an upstream
+        // writer has no complete line available. The scanner supplies buffering.
+        let stdin = io::stdin();
+        let stdin = stdin.lock();
+        let reader = crate::search_input::InterruptibleReader::new(stdin.as_fd(), output);
         let mut scanner = Scanner::new(config.scan.clone()).map_err(|e| search_error("grep", e))?;
         let summary = scanner
             .search(
                 matcher,
-                io::stdin().lock(),
+                reader,
                 &Control::default(),
                 || output.stopped(),
                 |event| match event {
@@ -654,6 +666,7 @@ fn parse_args(args: &[Val], env: &Env) -> Result<Config, String> {
         paths: vec![],
         labels: vec![],
         recursive: false,
+        stdin: false,
         follow_links: false,
         hidden: false,
         ignore: true,
@@ -689,6 +702,7 @@ fn parse_args(args: &[Val], env: &Env) -> Result<Config, String> {
                 "--count" => config.mode = Mode::Count,
                 "--quiet" => config.mode = Mode::Quiet,
                 "--recursive" => config.recursive = true,
+                "--stdin" => config.stdin = true,
                 "--hidden" => config.hidden = true,
                 "--no-ignore" => config.ignore = false,
                 "--sort" => config.sorted = true,
@@ -783,6 +797,9 @@ fn parse_args(args: &[Val], env: &Env) -> Result<Config, String> {
             return Err("a pattern is required".into());
         }
         config.patterns.push(positional.remove(0));
+    }
+    if config.stdin && !positional.is_empty() {
+        return Err("--stdin cannot be combined with file paths".into());
     }
     config.paths = positional
         .iter()

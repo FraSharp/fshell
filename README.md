@@ -267,6 +267,8 @@ core stages, evaluated in-process:
 | `traverse <edge>` | walk edges of an `ObjectGraph` | `deps \| traverse "depends_on"` |
 | `hash [-a 256\|512]` | whole-stream or per-record hashes | `cat archive.tar \| hash` |
 
+Native `grep "search"` with no file paths and terminal stdin recursively searches the current directory. Piped or redirected input is filtered instead; use `grep --stdin "search"` to explicitly read terminal input. POSIX mode keeps standard external grep behavior.
+
 boundary operators convert between typed streams and text:
 
 | operator | description |

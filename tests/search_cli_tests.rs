@@ -134,6 +134,52 @@ fn byte_stream_grep_preserves_long_line_boundaries() {
 }
 
 #[test]
+fn builtin_grep_reads_stdin_and_finishes_at_eof() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let tmp = tempfile::tempdir().unwrap();
+    for (flags, expected) in [
+        ("", "needle\nneedle at eof\n"),
+        ("--stdin", "needle\nneedle at eof\n"),
+        ("-c", "2\n"),
+        ("--stdin -c", "2\n"),
+        ("-q", ""),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fsh"))
+            .args([
+                "--native",
+                "--no-color",
+                "-c",
+                &format!("grep {flags} needle"),
+            ])
+            .env("FSH_CONFIG_DIR", tmp.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"miss\nneedle\nneedle at eof")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            expected.as_bytes(),
+            "stdin output for {flags}"
+        );
+    }
+}
+
+#[test]
 fn external_command_prefix_preserves_the_child_status() {
     let tmp = tempfile::tempdir().unwrap();
     let output = native("command sh -c 'exit 7'", tmp.path());

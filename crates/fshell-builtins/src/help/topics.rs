@@ -1272,9 +1272,17 @@ Fuzzy search (--search/-s) matches against topic name, summary, and description.
         name: "grep",
         category: HelpCategory::Builtin,
         summary: "Search files or filter stream records",
-        description: "Search files or pipeline input using Rust regular expressions; -F selects fixed strings. Invalid patterns are errors. File matches are text at the terminal and structured records in pipelines. Stream records retain their types and match textual leaf values, not map keys. Status is 0 for matches, 1 for no matches, 2 for utility errors. Recursive searches prune hidden/ignored subtrees by default. --encoding applies to file input. NUL-containing input stops scanning by default; -a treats it as text. POSIX mode uses external grep.",
-        syntax: "grep [options] <pattern> [files...]\n<producer> | grep [options] <pattern>",
+        description: "Search files or pipeline input using Rust regular expressions; -F selects fixed strings. With no file paths and terminal stdin, search the current directory recursively. Piped or redirected input is filtered instead; --stdin forces stdin even at a terminal and cannot be combined with file paths. Invalid patterns are errors. File matches are text at the terminal and structured records in pipelines. Stream records retain their types and match textual leaf values, not map keys. Status is 0 for matches, 1 for no matches, 2 for utility errors. Recursive searches prune hidden/ignored subtrees by default. --encoding applies to file input. NUL-containing input stops scanning by default; -a treats it as text. POSIX mode uses external grep.",
+        syntax: "grep [options] <pattern> [files...]\ngrep --stdin [options] <pattern>\n<producer> | grep [options] <pattern>",
         examples: &[
+            HelpExample {
+                input: "grep \"search\"",
+                explanation: "Recursively search the current directory when stdin is a terminal.",
+            },
+            HelpExample {
+                input: "grep --stdin \"search\"",
+                explanation: "Read terminal input instead of searching files; Ctrl+C cancels.",
+            },
             HelpExample {
                 input: "ls | grep -F \".rs\"",
                 explanation: "Show entries with literal '.rs' in a textual value.",
@@ -1289,6 +1297,7 @@ Fuzzy search (--search/-s) matches against topic name, summary, and description.
             HelpFlag { flag: "-n / -H / -h", desc: "Line numbers / force filenames / suppress filenames" },
             HelpFlag { flag: "-c / -q", desc: "Count matches / stop quietly after a match" },
             HelpFlag { flag: "-r / -R", desc: "Recursive search / follow recursive symlinks" },
+            HelpFlag { flag: "--stdin", desc: "Force stdin filtering (no file paths allowed)" },
             HelpFlag { flag: "-A / -B / -C <N>", desc: "After / before / surrounding context" },
             HelpFlag { flag: "-m <N>", desc: "Maximum selected lines per input" },
             HelpFlag { flag: "-e <pattern>", desc: "Add a pattern (patterns are ORed)" },

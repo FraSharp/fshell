@@ -807,10 +807,14 @@ ls | sort name asc
 #### `grep`
 `grep` is a registered native builtin, not a reserved pipeline keyword. It searches files or filters pipeline text/records using Rust regular expressions; `-F` selects literal matching and invalid expressions are errors:
 ```fsh
-grep -n "ERROR 500" server.log
+grep "search"                       # terminal stdin: recursively search cwd
+grep -n "ERROR 500" server.log       # explicit file: search only this file
+grep --stdin "search"               # explicitly read terminal input
 cat server.log | grep -F "ERROR 500"
 ff --paths name = "*.rs"
 ```
+With no file paths and stdin connected to a terminal, native `grep` recursively searches the current directory, like `grep -r <pattern> .`. Piped or redirected stdin is filtered instead; even an empty pipeline never falls back to searching files. `--stdin` forces stdin filtering at a terminal and cannot be combined with file paths. Explicit files retain ordinary file-search behavior; explicit directories still require `-r` or `-R`.
+
 File searches print ordinary grep text at the terminal and emit match records (`file`, `line`, `offset`, `text`, `matched`) into pipelines or captures. Stream filtering preserves matching records and searches textual leaf values, not map keys. `-c` counts without constructing match records; `-q` stops after a match. Exit statuses are 0 for matches, 1 for no matches, and 2 for utility errors. Recursive `-r` searches respect root-local ignore rules and prune hidden directories; use `--no-ignore` / `--hidden` to override. POSIX mode retains the external utility's syntax and behavior.
 
 #### `mark`
