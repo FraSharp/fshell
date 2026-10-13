@@ -66,6 +66,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "builtin_registry",
                 "invocation_state",
                 "native_evaluation",
+                "native_parsing",
                 "pipeline_values",
                 "search_streams",
                 "cli_execution",
