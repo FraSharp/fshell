@@ -8,4 +8,6 @@
 #![deny(clippy::unwrap_used, clippy::panic)]
 
 pub mod fixture;
+#[cfg(target_os = "linux")]
+pub mod namespace;
 pub mod process;

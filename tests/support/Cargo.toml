@@ -16,3 +16,13 @@ workspace = true
 [[bin]]
 name = "fshell-process-probe"
 path = "src/bin/fshell-process-probe.rs"
+
+[[bin]]
+name = "fshell-namespace-probe"
+path = "src/bin/fshell-namespace-probe.rs"
+test = false
+
+[[bin]]
+name = "fshell-process-supervisor"
+path = "src/bin/fshell-process-supervisor.rs"
+test = false

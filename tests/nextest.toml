@@ -13,12 +13,12 @@ success-output = "never"
 [profile.specifications]
 # Include owner-local read and descriptor-output regressions by exact family.
 default-filter = """
-package(=fshell-test-support) | package(=fshell-specifications) | package(=fshell-test-runner) |
+(package(=fshell-test-support) & !binary(=namespace_containment)) | package(=fshell-specifications) | package(=fshell-test-runner) |
 (package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_)))
 """
 
 [profile.support]
-default-filter = "package(=fshell-test-support) | package(=fshell-test-runner)"
+default-filter = "(package(=fshell-test-support) & !binary(=namespace_containment)) | package(=fshell-test-runner)"
 
 [profile.support.junit]
 path = "specifications.xml"
@@ -40,6 +40,16 @@ store-failure-output = true
 default-filter = "package(=fshell-specifications) & binary(=cli_execution)"
 
 [profile.executable.junit]
+path = "specifications.xml"
+store-success-output = false
+store-failure-output = true
+
+# Kernel prerequisites are mandatory in this explicitly selected Linux profile.
+# Portable profiles do not schedule these probes on unsuitable hosts.
+[profile.containment]
+default-filter = "package(=fshell-test-support) & binary(=namespace_containment)"
+
+[profile.containment.junit]
 path = "specifications.xml"
 store-success-output = false
 store-failure-output = true

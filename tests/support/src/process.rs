@@ -52,6 +52,8 @@ pub enum ProcessErrorKind {
     Deadline,
     Cancelled,
     Cleanup,
+    #[cfg(target_os = "linux")]
+    Namespace(crate::namespace::NamespaceError),
 }
 
 #[derive(Debug, Default)]
@@ -74,6 +76,8 @@ pub struct ProcessError {
     pub program: PathBuf,
     pub args: Vec<OsString>,
     pub capture: CapturedOutput,
+    /// Direct-child status, which is the supervisor when containment is used.
+    /// Infrastructure failures are never presented as payload exit observations.
     pub status: Option<ExitStatus>,
     pub cleanup_errors: Vec<String>,
 }
@@ -103,6 +107,8 @@ impl std::error::Error for ProcessError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.kind {
             ProcessErrorKind::Io { source, .. } => Some(source),
+            #[cfg(target_os = "linux")]
+            ProcessErrorKind::Namespace(error) => Some(error),
             _ => None,
         }
     }
@@ -119,6 +125,8 @@ pub struct ProcessCommand {
     stdin: Vec<u8>,
     limits: ExecutionLimits,
     cancellation: Option<Arc<AtomicBool>>,
+    #[cfg(target_os = "linux")]
+    namespace_supervisor: Option<PathBuf>,
 }
 
 impl ProcessCommand {
@@ -131,6 +139,8 @@ impl ProcessCommand {
             stdin: Vec::new(),
             limits: ExecutionLimits::default(),
             cancellation: None,
+            #[cfg(target_os = "linux")]
+            namespace_supervisor: None,
         }
     }
 
@@ -170,6 +180,14 @@ impl ProcessCommand {
         self
     }
 
+    /// Require Linux PID-namespace lifecycle containment through an explicitly
+    /// prepared private supervisor artifact. No process-group fallback exists.
+    #[cfg(target_os = "linux")]
+    pub fn in_pid_namespace(mut self, supervisor: impl AsRef<Path>) -> Self {
+        self.namespace_supervisor = Some(supervisor.as_ref().to_path_buf());
+        self
+    }
+
     /// Execute once. A completed nonzero exit/signal is an observation, not an
     /// infrastructure failure. All I/O, deadline and cleanup failures are errors.
     pub fn run(&self) -> Result<ProcessOutput, Box<ProcessError>> {
@@ -187,7 +205,42 @@ impl ProcessCommand {
                 started,
             ));
         }
+        #[cfg(target_os = "linux")]
+        let mut namespace = self
+            .namespace_supervisor
+            .as_ref()
+            .map(|_| crate::namespace::NamespaceControl::new())
+            .transpose()
+            .map_err(|source| {
+                self.failure(
+                    ProcessErrorKind::Io {
+                        operation: "create namespace control",
+                        source,
+                    },
+                    CapturedOutput::default(),
+                    None,
+                    Vec::new(),
+                    started,
+                )
+            })?;
         let mut command = Command::new(&self.program);
+        #[cfg(target_os = "linux")]
+        if let (Some(supervisor), Some(control)) = (&self.namespace_supervisor, &namespace) {
+            command = Command::new(supervisor);
+            control.configure(&mut command).map_err(|source| {
+                self.failure(
+                    ProcessErrorKind::Io {
+                        operation: "configure namespace launch",
+                        source,
+                    },
+                    CapturedOutput::default(),
+                    None,
+                    Vec::new(),
+                    started,
+                )
+            })?;
+            command.arg(&self.program);
+        }
         command
             .args(&self.args)
             .current_dir(&self.cwd)
@@ -212,6 +265,10 @@ impl ProcessCommand {
                 started,
             )
         })?;
+        #[cfg(target_os = "linux")]
+        if let Some(control) = &mut namespace {
+            control.spawned();
+        }
         let mut owner = OwnedChild::new(child);
         let mut input = owner.child.stdin.take();
         let mut stdout = owner.child.stdout.take();
@@ -244,6 +301,8 @@ impl ProcessCommand {
                             source,
                         })?;
                 }
+                #[cfg(target_os = "linux")]
+                let protocol_result = namespace.as_mut().map(|control| control.pump()).transpose();
                 drain(
                     &mut stdout,
                     &mut capture.stdout,
@@ -256,6 +315,19 @@ impl ProcessCommand {
                     self.limits.output_bytes,
                     OutputStream::Stderr,
                 )?;
+                // Drain diagnostics causally preceding a fatal protocol record
+                // before returning it. Capture faults remain failures themselves.
+                #[cfg(target_os = "linux")]
+                {
+                    protocol_result.map_err(ProcessErrorKind::Namespace)?;
+                    if owner.exited
+                        && let Some(control) = &namespace
+                    {
+                        control
+                            .require_finished()
+                            .map_err(ProcessErrorKind::Namespace)?;
+                    }
+                }
                 if let Some(writer) = input.as_mut() {
                     let remaining = &self.stdin[capture.stdin_written..];
                     match writer.write(&remaining[..remaining.len().min(64 * 1024)]) {
@@ -295,6 +367,14 @@ impl ProcessCommand {
                         });
                     }
                 }
+                #[cfg(target_os = "linux")]
+                if let Some(control) = &namespace {
+                    fds.push(libc::pollfd {
+                        fd: control.fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    });
+                }
                 let remaining = self.limits.deadline.saturating_sub(started.elapsed());
                 let wait = remaining.as_millis().clamp(1, 20) as i32;
                 // SAFETY: fds owns valid pollfd elements for all still-owned pipes.
@@ -314,6 +394,27 @@ impl ProcessCommand {
         drop(stdout);
         drop(stderr);
         let cleanup_errors = owner.cleanup();
+        let output_status = owner.status;
+        #[cfg(target_os = "linux")]
+        let (result, cleanup_errors, output_status) = {
+            let mut cleanup_errors = cleanup_errors;
+            let mut result = result;
+            let mut output_status = output_status;
+            if let Some(control) = &mut namespace {
+                if let Err(error) = control.cleanup() {
+                    cleanup_errors.push(format!("namespace cleanup: {error}"));
+                }
+                if result.is_ok()
+                    && let Some(status) = owner.status
+                {
+                    match control.completed_status(status) {
+                        Ok(payload_status) => output_status = Some(payload_status),
+                        Err(error) => result = Err(ProcessErrorKind::Namespace(error)),
+                    }
+                }
+            }
+            (result, cleanup_errors, output_status)
+        };
         capture.elapsed = started.elapsed();
         match result {
             Err(kind) => Err(self.failure(kind, capture, owner.status, cleanup_errors, started)),
@@ -324,7 +425,7 @@ impl ProcessCommand {
                 cleanup_errors,
                 started,
             )),
-            Ok(()) => match owner.status {
+            Ok(()) => match output_status {
                 Some(status) => Ok(ProcessOutput { status, capture }),
                 None => Err(self.failure(
                     ProcessErrorKind::Cleanup,
@@ -357,6 +458,22 @@ impl ProcessCommand {
         })?;
         if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
             return Err(invalid("executable must be an executable regular file"));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(supervisor) = &self.namespace_supervisor {
+            if !supervisor.is_absolute() {
+                return Err(invalid("namespace supervisor must be absolute"));
+            }
+            let metadata =
+                std::fs::metadata(supervisor).map_err(|source| ProcessErrorKind::Io {
+                    operation: "validate namespace supervisor",
+                    source,
+                })?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                return Err(invalid(
+                    "namespace supervisor must be an executable regular file",
+                ));
+            }
         }
         if !self.cwd.is_dir() {
             return Err(invalid("cwd must be an existing directory"));
