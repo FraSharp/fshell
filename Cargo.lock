@@ -1719,6 +1719,7 @@ name = "fshell-test-runner"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "fshell-test-support",
  "serde",
  "serde_json",
 ]

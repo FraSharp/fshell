@@ -5,11 +5,24 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
+default-run = "fshell-test-runner"
 
 [dependencies]
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+fshell-test-support = { path = "../support" }
+
+[[bin]]
+name = "fshell-test-runner"
+path = "src/main.rs"
+
+[[bin]]
+name = "fshell-orchestration-probe"
+path = "src/bin/fshell-orchestration-probe.rs"
+test = false
 
 [lints]
 workspace = true

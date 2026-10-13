@@ -17,6 +17,33 @@ package(=fshell-test-support) | package(=fshell-specifications) | package(=fshel
 (package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_)))
 """
 
+[profile.support]
+default-filter = "package(=fshell-test-support) | package(=fshell-test-runner)"
+
+[profile.support.junit]
+path = "specifications.xml"
+store-success-output = false
+store-failure-output = true
+
+[profile.library]
+default-filter = """
+package(=fshell-specifications) |
+(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_)))
+"""
+
+[profile.library.junit]
+path = "specifications.xml"
+store-success-output = false
+store-failure-output = true
+
+[profile.executable]
+default-filter = "package(=fshell-specifications) & binary(=cli_execution)"
+
+[profile.executable.junit]
+path = "specifications.xml"
+store-success-output = false
+store-failure-output = true
+
 [profile.specifications.junit]
 path = "specifications.xml"
 store-success-output = false

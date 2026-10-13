@@ -11,8 +11,35 @@ use std::process::{Command, ExitCode, Stdio};
 enum Suite {
     All,
     Support,
-    Specifications,
+    Library,
+    Executable,
 }
+
+impl Suite {
+    fn needs_shell(self) -> bool {
+        matches!(self, Self::All | Self::Executable)
+    }
+
+    fn profile(self) -> &'static str {
+        match self {
+            Self::All => "specifications",
+            Self::Support => "support",
+            Self::Library => "library",
+            Self::Executable => "executable",
+        }
+    }
+}
+
+// Explicit classification: additions/removals must update the execution plan.
+// Cargo metadata is checked before builds, so an unclassified target fails.
+const SPECIFICATION_TARGETS: &[(&str, Suite)] = &[
+    ("builtin_registry", Suite::Library),
+    ("invocation_state", Suite::Library),
+    ("native_evaluation", Suite::Library),
+    ("pipeline_values", Suite::Library),
+    ("search_streams", Suite::Library),
+    ("cli_execution", Suite::Executable),
+];
 
 #[derive(Debug, Parser)]
 #[command(about = "Run fshell specifications with explicit artifacts and per-test isolation")]
@@ -22,7 +49,7 @@ struct Arguments {
     /// Build and test all optional shell features.
     #[arg(long)]
     full: bool,
-    /// Build both the shell and specifications in release mode.
+    /// Build the selected artifacts and specifications in release mode.
     #[arg(long)]
     release: bool,
     /// Explicit native Rust target. Cross execution is not supported here.
@@ -45,7 +72,7 @@ fn main() -> ExitCode {
 
 fn run(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     if arguments.full && arguments.suite == Suite::Support {
-        return Err(io::Error::other("--full requires the specifications suite").into());
+        return Err(io::Error::other("--full is not applicable to the support suite").into());
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -70,9 +97,21 @@ fn run(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     }
     let host = native_target(&version.stdout)?;
     let target = validate_target(arguments.target.as_deref(), &host)?;
-    let executable = if arguments.suite == Suite::Support {
-        None
-    } else {
+    if arguments.suite != Suite::Support {
+        let metadata = Command::new(&cargo)
+            .args(["metadata", "--locked", "--no-deps", "--format-version=1"])
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .output()?;
+        io::stderr().write_all(&metadata.stderr)?;
+        if !metadata.status.success() {
+            return Err(
+                io::Error::other(format!("Cargo metadata failed: {}", metadata.status)).into(),
+            );
+        }
+        validate_specification_targets(&metadata.stdout)?;
+    }
+    let executable = if arguments.suite.needs_shell() {
         let output = Command::new(&cargo)
             .args(build_arguments(&arguments, &target))
             .current_dir(&root)
@@ -92,11 +131,13 @@ fn run(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
         }
         println!("shell artifact: {}", path.display());
         Some(path)
+    } else {
+        None
     };
     let mut nextest = Command::new(&cargo);
     nextest.args(test_arguments(&arguments, &target, &root));
     nextest.current_dir(&root).stdin(Stdio::null());
-    // Do not accept a stale caller-supplied artifact, even for support-only runs.
+    // Artifact-free selections must not accept a caller-supplied executable.
     nextest.env_remove("FSHELL_TEST_EXECUTABLE");
     if let Some(path) = executable {
         nextest.env("FSHELL_TEST_EXECUTABLE", path);
@@ -141,7 +182,7 @@ fn test_arguments(arguments: &Arguments, target: &str, root: &Path) -> Vec<OsStr
     args.extend(
         [
             "--profile",
-            "specifications",
+            arguments.suite.profile(),
             "--no-tests",
             "fail",
             "--target",
@@ -158,14 +199,28 @@ fn test_arguments(arguments: &Arguments, target: &str, root: &Path) -> Vec<OsStr
             "fshell-posix",
         ],
         Suite::Support => &["fshell-test-support", "fshell-test-runner"],
-        Suite::Specifications => &["fshell-specifications", "fshell-posix"],
+        Suite::Library => &["fshell-specifications", "fshell-posix"],
+        Suite::Executable => &["fshell-specifications"],
     };
     for package in packages {
         args.extend(["--package".into(), (*package).into()]);
     }
-    // Include runner unit tests as well as library/integration specifications.
-    // Examples and benchmarks are not part of this execution profile.
-    args.extend(["--lib".into(), "--bins".into(), "--tests".into()]);
+    match arguments.suite {
+        // Include runner unit tests; examples and benchmarks are not selected.
+        Suite::All | Suite::Support => {
+            args.extend(["--lib".into(), "--bins".into(), "--tests".into()]);
+        }
+        Suite::Library | Suite::Executable => {
+            if arguments.suite == Suite::Library {
+                args.push("--lib".into());
+            }
+            for (target, suite) in SPECIFICATION_TARGETS {
+                if *suite == arguments.suite {
+                    args.extend(["--test".into(), (*target).into()]);
+                }
+            }
+        }
+    }
     if arguments.release {
         args.push("--release".into());
     }
@@ -214,6 +269,50 @@ struct CargoMessage {
 struct CargoTarget {
     name: String,
     kind: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct CargoMetadata {
+    packages: Vec<MetadataPackage>,
+}
+
+#[derive(Deserialize)]
+struct MetadataPackage {
+    name: String,
+    targets: Vec<CargoTarget>,
+}
+
+fn validate_specification_targets(output: &[u8]) -> io::Result<()> {
+    let metadata: CargoMetadata = serde_json::from_slice(output)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let packages: Vec<_> = metadata
+        .packages
+        .iter()
+        .filter(|package| package.name == "fshell-specifications")
+        .collect();
+    if packages.len() != 1 {
+        return Err(io::Error::other(
+            "metadata must contain exactly one specifications package",
+        ));
+    }
+    let mut actual: Vec<_> = packages[0]
+        .targets
+        .iter()
+        .filter(|target| target.kind == ["test"])
+        .map(|target| target.name.as_str())
+        .collect();
+    let mut expected: Vec<_> = SPECIFICATION_TARGETS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    if actual != expected {
+        return Err(io::Error::other(format!(
+            "specification targets must be classified: expected {expected:?}, found {actual:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn shell_artifact(output: &[u8]) -> io::Result<PathBuf> {
