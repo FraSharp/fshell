@@ -1698,6 +1698,8 @@ dependencies = [
  "fshell-core",
  "fshell-engine",
  "fshell-search",
+ "fshell-test-support",
+ "serde_json",
  "tokio",
 ]
 

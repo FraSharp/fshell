@@ -20,7 +20,11 @@ ff = ["fshell-builtins/ff"]
 replace = ["fshell-builtins/replace"]
 extract = ["fshell-builtins/extract"]
 
+[dependencies]
+fshell-test-support = { path = "../support" }
+
 [dev-dependencies]
+serde_json.workspace = true
 fshell-core.workspace = true
 fshell-engine.workspace = true
 fshell-builtins.workspace = true
