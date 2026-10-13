@@ -1419,7 +1419,11 @@ impl Parser {
             }
             p < self.input.len() && self.input[p] == '-'
         };
-        self.parse_stage_inner(name, has_flag, inline_env)
+        let mut stage = self.parse_stage_inner(name, has_flag, inline_env)?;
+        if let PipelineStage::CommandCall { span, .. } = &mut stage {
+            *span = self.span_from(start);
+        }
+        Ok(stage)
     }
 
     pub(crate) fn parse_pipeline_stage_with_env(
@@ -1439,8 +1443,7 @@ impl Parser {
         };
         let mut stage = self.parse_stage_inner(name, has_flag, inline_env)?;
         if let PipelineStage::CommandCall { span, .. } = &mut stage {
-            let from = self.byte_offset(start);
-            *span = SourceSpan::new(from.into(), self.byte_offset(self.pos).saturating_sub(from));
+            *span = self.span_from(start);
         }
         Ok(stage)
     }
@@ -1636,5 +1639,90 @@ impl Parser {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod command_locations {
+    use super::*;
+
+    #[test]
+    fn ordinary_command_stages_use_exact_unicode_byte_ranges() {
+        let actual = Parser::new("echo 'é'|other")
+            .parse_pipeline()
+            .expect("command pipeline");
+        assert_eq!(
+            actual,
+            Pipeline {
+                stages: vec![
+                    PipelineStage::CommandCall {
+                        name: "echo".into(),
+                        args: vec![Expr::String(vec![StringPart::Lit {
+                            text: "é".into(),
+                            quote: QuoteKind::Single,
+                        }])],
+                        env: Vec::new(),
+                        span: (0, 9).into(),
+                    },
+                    PipelineStage::CommandCall {
+                        name: "other".into(),
+                        args: Vec::new(),
+                        env: Vec::new(),
+                        span: (10, 5).into()
+                    },
+                ],
+                boundaries: vec![1],
+            }
+        );
+    }
+
+    #[test]
+    fn inline_environment_prefix_is_included_in_the_pipeline_command_range() {
+        let source = "VALUE=x echo 'é'";
+        let actual = Parser::new(source)
+            .parse_pipeline()
+            .expect("prefixed command");
+        assert_eq!(
+            actual,
+            Pipeline {
+                stages: vec![PipelineStage::CommandCall {
+                    name: "echo".into(),
+                    args: vec![Expr::String(vec![StringPart::Lit {
+                        text: "é".into(),
+                        quote: QuoteKind::Single
+                    }])],
+                    env: vec![(
+                        "VALUE".into(),
+                        Expr::String(vec![StringPart::unquoted("x")])
+                    )],
+                    span: (0, source.len()).into(),
+                }],
+                boundaries: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn already_parsed_environment_preserves_the_command_body_range() {
+        let source = "echo 'é'";
+        let env = vec![(
+            "VALUE".into(),
+            Expr::String(vec![StringPart::unquoted("x")]),
+        )];
+        let actual = Parser::new(source)
+            .parse_pipeline_stage_with_env(env.clone())
+            .expect("command stage");
+        assert_eq!(
+            actual,
+            PipelineStage::CommandCall {
+                name: "echo".into(),
+                args: vec![Expr::String(vec![StringPart::Lit {
+                    text: "é".into(),
+                    quote: QuoteKind::Single
+                }])],
+                env,
+                span: (0, source.len()).into(),
+            }
+        );
     }
 }
