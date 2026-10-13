@@ -2174,7 +2174,6 @@ async fn execute_pipeline_inner(
                                             // A predicate must be Bool. Silently
                                             // dropping the item (as before) hid
                                             // genuine mistakes; `if` already errors.
-                                            env_clone.report_stage_error();
                                             let diag = fshell_core::diagnostic::FshDiag::from(
                                                 fshell_core::ShellError::new(
                                                     fshell_core::diagnostic::ErrorCode::TypeError,
@@ -2184,17 +2183,12 @@ async fn execute_pipeline_inner(
                                                     ),
                                                 ),
                                             );
-                                            let _ = out_tx
-                                                .send(PipelinePayload::Structured(diag))
+                                            report_stage_diagnostic(&env_clone, &out_tx, diag)
                                                 .await;
                                             break;
                                         }
                                         Err(e) => {
-                                            env_clone.report_stage_error();
-                                            let _ = out_tx
-                                                .send(PipelinePayload::Structured(
-                                                    e.to_string().into(),
-                                                ))
+                                            report_stage_diagnostic(&env_clone, &out_tx, e.into())
                                                 .await;
                                             break;
                                         }
@@ -2217,7 +2211,6 @@ async fn execute_pipeline_inner(
                                             }
                                             Ok(Val::Bool(false)) => {}
                                             Ok(other) => {
-                                                env_clone.report_stage_error();
                                                 let diag = fshell_core::diagnostic::FshDiag::from(
                                                     fshell_core::ShellError::new(
                                                         fshell_core::diagnostic::ErrorCode::TypeError,
@@ -2227,18 +2220,17 @@ async fn execute_pipeline_inner(
                                                         ),
                                                     ),
                                                 );
-                                                let _ = out_tx
-                                                    .send(PipelinePayload::Structured(diag))
+                                                report_stage_diagnostic(&env_clone, &out_tx, diag)
                                                     .await;
                                                 break;
                                             }
                                             Err(e) => {
-                                                env_clone.report_stage_error();
-                                                let _ = out_tx
-                                                    .send(PipelinePayload::Structured(
-                                                        e.to_string().into(),
-                                                    ))
-                                                    .await;
+                                                report_stage_diagnostic(
+                                                    &env_clone,
+                                                    &out_tx,
+                                                    e.into(),
+                                                )
+                                                .await;
                                                 break;
                                             }
                                         }
@@ -2306,9 +2298,7 @@ async fn execute_pipeline_inner(
                                         }
                                     }
                                     if let Some(e) = err {
-                                        env_clone.report_stage_error();
-                                        let _ = out_tx
-                                            .send(PipelinePayload::Structured(e.to_string().into()))
+                                        report_stage_diagnostic(&env_clone, &out_tx, e.into())
                                             .await;
                                         break;
                                     } else {
@@ -3797,6 +3787,13 @@ async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
     Ok(Flow::Normal)
 }
 
+/// Record the same typed diagnostic that the stage sends. The statement's
+/// finalizer must retain it even when a capture or redirect owns the output.
+async fn report_stage_diagnostic(env: &Env, out_tx: &PipeSender, diag: FshDiag) {
+    env.record_stage_failure(diag.clone());
+    let _ = out_tx.send(PipelinePayload::Structured(diag)).await;
+}
+
 /// Report a hard error from a function body to the function's output stream and
 /// mark the stage failed.
 async fn report_function_error(env: &Env, out_tx: &PipeSender, error: EngineError) {
@@ -4001,5 +3998,81 @@ pub(crate) fn val_type_precedence(val: &Val) -> u8 {
         Val::ObjectGraph { .. } => 9,
         Val::Capability(_) => 10,
         Val::ReactiveStream(_) => 11,
+    }
+}
+
+#[cfg(test)]
+mod expression_diagnostics {
+    use super::*;
+    use crate::execution::{PipelineOutcomes, Slot};
+
+    fn context() -> (Env, Arc<PipelineOutcomes>) {
+        let mut env = Env::for_command();
+        env.options.write().errexit = false;
+        let outcomes = PipelineOutcomes::new();
+        outcomes.set_stages(1);
+        env.attach_stage(outcomes.clone(), Slot::Stage(0));
+        (env, outcomes)
+    }
+
+    fn error() -> EngineError {
+        EngineError::VariableNotFound {
+            name: "missing_field".into(),
+            span: Some((7, 13).into()),
+        }
+    }
+
+    fn assert_error(error: &EngineError) {
+        assert!(
+            matches!(error, EngineError::VariableNotFound { name, span: Some(span) } if name == "missing_field" && *span == (7, 13).into()),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_and_finalizer_keep_the_same_error_type_and_span() {
+        let (env, outcomes) = context();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            report_stage_diagnostic(&env, &tx, error().into()),
+        )
+        .await
+        .expect("diagnostic send deadline");
+        let PipelinePayload::Structured(diag) = rx.recv().await.expect("diagnostic") else {
+            unreachable!("expected diagnostic")
+        };
+        assert_error(
+            diag.report
+                .downcast_ref::<EngineError>()
+                .expect("typed error"),
+        );
+        drop(tx);
+        assert!(rx.recv().await.is_none());
+        let result = crate::apply_pipeline_outcome(
+            &env,
+            crate::pipeline_finalize(&outcomes, Vec::new(), false),
+        );
+        assert_error(&result.expect_err("expression failure must unwind"));
+        assert_eq!(env.exit_code(), 1);
+    }
+
+    #[tokio::test]
+    async fn closed_output_does_not_erase_the_recorded_typed_failure() {
+        let (env, outcomes) = context();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            report_stage_diagnostic(&env, &tx, error().into()),
+        )
+        .await
+        .expect("closed send deadline");
+        let result = crate::apply_pipeline_outcome(
+            &env,
+            crate::pipeline_finalize(&outcomes, Vec::new(), false),
+        );
+        assert_error(&result.expect_err("recorded failure must survive output closure"));
+        assert_eq!(env.exit_code(), 1);
     }
 }
