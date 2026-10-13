@@ -20,6 +20,7 @@ members = [
     "crates/fshell-posix",
     "fuzz",
     "tests/support",
+    "tests/specifications",
 ]
 [workspace.package]
 version = "0.2.0"

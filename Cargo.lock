@@ -1691,6 +1691,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fshell-specifications"
+version = "0.0.0"
+dependencies = [
+ "fshell-builtins",
+ "fshell-core",
+ "fshell-engine",
+ "fshell-search",
+ "tokio",
+]
+
+[[package]]
 name = "fshell-terminal"
 version = "0.2.0"
 dependencies = [

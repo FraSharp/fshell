@@ -1,0 +1,31 @@
+[package]
+name = "fshell-specifications"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+full = ["sandbox", "vault", "ai", "http", "sql", "chart", "notify", "ff", "replace", "extract"]
+sandbox = ["fshell-builtins/sandbox"]
+vault = ["fshell-builtins/vault"]
+ai = ["fshell-builtins/ai"]
+http = ["fshell-builtins/http"]
+sql = ["fshell-builtins/sql"]
+chart = ["fshell-builtins/chart"]
+notify = ["fshell-builtins/notify"]
+ff = ["fshell-builtins/ff"]
+replace = ["fshell-builtins/replace"]
+extract = ["fshell-builtins/extract"]
+
+[dev-dependencies]
+fshell-core.workspace = true
+fshell-engine.workspace = true
+fshell-builtins.workspace = true
+fshell-search.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
