@@ -40,6 +40,7 @@ const SPECIFICATION_TARGETS: &[(&str, Suite)] = &[
     ("builtin_registry", Suite::Library),
     ("invocation_state", Suite::Library),
     ("native_evaluation", Suite::Library),
+    ("evaluation_effects", Suite::Library),
     ("native_parsing", Suite::Library),
     ("pipeline_values", Suite::Library),
     ("search_streams", Suite::Library),
