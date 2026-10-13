@@ -11,10 +11,10 @@ failure-output = "immediate-final"
 success-output = "never"
 
 [profile.specifications]
-# Include owner-local parser/read/descriptor regressions by exact family.
+# Include owner-local parser and POSIX regressions by exact family.
 default-filter = """
 (package(=fshell-test-support) & !binary(=namespace_containment)) | package(=fshell-specifications) | package(=fshell-test-runner) |
-(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_))) |
+(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::))) |
 (package(=fshell-core) & test(parser::stmt::command_locations::))
 """
 
@@ -29,7 +29,7 @@ store-failure-output = true
 [profile.library]
 default-filter = """
 package(=fshell-specifications) |
-(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_))) |
+(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::))) |
 (package(=fshell-core) & test(parser::stmt::command_locations::))
 """
 

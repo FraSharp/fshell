@@ -101,13 +101,10 @@ pub fn split_ifs(s: &str, ifs: &str) -> Vec<String> {
         chars.next();
     }
 
-    let mut had_nws_delim = false;
-
     while let Some(c) = chars.next() {
         if ifs_nws.contains(&c) {
             // Non-whitespace IFS delimiter: push current field
             fields.push(std::mem::take(&mut cur));
-            had_nws_delim = true;
             // Skip any following IFS whitespace adjacent to this delimiter
             while matches!(chars.peek(), Some(&nc) if ifs_ws.contains(&nc)) {
                 chars.next();
@@ -124,15 +121,14 @@ pub fn split_ifs(s: &str, ifs: &str) -> Vec<String> {
             } else if chars.peek().is_some() {
                 // Not trailing whitespace -> delimits field
                 fields.push(std::mem::take(&mut cur));
-                had_nws_delim = false;
             }
         } else {
             cur.push(c);
-            had_nws_delim = false;
         }
     }
 
-    if !cur.is_empty() || had_nws_delim {
+    // A delimiter terminates its preceding field, not an extra final field.
+    if !cur.is_empty() {
         fields.push(cur);
     }
 
@@ -313,8 +309,25 @@ fn expand_word_internal(
     do_field_split: bool,
     preserve_pattern_quoting: bool,
 ) -> Result<Vec<String>, fshell_engine::EngineError> {
-    if word_str == "$@" || word_str == "\"$@\"" {
+    if word_str == "\"$@\"" || (word_str == "$@" && !do_field_split) {
         return Ok(get_effective_positional(env, positional));
+    }
+    if word_str == "$@" {
+        let ifs = effective_ifs(cfg, env);
+        let mut fields = Vec::new();
+        for arg in get_effective_positional(env, positional) {
+            if arg.is_empty() {
+                continue;
+            }
+            for field in split_ifs(&arg, &ifs) {
+                if cfg.do_glob && field.contains(['*', '?', '[']) {
+                    fields.extend(expand_glob(&field, &field, &env.cwd()));
+                } else {
+                    fields.push(field);
+                }
+            }
+        }
+        return Ok(fields);
     }
 
     let opts = ParserOptions {
@@ -471,7 +484,11 @@ fn expand_word_internal(
             )
         });
         if contains_expansion && do_field_split {
-            split_ifs(&expanded, &ifs)
+            if expanded.is_empty() {
+                Vec::new()
+            } else {
+                split_ifs(&expanded, &ifs)
+            }
         } else if expanded.contains(' ') || expanded.contains('\t') || expanded.contains('\n') {
             // No expansion but word contains IFS whitespace? Don't split bare words like "hello world" from quoted source — but unquoted "a  b" should? Keep as single field to avoid breaking simple args.
             vec![expanded.clone()]
@@ -1215,5 +1232,77 @@ mod tests {
         let cfg = ExpansionConfig::default();
         let r = expand_word("${FOO%lo}", &env, &cfg, &[]).unwrap();
         assert_eq!(r, vec!["hel"]);
+    }
+}
+
+#[cfg(test)]
+mod field_boundaries {
+    use super::*;
+
+    #[test]
+    fn nonwhitespace_delimiters_do_not_add_a_final_null_field() {
+        for (input, expected) in [
+            ("", vec![]),
+            (":", vec![""]),
+            ("::", vec!["", ""]),
+            ("a:", vec!["a"]),
+            (":a", vec!["", "a"]),
+            ("a::b", vec!["a", "", "b"]),
+            ("a::", vec!["a", ""]),
+        ] {
+            assert_eq!(split_ifs(input, ":"), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn mixed_delimiters_keep_only_explicit_null_fields() {
+        assert_eq!(
+            split_ifs("\t: alpha :: beta: \t", ": \t"),
+            ["", "alpha", "", "beta"]
+        );
+    }
+
+    #[test]
+    fn empty_ifs_does_not_preserve_an_unquoted_null_argument() {
+        let env = fshell_engine::Env::for_command();
+        env.vars
+            .write()
+            .insert("value".into(), Val::String(String::new()));
+        let cfg = ExpansionConfig {
+            ifs: Some(String::new()),
+            do_glob: false,
+        };
+        assert!(
+            expand_word("$value", &env, &cfg, &[])
+                .expect("unquoted value")
+                .is_empty()
+        );
+        assert_eq!(
+            expand_word("\"$value\"", &env, &cfg, &[]).expect("quoted value"),
+            [""]
+        );
+    }
+
+    #[test]
+    fn unquoted_positional_arguments_split_individually() {
+        let env = fshell_engine::Env::for_command();
+        let args = vec!["a b".into(), String::new(), " c ".into()];
+        let mut cfg = ExpansionConfig {
+            ifs: Some(" \t\n".into()),
+            do_glob: false,
+        };
+        assert_eq!(
+            expand_word("$@", &env, &cfg, &args).expect("unquoted args"),
+            ["a", "b", "c"]
+        );
+        assert_eq!(
+            expand_word("\"$@\"", &env, &cfg, &args).expect("quoted args"),
+            args
+        );
+        cfg.ifs = Some(String::new());
+        assert_eq!(
+            expand_word("$@", &env, &cfg, &args).expect("unsplit args"),
+            ["a b", " c "]
+        );
     }
 }
