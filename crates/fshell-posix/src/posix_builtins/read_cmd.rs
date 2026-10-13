@@ -100,7 +100,7 @@ pub fn read_posix(
         .and_then(|vars| vars.get("IFS").map(|v| v.to_text()))
         .unwrap_or_else(|| " \t\n".to_string());
 
-    let fields = crate::expand::split_ifs(&processed_line, &ifs);
+    let fields = read_fields(&processed_line, &ifs, var_names.len());
 
     {
         let mut vars = env.vars.write();
@@ -109,20 +109,8 @@ pub fn read_posix(
             let trimmed = processed_line.trim_matches(|c| ifs.contains(c));
             vars.insert("REPLY".to_string(), Val::String(trimmed.to_string()));
         } else {
-            let num_vars = var_names.len();
-            for (idx, name) in var_names.iter().enumerate() {
-                if idx < num_vars - 1 {
-                    let val = fields.get(idx).cloned().unwrap_or_default();
-                    vars.insert(name.clone(), Val::String(val));
-                } else {
-                    // Last variable gets all remaining fields
-                    if idx < fields.len() {
-                        let remainder = fields[idx..].join(" ");
-                        vars.insert(name.clone(), Val::String(remainder));
-                    } else {
-                        vars.insert(name.clone(), Val::String(String::new()));
-                    }
-                }
+            for (name, field) in var_names.iter().zip(fields) {
+                vars.insert(name.clone(), Val::String(field.to_string()));
             }
         }
     }
@@ -131,5 +119,106 @@ pub fn read_posix(
         Ok((1, remaining_bytes))
     } else {
         Ok((0, remaining_bytes))
+    }
+}
+
+/// Retain field spans so the final name receives the original remainder,
+/// including intervening delimiters, rather than reconstructed words.
+fn read_fields<'a>(line: &'a str, ifs: &str, names: usize) -> Vec<&'a str> {
+    let whitespace = |c: char| matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
+    let line = line.trim_matches(whitespace);
+    let mut chars = line.char_indices().peekable();
+    let mut fields = Vec::new();
+    let mut start = 0;
+    while let Some((offset, c)) = chars.next() {
+        if !ifs.contains(c) {
+            continue;
+        }
+        fields.push(start..offset);
+        if whitespace(c) {
+            while chars.peek().is_some_and(|(_, c)| whitespace(*c)) {
+                chars.next();
+            }
+            if chars
+                .peek()
+                .is_some_and(|(_, c)| ifs.contains(*c) && !whitespace(*c))
+            {
+                chars.next();
+            }
+        }
+        while chars.peek().is_some_and(|(_, c)| whitespace(*c)) {
+            chars.next();
+        }
+        start = chars.peek().map_or(line.len(), |(offset, _)| *offset);
+    }
+    if start < line.len() {
+        fields.push(start..line.len());
+    }
+    (0..names)
+        .map(|index| match fields.get(index) {
+            Some(field) if index + 1 == names && index + 1 < fields.len() => &line[field.start..],
+            Some(field) => &line[field.clone()],
+            None => "",
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_name_preserves_internal_ifs_whitespace() {
+        assert_eq!(read_fields("  alpha  beta  ", " \t\n", 1), ["alpha  beta"]);
+        assert_eq!(
+            read_fields("  alpha   beta  gamma  ", " \t\n", 2),
+            ["alpha", "beta  gamma"]
+        );
+    }
+
+    #[test]
+    fn last_name_preserves_non_whitespace_delimiters_between_remaining_fields() {
+        assert_eq!(read_fields("::alpha:beta::", ":", 2), ["", ":alpha:beta::"]);
+        assert_eq!(read_fields("alpha:beta::", ":", 2), ["alpha", "beta::"]);
+        assert_eq!(
+            read_fields(" alpha : beta :: ", ": ", 2),
+            ["alpha", "beta ::"]
+        );
+    }
+
+    #[test]
+    fn a_trailing_delimiter_terminates_the_last_field_without_creating_another() {
+        assert_eq!(read_fields("alpha:beta:", ":", 2), ["alpha", "beta"]);
+        assert_eq!(read_fields("alpha:beta::", ":", 3), ["alpha", "beta", ""]);
+        assert_eq!(read_fields("alpha:", ":", 1), ["alpha"]);
+    }
+
+    #[test]
+    fn empty_ifs_preserves_the_entire_line_and_unfilled_names_are_empty() {
+        assert_eq!(
+            read_fields("  alpha  beta  ", "", 2),
+            ["  alpha  beta  ", ""]
+        );
+        assert_eq!(read_fields("", " \t\n", 3), ["", "", ""]);
+    }
+
+    #[test]
+    fn raw_read_assigns_the_original_remainder_and_returns_unconsumed_input() {
+        let env = Env::for_command();
+        let result = read_posix(
+            &["-r".into(), "first".into(), "rest".into()],
+            &env,
+            Some("alpha beta  gamma\nnext\n"),
+        )
+        .expect("raw read");
+        assert_eq!(result, (0, Some(b"next\n".to_vec())));
+        assert_eq!(
+            env.vars.read().get("first"),
+            Some(&Val::String("alpha".into()))
+        );
+        assert_eq!(
+            env.vars.read().get("rest"),
+            Some(&Val::String("beta  gamma".into()))
+        );
     }
 }
