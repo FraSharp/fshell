@@ -334,6 +334,7 @@ pub(crate) fn accept_first_tab_completion(
                     text_buf.insert_char(c);
                 }
                 append_slash_if_dir(text_buf, &prefix);
+                comp_mgr.update_from_buffer(text_buf, false);
             }
         }
         comp_mgr.prefix_accepted = true;

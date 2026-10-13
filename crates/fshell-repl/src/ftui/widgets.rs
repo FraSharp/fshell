@@ -606,6 +606,7 @@ pub fn execute_widget(widget_name: &str, ctx: &mut WidgetContext<'_>) -> WidgetA
                                     ctx.text_buf.insert_char(c);
                                 }
                                 super::append_slash_if_dir(ctx.text_buf, &prefix);
+                                ctx.comp_mgr.update_from_buffer(ctx.text_buf, false);
                                 ctx.comp_mgr.prefix_accepted = true;
                             } else {
                                 ctx.comp_mgr.prefix_accepted = true;

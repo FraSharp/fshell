@@ -607,7 +607,7 @@ pub struct CompletionsManager {
     generation: u64,
     pub loading: bool,
     pub session: Option<CompletionSession>,
-    /// Full unfiltered suggestion list from the completer (never mutated by filter)
+    /// Full unfiltered suggestion list; replacement spans follow the current input.
     pub all_suggestions: Vec<CompletionCandidate>,
     /// Kept for backwards compatibility and test convenience
     pub suggestions: Vec<CompletionCandidate>,
@@ -705,28 +705,27 @@ impl CompletionsManager {
         let cwd = self.completer.env.cwd();
         let (context_key, partial) = completion_context_key(&line, cursor_pos, &cwd);
 
-        // Filter-only fast path: same candidate set, just a narrower/wider
-        // query. Filter locally, preserve selection, never touch the worker
-        // and never clear. This is what makes per-char typing stable.
-        if !force_visible
-            && self.last_context_key.as_deref() == Some(&context_key)
+        // Same context: filter locally without recomputing or clearing the
+        // menu. Cached values remain valid, but their byte spans must follow
+        // typing, backspacing, cursor movement, and common-prefix insertion.
+        if self.last_context_key.as_deref() == Some(&context_key)
             && !self.all_suggestions.is_empty()
         {
+            let cursor_byte = line
+                .char_indices()
+                .nth(cursor_pos)
+                .map(|(index, _)| index)
+                .unwrap_or(line.len());
+            let span = TextSpan::new(cursor_byte.saturating_sub(partial.len()), cursor_byte);
+            for suggestion in &mut self.all_suggestions {
+                suggestion.span = span;
+            }
             self.loading = false;
             self.filter(&partial);
             self.visible = !self.suggestions.is_empty();
-            return;
-        }
-        // Tab re-press with identical context and cached results: just ensure
-        // visibility, no recompute.
-        if force_visible
-            && self.last_context_key.as_deref() == Some(&context_key)
-            && !self.all_suggestions.is_empty()
-        {
-            self.loading = false;
-            self.filter(&partial);
-            self.visible = !self.suggestions.is_empty();
-            self.session_active = self.visible;
+            if force_visible {
+                self.session_active = self.visible;
+            }
             return;
         }
 
@@ -2004,6 +2003,109 @@ mod tests {
         assert!(
             mgr.suggestions.iter().any(|s| s.value == selected_before) || mgr.selected_idx == 0
         );
+    }
+
+    #[test]
+    fn test_cached_completion_replaces_current_partial() {
+        // Exercise both normal filtering and Tab re-opening cached results.
+        for force_visible in [false, true] {
+            for (initial, edited, cursor, expected) in [
+                ("ls ", "ls runn", 7, "ls runner/"),
+                ("ls r", "ls runn", 7, "ls runner/"),
+                ("ls runn", "ls r", 4, "ls runner/"),
+                ("ls r", "ls runn --all", 7, "ls runner/ --all"),
+                ("ls r", "ls rünn", 7, "ls rünner/"),
+                ("ls \"r", "ls \"runn", 8, "ls \"runner/"),
+            ] {
+                let mut mgr = CompletionsManager::new(Env::new());
+                mgr.last_context_key = Some(
+                    completion_context_key(
+                        initial,
+                        initial.chars().count(),
+                        &mgr.completer.env.cwd(),
+                    )
+                    .0,
+                );
+                mgr.session_active = true;
+                let value = if initial.contains('"') {
+                    "\"runner/"
+                } else if edited.contains('ü') {
+                    "rünner/"
+                } else {
+                    "runner/"
+                };
+                let partial = extract_partial_word(initial, initial.chars().count());
+                mgr.apply_result(
+                    &CompletionRequest {
+                        generation: mgr.generation(),
+                        line: initial.to_string(),
+                        cursor_pos: initial.chars().count(),
+                        force_visible: true,
+                    },
+                    vec![CompletionCandidate::new(
+                        value,
+                        CompletionKind::Directory,
+                        TextSpan::new(initial.len() - partial.len(), initial.len()),
+                    )],
+                );
+                let generation = mgr.generation();
+                mgr.update(edited, cursor, force_visible);
+                assert_eq!(mgr.generation(), generation, "must reuse cached candidates");
+                let suggestion = mgr.get_selected_suggestion().unwrap_or_else(|| {
+                    panic!("missing completion: {initial:?} -> {edited:?}, force={force_visible}")
+                });
+                let cursor_byte = edited
+                    .char_indices()
+                    .nth(cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(edited.len());
+                assert_eq!(suggestion.span, TextSpan::new(3, cursor_byte));
+                assert_eq!(
+                    mgr.session.as_ref().unwrap().replacement_range,
+                    3..cursor_byte
+                );
+                let mut buffer = crate::ftui::buffer::TextBuffer::new();
+                buffer.replace_content(edited);
+                buffer.set_cursor(cursor);
+                super::super::render::apply_completion(&mut buffer, edited, suggestion);
+                assert_eq!(buffer.text(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_common_prefix_completion_updates_replacement_span() {
+        let mut mgr = CompletionsManager::new(Env::new());
+        mgr.last_context_key = Some(completion_context_key("ls r", 4, &mgr.completer.env.cwd()).0);
+        mgr.session_active = true;
+        mgr.apply_result(
+            &CompletionRequest {
+                generation: mgr.generation(),
+                line: "ls r".to_string(),
+                cursor_pos: 4,
+                force_visible: true,
+            },
+            ["runner/", "runways/"]
+                .into_iter()
+                .map(|value| {
+                    CompletionCandidate::new(value, CompletionKind::Directory, TextSpan::new(3, 4))
+                })
+                .collect(),
+        );
+        let mut buffer = crate::ftui::buffer::TextBuffer::new();
+        buffer.replace_content("ls r");
+        super::super::render::accept_first_tab_completion(&mut mgr, &mut buffer);
+        assert_eq!(buffer.text(), "ls run");
+        assert!(mgr.prefix_accepted);
+        let suggestion = mgr
+            .suggestions
+            .iter()
+            .find(|s| s.value == "runner/")
+            .unwrap();
+        assert_eq!(suggestion.span, TextSpan::new(3, 6));
+        let line = buffer.text();
+        super::super::render::apply_completion(&mut buffer, &line, suggestion);
+        assert_eq!(buffer.text(), "ls runner/");
     }
 
     #[test]
