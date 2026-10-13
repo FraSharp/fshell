@@ -203,6 +203,7 @@ pub async fn run_exit_trap(env: &Env) -> Result<(), EngineError> {
         .map(|_| ())
 }
 
+#[derive(Debug)]
 pub(crate) enum PosixError {
     Engine(EngineError),
     Exit(i32),
@@ -821,19 +822,22 @@ fn write_shared_file(
 /// descriptor of the *same number*, which is wrong for a duplication such as
 /// `2>&1`, where the child's fd 2 must become this process's fd 1.
 fn dup_stdio(fd: i32) -> Result<std::process::Stdio, PosixError> {
+    duplicate_process_file(fd).map(std::process::Stdio::from)
+}
+
+fn duplicate_process_file(fd: i32) -> Result<std::fs::File, PosixError> {
     use std::os::fd::FromRawFd;
-    let duplicated = unsafe { libc::dup(fd) };
+    // SAFETY: fcntl validates fd; CLOEXEC prevents the owned duplicate from
+    // escaping through a concurrent spawn. The original descriptor is untouched.
+    let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if duplicated < 0 {
         return Err(PosixError::Engine(EngineError::IoError {
             message: format!("dup({fd}) failed: {}", std::io::Error::last_os_error()),
             span: None,
         }));
     }
-    // `Stdio::from` takes ownership, so the duplicated descriptor is closed when
-    // the command drops it. The original descriptor is untouched.
-    Ok(std::process::Stdio::from(unsafe {
-        std::fs::File::from_raw_fd(duplicated)
-    }))
+    // SAFETY: a successful duplication returns one newly owned descriptor.
+    Ok(unsafe { std::fs::File::from_raw_fd(duplicated) })
 }
 
 /// Clone a shared redirect handle for handing to a child process. `try_clone`
@@ -2624,15 +2628,17 @@ async fn write_builtin_output(
         } else {
             None
         }),
-        FdTarget::Process(_) => {
-            if capture_stdout {
-                Ok(Some(rendered.as_bytes().to_vec()))
-            } else {
-                print!("{}", rendered);
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                Ok(None)
-            }
+        FdTarget::Process(1) if capture_stdout => Ok(Some(rendered.as_bytes().to_vec())),
+        FdTarget::Process(fd) => {
+            use std::io::Write;
+            let mut file = duplicate_process_file(*fd)?;
+            file.write_all(rendered.as_bytes()).map_err(|error| {
+                PosixError::Engine(EngineError::IoError {
+                    message: format!("redirect write error: {error}"),
+                    span: None,
+                })
+            })?;
+            Ok(capture_stdout.then(Vec::new))
         }
     }
 }
@@ -3345,6 +3351,45 @@ fn parse_test_int(s: &str) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn builtin_output_capture_applies_only_to_the_stdout_descriptor() {
+        let output = write_builtin_output("captured", &RedirectionContext::default(), true)
+            .await
+            .expect("stdout capture");
+        assert_eq!(output, Some(b"captured".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn builtin_output_uses_the_redirected_process_descriptor_even_when_capturing() {
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let (read_fd, write_fd) =
+            fshell_engine::create_cloexec_pipe().expect("private output pipe");
+        // SAFETY: each fresh pipe descriptor is transferred to exactly one File.
+        let mut reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
+        let writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        let mut redir = RedirectionContext::default();
+        redir.targets[1] = FdTarget::Process(writer.as_raw_fd());
+        let output = write_builtin_output("redirected", &redir, true)
+            .await
+            .expect("descriptor output");
+        assert_eq!(
+            output,
+            Some(Vec::new()),
+            "redirected bytes are not captured stdout"
+        );
+        assert!(
+            writer.metadata().is_ok(),
+            "the caller still owns its original descriptor"
+        );
+        drop(writer);
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .expect("read redirected bytes");
+        assert_eq!(bytes, b"redirected");
+    }
 
     #[tokio::test]
     async fn test_posix_while_loop_cancellation() {
