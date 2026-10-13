@@ -1702,6 +1702,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fshell-test-support"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "fshell-tty"
 version = "0.2.0"
 dependencies = [
