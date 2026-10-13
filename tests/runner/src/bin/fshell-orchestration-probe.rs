@@ -69,6 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "evaluation_effects",
                 "native_parsing",
                 "pipeline_values",
+                "pipeline_execution",
                 "posix_expansion",
                 "search_streams",
                 "cli_execution",

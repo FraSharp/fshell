@@ -15,7 +15,8 @@ success-output = "never"
 default-filter = """
 (package(=fshell-test-support) & !binary(=namespace_containment)) | package(=fshell-specifications) | package(=fshell-test-runner) |
 (package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::) | test(bridge::subshell_bindings::))) |
-(package(=fshell-core) & test(parser::stmt::command_locations::))
+(package(=fshell-core) & test(parser::stmt::command_locations::)) |
+(package(=fshell-engine) & (test(pipeline_completion::) | test(pipeline::expression_diagnostics::)))
 """
 
 [profile.support]
@@ -30,7 +31,8 @@ store-failure-output = true
 default-filter = """
 package(=fshell-specifications) |
 (package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::) | test(bridge::subshell_bindings::))) |
-(package(=fshell-core) & test(parser::stmt::command_locations::))
+(package(=fshell-core) & test(parser::stmt::command_locations::)) |
+(package(=fshell-engine) & (test(pipeline_completion::) | test(pipeline::expression_diagnostics::)))
 """
 
 [profile.library.junit]
