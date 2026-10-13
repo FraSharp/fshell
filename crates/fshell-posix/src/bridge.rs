@@ -38,6 +38,9 @@ pub fn fork_env_for_subshell(parent: &Env) -> Env {
     let mut child = parent.clone();
     child.scope.vars =
         std::sync::Arc::new(fshell_core::RwLock::new(snap_vars.into_iter().collect()));
+    // Lexical bindings were flattened into the snapshot. Keeping the parent's
+    // frame chain would let child assignments update that chain instead.
+    child.scope.local_vars = None;
     child.scope.fns = std::sync::Arc::new(fshell_core::RwLock::new(snap_fns.into_iter().collect()));
     child.scope.cwd = std::sync::Arc::new(fshell_core::RwLock::new(parent.cwd()));
     child.posix_traps =
@@ -82,5 +85,74 @@ mod tests {
         child.set_cwd(std::path::PathBuf::from("/tmp"));
         assert_eq!(parent.cwd(), initial);
         assert_eq!(child.cwd(), std::path::PathBuf::from("/tmp"));
+    }
+}
+
+#[cfg(test)]
+mod subshell_bindings {
+    use super::*;
+    use fshell_core::RwLock;
+    use std::sync::Arc;
+
+    #[test]
+    fn snapshot_uses_innermost_lexical_values_and_retains_outer_bindings() {
+        let parent = Env::for_command();
+        parent
+            .vars
+            .write()
+            .insert("value".into(), Val::String("global".into()));
+        let outer = parent.push_scope(Arc::new(RwLock::new(Default::default())));
+        let frame = outer.local_vars.as_ref().expect("outer frame");
+        frame.declare("value", Val::String("outer".into()));
+        frame.declare("outer_only", Val::Int(7));
+        let inner = outer.push_scope(Arc::new(RwLock::new(Default::default())));
+        inner
+            .local_vars
+            .as_ref()
+            .expect("inner frame")
+            .declare("value", Val::String("inner".into()));
+        let child = fork_env_for_subshell(&inner);
+        assert!(
+            child.local_vars.is_none(),
+            "child must not retain shared lexical frames"
+        );
+        assert_eq!(
+            child.vars.read().get("value"),
+            Some(&Val::String("inner".into()))
+        );
+        assert_eq!(child.vars.read().get("outer_only"), Some(&Val::Int(7)));
+    }
+
+    #[test]
+    fn child_assignment_does_not_update_the_parent_lexical_frame_or_global_binding() {
+        let parent = Env::for_command();
+        parent
+            .vars
+            .write()
+            .insert("value".into(), Val::String("global".into()));
+        let scoped = parent.push_scope(Arc::new(RwLock::new(Default::default())));
+        scoped
+            .local_vars
+            .as_ref()
+            .expect("parent frame")
+            .declare("value", Val::String("local".into()));
+        let child = fork_env_for_subshell(&scoped);
+        child.set_shell_var("value", Val::String("child".into()));
+        assert_eq!(
+            child.vars.read().get("value"),
+            Some(&Val::String("child".into()))
+        );
+        assert_eq!(
+            scoped
+                .local_vars
+                .as_ref()
+                .expect("parent frame")
+                .get("value"),
+            Some(Val::String("local".into()))
+        );
+        assert_eq!(
+            parent.vars.read().get("value"),
+            Some(&Val::String("global".into()))
+        );
     }
 }

@@ -14,7 +14,7 @@ success-output = "never"
 # Include owner-local parser and POSIX regressions by exact family.
 default-filter = """
 (package(=fshell-test-support) & !binary(=namespace_containment)) | package(=fshell-specifications) | package(=fshell-test-runner) |
-(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::))) |
+(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::) | test(bridge::subshell_bindings::))) |
 (package(=fshell-core) & test(parser::stmt::command_locations::))
 """
 
@@ -29,7 +29,7 @@ store-failure-output = true
 [profile.library]
 default-filter = """
 package(=fshell-specifications) |
-(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::))) |
+(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::) | test(bridge::subshell_bindings::))) |
 (package(=fshell-core) & test(parser::stmt::command_locations::))
 """
 
