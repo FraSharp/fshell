@@ -88,13 +88,14 @@ impl ShellFixture {
         let parent = self.open_directory(parents, true)?;
         let filename = c_string(filename)?;
         // SAFETY: parent and filename remain live; O_EXCL refuses all existing
-        // entries, including symlinks. The returned descriptor is owned once.
+        // entries, including symlinks. C varargs require integer promotion:
+        // Darwin's mode_t is 16-bit, unlike Linux's. The fd is owned once.
         let fd = unsafe {
             libc::openat(
                 parent.as_raw_fd(),
                 filename.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                0o600 as libc::mode_t,
+                0o600 as libc::c_uint,
             )
         };
         if fd < 0 {

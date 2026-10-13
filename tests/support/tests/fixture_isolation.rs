@@ -24,6 +24,21 @@ fn nested_files_preserve_bytes_and_existing_contents() -> io::Result<()> {
 }
 
 #[test]
+fn file_creation_never_grants_group_or_other_permissions() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = ShellFixture::new()?;
+    let path = fixture.create_file("private", b"fixture bytes")?;
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    assert_eq!(
+        mode & 0o177,
+        0,
+        "only owner read/write permissions may be requested"
+    );
+    assert_eq!(fixture.read_file("private")?, b"fixture bytes");
+    fixture.close()
+}
+
+#[test]
 fn absolute_parent_empty_and_nul_paths_are_rejected() -> io::Result<()> {
     let fixture = ShellFixture::new()?;
     for path in [
@@ -64,12 +79,55 @@ fn absolute_parent_empty_and_nul_paths_are_rejected() -> io::Result<()> {
 }
 
 #[test]
-fn non_unicode_paths_are_supported() -> io::Result<()> {
+fn non_unicode_filename_operations_preserve_native_filesystem_results() -> io::Result<()> {
     let fixture = ShellFixture::new()?;
+    let native = tempfile::tempdir()?;
     let name = OsString::from_vec(vec![b'f', 255]);
-    fixture.create_file(&name, b"contents")?;
-    assert_eq!(fixture.read_file(&name)?, b"contents");
-    fixture.close()
+    // Filesystems differ in the byte sequences they accept. Compare the native
+    // create-new operation, not a Linux assumption or a lossy replacement name.
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(native.path().join(&name));
+    match result {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(b"contents")?;
+            fixture.create_file(&name, b"contents")?;
+            assert_eq!(
+                fixture.read_file(&name)?,
+                std::fs::read(native.path().join(&name))?
+            );
+            let filenames = |directory: &Path| -> io::Result<Vec<OsString>> {
+                std::fs::read_dir(directory)?
+                    .map(|entry| Ok(entry?.file_name()))
+                    .collect()
+            };
+            assert_eq!(filenames(&fixture.workspace())?, filenames(native.path())?);
+        }
+        Err(error) => {
+            let actual = fixture
+                .create_file(&name, b"contents")
+                .expect_err("native filesystem rejected the filename");
+            assert_eq!(actual.raw_os_error(), error.raw_os_error());
+            assert_eq!(
+                std::fs::read_dir(fixture.workspace())?.count(),
+                0,
+                "rejection must not create a replacement filename"
+            );
+            assert_eq!(
+                fixture
+                    .read_file(&name)
+                    .expect_err("native read failure")
+                    .raw_os_error(),
+                std::fs::read(native.path().join(&name))
+                    .expect_err("native read failure")
+                    .raw_os_error()
+            );
+        }
+    }
+    fixture.close()?;
+    native.close()
 }
 
 #[test]

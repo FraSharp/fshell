@@ -124,6 +124,22 @@ jobs:
           path: target/nextest/specifications/specifications.xml
           if-no-files-found: error
 
+  support-abi:
+    name: Support ABI (${{ matrix.target }})
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Check Darwin support and runner targets
+        run: cargo check --locked -p fshell-test-support -p fshell-test-runner --all-targets --target ${{ matrix.target }}
+
   containment:
     name: Linux containment (${{ matrix.os }})
     timeout-minutes: 15
