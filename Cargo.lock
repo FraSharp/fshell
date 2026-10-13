@@ -1697,6 +1697,7 @@ dependencies = [
  "fshell-builtins",
  "fshell-core",
  "fshell-engine",
+ "fshell-posix",
  "fshell-search",
  "fshell-test-support",
  "serde_json",

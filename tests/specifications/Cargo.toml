@@ -27,6 +27,7 @@ fshell-test-support = { path = "../support" }
 serde_json.workspace = true
 fshell-core.workspace = true
 fshell-engine.workspace = true
+fshell-posix.workspace = true
 fshell-builtins.workspace = true
 fshell-search.workspace = true
 tokio.workspace = true

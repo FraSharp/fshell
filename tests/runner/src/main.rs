@@ -43,6 +43,7 @@ const SPECIFICATION_TARGETS: &[(&str, Suite)] = &[
     ("evaluation_effects", Suite::Library),
     ("native_parsing", Suite::Library),
     ("pipeline_values", Suite::Library),
+    ("posix_expansion", Suite::Library),
     ("search_streams", Suite::Library),
     ("cli_execution", Suite::Executable),
 ];
