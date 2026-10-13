@@ -132,6 +132,59 @@ fn support_selection_neither_queries_specifications_nor_builds_the_shell() -> io
     fixture.close()
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn containment_selection_has_no_shell_artifact_or_specification_metadata_dependency()
+-> io::Result<()> {
+    let fixture = fixture("success")?;
+    let output = runner(&fixture, &["--suite", "containment"]);
+    assert!(output.status.success(), "{output:?}");
+    let calls = calls(&fixture)?;
+    assert_eq!(
+        calls.iter().map(operation).collect::<Vec<_>>(),
+        ["nextest", "-vV", "nextest"]
+    );
+    let run = calls.last().expect("nextest run");
+    assert_eq!(run["executable"], Value::Null);
+    assert!(has_pair(run, "--profile", "containment"));
+    assert!(has_pair(run, "--test", "namespace_containment"));
+    fixture.close()
+}
+
+#[test]
+fn invalid_mechanical_full_feature_requests_fail_before_any_tool_invocation() -> io::Result<()> {
+    for suite in ["support", "containment"] {
+        let fixture = fixture("success")?;
+        let output = runner(&fixture, &["--suite", suite, "--full"]);
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(
+            fixture
+                .read_file("calls")
+                .expect_err("no tools should execute")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        fixture.close()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn unsupported_containment_hosts_fail_before_any_tool_invocation() -> io::Result<()> {
+    let fixture = fixture("success")?;
+    let output = runner(&fixture, &["--suite", "containment"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        fixture
+            .read_file("calls")
+            .expect_err("no tools should execute")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    fixture.close()
+}
+
 #[test]
 fn unclassified_missing_or_ambiguous_specification_targets_fail_before_building() -> io::Result<()>
 {

@@ -9,10 +9,13 @@ use std::process::{Command, ExitCode, Stdio};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Suite {
+    /// Portable support, library and executable checks.
     All,
     Support,
     Library,
     Executable,
+    /// Linux kernel containment probes; requires user/PID namespaces and pidfds.
+    Containment,
 }
 
 impl Suite {
@@ -26,6 +29,7 @@ impl Suite {
             Self::Support => "support",
             Self::Library => "library",
             Self::Executable => "executable",
+            Self::Containment => "containment",
         }
     }
 }
@@ -71,8 +75,15 @@ fn main() -> ExitCode {
 }
 
 fn run(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
-    if arguments.full && arguments.suite == Suite::Support {
-        return Err(io::Error::other("--full is not applicable to the support suite").into());
+    if arguments.full && matches!(arguments.suite, Suite::Support | Suite::Containment) {
+        return Err(
+            io::Error::other("--full is not applicable to mechanical support checks").into(),
+        );
+    }
+    if arguments.suite == Suite::Containment && !cfg!(target_os = "linux") {
+        return Err(
+            io::Error::other("PID-namespace containment requires a native Linux host").into(),
+        );
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -97,7 +108,7 @@ fn run(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     }
     let host = native_target(&version.stdout)?;
     let target = validate_target(arguments.target.as_deref(), &host)?;
-    if arguments.suite != Suite::Support {
+    if !matches!(arguments.suite, Suite::Support | Suite::Containment) {
         let metadata = Command::new(&cargo)
             .args(["metadata", "--locked", "--no-deps", "--format-version=1"])
             .current_dir(&root)
@@ -201,6 +212,7 @@ fn test_arguments(arguments: &Arguments, target: &str, root: &Path) -> Vec<OsStr
         Suite::Support => &["fshell-test-support", "fshell-test-runner"],
         Suite::Library => &["fshell-specifications", "fshell-posix"],
         Suite::Executable => &["fshell-specifications"],
+        Suite::Containment => &["fshell-test-support"],
     };
     for package in packages {
         args.extend(["--package".into(), (*package).into()]);
@@ -209,6 +221,9 @@ fn test_arguments(arguments: &Arguments, target: &str, root: &Path) -> Vec<OsStr
         // Include runner unit tests; examples and benchmarks are not selected.
         Suite::All | Suite::Support => {
             args.extend(["--lib".into(), "--bins".into(), "--tests".into()]);
+        }
+        Suite::Containment => {
+            args.extend(["--test".into(), "namespace_containment".into()]);
         }
         Suite::Library | Suite::Executable => {
             if arguments.suite == Suite::Library {
@@ -410,6 +425,27 @@ mod tests {
         assert!(args.contains(&OsString::from("fshell-test-runner")));
         assert!(!args.contains(&OsString::from("fshell-specifications")));
         assert!(args.windows(2).any(|pair| pair == ["--no-tests", "fail"]));
+    }
+
+    #[test]
+    fn containment_selection_prepares_only_its_explicit_support_target() {
+        let arguments = Arguments::parse_from(["runner", "--suite", "containment"]);
+        assert!(!arguments.suite.needs_shell());
+        let args = test_arguments(
+            &arguments,
+            "aarch64-unknown-linux-gnu",
+            Path::new("/workspace"),
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--test", "namespace_containment"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--profile", "containment"])
+        );
+        assert!(!args.contains(&OsString::from("fshell-specifications")));
+        assert!(!args.contains(&OsString::from("--tests")));
     }
 
     #[test]
