@@ -60,6 +60,7 @@ jobs:
         run: cargo audit
 
   full:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -79,6 +80,9 @@ jobs:
         with:
           components: clippy
       - run: rustup target add ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.114
       - name: Install archive build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -95,6 +99,15 @@ jobs:
         run: cargo test --features full --target ${{ matrix.target }}
       - name: Clippy (full features)
         run: cargo clippy --features full --target ${{ matrix.target }} --all-targets -- -D warnings
+      - name: Run full-feature specifications
+        run: cargo run --locked -p fshell-test-runner -- --full --target ${{ matrix.target }}
+      - name: Upload full-feature specification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: specifications-full-${{ matrix.target }}
+          path: target/nextest/specifications/specifications.xml
+          if-no-files-found: error
 
   specifications:
     name: Specifications (${{ matrix.os }})
