@@ -1021,7 +1021,7 @@ fn run_command_subst(
 
     let bytes = bytes.unwrap_or_default();
     let mut output = String::from_utf8_lossy(&bytes).into_owned();
-    while output.ends_with('\n') || output.ends_with('\r') {
+    while output.ends_with('\n') {
         output.pop();
     }
     Ok(output)
@@ -1303,6 +1303,33 @@ mod field_boundaries {
         assert_eq!(
             expand_word("$@", &env, &cfg, &args).expect("unsplit args"),
             ["a b", " c "]
+        );
+    }
+}
+
+#[cfg(test)]
+mod substitution_bytes {
+    use super::*;
+
+    #[test]
+    fn trailing_carriage_returns_are_not_newline_terminators() {
+        let env = fshell_engine::Env::for_command();
+        assert_eq!(
+            run_command_subst("printf 'a\\r\\n\\n'", &env).expect("substitution"),
+            "a\r"
+        );
+        assert_eq!(
+            run_command_subst("printf '\\r'", &env).expect("carriage return"),
+            "\r"
+        );
+    }
+
+    #[test]
+    fn embedded_newlines_survive_removal_of_all_trailing_newlines() {
+        let env = fshell_engine::Env::for_command();
+        assert_eq!(
+            run_command_subst("printf 'a\\nb\\n\\n'", &env).expect("substitution"),
+            "a\nb"
         );
     }
 }
