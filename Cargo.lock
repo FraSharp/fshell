@@ -1713,6 +1713,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fshell-test-runner"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fshell-test-support"
 version = "0.0.0"
 dependencies = [

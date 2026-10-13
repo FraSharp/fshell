@@ -1,0 +1,19 @@
+# Process-per-test execution; timeouts and leaked capture pipes fail closed.
+nextest-version = "0.9.114"
+
+[profile.default]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "5s", terminate-after = 4, grace-period = "1s" }
+leak-timeout = { period = "1s", result = "fail" }
+status-level = "all"
+failure-output = "immediate-final"
+success-output = "never"
+
+[profile.specifications]
+default-filter = "package(fshell-test-support) | package(fshell-specifications) | package(fshell-test-runner)"
+
+[profile.specifications.junit]
+path = "specifications.xml"
+store-success-output = false
+store-failure-output = true
