@@ -3462,7 +3462,10 @@ pub(crate) fn apply_pipeline_outcome(
     }
 
     match outcome.failure {
-        Some(PipelineFailure::ConditionFalse) => Ok(Flow::ConditionFalse),
+        // Logical false in an earlier stage must not make a successful
+        // finalized pipeline skip a following `&&` branch.
+        Some(PipelineFailure::ConditionFalse) if outcome.exit_code != 0 => Ok(Flow::ConditionFalse),
+        Some(PipelineFailure::ConditionFalse) => Ok(Flow::Normal),
         // A reported failure has already reached the user and its status is
         // committed above: a command's failure is not a reason to unwind.
         Some(PipelineFailure::Reported { .. }) => Ok(Flow::Normal),
@@ -4149,4 +4152,58 @@ pub(crate) fn json_to_val(v: serde_json::Value) -> fshell_core::Val {
 
 pub(crate) fn val_to_json(v: &fshell_core::Val) -> serde_json::Value {
     v.into()
+}
+
+#[cfg(test)]
+mod pipeline_completion {
+    use super::*;
+    use crate::execution::{PipelineOutcomes, Slot};
+
+    #[test]
+    fn successful_last_stage_overrides_upstream_logical_false() {
+        let env = Env::for_command();
+        env.options.write().errexit = false;
+        let outcomes = PipelineOutcomes::new();
+        outcomes.set_stages(2);
+        outcomes.record_failure(Slot::Stage(0), PipelineFailure::ConditionFalse);
+        outcomes.record_status(Slot::Stage(1), 0);
+        let result = pipeline_finalize(&outcomes, Vec::new(), false);
+        assert_eq!(
+            apply_pipeline_outcome(&env, result).expect("successful pipeline"),
+            Flow::Normal
+        );
+        assert_eq!(env.exit_code(), 0);
+    }
+
+    #[test]
+    fn pipefail_preserves_upstream_logical_false() {
+        let env = Env::for_command();
+        env.options.write().errexit = false;
+        let outcomes = PipelineOutcomes::new();
+        outcomes.set_stages(2);
+        outcomes.record_failure(Slot::Stage(0), PipelineFailure::ConditionFalse);
+        outcomes.record_status(Slot::Stage(1), 0);
+        let result = pipeline_finalize(&outcomes, Vec::new(), true);
+        assert_eq!(
+            apply_pipeline_outcome(&env, result).expect("logical false"),
+            Flow::ConditionFalse
+        );
+        assert_eq!(env.exit_code(), 1);
+    }
+
+    #[test]
+    fn logical_false_in_the_last_stage_is_not_success() {
+        let env = Env::for_command();
+        env.options.write().errexit = false;
+        let outcomes = PipelineOutcomes::new();
+        outcomes.set_stages(2);
+        outcomes.record_status(Slot::Stage(0), 0);
+        outcomes.record_failure(Slot::Stage(1), PipelineFailure::ConditionFalse);
+        let result = pipeline_finalize(&outcomes, Vec::new(), false);
+        assert_eq!(
+            apply_pipeline_outcome(&env, result).expect("logical false"),
+            Flow::ConditionFalse
+        );
+        assert_eq!(env.exit_code(), 1);
+    }
 }
