@@ -11,7 +11,11 @@ failure-output = "immediate-final"
 success-output = "never"
 
 [profile.specifications]
-default-filter = "package(fshell-test-support) | package(fshell-specifications) | package(fshell-test-runner)"
+# Include owner-local read and descriptor-output regressions by exact family.
+default-filter = """
+package(=fshell-test-support) | package(=fshell-specifications) | package(=fshell-test-runner) |
+(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_)))
+"""
 
 [profile.specifications.junit]
 path = "specifications.xml"

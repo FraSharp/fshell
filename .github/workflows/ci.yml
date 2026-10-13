@@ -96,6 +96,34 @@ jobs:
       - name: Clippy (full features)
         run: cargo clippy --features full --target ${{ matrix.target }} --all-targets -- -D warnings
 
+  specifications:
+    name: Specifications (${{ matrix.os }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.114
+      - name: Run specifications
+        run: cargo run --locked -p fshell-test-runner
+      - name: Check test infrastructure
+        run: cargo clippy --locked -p fshell-test-support -p fshell-test-runner -p fshell-specifications --all-targets -- -D warnings
+      - name: Upload specification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: specifications-${{ matrix.os }}
+          path: target/nextest/specifications/specifications.xml
+          if-no-files-found: error
+
   msrv:
     runs-on: ubuntu-latest
     steps:
@@ -109,3 +137,5 @@ jobs:
         run: cargo check --locked
       - name: Check (full features)
         run: cargo check --locked --features full
+      - name: Check test infrastructure
+        run: cargo check --locked -p fshell-test-support -p fshell-test-runner -p fshell-specifications --all-targets

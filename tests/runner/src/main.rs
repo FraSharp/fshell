@@ -155,9 +155,10 @@ fn test_arguments(arguments: &Arguments, target: &str, root: &Path) -> Vec<OsStr
             "fshell-test-support",
             "fshell-specifications",
             "fshell-test-runner",
+            "fshell-posix",
         ],
         Suite::Support => &["fshell-test-support", "fshell-test-runner"],
-        Suite::Specifications => &["fshell-specifications"],
+        Suite::Specifications => &["fshell-specifications", "fshell-posix"],
     };
     for package in packages {
         args.extend(["--package".into(), (*package).into()]);
