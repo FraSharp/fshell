@@ -7,12 +7,14 @@ use super::types::{CompletionCancel, CompletionCandidate, CompletionKind, TextSp
 use crate::fuzzy;
 use fshell_core::{FxIndexMap, Val};
 use fshell_engine::Env;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 const DIRECTORY_SNAPSHOT_TTL: Duration = Duration::from_millis(400);
 const MAX_CACHED_DIRECTORIES: usize = 64;
-const MAX_DIRECTORY_ENTRIES: usize = 2000;
+const MAX_CACHED_DIRECTORY_ENTRIES: usize = 2000;
 
 type DirectoryEntries = Arc<Vec<(String, bool)>>;
 
@@ -175,27 +177,25 @@ pub fn complete_files_at(
         if cancel.is_some_and(|c| c.is_cancelled()) {
             return Vec::new();
         }
-        let entries = directory_snapshot(&dir_to_read, cancel);
-        if entries.is_empty() {
+        let prepared = fuzzy::PreparedQuery::new(&file_prefix);
+        // The heap's maximum is the worst retained match: lower score, then
+        // lexicographically later name. Bound results, never directory coverage.
+        let mut scored: BinaryHeap<(Reverse<isize>, String, bool)> = BinaryHeap::new();
+        if !visit_directory(&dir_to_read, cancel, |name, is_dir, kind| {
+            if let Some(score) = fuzzy::fuzzy_score_prepared(&prepared, name, kind) {
+                let better = scored.peek().is_none_or(|worst| {
+                    Reverse(score) < worst.0
+                        || (Reverse(score) == worst.0 && name < worst.1.as_str())
+                });
+                if scored.len() < fuzzy::MAX_RESULTS {
+                    scored.push((Reverse(score), name.to_owned(), is_dir));
+                } else if better && let Some(mut worst) = scored.peek_mut() {
+                    *worst = (Reverse(score), name.to_owned(), is_dir);
+                }
+            }
+        }) {
             return Vec::new();
         }
-
-        let kind = fuzzy::choose_kind(entries.len());
-        let prepared = fuzzy::PreparedQuery::new(&file_prefix);
-        let mut scored: Vec<(isize, &str, bool)> = Vec::new();
-        for (name, is_dir) in entries.iter() {
-            // Cooperative cancellation: a superseded keystroke burst must not
-            // score thousands of entries to completion.
-            if scored.len().is_multiple_of(64) && cancel.is_some_and(|c| c.is_cancelled()) {
-                return Vec::new();
-            }
-            if let Some(score) = fuzzy::fuzzy_score_prepared(&prepared, name, kind) {
-                scored.push((score, name.as_str(), *is_dir));
-            }
-        }
-
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
-        scored.truncate(fuzzy::MAX_RESULTS);
 
         let user_prefix = match unquoted_owned.rfind('/') {
             Some(idx) => &unquoted_owned[..=idx],
@@ -203,6 +203,7 @@ pub fn complete_files_at(
         };
 
         scored
+            .into_sorted_vec()
             .into_iter()
             .map(|(_, name, is_dir)| {
                 let mut path_str = format!("{}{}", user_prefix, name);
@@ -233,7 +234,7 @@ pub fn complete_files_at(
                 } else if cancel.is_some_and(|c| c.is_cancelled()) {
                     None
                 } else {
-                    file_completion_description(&dir_to_read, name, false)
+                    file_completion_description(&dir_to_read, &name, false)
                 };
                 let item_kind = if is_dir {
                     CompletionKind::Directory
@@ -257,10 +258,14 @@ pub fn complete_files_at(
     perform_read()
 }
 
-fn directory_snapshot(
+/// Visit every entry, caching only complete small snapshots. Large directories
+/// stream through the visitor instead of allocating or caching an unbounded list.
+/// False means cancellation or an incomplete read; never publish that snapshot.
+fn visit_directory(
     dir: &std::path::Path,
     cancel: Option<&CompletionCancel>,
-) -> DirectoryEntries {
+    mut visit: impl FnMut(&str, bool, fuzzy::FuzzyKind),
+) -> bool {
     let cache_key = if dir.is_absolute() {
         dir.to_path_buf()
     } else {
@@ -268,46 +273,83 @@ fn directory_snapshot(
             .map(|cwd| cwd.join(dir))
             .unwrap_or_else(|_| dir.to_path_buf())
     };
-
-    if let Ok(cache) = DIRECTORY_SNAPSHOTS.lock()
-        && let Some(snapshot) = cache.get(&cache_key)
-        && snapshot.loaded_at.elapsed() < DIRECTORY_SNAPSHOT_TTL
-    {
-        return Arc::clone(&snapshot.entries);
+    let cached = DIRECTORY_SNAPSHOTS.lock().ok().and_then(|cache| {
+        cache
+            .get(&cache_key)
+            .filter(|snapshot| snapshot.loaded_at.elapsed() < DIRECTORY_SNAPSHOT_TTL)
+            .map(|snapshot| Arc::clone(&snapshot.entries))
+    });
+    if let Some(entries) = cached {
+        let kind = fuzzy::choose_kind(entries.len());
+        for (index, (name, is_dir)) in entries.iter().enumerate() {
+            if index.is_multiple_of(64) && cancel.is_some_and(CompletionCancel::is_cancelled) {
+                return false;
+            }
+            visit(name, *is_dir, kind);
+        }
+        return !cancel.is_some_and(CompletionCancel::is_cancelled);
     }
 
+    let Ok(mut reader) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let loaded_at = Instant::now();
     let mut entries = Vec::new();
-    if let Ok(dir_entries) = std::fs::read_dir(dir) {
-        for entry in dir_entries.flatten() {
-            if entries.len().is_multiple_of(64) && cancel.is_some_and(|c| c.is_cancelled()) {
+    let mut complete = false;
+    while entries.len() <= MAX_CACHED_DIRECTORY_ENTRIES {
+        if entries.len().is_multiple_of(64) && cancel.is_some_and(CompletionCancel::is_cancelled) {
+            return false;
+        }
+        match reader.next() {
+            None => {
+                complete = true;
                 break;
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry
-                .file_type()
-                .map(|file_type| file_type.is_dir())
-                .unwrap_or(false);
-            entries.push((name, is_dir));
-            if entries.len() >= MAX_DIRECTORY_ENTRIES {
-                break;
-            }
+            Some(Err(_)) => return false,
+            Some(Ok(entry)) => entries.push(directory_entry(entry)),
         }
     }
-    let entries = Arc::new(entries);
-
-    if let Ok(mut cache) = DIRECTORY_SNAPSHOTS.lock() {
+    let kind = fuzzy::choose_kind(entries.len());
+    for (index, (name, is_dir)) in entries.iter().enumerate() {
+        if index.is_multiple_of(64) && cancel.is_some_and(CompletionCancel::is_cancelled) {
+            return false;
+        }
+        visit(name, *is_dir, kind);
+    }
+    if !complete {
+        for (index, entry) in reader.enumerate() {
+            if index.is_multiple_of(64) && cancel.is_some_and(CompletionCancel::is_cancelled) {
+                return false;
+            }
+            let Ok(entry) = entry else {
+                return false;
+            };
+            let (name, is_dir) = directory_entry(entry);
+            visit(&name, is_dir, kind);
+        }
+    }
+    if cancel.is_some_and(CompletionCancel::is_cancelled) {
+        return false;
+    }
+    if complete && let Ok(mut cache) = DIRECTORY_SNAPSHOTS.lock() {
         if !cache.contains_key(&cache_key) && cache.len() >= MAX_CACHED_DIRECTORIES {
             cache.shift_remove_index(0);
         }
         cache.insert(
             cache_key,
             DirectorySnapshot {
-                loaded_at: Instant::now(),
-                entries: Arc::clone(&entries),
+                loaded_at,
+                entries: Arc::new(entries),
             },
         );
     }
-    entries
+    true
+}
+
+fn directory_entry(entry: std::fs::DirEntry) -> (String, bool) {
+    let name = entry.file_name().to_string_lossy().into_owned();
+    let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+    (name, is_dir)
 }
 
 pub fn file_completion_description(
@@ -379,5 +421,63 @@ pub fn get_val_keys(val: &Val) -> Vec<String> {
             }
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::CompletionGeneration;
+    use super::*;
+
+    #[test]
+    fn large_directory_matches_beyond_the_snapshot_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..3000 {
+            std::fs::write(directory.path().join(format!("entry{index:04}")), b"").unwrap();
+        }
+        let target = std::fs::read_dir(directory.path())
+            .unwrap()
+            .nth(MAX_CACHED_DIRECTORY_ENTRIES + 100)
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        let candidates = complete_files_at(&target, target.len(), directory.path(), None);
+        assert!(candidates.iter().any(|candidate| candidate.value == target));
+        let candidates = complete_files_at("", 0, directory.path(), None);
+        assert_eq!(candidates.len(), fuzzy::MAX_RESULTS);
+        assert_eq!(candidates.first().unwrap().value, "entry0000");
+        assert_eq!(candidates.last().unwrap().value, "entry0049");
+        assert!(
+            !DIRECTORY_SNAPSHOTS
+                .lock()
+                .unwrap()
+                .contains_key(directory.path()),
+            "large directories must not become partial or unbounded cache entries"
+        );
+    }
+
+    #[test]
+    fn cancelled_visit_does_not_publish_a_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("entry"), b"").unwrap();
+        let generation = Arc::new(CompletionGeneration::default());
+        let cancel = CompletionCancel::new(0, generation.clone());
+        assert!(!visit_directory(
+            directory.path(),
+            Some(&cancel),
+            |_, _, _| generation.advance(1)
+        ));
+        assert!(
+            !DIRECTORY_SNAPSHOTS
+                .lock()
+                .unwrap()
+                .contains_key(directory.path())
+        );
+        assert_eq!(
+            complete_files_at("entry", 5, directory.path(), None).len(),
+            1
+        );
     }
 }
