@@ -114,20 +114,32 @@ impl CompletionCandidate {
     }
 }
 
-/// Cooperative cancellation token for background completion computes.
-///
-/// `spawn_blocking` tasks cannot be aborted mid-scan (abort only detaches the
-/// thread), so long-running providers poll this token at phase boundaries and
-/// return early with partial results. The worker advances `current` past a
-/// compute's `generation` as soon as newer input arrives.
+/// Request generation published by the input owner, independently of workers.
+#[derive(Debug, Default)]
+pub struct CompletionGeneration {
+    current: std::sync::atomic::AtomicU64,
+    changed: tokio::sync::Notify,
+}
+
+impl CompletionGeneration {
+    pub fn advance(&self, generation: u64) {
+        self.current
+            .store(generation, std::sync::atomic::Ordering::Release);
+        self.changed.notify_waiters();
+    }
+}
+
+/// Cooperative cancellation for scans and notification-driven provider waits.
+/// A blocking scan cannot be aborted; it must observe the generation published
+/// at submission rather than waiting for its own worker to read the next request.
 #[derive(Debug, Clone)]
 pub struct CompletionCancel {
     generation: u64,
-    current: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    current: std::sync::Arc<CompletionGeneration>,
 }
 
 impl CompletionCancel {
-    pub fn new(generation: u64, current: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+    pub fn new(generation: u64, current: std::sync::Arc<CompletionGeneration>) -> Self {
         Self {
             generation,
             current,
@@ -138,12 +150,27 @@ impl CompletionCancel {
     pub fn never() -> Self {
         Self {
             generation: 0,
-            current: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            current: std::sync::Arc::new(CompletionGeneration::default()),
         }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.current.load(std::sync::atomic::Ordering::SeqCst) != self.generation
+        self.current
+            .current
+            .load(std::sync::atomic::Ordering::Acquire)
+            != self.generation
+    }
+
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.current.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 

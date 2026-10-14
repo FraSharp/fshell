@@ -459,6 +459,7 @@ struct CompletionResponse {
 fn spawn_completion_worker(
     env: Env,
     waker: Option<std::task::Waker>,
+    current_gen: Arc<crate::autocomplete::types::CompletionGeneration>,
 ) -> Option<(
     watch::Sender<Option<CompletionRequest>>,
     mpsc::UnboundedReceiver<CompletionResponse>,
@@ -466,13 +467,6 @@ fn spawn_completion_worker(
     let runtime = tokio::runtime::Handle::try_current().ok()?;
     let (request_tx, mut request_rx) = watch::channel::<Option<CompletionRequest>>(None);
     let (result_tx, result_rx) = mpsc::unbounded_channel();
-    // Tracks the newest generation observed by the worker. Compute tasks poll
-    // it through their cancellation token; advancing it here is what makes an
-    // in-flight scan stop early instead of running to completion pointlessly.
-    // `spawn_blocking` abort only detaches the thread, so cooperative polling
-    // is the only correct cancellation mechanism.
-    let current_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-
     runtime.spawn(async move {
         // Keystroke bursts coalesce here: wait out fast typing before spawning
         // blocking work. Explicit Tab (`force_visible`) skips the wait so the
@@ -487,7 +481,6 @@ fn spawn_completion_worker(
             };
 
             loop {
-                current_gen.store(request.generation, std::sync::atomic::Ordering::SeqCst);
                 if !request.force_visible {
                     tokio::time::sleep(TYPE_DEBOUNCE).await;
                     match request_rx.borrow_and_update().clone() {
@@ -612,6 +605,7 @@ pub struct CompletionsManager {
     completion_request_tx: Option<watch::Sender<Option<CompletionRequest>>>,
     completion_result_rx: Option<mpsc::UnboundedReceiver<CompletionResponse>>,
     generation: u64,
+    cancellation: Arc<crate::autocomplete::types::CompletionGeneration>,
     pub loading: bool,
     pub session: Option<CompletionSession>,
     /// Full unfiltered suggestion list; replacement spans follow the current input.
@@ -654,14 +648,16 @@ impl CompletionsManager {
     }
 
     fn new_internal(env: Env, background: bool, waker: Option<std::task::Waker>) -> Self {
+        let cancellation = Arc::new(crate::autocomplete::types::CompletionGeneration::default());
         let worker = background
-            .then(|| spawn_completion_worker(env.clone(), waker))
+            .then(|| spawn_completion_worker(env.clone(), waker, cancellation.clone()))
             .flatten();
         Self {
             completer: FshellCompleter { env, cancel: None },
             completion_request_tx: worker.as_ref().map(|(tx, _)| tx.clone()),
             completion_result_rx: worker.map(|(_, rx)| rx),
             generation: 0,
+            cancellation,
             loading: false,
             session: None,
             all_suggestions: Vec::new(),
@@ -742,6 +738,7 @@ impl CompletionsManager {
 
         self.last_context_key = Some(context_key);
         self.generation = self.generation.wrapping_add(1);
+        self.cancellation.advance(self.generation);
         let request = CompletionRequest {
             generation: self.generation,
             line,
@@ -1090,6 +1087,7 @@ impl CompletionsManager {
 
     pub fn clear(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.cancellation.advance(self.generation);
         if let Some(request_tx) = &self.completion_request_tx {
             request_tx.send_replace(None);
         }
@@ -1674,6 +1672,12 @@ impl CompletionsManager {
     }
 }
 
+impl Drop for CompletionsManager {
+    fn drop(&mut self) {
+        self.cancellation.advance(self.generation.wrapping_add(1));
+    }
+}
+
 /// Legacy format method — kept for backwards compat in tests / non-popup paths
 pub fn format_suggestion_legacy(
     suggestion: &CompletionCandidate,
@@ -2163,13 +2167,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn submission_and_clear_cancel_work_without_worker_progress() {
+        use crate::autocomplete::types::CompletionCancel;
+        let mut manager = CompletionsManager::new_async(Env::new());
+        let first = CompletionCancel::new(manager.generation(), manager.cancellation.clone());
+        // No yield: the worker has not had an opportunity to consume a request.
+        manager.update("echo ./", 7, true);
+        assert!(first.is_cancelled());
+        let second = CompletionCancel::new(manager.generation(), manager.cancellation.clone());
+        assert!(!second.is_cancelled());
+        manager.clear();
+        second.cancelled().await;
+        let third = CompletionCancel::new(manager.generation(), manager.cancellation.clone());
+        drop(manager);
+        third.cancelled().await;
+    }
+
     #[test]
     fn test_cancelled_file_completion_returns_early() {
         use crate::autocomplete::types::CompletionCancel;
-        use std::sync::atomic::AtomicU64;
-        // A token whose generation is behind the worker's current generation
+        // A token whose generation is behind the submitted generation
         // is cancelled before any scanning starts.
-        let current = Arc::new(AtomicU64::new(1));
+        let current = Arc::new(crate::autocomplete::types::CompletionGeneration::default());
+        current.advance(1);
         let cancel = CompletionCancel::new(0, Arc::clone(&current));
         assert!(cancel.is_cancelled());
         let results = crate::autocomplete::complete_files_at(
