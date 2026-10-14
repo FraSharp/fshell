@@ -27,6 +27,9 @@ impl Invocation {
     }
 
     fn cancel(&self) {
+        // Some synchronous builtins still consume only the interrupt flag.
+        // Both flags are private to this provider, never the foreground shell.
+        self.0.request_pipeline_interrupt();
         self.0.request_shell_cancellation();
         let jobs = self.0.job_control.jobs.read();
         for job in jobs.values() {
@@ -192,6 +195,39 @@ mod tests {
         worker.join().unwrap();
         assert!(!env.pipeline_cancelled());
         assert_eq!(env.exit_code(), 37);
+    }
+
+    #[test]
+    fn cancellation_interrupts_synchronous_builtin_work() {
+        let env = Env::new();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        env.register_builtin(
+            "waitchoices",
+            Arc::new(move |input, _, env, output, span| {
+                started_tx.send(()).unwrap();
+                let result = fshell_builtins::cmd::misc::sleep_builtin(
+                    input,
+                    vec![Val::String("30".into())],
+                    env,
+                    output,
+                    span,
+                );
+                finished_tx.send(()).unwrap();
+                result
+            }),
+        );
+        let generation = Arc::new(CompletionGeneration::default());
+        let cancel = CompletionCancel::new(0, generation.clone());
+        let worker = std::thread::spawn(move || {
+            evaluate_fsh_completions_sync("waitchoices", &env, Some(&cancel))
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        generation.advance(1);
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("native work survived cancellation");
+        assert!(worker.join().unwrap().is_empty());
     }
 
     #[test]
