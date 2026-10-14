@@ -7,6 +7,7 @@ pub mod carapace;
 pub mod custom;
 pub mod files;
 pub mod help;
+mod provider;
 pub mod ranking;
 pub mod types;
 
@@ -424,7 +425,8 @@ impl Completer for FshellCompleter {
             }
         }
 
-        if let Some(custom_suggestions) = get_custom_completions(line, pos, &self.env)
+        if let Some(custom_suggestions) =
+            get_custom_completions_cancellable(line, pos, &self.env, self.cancel.as_ref())
             && !custom_suggestions.is_empty()
         {
             return custom_suggestions;

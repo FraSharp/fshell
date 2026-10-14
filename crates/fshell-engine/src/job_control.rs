@@ -129,6 +129,7 @@ impl Drop for PipelineJobBarrierGuard {
 }
 
 /// Job management, foreground process tracking, and signal flags.
+#[derive(Default)]
 pub struct JobControl {
     pub jobs: Arc<RwLock<fshell_hash::FxHashMap<i32, Job>>>,
     pub fg_mutex: Arc<Mutex<Option<usize>>>,

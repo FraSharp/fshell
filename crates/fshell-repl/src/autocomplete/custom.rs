@@ -3,9 +3,10 @@
 
 //! Custom command-specific and shell-registry completion resolvers.
 
-use super::types::{CompletionCandidate, CompletionKind, TextSpan};
+use super::provider::evaluate_fsh_completions_sync;
+use super::types::{CompletionCancel, CompletionCandidate, CompletionKind, TextSpan};
+use fshell_core::Val;
 use fshell_core::lock::Mutex;
-use fshell_core::{Stmt, Val};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -195,73 +196,15 @@ pub fn git_branch_context(words: &[&str]) -> bool {
     )
 }
 
-static COMPLETION_EVAL_RUNTIME: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
-
-async fn evaluate_fsh_completions(expr_str: &str, env: &fshell_engine::Env) -> Vec<String> {
-    let mut parser = fshell_core::Parser::new(expr_str);
-    let Ok(stmts) = parser.parse_statements() else {
-        return Vec::new();
-    };
-
-    let mut last_results = Vec::new();
-    for stmt in stmts {
-        // Parser output wraps top-level statements in `Spanned`; inspect the inner node so
-        // expression-valued providers return values instead of falling through to `eval_stmt`.
-        if let Stmt::Expr(expr) = stmt.unpack() {
-            if let Ok(result) = fshell_engine::eval_expr(expr, env).await {
-                match result {
-                    Val::List(list) => {
-                        last_results = list.into_iter().map(|value| value.to_text()).collect();
-                    }
-                    Val::String(value) => {
-                        last_results = value.split_whitespace().map(str::to_string).collect();
-                    }
-                    other => last_results = vec![other.to_text()],
-                }
-            }
-        } else {
-            let _ = fshell_engine::eval_stmt(&stmt, env, false).await;
-        }
-    }
-    last_results
-}
-
-fn evaluate_fsh_completions_with_runtime(expr_str: &str, env: &fshell_engine::Env) -> Vec<String> {
-    let mut runtime_guard = COMPLETION_EVAL_RUNTIME.lock();
-    if runtime_guard.is_none() {
-        *runtime_guard = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok();
-    }
-    runtime_guard
-        .as_mut()
-        .map(|runtime| runtime.block_on(evaluate_fsh_completions(expr_str, env)))
-        .unwrap_or_default()
-}
-
-fn evaluate_fsh_completions_sync(expr_str: &str, env: &fshell_engine::Env) -> Vec<String> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(evaluate_fsh_completions(expr_str, env)))
-        }
-        // Current-thread runtimes cannot be blocked reentrantly. Run the synchronous API's
-        // provider evaluation on a dedicated thread using the shared isolated runtime.
-        Ok(_) => std::thread::scope(|scope| {
-            scope
-                .spawn(|| evaluate_fsh_completions_with_runtime(expr_str, env))
-                .join()
-                .unwrap_or_default()
-        }),
-        Err(_) => evaluate_fsh_completions_with_runtime(expr_str, env),
-    }
-}
-
-fn resolve_choices(choices_str: &str, env: &fshell_engine::Env) -> Vec<String> {
+fn resolve_choices(
+    choices_str: &str,
+    env: &fshell_engine::Env,
+    cancel: Option<&CompletionCancel>,
+) -> Vec<String> {
     let choices_trimmed = choices_str.trim();
     if choices_trimmed.starts_with('(') && choices_trimmed.ends_with(')') {
         let inner = &choices_trimmed[1..choices_trimmed.len() - 1];
-        evaluate_fsh_completions_sync(inner, env)
+        evaluate_fsh_completions_sync(inner, env, cancel)
     } else {
         let sep = if choices_trimmed.contains(',') {
             ','
@@ -280,6 +223,15 @@ pub fn get_registry_completions(
     line: &str,
     pos: usize,
     env: &fshell_engine::Env,
+) -> Option<Vec<CompletionCandidate>> {
+    get_registry_completions_cancellable(line, pos, env, None)
+}
+
+fn get_registry_completions_cancellable(
+    line: &str,
+    pos: usize,
+    env: &fshell_engine::Env,
+    cancel: Option<&CompletionCancel>,
 ) -> Option<Vec<CompletionCandidate>> {
     let pos = crate::text::floor_char_boundary(line, pos);
     let prefix = &line[..pos];
@@ -334,7 +286,7 @@ pub fn get_registry_completions(
                     || flag.long.as_deref() == Some(flag_name))
                 && let Some(ref choices_str) = flag.choices
             {
-                let choices = resolve_choices(choices_str, env);
+                let choices = resolve_choices(choices_str, env, cancel);
                 for val in choices {
                     if val.to_lowercase().starts_with(&filter) {
                         suggestions.push(CompletionCandidate::new(
@@ -398,7 +350,7 @@ pub fn get_registry_completions(
 
     for prov in &comp.dynamic_providers {
         if prov.parent_subcmds == typed_subcmds {
-            let choices = resolve_choices(&prov.command, env);
+            let choices = resolve_choices(&prov.command, env, cancel);
             for val in choices {
                 if val.to_lowercase().starts_with(&filter) {
                     suggestions.push(
@@ -426,7 +378,16 @@ pub fn get_custom_completions(
     pos: usize,
     env: &fshell_engine::Env,
 ) -> Option<Vec<CompletionCandidate>> {
-    if let Some(reg_suggs) = get_registry_completions(line, pos, env) {
+    get_custom_completions_cancellable(line, pos, env, None)
+}
+
+pub(crate) fn get_custom_completions_cancellable(
+    line: &str,
+    pos: usize,
+    env: &fshell_engine::Env,
+    cancel: Option<&CompletionCancel>,
+) -> Option<Vec<CompletionCandidate>> {
+    if let Some(reg_suggs) = get_registry_completions_cancellable(line, pos, env, cancel) {
         return Some(reg_suggs);
     }
     let pos = crate::text::floor_char_boundary(line, pos);
@@ -1042,7 +1003,7 @@ mod tests {
             Val::List(vec![Val::String("alpha".to_string())]),
         );
         assert_eq!(
-            evaluate_fsh_completions_with_runtime("$choices", &env),
+            super::super::provider::evaluate_fsh_completions_with_runtime("$choices", &env, None),
             vec!["alpha".to_string()]
         );
     }
