@@ -458,6 +458,7 @@ struct CompletionResponse {
 
 fn spawn_completion_worker(
     env: Env,
+    waker: Option<std::task::Waker>,
 ) -> Option<(
     watch::Sender<Option<CompletionRequest>>,
     mpsc::UnboundedReceiver<CompletionResponse>,
@@ -514,10 +515,16 @@ fn spawn_completion_worker(
                         request = latest;
                     }
                     Some(_) => {
-                        let _ = result_tx.send(CompletionResponse {
-                            request,
-                            suggestions,
-                        });
+                        if result_tx
+                            .send(CompletionResponse {
+                                request,
+                                suggestions,
+                            })
+                            .is_ok()
+                            && let Some(waker) = &waker
+                        {
+                            waker.wake_by_ref();
+                        }
                         break;
                     }
                     None => break,
@@ -634,17 +641,21 @@ pub struct CompletionsManager {
 impl CompletionsManager {
     /// Create a synchronous manager for direct callers and tests.
     pub fn new(env: Env) -> Self {
-        Self::new_internal(env, false)
+        Self::new_internal(env, false, None)
     }
 
     /// Create a manager that computes completion results off the input loop.
     pub fn new_async(env: Env) -> Self {
-        Self::new_internal(env, true)
+        Self::new_internal(env, true, None)
     }
 
-    fn new_internal(env: Env, background: bool) -> Self {
+    pub fn new_async_with_waker(env: Env, waker: std::task::Waker) -> Self {
+        Self::new_internal(env, true, Some(waker))
+    }
+
+    fn new_internal(env: Env, background: bool, waker: Option<std::task::Waker>) -> Self {
         let worker = background
-            .then(|| spawn_completion_worker(env.clone()))
+            .then(|| spawn_completion_worker(env.clone(), waker))
             .flatten();
         Self {
             completer: FshellCompleter { env, cancel: None },
@@ -1811,6 +1822,30 @@ mod tests {
         mgr.update("echo è à é", 10, false);
         let partial2 = extract_partial_word("echo è à é", 10);
         assert_eq!(partial2, "é");
+    }
+
+    #[tokio::test]
+    async fn background_completion_wakes_the_input_owner_after_publication() {
+        struct CompletionWake(tokio::sync::Notify);
+        impl std::task::Wake for CompletionWake {
+            fn wake(self: Arc<Self>) {
+                self.0.notify_one();
+            }
+        }
+        let wake = Arc::new(CompletionWake(tokio::sync::Notify::new()));
+        let mut manager = CompletionsManager::new_async_with_waker(
+            Env::new(),
+            std::task::Waker::from(wake.clone()),
+        );
+        manager.update("echo ./", 7, true);
+        tokio::time::timeout(std::time::Duration::from_secs(2), wake.0.notified())
+            .await
+            .expect("completion did not wake the input owner");
+        assert!(
+            manager.apply_pending_results(),
+            "wake preceded result publication"
+        );
+        assert!(!manager.loading);
     }
 
     #[tokio::test]

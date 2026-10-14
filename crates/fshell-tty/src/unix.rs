@@ -13,8 +13,9 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -48,14 +49,21 @@ impl UnixFd {
 
     /// Wait up to `timeout` for readability. Hangup and error conditions
     /// count as readable: the subsequent read resolves them to EOF or error.
-    fn wait_readable(&self, timeout: Duration) -> io::Result<bool> {
-        let mut fd = libc::pollfd {
-            fd: self.fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
+    fn wait_readable(&self, timeout: Duration, wake: &mut Option<UnixStream>) -> io::Result<bool> {
+        let mut fds = [
+            libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake.as_ref().map_or(-1, AsRawFd::as_raw_fd),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
         let millis = timeout.as_millis().min(std::ffi::c_int::MAX as u128) as std::ffi::c_int;
-        let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, millis) };
         if ready < 0 {
             let error = io::Error::last_os_error();
             // A signal interrupted the wait without input; the caller's
@@ -64,6 +72,30 @@ impl UnixFd {
                 return Ok(false);
             }
             return Err(error);
+        }
+        if fds[1].revents != 0 {
+            let mut closed = false;
+            if let Some(mut reader) = wake.as_ref() {
+                let mut bytes = [0u8; 256];
+                loop {
+                    match reader.read(&mut bytes) {
+                        Ok(0) => {
+                            closed = true;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            if closed {
+                *wake = None;
+            }
+            // End this poll without consuming terminal input. The caller must
+            // regain ownership before rendering or handing the TTY to a child.
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
         }
         Ok(ready > 0)
     }
@@ -106,6 +138,26 @@ pub(crate) struct UnixSource {
     size_pending: bool,
     esc_due: bool,
     chunk: Vec<u8>,
+    wake: Option<UnixStream>,
+}
+
+struct PollWake(UnixStream);
+
+impl std::task::Wake for PollWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        // Nonblocking: a full socket already represents a pending wakeup.
+        // BrokenPipe means the source has gone away; no reader is kept alive.
+        loop {
+            match (&self.0).write(&[1]) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                _ => break,
+            }
+        }
+    }
 }
 
 impl UnixSource {
@@ -118,7 +170,16 @@ impl UnixSource {
             size_pending: false,
             esc_due: false,
             chunk: vec![0u8; 1024],
+            wake: None,
         }
+    }
+
+    fn install_waker(&mut self) -> io::Result<std::task::Waker> {
+        let (reader, writer) = UnixStream::pair()?;
+        reader.set_nonblocking(true)?;
+        writer.set_nonblocking(true)?;
+        self.wake = Some(reader);
+        Ok(std::task::Waker::from(Arc::new(PollWake(writer))))
     }
 
     /// Open over an explicit fd (tests, PTY probes).
@@ -132,6 +193,7 @@ impl UnixSource {
             size_pending: false,
             esc_due: false,
             chunk: vec![0u8; 1024],
+            wake: None,
         }
     }
 
@@ -231,7 +293,7 @@ impl EventReader for UnixSource {
                 .fd
                 .as_ref()
                 .expect("descriptor opened above")
-                .wait_readable(wait)?;
+                .wait_readable(wait, &mut self.wake)?;
             if !readable {
                 // A cursor-position query can read input while this source is
                 // waiting, then return those bytes through the shared inbox.
@@ -335,6 +397,19 @@ impl UnixEventSource {
         Self {
             source: crate::input::InputSource::new(UnixSource::new()),
         }
+    }
+
+    /// Create a source whose blocking poll can be interrupted by background
+    /// results. Waking never reads the terminal or leaves a reader running.
+    pub fn with_waker() -> io::Result<(Self, std::task::Waker)> {
+        let mut source = UnixSource::new();
+        let waker = source.install_waker()?;
+        Ok((
+            Self {
+                source: crate::input::InputSource::new(source),
+            },
+            waker,
+        ))
     }
 
     pub fn poll(&mut self, timeout: Duration) -> Result<InputPoll, InputError> {
@@ -576,6 +651,59 @@ mod tests {
         let (key, modifiers) = expect_key(source.poll(Duration::from_secs(5)));
         assert_eq!(key, Key::Character('x'));
         assert!(modifiers.contains(crate::input::Modifiers::ALT));
+    }
+
+    #[test]
+    fn background_wake_interrupts_poll_without_consuming_input() {
+        let _guard = lock();
+        let mut pipe = Pipe::new().unwrap();
+        let mut reader = UnixSource::open_fd(pipe.reader);
+        let waker = reader.install_waker().unwrap();
+        let mut source = crate::input::InputSource::new(reader);
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            waker.wake_by_ref();
+            waker
+        });
+        let start = Instant::now();
+        assert_eq!(
+            source.poll(Duration::from_secs(5)).unwrap(),
+            InputPoll::Timeout
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "wake did not interrupt the poll"
+        );
+        let waker = worker.join().unwrap();
+        pipe.write(b"q");
+        assert_eq!(
+            expect_key(source.poll(Duration::from_secs(1))).0,
+            Key::Character('q')
+        );
+        // Wakeups may precede poll and coalesce; neither case loses input.
+        waker.wake_by_ref();
+        waker.wake_by_ref();
+        assert_eq!(
+            source.poll(Duration::from_secs(1)).unwrap(),
+            InputPoll::Timeout
+        );
+        assert_eq!(
+            source.poll(Duration::from_millis(5)).unwrap(),
+            InputPoll::Timeout
+        );
+        drop(source);
+        waker.wake();
+    }
+
+    #[test]
+    fn dropping_waker_does_not_leave_a_readable_hangup() {
+        let _guard = lock();
+        let pipe = Pipe::new().unwrap();
+        let mut reader = UnixSource::open_fd(pipe.reader);
+        drop(reader.install_waker().unwrap());
+        let error = reader.poll(Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(reader.wake.is_none());
     }
 
     #[test]

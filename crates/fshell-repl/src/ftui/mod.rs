@@ -221,8 +221,15 @@ pub async fn run_ftui_repl(
             return;
         }
     };
+    let (source, input_waker) = match UnixEventSource::with_waker() {
+        Ok(source) => source,
+        Err(error) => {
+            log_repl_exit("create input wakeup", &error);
+            return;
+        }
+    };
     let event_source: Arc<std::sync::Mutex<dyn EventSource>> =
-        Arc::new(std::sync::Mutex::new(UnixEventSource::new()));
+        Arc::new(std::sync::Mutex::new(source));
 
     // Wait for deferred initialization (login shell env, PATH cache warmup) to finish
     init_done.notified().await;
@@ -265,7 +272,7 @@ pub async fn run_ftui_repl(
     let mut prompt_mgr = PromptManager::new(env.clone());
     let mut text_buf = TextBuffer::new();
     let mut cursor_state = CursorState::new();
-    let mut comp_mgr = CompletionsManager::new_async(env.clone());
+    let mut comp_mgr = CompletionsManager::new_async_with_waker(env.clone(), input_waker);
     let mut history_mgr = HistoryManager::new();
     let mut agent_state = AgentModeState::new();
 
@@ -1767,7 +1774,6 @@ pub async fn run_ftui_repl(
             // Poll only while the REPL is waiting for input. Keeping a
             // background reader alive during command handoff and cursor-position
             // queries can steal terminal bytes from those exclusive readers.
-            let poll_start = std::time::Instant::now();
             let polled = match poll_terminal_event(event_source.clone(), poll_timeout).await {
                 Ok(InputPoll::Event(event)) => Some(event),
                 Ok(InputPoll::Timeout) => None,
@@ -1781,22 +1787,11 @@ pub async fn run_ftui_repl(
                 }
             };
 
-            let poll_elapsed = poll_start.elapsed();
             if polled.is_none() {
                 #[cfg(unix)]
                 if raw::SignalGuard::hup_received() {
                     cpu_dbg!("GOT_SIGHUP (in !polled path) — breaking repl_loop");
                     break 'repl_loop;
-                }
-
-                if poll_elapsed < poll_timeout / 2 {
-                    cpu_dbg!(
-                        "event::poll({:?}) returned Ok(false) in {:?} — busy-poll! (external_busy={})",
-                        poll_timeout,
-                        poll_elapsed,
-                        external_busy
-                    );
-                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
 
