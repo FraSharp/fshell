@@ -585,7 +585,10 @@ pub fn execute_widget(widget_name: &str, ctx: &mut WidgetContext<'_>) -> WidgetA
             if !ctx.comp_mgr.visible {
                 ctx.comp_mgr
                     .update(&ctx.text_buf.text(), ctx.text_buf.cursor(), true);
-                if ctx.comp_mgr.visible && !ctx.comp_mgr.suggestions.is_empty() {
+                if !ctx.comp_mgr.loading
+                    && ctx.comp_mgr.visible
+                    && !ctx.comp_mgr.suggestions.is_empty()
+                {
                     if ctx.comp_mgr.suggestions.len() == 1 {
                         if let Some(s) = ctx.comp_mgr.suggestions.first() {
                             let line = ctx.text_buf.text();
@@ -618,8 +621,9 @@ pub fn execute_widget(widget_name: &str, ctx: &mut WidgetContext<'_>) -> WidgetA
                         ctx.comp_mgr.select_next();
                     }
                 }
-            } else {
+            } else if !ctx.comp_mgr.loading {
                 ctx.comp_mgr.select_next();
+                ctx.comp_mgr.refresh_files_if_stale(ctx.text_buf);
             }
             WidgetAction::Redraw
         }

@@ -12,7 +12,7 @@ use std::collections::BinaryHeap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-const DIRECTORY_SNAPSHOT_TTL: Duration = Duration::from_millis(400);
+pub(crate) const DIRECTORY_SNAPSHOT_TTL: Duration = Duration::from_millis(400);
 const MAX_CACHED_DIRECTORIES: usize = 64;
 const MAX_CACHED_DIRECTORY_ENTRIES: usize = 2000;
 

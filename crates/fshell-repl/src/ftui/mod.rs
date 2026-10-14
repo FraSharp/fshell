@@ -2947,8 +2947,10 @@ pub async fn run_ftui_repl(
                                     accept_first_tab_completion(&mut comp_mgr, &mut text_buf);
                                 }
                             } else if !comp_mgr.loading {
-                                // Already visible — cycle through
+                                // Cycle the current menu, then refresh an expired
+                                // filesystem source without accepting stale values.
                                 comp_mgr.select_next();
+                                comp_mgr.refresh_files_if_stale(&text_buf);
                             }
                             redraw = true;
                             continue;

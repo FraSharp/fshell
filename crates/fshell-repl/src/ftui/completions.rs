@@ -608,7 +608,7 @@ pub struct CompletionsManager {
     cancellation: Arc<crate::autocomplete::types::CompletionGeneration>,
     pub loading: bool,
     pub session: Option<CompletionSession>,
-    /// Full unfiltered suggestion list; replacement spans follow the current input.
+    /// Last published query result, not a complete provider/source snapshot.
     pub all_suggestions: Vec<CompletionCandidate>,
     /// Kept for backwards compatibility and test convenience
     pub suggestions: Vec<CompletionCandidate>,
@@ -626,10 +626,10 @@ pub struct CompletionsManager {
     pub theme: Arc<Theme>,
     pub layout_kind: CompletionLayoutKind,
     pub inner_width: usize,
-    /// Completion context of the last worker request (cwd + prefix before
-    /// partial + directory part). Typing within the same context filters
-    /// locally without recompute or clearing.
+    /// Context of the published result, never the request still in flight.
     last_context_key: Option<String>,
+    last_result_at: Option<std::time::Instant>,
+    layout_initialized: bool,
 }
 
 impl CompletionsManager {
@@ -674,6 +674,8 @@ impl CompletionsManager {
             layout_kind: CompletionLayoutKind::List,
             inner_width: 80,
             last_context_key: None,
+            last_result_at: None,
+            layout_initialized: false,
         }
     }
 
@@ -712,9 +714,9 @@ impl CompletionsManager {
         let cwd = self.completer.env.cwd();
         let (context_key, partial) = completion_context_key(&line, cursor_pos, &cwd);
 
-        // Same context: filter locally without recomputing or clearing the
-        // menu. Cached values remain valid, but their byte spans must follow
-        // typing, backspacing, cursor movement, and common-prefix insertion.
+        // Refilter the previous result only as a non-accepting preview. Providers
+        // may already have filtered or truncated it for the previous query, so
+        // even narrowing within the same context must request fresh results.
         if self.last_context_key.as_deref() == Some(&context_key)
             && !self.all_suggestions.is_empty()
         {
@@ -727,16 +729,13 @@ impl CompletionsManager {
             for suggestion in &mut self.all_suggestions {
                 suggestion.span = span;
             }
-            self.loading = false;
             self.filter(&partial);
-            self.visible = !self.suggestions.is_empty();
-            if force_visible {
-                self.session_active = self.visible;
-            }
-            return;
+        } else {
+            self.suggestions.clear();
+            self.all_suggestions.clear();
+            self.session = None;
         }
 
-        self.last_context_key = Some(context_key);
         self.generation = self.generation.wrapping_add(1);
         self.cancellation.advance(self.generation);
         let request = CompletionRequest {
@@ -790,6 +789,10 @@ impl CompletionsManager {
 
     fn apply_result(&mut self, request: &CompletionRequest, suggestions: Vec<CompletionCandidate>) {
         self.loading = false;
+        self.last_context_key = Some(
+            completion_context_key(&request.line, request.cursor_pos, &self.completer.env.cwd()).0,
+        );
+        self.last_result_at = Some(std::time::Instant::now());
         // Preserve selection by value across candidate-set swaps when possible.
         let prev_selected_value = self
             .suggestions
@@ -799,6 +802,7 @@ impl CompletionsManager {
 
         if request.line.trim().is_empty() && request.force_visible {
             self.layout_kind = CompletionLayoutKind::List;
+            self.layout_initialized = true;
             self.filter(extract_partial_word(&request.line, request.cursor_pos));
             // `filter()` already preserved by value; only reset scroll when
             // selection fell back to zero.
@@ -812,7 +816,7 @@ impl CompletionsManager {
 
         // Context-driven layout: establish layout mode upon session opening, and keep stable
         // across filter-only keystrokes and worker swaps to avoid List/Grid flicker.
-        if !self.session_active || self.session.is_none() {
+        if !self.layout_initialized && !self.all_suggestions.is_empty() {
             let is_fs = !self.all_suggestions.is_empty()
                 && self.all_suggestions.iter().all(|suggestion| {
                     matches!(
@@ -825,6 +829,7 @@ impl CompletionsManager {
             } else {
                 CompletionLayoutKind::List
             };
+            self.layout_initialized = true;
         }
 
         let partial = extract_partial_word(&request.line, request.cursor_pos);
@@ -1011,7 +1016,7 @@ impl CompletionsManager {
     }
 
     pub fn get_selected_suggestion(&self) -> Option<&CompletionCandidate> {
-        if self.visible && !self.suggestions.is_empty() {
+        if self.visible && !self.loading && !self.suggestions.is_empty() {
             self.suggestions.get(self.selected_idx)
         } else {
             None
@@ -1102,6 +1107,22 @@ impl CompletionsManager {
         self.prefix_accepted = false;
         self.layout_kind = CompletionLayoutKind::List;
         self.last_context_key = None;
+        self.last_result_at = None;
+        self.layout_initialized = false;
+    }
+
+    /// Revalidate an open filesystem menu on Tab after its source TTL. Cycling
+    /// remains cheap while fresh; providers with their own policies are not
+    /// arbitrarily rerun just because the user is navigating their results.
+    pub fn refresh_files_if_stale(&mut self, buffer: &crate::ftui::buffer::TextBuffer) {
+        if !self.loading
+            && self.is_all_files_or_dirs()
+            && self.last_result_at.is_some_and(|time| {
+                time.elapsed() >= crate::autocomplete::files::DIRECTORY_SNAPSHOT_TTL
+            })
+        {
+            self.update_from_buffer(buffer, true);
+        }
     }
 
     /// After a completion has been applied to the buffer, decide whether to keep
@@ -1707,9 +1728,8 @@ pub fn format_suggestion_legacy(
 }
 
 /// Completion context key: cwd + line prefix before the partial word +
-/// directory part of the partial. Typing that leaves this key unchanged is a
-/// filter-only change (same candidate set, just narrower query) and must not
-/// trigger a worker recompute or clear the menu.
+/// directory part of the partial. An unchanged key permits a filtered preview,
+/// not reuse as a complete source: worker results may themselves be query-limited.
 pub fn completion_context_key(
     line: &str,
     cursor_char_idx: usize,
@@ -2013,11 +2033,27 @@ mod tests {
         assert_ne!(key_d, key_e);
     }
 
+    fn deferred_manager() -> CompletionsManager {
+        let mut manager = CompletionsManager::new(Env::new());
+        manager.completion_request_tx = Some(watch::channel(None).0);
+        manager
+    }
+
+    fn publish_preview(manager: &mut CompletionsManager) {
+        let request = manager
+            .completion_request_tx
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .clone()
+            .unwrap();
+        manager.apply_result(&request, manager.all_suggestions.clone());
+    }
+
     #[test]
-    fn test_typing_within_context_filters_without_recompute() {
-        let env = fshell_engine::Env::new();
-        let cwd = env.cwd();
-        let mut mgr = CompletionsManager::new(env);
+    fn typing_requeries_filtered_sources_without_accepting_the_preview() {
+        let mut mgr = deferred_manager();
+        let cwd = mgr.completer.env.cwd();
         // Seed a stable candidate set as if a worker response arrived.
         let candidates: Vec<CompletionCandidate> = ["checkout", "cherry", "commit"]
             .into_iter()
@@ -2031,11 +2067,12 @@ mod tests {
         let gen_before = mgr.generation();
         let selected_before = mgr.suggestions[0].value.clone();
 
-        // Typing another char in the same context must not bump generation
-        // and must not clear the menu.
+        // Keep the visual preview, but do not pretend a query result was the
+        // complete source set, or accept it before the new result arrives.
         mgr.update("git che", 7, false);
-        assert_eq!(mgr.generation(), gen_before);
-        assert!(!mgr.loading);
+        assert_ne!(mgr.generation(), gen_before);
+        assert!(mgr.loading);
+        assert!(mgr.get_selected_suggestion().is_none());
         assert!(mgr.visible);
         assert!(!mgr.suggestions.is_empty());
         // Selection preserved by value when possible, or reset without clearing.
@@ -2045,8 +2082,8 @@ mod tests {
     }
 
     #[test]
-    fn test_cached_completion_replaces_current_partial() {
-        // Exercise both normal filtering and Tab re-opening cached results.
+    fn refreshed_completion_replaces_current_partial() {
+        // Exercise preview filtering and publication after input/cursor edits.
         for force_visible in [false, true] {
             for (initial, edited, cursor, expected) in [
                 ("ls ", "ls runn", 7, "ls runner/"),
@@ -2056,15 +2093,7 @@ mod tests {
                 ("ls r", "ls rünn", 7, "ls rünner/"),
                 ("ls \"r", "ls \"runn", 8, "ls \"runner/"),
             ] {
-                let mut mgr = CompletionsManager::new(Env::new());
-                mgr.last_context_key = Some(
-                    completion_context_key(
-                        initial,
-                        initial.chars().count(),
-                        &mgr.completer.env.cwd(),
-                    )
-                    .0,
-                );
+                let mut mgr = deferred_manager();
                 mgr.session_active = true;
                 let value = if initial.contains('"') {
                     "\"runner/"
@@ -2089,7 +2118,13 @@ mod tests {
                 );
                 let generation = mgr.generation();
                 mgr.update(edited, cursor, force_visible);
-                assert_eq!(mgr.generation(), generation, "must reuse cached candidates");
+                assert_ne!(
+                    mgr.generation(),
+                    generation,
+                    "query-limited results must be refreshed"
+                );
+                assert!(mgr.get_selected_suggestion().is_none());
+                publish_preview(&mut mgr);
                 let suggestion = mgr.get_selected_suggestion().unwrap_or_else(|| {
                     panic!("missing completion: {initial:?} -> {edited:?}, force={force_visible}")
                 });
@@ -2114,8 +2149,7 @@ mod tests {
 
     #[test]
     fn test_common_prefix_completion_updates_replacement_span() {
-        let mut mgr = CompletionsManager::new(Env::new());
-        mgr.last_context_key = Some(completion_context_key("ls r", 4, &mgr.completer.env.cwd()).0);
+        let mut mgr = deferred_manager();
         mgr.session_active = true;
         mgr.apply_result(
             &CompletionRequest {
@@ -2136,6 +2170,8 @@ mod tests {
         super::super::render::accept_first_tab_completion(&mut mgr, &mut buffer);
         assert_eq!(buffer.text(), "ls run");
         assert!(mgr.prefix_accepted);
+        assert!(mgr.get_selected_suggestion().is_none());
+        publish_preview(&mut mgr);
         let suggestion = mgr
             .suggestions
             .iter()
@@ -2148,23 +2184,55 @@ mod tests {
     }
 
     #[test]
-    fn test_context_change_keeps_stale_visible_for_async_manager() {
-        // Async manager without a runtime has no worker channel; fall back to
-        // checking that a context change does not clear synchronously when a
-        // worker is present. Use sync manager to verify recompute path keeps
-        // results visible instead of blanking.
-        let env = fshell_engine::Env::new();
-        let mut mgr = CompletionsManager::new(env);
-        mgr.update("ls /tmp/", 7, true);
-        assert!(mgr.visible || mgr.suggestions.is_empty());
-        let had_results = !mgr.suggestions.is_empty();
-        if had_results {
-            let gen_before = mgr.generation();
-            mgr.update("ls /tmp/a", 8, false);
-            // Sync recompute keeps the menu populated, never blank.
-            assert!(!mgr.suggestions.is_empty());
-            assert!(mgr.generation() >= gen_before);
+    fn requested_context_never_claims_the_previous_result_set() {
+        let mut mgr = deferred_manager();
+        mgr.apply_result(
+            &CompletionRequest {
+                generation: 0,
+                line: "git ch".into(),
+                cursor_pos: 6,
+                force_visible: true,
+            },
+            vec![CompletionCandidate::new(
+                "checkout",
+                CompletionKind::ExternalCommand,
+                TextSpan::new(4, 6),
+            )],
+        );
+        mgr.session_active = true;
+        mgr.update("echo ./", 7, false);
+        mgr.update("echo ./f", 8, false);
+        assert!(mgr.loading);
+        assert!(mgr.suggestions.is_empty());
+        assert!(mgr.get_selected_suggestion().is_none());
+    }
+
+    #[test]
+    fn widening_a_query_restores_candidates_filtered_out_by_the_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["a-one", "a-two", "b-one", "b-two"] {
+            std::fs::write(directory.path().join(name), b"").unwrap();
         }
+        let env = Env::new();
+        env.set_cwd(directory.path().to_path_buf());
+        let mut mgr = CompletionsManager::new(env);
+        mgr.update("echo ./a-", 9, true);
+        assert!(
+            mgr.suggestions
+                .iter()
+                .all(|candidate| candidate.value.starts_with("./a-"))
+        );
+        mgr.update("echo ./", 7, false);
+        assert!(
+            mgr.suggestions
+                .iter()
+                .any(|candidate| candidate.value == "./b-one")
+        );
+        assert!(
+            mgr.suggestions
+                .iter()
+                .any(|candidate| candidate.value == "./b-two")
+        );
     }
 
     #[tokio::test]

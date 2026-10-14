@@ -309,7 +309,7 @@ pub(crate) fn accept_first_tab_completion(
     comp_mgr: &mut CompletionsManager,
     text_buf: &mut buffer::TextBuffer,
 ) {
-    if !comp_mgr.visible || comp_mgr.suggestions.is_empty() {
+    if comp_mgr.loading || !comp_mgr.visible || comp_mgr.suggestions.is_empty() {
         return;
     }
 
