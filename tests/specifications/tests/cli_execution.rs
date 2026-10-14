@@ -55,6 +55,60 @@ fn posix_exit_stops_the_script_and_preserves_the_requested_status() -> io::Resul
 }
 
 #[test]
+fn posix_exit_handler_output_does_not_replace_the_exiting_status() -> io::Result<()> {
+    let fixture = ShellFixture::new()?;
+    let output = command(&fixture)?
+        .args([
+            "--posix",
+            "-c",
+            "set +e; trap 'printf \"<%s>\" \"$?\"; false' EXIT; printf body; exit 23; printf wrong",
+        ])
+        .run()
+        .expect("exit handler");
+    assert_output(&output, 23, b"body<23>", b"");
+    fixture.close()
+}
+
+#[test]
+fn posix_exit_inside_the_exit_handler_overrides_the_process_status() -> io::Result<()> {
+    let fixture = ShellFixture::new()?;
+    let output = command(&fixture)?
+        .args([
+            "--posix",
+            "-c",
+            "trap 'printf trap; exit 17; printf wrong' EXIT; printf before; exit 23",
+        ])
+        .run()
+        .expect("handler exit");
+    assert_output(&output, 17, b"beforetrap", b"");
+    fixture.close()
+}
+
+#[test]
+fn posix_redirected_return_preserves_file_bytes_and_restores_caller_stdout() -> io::Result<()> {
+    let fixture = ShellFixture::new()?;
+    let output = command(&fixture)?.args(["--posix", "-c", "set +e; printf before; f() { { printf out; printf err >&2; return 19; } > out 2>&1; }; f; printf '<%s>' \"$?\""]).run().expect("redirected return");
+    assert_output(&output, 0, b"before<19>", b"");
+    assert_eq!(fixture.read_file("out")?, b"outerr");
+    fixture.close()
+}
+
+#[test]
+fn posix_errexit_retains_output_and_runs_the_exit_handler_with_failure_status() -> io::Result<()> {
+    let fixture = ShellFixture::new()?;
+    let output = command(&fixture)?
+        .args([
+            "--posix",
+            "-c",
+            "set -e; trap 'printf \"<%s>\" \"$?\"' EXIT; printf before; false; printf wrong",
+        ])
+        .run()
+        .expect("errexit handler");
+    assert_output(&output, 1, b"before<1>", b"");
+    fixture.close()
+}
+
+#[test]
 fn native_math_error_has_a_structured_diagnostic_and_nonzero_status() -> io::Result<()> {
     let fixture = ShellFixture::new()?;
     let output = command(&fixture)?

@@ -3631,6 +3631,63 @@ mod redirection_ownership {
         );
     }
 
+    #[tokio::test]
+    async fn dropping_a_command_awaiting_eof_releases_its_inherited_redirect() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        let directory = tempfile::tempdir().expect("directory");
+        let env = Env::for_command();
+        env.options.write().errexit = false;
+        let handle = open_redirect_file(&directory.path().join("out"), false).expect("output");
+        let weak = std::sync::Arc::downgrade(&handle);
+        let mut redir = RedirectionContext::default();
+        redir.targets[1] = FdTarget::File(handle);
+        let io_cfg = IoStreamConfig {
+            redirections: Some(redir),
+            ..Default::default()
+        };
+        let lease = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let handler_lease = lease.clone();
+        #[expect(
+            clippy::result_large_err,
+            reason = "production BuiltinHandler error type"
+        )]
+        let handler: fshell_engine::BuiltinHandler = std::sync::Arc::new(move |_, _, _, tx, _| {
+            *handler_lease.lock().expect("lease") = Some(tx);
+            Ok(())
+        });
+        env.register_builtin("jobs", handler);
+        let parsed = crate::parse_posix_script("{ printf before; jobs; }").expect("script");
+        let cfg = EvalConfig::default();
+        let mut call = Box::pin(eval_compound_list_stream(
+            &parsed.program.complete_commands[0],
+            &env,
+            &cfg,
+            io_cfg,
+        ));
+        assert!(
+            call.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert!(
+            lease.lock().expect("lease").is_some(),
+            "actually awaiting EOF"
+        );
+        assert!(
+            weak.upgrade().is_some(),
+            "the pending call owns the redirect"
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("out")).expect("prefix"),
+            b"before"
+        );
+        drop(call);
+        assert!(weak.upgrade().is_none(), "all redirect owners are dropped");
+        let sender = lease.lock().expect("lease").take().expect("held sender");
+        assert!(sender.is_closed(), "the awaiting receiver is dropped");
+    }
+
     #[test]
     fn unsupported_duplication_sources_are_rejected_before_indexing_the_table() {
         for destination in ["1", "-"] {
