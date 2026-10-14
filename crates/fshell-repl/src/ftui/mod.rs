@@ -2086,7 +2086,10 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             Key::Tab => {
-                                comp_mgr.select_next();
+                                if !comp_mgr.loading {
+                                    comp_mgr.select_next();
+                                    comp_mgr.refresh_files_if_stale(&text_buf);
+                                }
                                 redraw = true;
                                 continue;
                             }
@@ -2159,6 +2162,9 @@ pub async fn run_ftui_repl(
                                 continue;
                             }
                             Key::Enter => {
+                                if comp_mgr.loading {
+                                    continue;
+                                }
                                 if let Some(s) = comp_mgr.get_selected_suggestion().cloned() {
                                     let line = text_buf.text().clone();
                                     apply_completion(&mut text_buf, &line, &s);
