@@ -20,21 +20,7 @@ pub fn shift_posix(env: &Env, n: usize) -> Result<(), String> {
             ));
         }
         let remaining = items.into_iter().skip(n).collect::<Vec<_>>();
-        let count = remaining.len();
-        vars.insert("@".to_string(), fshell_core::Val::List(remaining.clone()));
-        vars.insert("#".to_string(), fshell_core::Val::Int(count as i64));
-        // Also update $1..$n
-        for i in 1..=count {
-            vars.insert(i.to_string(), remaining[i - 1].clone());
-        }
-        // Clear stale high indices
-        for i in (count + 1)..=64 {
-            if vars.contains_key(&i.to_string()) {
-                vars.remove(&i.to_string());
-            } else {
-                break;
-            }
-        }
+        crate::positional::replace(&mut vars, remaining);
     }
     Ok(())
 }
@@ -54,12 +40,7 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<Option<String>, String> {
             .iter()
             .map(|s| fshell_core::Val::String(s.clone()))
             .collect();
-        let count = positional.len();
-        vars.insert("@".to_string(), fshell_core::Val::List(positional.clone()));
-        vars.insert("#".to_string(), fshell_core::Val::Int(count as i64));
-        for (i, v) in positional.into_iter().enumerate() {
-            vars.insert((i + 1).to_string(), v);
-        }
+        crate::positional::replace(&mut vars, positional);
         return Ok(None);
     }
 
@@ -83,12 +64,7 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<Option<String>, String> {
                     .iter()
                     .map(|s| fshell_core::Val::String(s.clone()))
                     .collect();
-                let count = positional.len();
-                vars.insert("@".to_string(), fshell_core::Val::List(positional.clone()));
-                vars.insert("#".to_string(), fshell_core::Val::Int(count as i64));
-                for (idx, v) in positional.into_iter().enumerate() {
-                    vars.insert((idx + 1).to_string(), v);
-                }
+                crate::positional::replace(&mut vars, positional);
                 break;
             }
             "-o" | "+o" => {
@@ -213,5 +189,77 @@ mod tests {
         assert!(env.options.read().errexit);
         set_posix(&env, &["+e".to_string()]).unwrap();
         assert!(!env.options.read().errexit);
+    }
+}
+
+#[cfg(test)]
+mod argument_updates {
+    use super::*;
+    use fshell_core::Val;
+
+    fn wide_arguments() -> Vec<String> {
+        std::iter::once("--".into())
+            .chain((1..=80).map(|index| format!("arg-{index}")))
+            .collect()
+    }
+
+    #[test]
+    fn shift_rebuilds_numbered_bindings_without_a_fixed_index_limit() {
+        let env = Env::for_command();
+        set_posix(&env, &wide_arguments()).expect("wide arguments");
+        shift_posix(&env, 79).expect("shift");
+        let bindings: Vec<_> = env
+            .vars
+            .read()
+            .iter()
+            .filter(|(name, _)| {
+                name.as_str() == "@"
+                    || name.as_str() == "#"
+                    || name.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        let expected: std::collections::HashMap<_, _> = [
+            (
+                "@".to_string(),
+                Val::List(vec![Val::String("arg-80".into())]),
+            ),
+            ("#".to_string(), Val::Int(1)),
+            ("1".to_string(), Val::String("arg-80".into())),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            bindings
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn set_clears_stale_arguments_with_and_without_option_prefixes() {
+        for args in [vec!["--".into()], vec!["-e".into(), "--".into()]] {
+            let env = Env::for_command();
+            set_posix(&env, &wide_arguments()).expect("wide arguments");
+            set_posix(&env, &args).expect("empty arguments");
+            assert_eq!(env.vars.read().get("@"), Some(&Val::List(Vec::new())));
+            assert_eq!(env.vars.read().get("#"), Some(&Val::Int(0)));
+            assert!(
+                !env.vars
+                    .read()
+                    .keys()
+                    .any(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_shift_preserves_every_binding() {
+        let env = Env::for_command();
+        set_posix(&env, &["--".into(), "original".into()]).expect("arguments");
+        let before = env.vars.read().clone();
+        assert!(shift_posix(&env, 2).is_err());
+        assert_eq!(*env.vars.read(), before);
     }
 }

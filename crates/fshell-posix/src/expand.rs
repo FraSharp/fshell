@@ -135,7 +135,10 @@ pub fn split_ifs(s: &str, ifs: &str) -> Vec<String> {
     fields
 }
 
-fn get_effective_positional(env: &fshell_engine::Env, fallback: &[String]) -> Vec<String> {
+pub(crate) fn get_effective_positional(
+    env: &fshell_engine::Env,
+    fallback: &[String],
+) -> Vec<String> {
     if let Some(Val::List(items)) = env.vars.read().get("@") {
         return items.iter().map(|v| v.to_text()).collect();
     }

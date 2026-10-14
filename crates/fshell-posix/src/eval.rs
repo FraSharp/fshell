@@ -1164,7 +1164,7 @@ async fn eval_compound_command_stream(
                 }
                 expanded
             } else {
-                cfg.positional.clone()
+                crate::expand::get_effective_positional(env, &cfg.positional)
             };
             let mut last = 0;
             let mut accumulated = if io_cfg.capture_stdout {
@@ -3337,5 +3337,41 @@ mod tests {
         let result = eval_source_stream(&parsed, &env, &EvalConfig::default(), false).await;
         assert!(matches!(result, Err(EngineError::Interrupted { .. })));
         assert_eq!(env.exit_code(), 130);
+    }
+}
+
+#[cfg(test)]
+mod argument_iteration {
+    use super::*;
+
+    #[tokio::test]
+    async fn implicit_for_preserves_live_empty_and_spaced_arguments() {
+        let env = Env::for_command();
+        let parsed = crate::parse_posix_script(
+            "set -- 'a b' '' c; for item; do printf '<%s>' \"$item\"; done",
+        )
+        .expect("script");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            eval_source_stream(&parsed, &env, &EvalConfig::default(), true),
+        )
+        .await
+        .expect("loop deadline")
+        .expect("loop");
+        assert_eq!(result, (0, Some(b"<a b><><c>".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn implicit_for_snapshots_arguments_before_running_its_body() {
+        let env = Env::for_command();
+        let parsed = crate::parse_posix_script("set -- a b; for item; do set -- changed; printf '%s' \"$item\"; done; printf '<%s>' \"$1\"").expect("script");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            eval_source_stream(&parsed, &env, &EvalConfig::default(), true),
+        )
+        .await
+        .expect("loop deadline")
+        .expect("loop");
+        assert_eq!(result, (0, Some(b"ab<changed>".to_vec())));
     }
 }
