@@ -51,15 +51,10 @@ pub async fn eval_source(
     env: &Env,
     cfg: &EvalConfig,
 ) -> Result<i32, EngineError> {
-    // Positional parameters are only scoped/restored when explicitly passed in cfg
-    let has_explicit_positional = !cfg.positional.is_empty();
-    let saved_positional = if has_explicit_positional {
-        let s = save_positional(env);
-        apply_positional(env, &cfg.positional);
-        Some(s)
-    } else {
-        None
-    };
+    // An empty config inherits the caller's live arguments; a function call,
+    // unlike this invocation API, always installs a scope even with no args.
+    let positional_scope =
+        (!cfg.positional.is_empty()).then(|| crate::positional::Scope::new(env, &cfg.positional));
 
     let result = {
         let run_cfg = EvalConfig {
@@ -69,9 +64,7 @@ pub async fn eval_source(
         eval_program(&parsed.program, env, &run_cfg).await
     };
 
-    if let Some(saved) = saved_positional {
-        restore_positional(env, saved);
-    }
+    drop(positional_scope);
 
     let code = match result {
         Ok(code) => {
@@ -112,14 +105,8 @@ pub async fn eval_source_stream(
     cfg: &EvalConfig,
     capture_stdout: bool,
 ) -> Result<(i32, Option<Vec<u8>>), EngineError> {
-    let has_explicit_positional = !cfg.positional.is_empty();
-    let saved_positional = if has_explicit_positional {
-        let s = save_positional(env);
-        apply_positional(env, &cfg.positional);
-        Some(s)
-    } else {
-        None
-    };
+    let _positional_scope =
+        (!cfg.positional.is_empty()).then(|| crate::positional::Scope::new(env, &cfg.positional));
 
     let mut captured = if capture_stdout {
         Some(Vec::new())
@@ -172,10 +159,6 @@ pub async fn eval_source_stream(
             }
             Err(PosixError::Engine(err)) => return Err(err),
         }
-    }
-
-    if let Some(saved) = saved_positional {
-        restore_positional(env, saved);
     }
 
     env.set_exit_code(last_code as i64);
@@ -240,54 +223,6 @@ pub(crate) fn check_cancelled(env: &Env) -> Result<(), PosixError> {
         Err(PosixError::Interrupted)
     } else {
         Ok(())
-    }
-}
-
-fn save_positional(env: &Env) -> Vec<String> {
-    if let Some(Val::List(items)) = env.vars.read().get("@") {
-        return items.iter().map(|v| v.to_text()).collect();
-    }
-    Vec::new()
-}
-
-fn apply_positional(env: &Env, positional: &[String]) {
-    if positional.is_empty() {
-        return;
-    }
-    {
-        let mut vars = env.vars.write();
-        let list: Vec<Val> = positional.iter().map(|s| Val::String(s.clone())).collect();
-        let n = list.len();
-        vars.insert("@".to_string(), Val::List(list.clone()));
-        vars.insert("#".to_string(), Val::Int(n as i64));
-        for (i, v) in list.into_iter().enumerate() {
-            vars.insert((i + 1).to_string(), v);
-        }
-    }
-}
-
-fn restore_positional(env: &Env, saved: Vec<String>) {
-    {
-        let mut vars = env.vars.write();
-        if saved.is_empty() {
-            vars.remove("@");
-            vars.remove("#");
-            for i in 1..=64 {
-                if vars.contains_key(&i.to_string()) {
-                    vars.remove(&i.to_string());
-                } else {
-                    break;
-                }
-            }
-        } else {
-            let list: Vec<Val> = saved.iter().map(|s| Val::String(s.clone())).collect();
-            let n = list.len();
-            vars.insert("@".to_string(), Val::List(list.clone()));
-            vars.insert("#".to_string(), Val::Int(n as i64));
-            for (i, v) in list.into_iter().enumerate() {
-                vars.insert((i + 1).to_string(), v);
-            }
-        }
     }
 }
 
@@ -1804,15 +1739,14 @@ async fn eval_simple_command_inner(
         && !crate::posix_builtins::type_cmd::is_special_builtin(cmd_name)
         && let Some(func_body) = get_posix_function(env, cmd_name)
     {
-        let saved = save_positional(env);
-        apply_positional(env, args);
+        let positional_scope = crate::positional::Scope::new(env, args);
         let fn_cfg = EvalConfig {
             positional: args.to_vec(),
             errexit: cfg.errexit,
             source: cfg.source.clone(),
         };
         let result = eval_compound_command_stream(&func_body, env, &fn_cfg, io_cfg).await;
-        restore_positional(env, saved);
+        drop(positional_scope);
         // `return` ends the function, not the script that called it: a caller sees
         // the status the function returned with and carries on.
         return match result {

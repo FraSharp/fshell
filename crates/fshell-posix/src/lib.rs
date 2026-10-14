@@ -23,6 +23,7 @@ pub mod bridge;
 pub mod eval;
 pub mod expand;
 pub mod parser;
+mod positional;
 pub mod posix_builtins;
 
 pub use arithmetic::eval_arithmetic_expr;
