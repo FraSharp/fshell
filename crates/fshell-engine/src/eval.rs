@@ -1436,6 +1436,10 @@ fn drain_captured(
             PipelinePayload::Structured(d) => {
                 // Command stderr stream content is output, not failure: pass
                 // it to the shell's stderr without recording anything.
+                if let Some(bytes) = d.stderr_bytes() {
+                    crate::write_stderr_bytes(bytes);
+                    continue;
+                }
                 if let Some(text) = d.stderr_text() {
                     crate::write_stderr_stream(&text);
                     continue;

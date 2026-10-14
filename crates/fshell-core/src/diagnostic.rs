@@ -630,7 +630,7 @@ impl FshDiag {
     /// an engine failure. Collectors must route its text to the shell's
     /// stderr and record no failure.
     pub fn is_stderr_stream(&self) -> bool {
-        self.report.downcast_ref::<StderrStream>().is_some()
+        self.report.downcast_ref::<StderrStream>().is_some() || self.stderr_bytes().is_some()
     }
 
     /// The raw stream text, when [`is_stderr_stream`](Self::is_stderr_stream)
@@ -639,6 +639,19 @@ impl FshDiag {
         self.report
             .downcast_ref::<StderrStream>()
             .map(|stream| stream.0.clone())
+            .or_else(|| {
+                self.stderr_bytes()
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            })
+    }
+
+    /// Unmodified subprocess stderr bytes. Prefer this over `stderr_text` for
+    /// transport: chunks may split UTF-8 and do not imply record newlines/NULs.
+    /// Native text records retain their separate sentinel-aware writer policy.
+    pub fn stderr_bytes(&self) -> Option<&[u8]> {
+        self.report
+            .downcast_ref::<StderrBytes>()
+            .map(|stream| stream.0.as_slice())
     }
 
     /// The status this diagnostic declares, when it describes a *command-level*
@@ -716,6 +729,25 @@ impl std::error::Error for StderrStream {}
 impl Diagnostic for StderrStream {}
 
 impl DiagnosticExt for StderrStream {
+    fn category(&self) -> &'static str {
+        "stderr"
+    }
+}
+
+/// Byte-preserving subprocess stderr transport, not an execution diagnostic.
+/// Unlike native `StderrStream` records, no newline or NUL has special meaning.
+#[derive(Debug, Clone)]
+pub struct StderrBytes(pub Vec<u8>);
+
+impl fmt::Display for StderrBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&String::from_utf8_lossy(&self.0))
+    }
+}
+
+impl std::error::Error for StderrBytes {}
+impl Diagnostic for StderrBytes {}
+impl DiagnosticExt for StderrBytes {
     fn category(&self) -> &'static str {
         "stderr"
     }

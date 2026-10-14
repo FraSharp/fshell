@@ -127,7 +127,10 @@ fn drain<W: Write, E: Write>(
             }
             PipelinePayload::Structured(diag) => {
                 output.flush()?;
-                if let Some(text) = diag.stderr_text() {
+                if let Some(bytes) = diag.stderr_bytes() {
+                    fshell_tty::mark_cursor_state_unknown_for_stderr_output(bytes);
+                    errors.write_all(bytes)?;
+                } else if let Some(text) = diag.stderr_text() {
                     write_stderr_record(&mut errors, &text)?;
                 } else {
                     summary.has_errors = true;
@@ -281,6 +284,17 @@ mod tests {
         )]);
         assert!(!summary.has_errors);
         assert_eq!(errors, b"progress\r");
+    }
+
+    #[test]
+    fn subprocess_stderr_preserves_bytes_without_record_conversion() {
+        let (summary, _, errors) = collect(vec![PipelinePayload::Structured(
+            fshell_core::FshDiag::new(fshell_core::diagnostic::StderrBytes(
+                b"\0\xffprogress\r".to_vec(),
+            )),
+        )]);
+        assert!(!summary.has_errors);
+        assert_eq!(errors, b"\0\xffprogress\r");
     }
 
     #[test]

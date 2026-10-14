@@ -101,6 +101,10 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
             PipelinePayload::Structured(d) => {
                 // Command stderr stream content is output, not failure: pass
                 // it to the shell's stderr and keep collecting.
+                if let Some(bytes) = d.stderr_bytes() {
+                    crate::write_stderr_bytes(bytes);
+                    continue;
+                }
                 if let Some(text) = d.stderr_text() {
                     crate::write_stderr_stream(&text);
                     continue;
@@ -3852,7 +3856,9 @@ pub(crate) async fn run_pipeline_statement(
             }
             PipelinePayload::Structured(d) => {
                 // Command stderr stream content is output, not failure.
-                if let Some(text) = d.stderr_text() {
+                if let Some(bytes) = d.stderr_bytes() {
+                    crate::write_stderr_bytes(bytes);
+                } else if let Some(text) = d.stderr_text() {
                     crate::write_stderr_stream(&text);
                 } else {
                     crate::render_stage_diag(env, &d);

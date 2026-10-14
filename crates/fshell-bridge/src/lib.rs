@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use ustr::ustr;
 
 mod cmdnotfound;
+mod stderr;
 mod structured;
 
 struct CursorStateGuard {
@@ -1157,42 +1158,20 @@ pub async fn run_external(
         }));
     }
 
-    // Capture stderr errors (when stderr was piped)
+    // stderr is a byte stream, not an error report held until child exit.
     if let Some(async_stderr) = stderr {
         let tx_diag = tx.clone();
         let stderr_limit = env.options.read().stderr_max_bytes;
         let output_cancelled_clone = output_cancelled.clone();
+        let stderr_env = env.clone();
         io_tasks.push(tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut err_str = String::with_capacity(4096);
-            let mut limited = async_stderr.take(stderr_limit as u64);
-            if limited.read_to_string(&mut err_str).await.is_err() {
+            if let Err(error) = stderr::forward(async_stderr, tx_diag, stderr_limit).await {
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    stderr_env.report_stage_error();
+                }
                 if !output_cancelled_clone.swap(true, Ordering::AcqRel) {
                     terminate_process_group(pid);
                 }
-                return;
-            }
-            if limited.limit() == 0 && !err_str.is_empty() {
-                let total = err_str.len();
-                if !err_str.ends_with('\n') {
-                    err_str.push('\n');
-                }
-                err_str.push_str(&format!(
-                    "...(stderr truncated at {} of {} bytes)\n",
-                    total,
-                    total + stderr_limit
-                ));
-            }
-            if !err_str.is_empty()
-                && tx_diag
-                    .send(PipelinePayload::Structured(fshell_core::FshDiag::new(
-                        fshell_core::StderrStream(err_str),
-                    )))
-                    .await
-                    .is_err()
-                && !output_cancelled_clone.swap(true, Ordering::AcqRel)
-            {
-                terminate_process_group(pid);
             }
         }));
     }

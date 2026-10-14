@@ -3668,6 +3668,15 @@ pub(crate) fn write_stderr_stream(text: &str) {
     let _ = handle.flush();
 }
 
+/// Write subprocess stderr without text-record newline or sentinel conversion.
+pub(crate) fn write_stderr_bytes(bytes: &[u8]) {
+    use std::io::Write;
+    fshell_tty::mark_cursor_state_unknown_for_stderr_output(bytes);
+    let mut error = std::io::stderr().lock();
+    let _ = error.write_all(bytes);
+    let _ = error.flush();
+}
+
 thread_local! {
     static IS_RUNNING_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
