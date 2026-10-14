@@ -710,9 +710,23 @@ pub fn format_val_compact(val: &Val, theme: &fshell_core::theme::Theme) -> Strin
 }
 
 pub fn print_item_streaming(val: &Val, theme: &fshell_core::theme::Theme) {
-    use std::io::Write;
+    if matches!(val, Val::List(_)) {
+        print_value_beautifully(val, theme);
+        return;
+    }
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
+    let _ = write_item_streaming(&mut handle, val, theme);
+    let _ = std::io::Write::flush(&mut handle);
+}
+
+/// Record formatting without terminal ownership or per-item flushing. Stream
+/// consumers own buffering; only aggregate values may need a fullscreen pager.
+pub(crate) fn write_item_streaming(
+    writer: &mut impl std::io::Write,
+    val: &Val,
+    theme: &fshell_core::theme::Theme,
+) -> std::io::Result<()> {
     use crate::theme_ext::ThemeColorNu;
     match val {
         Val::Map(map) => {
@@ -725,22 +739,23 @@ pub fn print_item_streaming(val: &Val, theme: &fshell_core::theme::Theme) {
                     format_val_compact(v, theme)
                 ));
             }
-            let _ = writeln!(handle, "{{ {} }}", parts.join(", "));
+            writeln!(writer, "{{ {} }}", parts.join(", "))
         }
-        Val::Blob(b) => {
-            let _ = handle.write_all(b);
-            let _ = handle.flush();
+        Val::Blob(bytes) => writer.write_all(bytes),
+        Val::String(text) if text.starts_with('\0') => Ok(()),
+        Val::String(text) => {
+            if let Some(text) = text.strip_suffix('\0') {
+                writer.write_all(text.as_bytes())
+            } else {
+                writeln!(writer, "{text}")
+            }
         }
-        Val::String(s) if s.starts_with('\0') => {}
-        other => {
-            drop(handle);
-            print_value_beautifully(other, theme);
-        }
+        other => writer.write_all(render_val_to_string(other, theme).as_bytes()),
     }
 }
 
-/// Async boundary for streaming output. The synchronous formatter may enter
-/// the fullscreen pager, so it must not run on the REPL runtime thread.
+/// Single-value convenience boundary for callers that may enter a pager.
+/// Pipeline streams use one display consumer, not one blocking task per item.
 pub async fn print_item_streaming_async(
     val: Val,
     theme: Arc<fshell_core::theme::Theme>,

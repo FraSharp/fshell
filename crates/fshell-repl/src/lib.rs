@@ -71,6 +71,7 @@ pub mod fuzzy;
 pub mod highlighter;
 pub mod hinter;
 pub mod history;
+mod output;
 pub mod picker;
 pub mod prompt;
 pub mod prompt_config;
@@ -1856,91 +1857,18 @@ async fn handle_line_generic_inner(
                 if let Stmt::Expr(expr) = stmt.unpack() {
                     match expr.unpack() {
                         Expr::Pipeline(pipeline) => {
-                            let (tx, mut rx) = tokio::sync::mpsc::channel(
-                                fshell_engine::pipeline_channel_size(env),
-                            );
-                            let env_clone = env.clone();
-                            let pipeline_clone = pipeline.clone();
-                            let tx_err = tx.clone();
                             env.set_exit_code(0);
-                            fshell_core::debug_log!("pipeline: spawning execute_pipeline");
-                            tokio::spawn(async move {
-                                fshell_core::debug_log!("pipeline: execute_pipeline started");
-                                if let Err(e) =
-                                    fshell_engine::execute_pipeline(&pipeline_clone, &env_clone, tx)
-                                        .await
-                                {
-                                    let _ = fshell_engine::send_with_backpressure(
-                                        &env_clone,
-                                        &tx_err,
-                                        PipelinePayload::Structured(e.into()),
-                                    )
-                                    .await;
-                                }
-                            });
-
-                            let mut vals = Vec::new();
-                            let mut has_errors = false;
-                            fshell_core::debug_log!("pipeline: waiting on rx.recv()");
-                            let theme = env.active_theme();
                             let mut output_span = env.trace.span(
                                 env.trace_context,
                                 "command.output_drain_and_format",
                                 env.trace_mode,
                                 serde_json::Map::new(),
                             );
-                            let mut output_item_count = 0usize;
-                            let mut output_byte_count = 0usize;
-                            while let Some(payload) = rx.recv().await {
-                                match payload {
-                                    PipelinePayload::Data(v) => {
-                                        output_item_count = output_item_count.saturating_add(1);
-                                        if !matches!(&*v, Val::Map(_))
-                                            && let Err(error) = print_item_streaming_async(
-                                                (*v).clone(),
-                                                theme.clone(),
-                                            )
-                                            .await
-                                        {
-                                            eprintln!("output formatter error: {error}");
-                                        }
-                                        vals.push((*v).clone());
-                                    }
-                                    PipelinePayload::Bytes(b) => {
-                                        output_byte_count =
-                                            output_byte_count.saturating_add(b.len());
-                                        let text = String::from_utf8_lossy(&b).into_owned();
-                                        println!("{}", text);
-                                        vals.push(Val::String(text));
-                                    }
-                                    PipelinePayload::Structured(diag) => {
-                                        has_errors = true;
-                                        let config = {
-                                            let opts = env.options.read();
-                                            fshell_render::RenderConfig {
-                                                format: opts.error_format,
-                                                color: opts.error_color,
-                                                is_interactive: true,
-                                            }
-                                        };
-                                        if !fshell_engine::is_condition_false_diag(&diag) {
-                                            env.set_last_error_with_source(
-                                                diag.clone(),
-                                                line_trimmed.to_string(),
-                                                "repl".to_string(),
-                                            );
-                                            let err_str = fshell_render::render(
-                                                diag, None, "pipeline", &config,
-                                            );
-                                            eprintln!("{}", err_str);
-                                        }
-                                    }
-                                }
-                            }
-                            fshell_core::debug_log!(
-                                "pipeline: rx.recv() done, {} items",
-                                vals.len()
-                            );
+                            let output = output::run(pipeline, env, line_trimmed).await;
+                            let vals = output.rows;
+                            let has_errors = output.has_errors;
+                            let output_item_count = output.item_count;
+                            let output_byte_count = output.byte_count;
                             if !vals.is_empty() && vals.iter().all(|v| matches!(v, Val::Map(_))) {
                                 let has_permissions = vals.iter().any(|v| {
                                     matches!(v, Val::Map(map) if map.contains_key(&ustr("permissions")))
@@ -2262,54 +2190,9 @@ fn repl_display_stmt<'a>(
                 Expr::Pipeline(pipeline) => {
                     env.set_exit_code(0);
                     let pipefail = env.options.read().pipefail;
-                    let (tx, mut rx) =
-                        tokio::sync::mpsc::channel(fshell_engine::pipeline_channel_size(env));
-                    let env_clone = env.clone();
-                    let pipeline_clone = pipeline.clone();
-                    let tx_err = tx.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            fshell_engine::execute_pipeline(&pipeline_clone, &env_clone, tx).await
-                        {
-                            let _ = fshell_engine::send_with_backpressure(
-                                &env_clone,
-                                &tx_err,
-                                PipelinePayload::Structured(e.into()),
-                            )
-                            .await;
-                        }
-                    });
-                    let mut vals = Vec::new();
-                    let mut has_errors = false;
-                    let theme = env.active_theme();
-                    while let Some(payload) = rx.recv().await {
-                        match payload {
-                            PipelinePayload::Data(v) => {
-                                if !matches!(&*v, Val::Map(_))
-                                    && let Err(error) =
-                                        print_item_streaming_async((*v).clone(), theme.clone())
-                                            .await
-                                {
-                                    eprintln!("output formatter error: {error}");
-                                }
-                                vals.push((*v).clone());
-                            }
-                            PipelinePayload::Bytes(b) => {
-                                let text = String::from_utf8_lossy(&b).into_owned();
-                                println!("{}", text);
-                                vals.push(Val::String(text));
-                            }
-                            PipelinePayload::Structured(diag) => {
-                                let config = fshell_render::RenderConfig::default();
-                                if !fshell_engine::is_condition_false_diag(&diag) {
-                                    let err_str =
-                                        fshell_render::render(diag, None, "pipeline", &config);
-                                    eprintln!("{}", err_str);
-                                }
-                                has_errors = true;
-                            }
-                        }
-                    }
+                    let output = output::run(pipeline, env, line_trimmed).await;
+                    let vals = output.rows;
+                    let has_errors = output.has_errors;
                     if !vals.is_empty() && vals.iter().all(|v| matches!(v, Val::Map(_))) {
                         let has_permissions = vals.iter().any(|v| {
                             matches!(v, Val::Map(map)
