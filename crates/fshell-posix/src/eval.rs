@@ -105,14 +105,35 @@ pub async fn eval_source_stream(
     cfg: &EvalConfig,
     capture_stdout: bool,
 ) -> Result<(i32, Option<Vec<u8>>), EngineError> {
+    if !capture_stdout {
+        return eval_source_to_stream(parsed, env, cfg, None)
+            .await
+            .map(|code| (code, None));
+    }
+
+    // Capture at the output boundary, not in successful recursive return values:
+    // exit/return/break/continue must not discard bytes already emitted. Drain
+    // concurrently so a script larger than channel capacity cannot deadlock.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(32);
+    let drain = async move {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            bytes.extend_from_slice(&chunk);
+        }
+        bytes
+    };
+    let (result, captured) = tokio::join!(eval_source_to_stream(parsed, env, cfg, Some(tx)), drain);
+    result.map(|code| (code, Some(captured)))
+}
+
+async fn eval_source_to_stream(
+    parsed: &ParsedScript,
+    env: &Env,
+    cfg: &EvalConfig,
+    stdout_stream: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+) -> Result<i32, EngineError> {
     let _positional_scope =
         (!cfg.positional.is_empty()).then(|| crate::positional::Scope::new(env, &cfg.positional));
-
-    let mut captured = if capture_stdout {
-        Some(Vec::new())
-    } else {
-        None
-    };
     let mut last_code = 0;
 
     let run_cfg = EvalConfig {
@@ -129,21 +150,18 @@ pub async fn eval_source_stream(
             env,
             &run_cfg,
             IoStreamConfig {
-                capture_stdout,
+                stdout_stream: stdout_stream.clone(),
                 ..Default::default()
             },
         )
         .await
         {
-            Ok((code, out)) => {
+            Ok((code, _)) => {
                 last_code = code;
                 if code == 130 || env.pipeline_cancelled() {
                     let _ = check_cancelled(env);
                     env.set_exit_code(130);
                     return Err(EngineError::Interrupted { span: None });
-                }
-                if let (Some(acc), Some(bytes)) = (&mut captured, out) {
-                    acc.extend_from_slice(&bytes);
                 }
             }
             Err(PosixError::Exit(c)) | Err(PosixError::Return(c)) => {
@@ -162,7 +180,7 @@ pub async fn eval_source_stream(
     }
 
     env.set_exit_code(last_code as i64);
-    Ok((last_code, captured))
+    Ok(last_code)
 }
 
 /// Evaluate a parsed POSIX script and capture its stdout bytes (used for command substitution).
@@ -1127,13 +1145,22 @@ async fn eval_compound_command_stream(
                 errexit: false,
                 ..cfg.clone()
             };
-            let cond_code = eval_compound_list(&if_clause.condition, env, &cond_cfg).await?;
+            let condition_io = || IoStreamConfig {
+                stdin_bytes: io_cfg.stdin_bytes.clone(),
+                stdout_stream: io_cfg.stdout_stream.clone(),
+                capture_stdout: io_cfg.capture_stdout,
+                ..Default::default()
+            };
+            let (cond_code, _) =
+                eval_compound_list_stream(&if_clause.condition, env, &cond_cfg, condition_io())
+                    .await?;
             if cond_code == 0 {
                 eval_compound_list_stream(&if_clause.then, env, cfg, io_cfg).await
             } else if let Some(elses) = &if_clause.elses {
                 for else_clause in elses {
                     if let Some(cond) = &else_clause.condition {
-                        let c = eval_compound_list(cond, env, &cond_cfg).await?;
+                        let (c, _) =
+                            eval_compound_list_stream(cond, env, &cond_cfg, condition_io()).await?;
                         if c == 0 {
                             return eval_compound_list_stream(&else_clause.body, env, cfg, io_cfg)
                                 .await;
@@ -3337,6 +3364,56 @@ mod tests {
         let result = eval_source_stream(&parsed, &env, &EvalConfig::default(), false).await;
         assert!(matches!(result, Err(EngineError::Interrupted { .. })));
         assert_eq!(env.exit_code(), 130);
+    }
+}
+
+#[cfg(test)]
+mod capture_transport {
+    use super::*;
+
+    async fn capture(source: &str) -> (i32, Option<Vec<u8>>) {
+        let env = Env::for_command();
+        env.options.write().errexit = false;
+        let parsed = crate::parse_posix_script(source).expect("script");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            eval_source_stream(&parsed, &env, &EvalConfig::default(), true),
+        )
+        .await
+        .expect("capture deadline")
+        .expect("capture")
+    }
+
+    #[tokio::test]
+    async fn exit_and_function_return_preserve_preceding_bytes() {
+        assert_eq!(
+            capture("printf before; { printf nested; exit 23; }").await,
+            (23, Some(b"beforenested".to_vec()))
+        );
+        assert_eq!(
+            capture("f() { printf body; return 19; }; f; printf after").await,
+            (0, Some(b"bodyafter".to_vec()))
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_drains_more_chunks_than_the_channel_can_hold() {
+        assert_eq!(
+            capture("i=0; while [ \"$i\" -lt 100 ]; do printf x; i=$((i+1)); done; exit 7").await,
+            (7, Some(vec![b'x'; 100]))
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_and_loop_condition_output_uses_the_capture_route() {
+        assert_eq!(
+            capture("if printf condition; true; then printf body; fi").await,
+            (0, Some(b"conditionbody".to_vec()))
+        );
+        assert_eq!(
+            capture("i=0; while printf c; [ \"$i\" -lt 2 ]; do printf b; i=$((i+1)); done").await,
+            (0, Some(b"cbcbc".to_vec()))
+        );
     }
 }
 
