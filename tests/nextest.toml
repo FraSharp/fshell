@@ -14,7 +14,7 @@ success-output = "never"
 # Include owner-local parser and POSIX regressions by exact family.
 default-filter = """
 (package(=fshell-test-support) & !binary(=namespace_containment)) | package(=fshell-specifications) | package(=fshell-test-runner) |
-(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::) | test(bridge::subshell_bindings::) | test(positional::ownership::) | test(eval::argument_iteration::) | test(posix_builtins::shift::argument_updates::) | test(eval::capture_transport::))) |
+(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::) | test(bridge::subshell_bindings::) | test(positional::ownership::) | test(eval::argument_iteration::) | test(posix_builtins::shift::argument_updates::) | test(eval::capture_transport::) | test(eval::redirection_ownership::))) |
 (package(=fshell-core) & test(parser::stmt::command_locations::)) |
 (package(=fshell-engine) & (test(pipeline_completion::) | test(pipeline::expression_diagnostics::)))
 """
@@ -30,7 +30,7 @@ store-failure-output = true
 [profile.library]
 default-filter = """
 package(=fshell-specifications) |
-(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::) | test(bridge::subshell_bindings::) | test(positional::ownership::) | test(eval::argument_iteration::) | test(posix_builtins::shift::argument_updates::) | test(eval::capture_transport::))) |
+(package(=fshell-posix) & (test(posix_builtins::read_cmd::tests::) | test(eval::tests::builtin_output_) | test(expand::field_boundaries::) | test(expand::substitution_bytes::) | test(bridge::subshell_bindings::) | test(positional::ownership::) | test(eval::argument_iteration::) | test(posix_builtins::shift::argument_updates::) | test(eval::capture_transport::) | test(eval::redirection_ownership::))) |
 (package(=fshell-core) & test(parser::stmt::command_locations::)) |
 (package(=fshell-engine) & (test(pipeline_completion::) | test(pipeline::expression_diagnostics::)))
 """

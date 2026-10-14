@@ -313,6 +313,7 @@ async fn eval_compound_list_stream(
                 stdin_stream: io_cfg.stdin_stream.take(),
                 stdout_stream: io_cfg.stdout_stream.clone(),
                 capture_stdout: io_cfg.capture_stdout,
+                redirections: io_cfg.redirections.clone(),
             }
         } else {
             IoStreamConfig {
@@ -320,6 +321,7 @@ async fn eval_compound_list_stream(
                 stdin_stream: None,
                 stdout_stream: io_cfg.stdout_stream.clone(),
                 capture_stdout: io_cfg.capture_stdout,
+                redirections: io_cfg.redirections.clone(),
             }
         };
         let (code, out) = eval_and_or_list_stream(&item.0, env, cfg, step_io).await?;
@@ -353,6 +355,7 @@ async fn eval_and_or_list_stream(
         stdin_stream: io_cfg.stdin_stream.take(),
         stdout_stream: io_cfg.stdout_stream.clone(),
         capture_stdout: io_cfg.capture_stdout,
+        redirections: io_cfg.redirections.clone(),
     };
     let (mut code, mut out) = eval_pipeline_stream(&list.first, env, cfg, first_io).await?;
     if code == 130 || env.pipeline_cancelled() {
@@ -380,6 +383,7 @@ async fn eval_and_or_list_stream(
             stdin_stream: None,
             stdout_stream: io_cfg.stdout_stream.clone(),
             capture_stdout: io_cfg.capture_stdout,
+            redirections: io_cfg.redirections.clone(),
         };
         match and_or {
             AndOr::And(next) => {
@@ -651,6 +655,9 @@ impl RedirectionContext {
 
     /// Point `src_fd` at whatever `dest` currently points at.
     fn duplicate(&mut self, src_fd: i32, dest: &str) -> Result<(), PosixError> {
+        if !(0..=2).contains(&src_fd) {
+            return Err(unsupported_descriptor(src_fd));
+        }
         if dest == "-" {
             self.targets[src_fd as usize] = FdTarget::Closed;
             return Ok(());
@@ -816,6 +823,16 @@ pub struct IoStreamConfig {
     pub stdin_stream: Option<tokio::sync::mpsc::Receiver<bytes::Bytes>>,
     pub stdout_stream: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
     pub capture_stdout: bool,
+    /// Descriptor destinations inherited by nested in-process commands.
+    pub redirections: Option<RedirectionContext>,
+}
+
+impl IoStreamConfig {
+    fn redirection_context(&self) -> RedirectionContext {
+        self.redirections
+            .clone()
+            .unwrap_or_else(|| RedirectionContext::new(self.stdout_stream.as_ref()))
+    }
 }
 
 #[async_recursion]
@@ -867,6 +884,15 @@ async fn eval_pipeline_stream(
             } else {
                 senders[idx].take()
             };
+            let mut stage_redir = io_cfg.redirection_context();
+            if !is_first {
+                stage_redir.stdin_bytes = None;
+                stage_redir.stdin_file = None;
+                stage_redir.targets[0] = FdTarget::Process(0);
+            }
+            if !is_last && let Some(tx) = &stage_tx {
+                stage_redir.targets[1] = FdTarget::Pipe(tx.clone());
+            }
             let stage_io = IoStreamConfig {
                 stdin_bytes: if is_first {
                     io_cfg.stdin_bytes.clone()
@@ -876,6 +902,7 @@ async fn eval_pipeline_stream(
                 stdin_stream: stage_rx,
                 stdout_stream: stage_tx,
                 capture_stdout: is_last && io_cfg.capture_stdout,
+                redirections: Some(stage_redir),
             };
 
             let cmd_clone = cmd.clone();
@@ -931,7 +958,7 @@ async fn eval_command_stream(
     match cmd {
         Command::Simple(simple) => eval_simple_command(simple, env, cfg, io_cfg).await,
         Command::Compound(compound, redirects) => {
-            let mut redir = RedirectionContext::new(io_cfg.stdout_stream.as_ref());
+            let mut redir = io_cfg.redirection_context();
             if let Some(list) = redirects {
                 for r in &list.0 {
                     match redir.apply_item(r, env, &cfg.positional) {
@@ -942,7 +969,7 @@ async fn eval_command_stream(
                         Err(e) => {
                             eprintln!("{e}");
                             env.set_exit_code(1);
-                            if cfg.errexit {
+                            if cfg.errexit && env.options.read().errexit {
                                 return Err(PosixError::Exit(1));
                             }
                             return Ok((1, None));
@@ -950,28 +977,17 @@ async fn eval_command_stream(
                     }
                 }
             }
-            // Take the redirect handle before moving the stdin bytes out of
-            // `redir`, so the table stays borrowable afterwards.
-            let stdout_handle = redir.stdout_file().cloned();
-            let capture = io_cfg.capture_stdout || stdout_handle.is_some();
             let sub_io = IoStreamConfig {
-                stdin_bytes: redir.stdin_bytes.or(io_cfg.stdin_bytes),
+                stdin_bytes: redir.stdin_bytes.clone().or(io_cfg.stdin_bytes),
                 stdin_stream: io_cfg.stdin_stream,
                 stdout_stream: io_cfg.stdout_stream,
-                capture_stdout: capture,
+                capture_stdout: io_cfg.capture_stdout,
+                redirections: Some(redir),
             };
-            let (code, out) = eval_compound_command_stream(compound, env, cfg, sub_io).await?;
-            if let Some(handle) = &stdout_handle
-                && let Some(bytes) = &out
-            {
-                write_shared_file(handle, bytes)?;
-            }
-            let ret_out = if io_cfg.capture_stdout && stdout_handle.is_none() {
-                out
-            } else {
-                None
-            };
-            Ok((code, ret_out))
+            // Commands write through the inherited table immediately. Buffering
+            // an entire group discarded file output on return/exit and ignored
+            // stderr and nested descriptor overrides.
+            eval_compound_command_stream(compound, env, cfg, sub_io).await
         }
         Command::Function(func_def) => {
             let name = func_def.fname.value.clone();
@@ -1123,7 +1139,7 @@ async fn eval_compound_command_stream(
     compound: &CompoundCommand,
     env: &Env,
     cfg: &EvalConfig,
-    io_cfg: IoStreamConfig,
+    mut io_cfg: IoStreamConfig,
 ) -> Result<(i32, Option<Vec<u8>>), PosixError> {
     match compound {
         CompoundCommand::BraceGroup(brace) => {
@@ -1133,9 +1149,25 @@ async fn eval_compound_command_stream(
             // A subshell is a real child process: it gets its own PID and
             // signals, and its `exit`/assignments cannot touch the parent.
             let fragment = compound_source(&sub.list, &cfg.source);
+            let redir = io_cfg.redirection_context();
+            // The child-shell helper transports stdout back to this evaluator;
+            // file destinations must be materialised here rather than sent to
+            // the enclosing pipeline's channel.
+            let stdout_handle = redir.stdout_file().cloned();
+            if stdout_handle.is_some() {
+                io_cfg.stdout_stream = None;
+                io_cfg.capture_stdout = true;
+            }
             let (code, out) = run_child_shell(&fragment, io_cfg, env).await?;
             env.set_exit_code(code as i64);
-            Ok((code, out))
+            if let Some(handle) = stdout_handle {
+                if let Some(bytes) = out {
+                    write_shared_file(&handle, &bytes)?;
+                }
+                Ok((code, None))
+            } else {
+                Ok((code, out))
+            }
         }
         CompoundCommand::IfClause(if_clause) => {
             // POSIX ignores `-e` while evaluating a condition: the clause is
@@ -1149,6 +1181,7 @@ async fn eval_compound_command_stream(
                 stdin_bytes: io_cfg.stdin_bytes.clone(),
                 stdout_stream: io_cfg.stdout_stream.clone(),
                 capture_stdout: io_cfg.capture_stdout,
+                redirections: io_cfg.redirections.clone(),
                 ..Default::default()
             };
             let (cond_code, _) =
@@ -1215,6 +1248,7 @@ async fn eval_compound_command_stream(
                     stdin_stream: if i == 0 { prev_stream.take() } else { None },
                     stdout_stream: io_cfg.stdout_stream.clone(),
                     capture_stdout: io_cfg.capture_stdout,
+                    redirections: io_cfg.redirections.clone(),
                 };
                 match eval_compound_list_stream(&for_clause.body.list, env, cfg, step_io).await {
                     Ok((code, out)) => {
@@ -1259,6 +1293,7 @@ async fn eval_compound_command_stream(
                     stdin_stream: None,
                     stdout_stream: io_cfg.stdout_stream.clone(),
                     capture_stdout: io_cfg.capture_stdout,
+                    redirections: io_cfg.redirections.clone(),
                 };
                 let (cond_code, cond_out) =
                     eval_compound_list_stream(&while_clause.0, env, &cond_cfg, cond_io).await?;
@@ -1282,6 +1317,7 @@ async fn eval_compound_command_stream(
                     stdin_stream: None,
                     stdout_stream: io_cfg.stdout_stream.clone(),
                     capture_stdout: io_cfg.capture_stdout,
+                    redirections: io_cfg.redirections.clone(),
                 };
                 match eval_compound_list_stream(&while_clause.1.list, env, cfg, body_io).await {
                     Ok((code, out)) => {
@@ -1597,7 +1633,7 @@ async fn eval_simple_command(
         }
     }
 
-    let mut redir = RedirectionContext::new(io_cfg.stdout_stream.as_ref());
+    let mut redir = io_cfg.redirection_context();
     for r in &redirects {
         match redir.apply_item(r, env, positional) {
             Ok(()) => {}
@@ -1607,7 +1643,7 @@ async fn eval_simple_command(
             Err(e) => {
                 eprintln!("{e}");
                 env.set_exit_code(1);
-                if cfg.errexit {
+                if cfg.errexit && env.options.read().errexit {
                     return Err(PosixError::Exit(1));
                 }
                 return Ok((1, None));
@@ -1772,6 +1808,8 @@ async fn eval_simple_command_inner(
             errexit: cfg.errexit,
             source: cfg.source.clone(),
         };
+        io_cfg.stdin_bytes = redir.stdin_bytes.clone().or(io_cfg.stdin_bytes);
+        io_cfg.redirections = Some(redir.clone());
         let result = eval_compound_command_stream(&func_body, env, &fn_cfg, io_cfg).await;
         drop(positional_scope);
         // `return` ends the function, not the script that called it: a caller sees
@@ -3364,6 +3402,90 @@ mod tests {
         let result = eval_source_stream(&parsed, &env, &EvalConfig::default(), false).await;
         assert!(matches!(result, Err(EngineError::Interrupted { .. })));
         assert_eq!(env.exit_code(), 130);
+    }
+}
+
+#[cfg(test)]
+mod redirection_ownership {
+    use super::*;
+
+    #[tokio::test]
+    async fn function_and_group_output_reaches_inherited_files_before_return() {
+        let directory = tempfile::tempdir().expect("directory");
+        let env = Env::for_command();
+        env.set_cwd(directory.path().to_path_buf());
+        env.options.write().errexit = false;
+        let parsed = crate::parse_posix_script(
+            "f() { printf outer; { printf inner; return 19; } > inner; }; f > outer; printf after",
+        )
+        .expect("script");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            eval_source_stream(&parsed, &env, &EvalConfig::default(), true),
+        )
+        .await
+        .expect("deadline")
+        .expect("evaluation");
+        assert_eq!(result, (0, Some(b"after".to_vec())));
+        assert_eq!(
+            std::fs::read(directory.path().join("outer")).expect("outer"),
+            b"outer"
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("inner")).expect("inner"),
+            b"inner"
+        );
+    }
+
+    #[tokio::test]
+    async fn inherited_redirect_handles_close_after_a_hard_error() {
+        let directory = tempfile::tempdir().expect("directory");
+        let env = Env::for_command();
+        env.vars.write().remove("env");
+        let handle = open_redirect_file(&directory.path().join("out"), false).expect("output");
+        let weak = std::sync::Arc::downgrade(&handle);
+        let mut redir = RedirectionContext::default();
+        redir.targets[1] = FdTarget::File(handle);
+        let io_cfg = IoStreamConfig {
+            redirections: Some(redir),
+            ..Default::default()
+        };
+        let parsed =
+            crate::parse_posix_script("{ printf before; : \"${required:?supply value}\"; }")
+                .expect("script");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            eval_compound_list_stream(
+                &parsed.program.complete_commands[0],
+                &env,
+                &EvalConfig::default(),
+                io_cfg,
+            ),
+        )
+        .await
+        .expect("deadline")
+        .expect_err("hard error");
+        assert!(matches!(
+            error,
+            PosixError::Engine(EngineError::ParameterExpansion { .. })
+        ));
+        assert!(weak.upgrade().is_none(), "no descriptor owner remains");
+        assert_eq!(
+            std::fs::read(directory.path().join("out")).expect("written prefix"),
+            b"before"
+        );
+    }
+
+    #[test]
+    fn unsupported_duplication_sources_are_rejected_before_indexing_the_table() {
+        for destination in ["1", "-"] {
+            let error = RedirectionContext::default()
+                .duplicate(9, destination)
+                .expect_err("unsupported descriptor");
+            assert!(
+                matches!(error, PosixError::Engine(EngineError::Generic { ref message, span: None }) if message == "redirection of file descriptor 9 is not supported (only 0, 1 and 2)")
+            );
+        }
     }
 }
 
