@@ -66,36 +66,26 @@ pub async fn eval_source(
 
     drop(positional_scope);
 
-    let code = match result {
-        Ok(code) => {
+    match result {
+        Ok(code) | Err(PosixError::Exit(code)) | Err(PosixError::Return(code)) => {
             env.set_exit_code(code as i64);
-            code
-        }
-        Err(PosixError::Exit(code)) => {
-            env.set_exit_code(code as i64);
-            code
-        }
-        Err(PosixError::Return(code)) => {
-            env.set_exit_code(code as i64);
-            code
         }
         Err(PosixError::Engine(e)) => {
-            // A hard error still leaves the shell, so the EXIT handler still runs.
+            // A hard error still leaves the shell, so the EXIT handler still runs
+            // and observes failure rather than the last successful command.
+            env.set_exit_code(1);
             run_exit_trap(env).await?;
             return Err(e);
         }
-        Err(PosixError::Break) | Err(PosixError::Continue) => 0,
-        Err(PosixError::Interrupted) => {
-            env.set_exit_code(130);
-            130
-        }
+        Err(PosixError::Break) | Err(PosixError::Continue) => env.set_exit_code(0),
+        Err(PosixError::Interrupted) => env.set_exit_code(130),
     };
 
     // Evaluating a whole script is the point at which the shell it ran in is
     // leaving it, so this is where `trap … EXIT` fires — for every way out,
     // including `exit` and a hard error.
     run_exit_trap(env).await?;
-    Ok(code)
+    Ok(env.exit_code() as i32)
 }
 
 /// Evaluate a parsed POSIX script and optionally capture its stdout bytes.
@@ -198,10 +188,43 @@ pub async fn run_exit_trap(env: &Env) -> Result<(), EngineError> {
     let Some(handler) = env.posix_exit_trap.write().take() else {
         return Ok(());
     };
-    let parsed = crate::parser::parse_posix_script(&handler)?;
-    eval_source_stream(&parsed, env, &EvalConfig::default(), false)
-        .await
-        .map(|_| ())
+    let mut status = ExitTrapStatus {
+        env,
+        code: env.exit_code(),
+    };
+    let parsed = crate::parser::parse_posix_script(&handler).inspect_err(|_| {
+        status.code = 1;
+    })?;
+    // Keep control transfers visible: a normally finishing handler preserves
+    // the incoming status, but exit (including errexit) chooses a new one.
+    match eval_program(&parsed.program, env, &EvalConfig::default()).await {
+        Ok(_) | Err(PosixError::Return(_)) | Err(PosixError::Break) | Err(PosixError::Continue) => {
+            Ok(())
+        }
+        Err(PosixError::Exit(code)) => {
+            status.code = code as i64;
+            Ok(())
+        }
+        Err(PosixError::Engine(error)) => {
+            status.code = 1;
+            Err(error)
+        }
+        Err(PosixError::Interrupted) => {
+            status.code = 130;
+            Err(EngineError::Interrupted { span: None })
+        }
+    }
+}
+
+struct ExitTrapStatus<'a> {
+    env: &'a Env,
+    code: i64,
+}
+
+impl Drop for ExitTrapStatus<'_> {
+    fn drop(&mut self) {
+        self.env.set_exit_code(self.code);
+    }
 }
 
 #[derive(Debug)]
@@ -3402,6 +3425,106 @@ mod tests {
         let result = eval_source_stream(&parsed, &env, &EvalConfig::default(), false).await;
         assert!(matches!(result, Err(EngineError::Interrupted { .. })));
         assert_eq!(env.exit_code(), 130);
+    }
+}
+
+#[cfg(test)]
+mod exit_trap_status {
+    use super::*;
+
+    async fn whole(source: &str, env: &Env) -> Result<i32, EngineError> {
+        let parsed = crate::parse_posix_script(source).expect("script");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            eval_source(&parsed, env, &EvalConfig::default()),
+        )
+        .await
+        .expect("trap deadline")
+    }
+
+    #[tokio::test]
+    async fn normal_handler_preserves_the_exiting_status_and_is_consumed() {
+        let env = Env::for_command();
+        env.options.write().errexit = false;
+        assert_eq!(
+            whole("trap 'seen=$?; false' EXIT; exit 23", &env)
+                .await
+                .expect("exit"),
+            23
+        );
+        assert_eq!(env.vars.read().get("seen"), Some(&Val::String("23".into())));
+        assert_eq!(env.exit_code(), 23);
+        assert!(env.posix_exit_trap.read().is_none());
+    }
+
+    #[tokio::test]
+    async fn handler_exit_overrides_the_original_exit_without_reentry() {
+        let env = Env::for_command();
+        assert_eq!(
+            whole("trap 'seen=$?; exit 17; wrong=yes' EXIT; exit 23", &env)
+                .await
+                .expect("exit"),
+            17
+        );
+        assert_eq!(env.vars.read().get("seen"), Some(&Val::String("23".into())));
+        assert_eq!(env.exit_code(), 17);
+        assert!(!env.vars.read().contains_key("wrong"));
+        assert!(env.posix_exit_trap.read().is_none());
+    }
+
+    #[tokio::test]
+    async fn hard_error_handler_observes_failure_and_keeps_the_original_error() {
+        let env = Env::for_command();
+        env.vars.write().remove("env");
+        let error = whole("trap 'seen=$?' EXIT; : \"${required:?supply value}\"", &env)
+            .await
+            .expect_err("hard error");
+        assert!(
+            matches!(error, EngineError::ParameterExpansion { ref parameter, ref message, span: None } if parameter == "${required}" && message == "supply value")
+        );
+        assert_eq!(env.vars.read().get("seen"), Some(&Val::String("1".into())));
+        assert_eq!(env.exit_code(), 1);
+        assert!(env.posix_exit_trap.read().is_none());
+    }
+
+    #[tokio::test]
+    async fn dropped_awaiting_handler_restores_the_incoming_status() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        let env = Env::for_command();
+        env.options.write().errexit = false;
+        env.set_exit_code(23);
+        *env.posix_exit_trap.write() = Some("false; jobs".into());
+        let lease = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let handler_lease = lease.clone();
+        #[expect(
+            clippy::result_large_err,
+            reason = "production BuiltinHandler error type"
+        )]
+        let handler: fshell_engine::BuiltinHandler = std::sync::Arc::new(move |_, _, _, tx, _| {
+            *handler_lease.lock().expect("lease") = Some(tx);
+            Ok(())
+        });
+        env.register_builtin("jobs", handler);
+        let mut call = Box::pin(run_exit_trap(&env));
+        assert!(
+            call.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert!(
+            lease.lock().expect("lease").is_some(),
+            "handler is actually awaiting EOF"
+        );
+        assert_eq!(env.exit_code(), 1, "handler has changed the live status");
+        drop(call);
+        assert_eq!(env.exit_code(), 23);
+        assert!(env.posix_exit_trap.read().is_none());
+        let sender = lease.lock().expect("lease").take().expect("held sender");
+        assert!(
+            sender.is_closed(),
+            "dropping the handler also drops its receiver"
+        );
     }
 }
 
