@@ -53,7 +53,7 @@ pub async fn eval_source(
 ) -> Result<i32, EngineError> {
     // An empty config inherits the caller's live arguments; a function call,
     // unlike this invocation API, always installs a scope even with no args.
-    let positional_scope =
+    let _positional_scope =
         (!cfg.positional.is_empty()).then(|| crate::positional::Scope::new(env, &cfg.positional));
 
     let result = {
@@ -64,8 +64,8 @@ pub async fn eval_source(
         eval_program(&parsed.program, env, &run_cfg).await
     };
 
-    drop(positional_scope);
-
+    // EXIT handlers are still part of this script's argument scope. The guard
+    // restores the caller only after termination handling finishes.
     match result {
         Ok(code) | Err(PosixError::Exit(code)) | Err(PosixError::Return(code)) => {
             env.set_exit_code(code as i64);
@@ -3485,6 +3485,38 @@ mod exit_trap_status {
         assert_eq!(env.vars.read().get("seen"), Some(&Val::String("1".into())));
         assert_eq!(env.exit_code(), 1);
         assert!(env.posix_exit_trap.read().is_none());
+    }
+
+    #[tokio::test]
+    async fn handler_uses_script_arguments_before_the_callers_bindings_are_restored() {
+        let env = Env::for_command();
+        crate::positional::replace(
+            &mut env.vars.write(),
+            vec![Val::Int(7), Val::String("parent".into())],
+        );
+        let before = env.vars.read().clone();
+        let parsed =
+            crate::parse_posix_script("trap 'seen=$1; count=$#' EXIT; exit 23").expect("script");
+        let cfg = EvalConfig {
+            positional: vec!["script argument".into()],
+            ..Default::default()
+        };
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            eval_source(&parsed, &env, &cfg),
+        )
+        .await
+        .expect("deadline")
+        .expect("exit");
+        assert_eq!(code, 23);
+        assert_eq!(
+            env.vars.read().get("seen"),
+            Some(&Val::String("script argument".into()))
+        );
+        assert_eq!(env.vars.read().get("count"), Some(&Val::String("1".into())));
+        for name in ["@", "#", "1", "2"] {
+            assert_eq!(env.vars.read().get(name), before.get(name));
+        }
     }
 
     #[tokio::test]
