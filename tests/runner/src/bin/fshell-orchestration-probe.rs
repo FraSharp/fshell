@@ -71,6 +71,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "pipeline_values",
                 "pipeline_execution",
                 "posix_expansion",
+                "posix_evaluation",
                 "search_streams",
                 "cli_execution",
             ]

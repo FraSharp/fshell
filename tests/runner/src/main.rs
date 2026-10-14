@@ -45,6 +45,7 @@ const SPECIFICATION_TARGETS: &[(&str, Suite)] = &[
     ("pipeline_values", Suite::Library),
     ("pipeline_execution", Suite::Library),
     ("posix_expansion", Suite::Library),
+    ("posix_evaluation", Suite::Library),
     ("search_streams", Suite::Library),
     ("cli_execution", Suite::Executable),
 ];
