@@ -138,6 +138,7 @@ pub const SPECIFICATION_TARGETS: &[(&str, Suite)] = &[
     ("posix_evaluation", Suite::Library),
     ("posix_io_control", Suite::Library),
     ("search_streams", Suite::Library),
+    ("bridge_execution", Suite::Executable),
     ("cli_execution", Suite::Executable),
 ];
 

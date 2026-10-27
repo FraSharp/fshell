@@ -74,6 +74,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "posix_evaluation",
                 "posix_io_control",
                 "search_streams",
+                "bridge_execution",
                 "cli_execution",
             ]
             .into_iter()

@@ -162,6 +162,7 @@ fn executable_selection_uses_only_the_selected_cargo_artifact_and_cli_target() -
     assert!(has_pair(run, "--features", "fshell-specifications/full"));
     assert!(has_pair(run, "--profile", "executable"));
     assert!(has_pair(run, "--test", "cli_execution"));
+    assert!(has_pair(run, "--test", "bridge_execution"));
     assert!(!has_pair(run, "--test", "native_evaluation"));
     assert_eq!(
         run["executable"],
