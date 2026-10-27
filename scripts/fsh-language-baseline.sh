@@ -6,6 +6,17 @@ set -u
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cases_dir=$repo_dir/scripts/fsh-language-baseline
 fsh_bin=${1:-${FSH_BIN:-$repo_dir/target/debug/fsh}}
+case $fsh_bin in
+    /*) ;;
+    *)
+        # Resolve once, before any case directory changes the working directory.
+        fsh_dir=$(CDPATH= cd -- "$(dirname -- "$fsh_bin")" 2>/dev/null && pwd) || {
+            echo "fsh binary directory not found: $(dirname -- "$fsh_bin")" >&2
+            exit 2
+        }
+        fsh_bin=$fsh_dir/$(basename -- "$fsh_bin")
+        ;;
+esac
 
 if [ ! -x "$fsh_bin" ]; then
     echo "fsh binary not found or not executable: $fsh_bin" >&2
