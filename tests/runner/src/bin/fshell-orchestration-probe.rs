@@ -85,11 +85,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if mode == "metadata-missing" {
                 targets.pop();
             }
-            let package = json!({"name":"fshell-specifications","targets":targets});
+            let features = json!({"full":["ai"],"ai":["fshell-builtins/ai"]});
+            let root = json!({"name":"fshell","targets":[],"features":features});
+            let package =
+                json!({"name":"fshell-specifications","targets":targets,"features":features});
             let packages = if mode == "metadata-ambiguous" {
-                vec![package.clone(), package]
+                vec![root, package.clone(), package]
             } else {
-                vec![package]
+                vec![root, package]
             };
             println!("{}", json!({"packages":packages}));
         }
@@ -106,6 +109,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "{}",
                 json!({"reason":"compiler-artifact","target":{"name":"fsh","kind":["bin"]},"executable":path})
             );
+        }
+        ["nextest", "list", ..] => {
+            let mut suites = serde_json::Map::new();
+            for (package, families) in fshell_test_runner::guarded_library_families() {
+                let mut testcases = serde_json::Map::new();
+                for (index, family) in families.iter().enumerate() {
+                    if mode == "listing-gap" && *package == "fshell-posix" && index == 0 {
+                        continue;
+                    }
+                    testcases.insert(format!("{family}probe"), json!({"ignored": false}));
+                }
+                suites.insert(
+                    (*package).to_string(),
+                    json!({"package-name": package, "testcases": testcases}),
+                );
+            }
+            println!("{}", json!({"rust-suites": suites, "test-count": 0}));
         }
         ["nextest", "run", ..] => {
             if mode == "nextest-fail" {

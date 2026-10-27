@@ -36,8 +36,17 @@ fn calls(fixture: &ShellFixture) -> io::Result<Vec<Value>> {
         .collect()
 }
 
-fn operation(call: &Value) -> &str {
-    call["args"][0].as_str().expect("tool operation")
+fn operation(call: &Value) -> String {
+    let args = call["args"].as_array().expect("argument array");
+    let first = args[0].as_str().expect("tool operation");
+    match args.get(1).and_then(Value::as_str) {
+        Some(second) if first == "nextest" => format!("nextest {second}"),
+        _ => first.to_string(),
+    }
+}
+
+fn operations(calls: &[Value]) -> Vec<String> {
+    calls.iter().map(operation).collect()
 }
 
 fn has_pair(call: &Value, option: &str, value: &str) -> bool {
@@ -48,6 +57,24 @@ fn has_pair(call: &Value, option: &str, value: &str) -> bool {
         .any(|pair| pair[0] == option && pair[1] == value)
 }
 
+fn has_flag(call: &Value, flag: &str) -> bool {
+    call["args"]
+        .as_array()
+        .expect("argument array")
+        .iter()
+        .any(|argument| argument == flag)
+}
+
+fn filter_expression(call: &Value) -> &str {
+    call["args"]
+        .as_array()
+        .expect("argument array")
+        .windows(2)
+        .find(|pair| pair[0] == "--filter-expr")
+        .map(|pair| pair[1].as_str().expect("filter value"))
+        .expect("filter expression")
+}
+
 #[test]
 fn library_selection_never_builds_or_passes_a_shell_executable() -> io::Result<()> {
     let fixture = fixture("success")?;
@@ -55,9 +82,24 @@ fn library_selection_never_builds_or_passes_a_shell_executable() -> io::Result<(
     assert!(output.status.success(), "{output:?}");
     let calls = calls(&fixture)?;
     assert_eq!(
-        calls.iter().map(operation).collect::<Vec<_>>(),
-        ["nextest", "-vV", "metadata", "nextest"]
+        operations(&calls),
+        [
+            "nextest --version",
+            "-vV",
+            "metadata",
+            "nextest list",
+            "nextest run"
+        ]
     );
+    let listing = &calls[3];
+    assert!(has_pair(listing, "--message-format", "json"));
+    assert!(has_pair(
+        listing,
+        "--features",
+        "fshell-specifications/full"
+    ));
+    assert!(!has_flag(listing, "--filter-expr"));
+    assert!(!has_flag(listing, "--profile"));
     let run = calls.last().expect("nextest run");
     assert_eq!(run["executable"], Value::Null);
     assert!(has_pair(run, "--profile", "library"));
@@ -70,6 +112,16 @@ fn library_selection_never_builds_or_passes_a_shell_executable() -> io::Result<(
             .expect("args")
             .contains(&Value::from("--release"))
     );
+    let filter = filter_expression(run);
+    assert!(filter.contains("package(=fshell-posix)"), "{filter}");
+    assert!(
+        filter.contains("test(eval::capture_transport::)"),
+        "{filter}"
+    );
+    assert!(
+        filter.contains("package(=fshell-specifications)"),
+        "{filter}"
+    );
     fixture.close()
 }
 
@@ -80,8 +132,14 @@ fn executable_selection_uses_only_the_selected_cargo_artifact_and_cli_target() -
     assert!(output.status.success(), "{output:?}");
     let calls = calls(&fixture)?;
     assert_eq!(
-        calls.iter().map(operation).collect::<Vec<_>>(),
-        ["nextest", "-vV", "metadata", "build", "nextest"]
+        operations(&calls),
+        [
+            "nextest --version",
+            "-vV",
+            "metadata",
+            "build",
+            "nextest run"
+        ]
     );
     let build = &calls[3];
     let run = &calls[4];
@@ -123,8 +181,8 @@ fn support_selection_neither_queries_specifications_nor_builds_the_shell() -> io
     assert!(output.status.success(), "{output:?}");
     let calls = calls(&fixture)?;
     assert_eq!(
-        calls.iter().map(operation).collect::<Vec<_>>(),
-        ["nextest", "-vV", "nextest"]
+        operations(&calls),
+        ["nextest --version", "-vV", "nextest run"]
     );
     let run = calls.last().expect("nextest run");
     assert_eq!(run["executable"], Value::Null);
@@ -141,8 +199,8 @@ fn containment_selection_has_no_shell_artifact_or_specification_metadata_depende
     assert!(output.status.success(), "{output:?}");
     let calls = calls(&fixture)?;
     assert_eq!(
-        calls.iter().map(operation).collect::<Vec<_>>(),
-        ["nextest", "-vV", "nextest"]
+        operations(&calls),
+        ["nextest --version", "-vV", "nextest run"]
     );
     let run = calls.last().expect("nextest run");
     assert_eq!(run["executable"], Value::Null);
@@ -199,8 +257,8 @@ fn unclassified_missing_or_ambiguous_specification_targets_fail_before_building(
         assert!(!output.status.success(), "{mode}: {output:?}");
         let calls = calls(&fixture)?;
         assert_eq!(
-            calls.iter().map(operation).collect::<Vec<_>>(),
-            ["nextest", "-vV", "metadata"],
+            operations(&calls),
+            ["nextest --version", "-vV", "metadata"],
             "{mode}"
         );
         fixture.close()?;
@@ -216,8 +274,8 @@ fn failed_builds_and_absent_artifacts_never_start_nextest_execution() -> io::Res
         assert!(!output.status.success(), "{mode}: {output:?}");
         let calls = calls(&fixture)?;
         assert_eq!(
-            calls.iter().map(operation).collect::<Vec<_>>(),
-            ["nextest", "-vV", "metadata", "build"],
+            operations(&calls),
+            ["nextest --version", "-vV", "metadata", "build"],
             "{mode}"
         );
         fixture.close()?;
@@ -226,23 +284,45 @@ fn failed_builds_and_absent_artifacts_never_start_nextest_execution() -> io::Res
 }
 
 #[test]
+fn listing_guard_fails_before_build_or_execution_when_a_family_disappears() -> io::Result<()> {
+    let fixture = fixture("listing-gap")?;
+    let output = runner(&fixture, &["--suite", "library"]);
+    assert!(!output.status.success(), "{output:?}");
+    let calls = calls(&fixture)?;
+    assert_eq!(
+        operations(&calls),
+        ["nextest --version", "-vV", "metadata", "nextest list"]
+    );
+    let stderr = std::str::from_utf8(&output.capture.stderr).expect("runner stderr");
+    assert!(stderr.contains("lost curated families"), "{stderr}");
+    assert!(
+        stderr.contains("posix_builtins::read_cmd::tests::"),
+        "{stderr}"
+    );
+    assert!(!operations(&calls).contains(&"nextest run".to_string()));
+    fixture.close()
+}
+
+#[test]
 fn failed_prerequisites_and_nextest_verdicts_propagate_to_the_runner_exit() -> io::Result<()> {
     for (mode, expected) in [
-        ("version-fail", vec!["nextest"]),
-        ("rustc-fail", vec!["nextest", "-vV"]),
+        ("version-fail", vec!["nextest --version"]),
+        ("rustc-fail", vec!["nextest --version", "-vV"]),
         (
             "nextest-fail",
-            vec!["nextest", "-vV", "metadata", "nextest"],
+            vec![
+                "nextest --version",
+                "-vV",
+                "metadata",
+                "nextest list",
+                "nextest run",
+            ],
         ),
     ] {
         let fixture = fixture(mode)?;
         let output = runner(&fixture, &["--suite", "library"]);
         assert!(!output.status.success(), "{mode}: {output:?}");
-        assert_eq!(
-            calls(&fixture)?.iter().map(operation).collect::<Vec<_>>(),
-            expected,
-            "{mode}"
-        );
+        assert_eq!(operations(&calls(&fixture)?), expected, "{mode}");
         fixture.close()?;
     }
     Ok(())
