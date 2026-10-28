@@ -112,18 +112,24 @@ const HISTORY_MEM_CACHE_CAPACITY: usize = 5000;
 
 /// Ensure the in-memory history cache is populated from SQLite.
 pub fn ensure_history_mem_cache() {
-    {
-        let guard = HISTORY_MEM_CACHE.read();
-        if guard.is_some() {
-            return;
-        }
-    }
-    let mut guard = HISTORY_MEM_CACHE.write();
-    if guard.is_some() {
+    populate_history_mem_cache();
+}
+
+/// Fill the cache from the database without holding its lock across the query.
+///
+/// A database load takes the connection pool's lock, and
+/// [`clear_connection_cache`] takes the pool first and this cache second.
+/// Holding the cache's write lock while loading would invert that order and
+/// deadlock the two.
+fn populate_history_mem_cache() {
+    if HISTORY_MEM_CACHE.read().is_some() {
         return;
     }
     let commands = load_recent_commands_from_db(HISTORY_MEM_CACHE_CAPACITY);
-    *guard = Some(commands);
+    let mut guard = HISTORY_MEM_CACHE.write();
+    if guard.is_none() {
+        *guard = Some(commands);
+    }
 }
 
 fn load_recent_commands_from_db(limit: usize) -> Vec<String> {
@@ -156,6 +162,7 @@ pub fn record_command_in_memory(command: &str) {
     if trimmed.is_empty() {
         return;
     }
+    populate_history_mem_cache();
     let mut guard = HISTORY_MEM_CACHE.write();
     if let Some(ref mut cmds) = *guard {
         if cmds.first().map(|s| s.as_str()) == Some(trimmed) {
@@ -168,15 +175,6 @@ pub fn record_command_in_memory(command: &str) {
         if cmds.len() > HISTORY_MEM_CACHE_CAPACITY {
             cmds.truncate(HISTORY_MEM_CACHE_CAPACITY);
         }
-    } else {
-        let mut cmds = load_recent_commands_from_db(HISTORY_MEM_CACHE_CAPACITY);
-        if cmds.first().map(|s| s.as_str()) != Some(trimmed) {
-            if let Some(pos) = cmds.iter().position(|c| c == trimmed) {
-                cmds.remove(pos);
-            }
-            cmds.insert(0, trimmed.to_string());
-        }
-        *guard = Some(cmds);
     }
 }
 
@@ -741,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_in_memory_history_cache() {
-        let _guard = TEST_DB_LOCK.lock();
+        let _guard = TEST_DB_LOCK.blocking_lock();
         clear_history_mem_cache();
         record_command_in_memory("__test_cmd_prefix_build --release");
         record_command_in_memory("__test_cmd_prefix_test -p fshell-repl");
