@@ -554,39 +554,89 @@ fn redirection_cases() -> Vec<Case> {
             "cd /definitely-not-a-directory > /dev/null 2>&1; emit --stdout done",
         )
         .compare_stderr()
-        .features(&["redirect", "fd_dup", "builtin"])
-        .known_failure(
-            "posix-builtin-diagnostics-bypass-redirection",
-            "builtin diagnostics are written with bare `eprintln!`, so they ignore \
-             the descriptor table entirely and still reach the process's stderr",
-            &[Engine::Posix],
-        ),
-        // A compound command's own duplication is not yet propagated into the body
-        // it evaluates, so `( … ) 2>&1` does not merge for the inner command.
+        .features(&["redirect", "fd_dup", "builtin"]),
         Case::posix_only("redirect/subshell-stderr-merged", "(emit --stderr e) 2>&1")
             .compare_stderr()
-            .features(&["redirect", "fd_dup", "subshell"])
-            .known_failure(
-                "posix-compound-stderr-not-merged",
-                "a compound command's redirects are applied to its own table but only \
-                 stdout is forwarded to the body, so `( … ) 2>&1` leaves stderr alone",
-                &[Engine::Posix],
-            ),
-        // Descriptors above 2 are rejected explicitly rather than silently ignored.
-        // bash and dash both permit the form, so this is a declared capability gap
-        // rather than undefined behaviour — the point is that it is never silent.
+            .features(&["redirect", "fd_dup", "subshell"]),
         Case::posix_only(
             "redirect/non-standard-descriptor",
             "emit --stdout o 3> fd3.txt",
         )
         .files(&["fd3.txt"])
-        .features(&["redirect", "unsupported"])
-        .known_failure(
-            "posix-non-standard-fd-rejected",
-            "redirection of fd 3+ is refused with an explicit error instead of being \
-             silently dropped; a declared capability gap, reported as UnsupportedSyntax",
-            &[Engine::Posix],
-        ),
+        .features(&["redirect", "high_fd"]),
+        // --- the descriptor table ----------------------------------------------
+        // Descriptors are open file descriptions shared by every command that
+        // inherits them: input is consumed only as far as each reader reads.
+        Case::posix_only(
+            "redirect/group-input-shares-one-offset",
+            "{ read -r a; read -r b; } < lines.txt; emit --stdout \"$a|$b\"",
+        )
+        .features(&["redirect", "read", "offset"]),
+        Case::posix_only(
+            "redirect/while-read-from-file-iterates",
+            "while read -r l; do emit --stdout \"[$l]\"; done < lines.txt",
+        )
+        .features(&["redirect", "read", "loop"]),
+        Case::posix_only(
+            "redirect/while-read-from-pipe-iterates",
+            "printf 'x\\ny\\n' | while read -r l; do emit --stdout \"[$l]\"; done",
+        )
+        .features(&["redirect", "read", "pipeline"]),
+        Case::posix_only(
+            "redirect/piped-group-reads-successive-lines",
+            "printf '1\\n2\\n' | { read -r a; read -r b; emit --stdout \"$a$b\"; }",
+        )
+        .features(&["redirect", "read", "pipeline"]),
+        Case::posix_only(
+            "redirect/heredoc-loop-body-command-does-not-consume-input",
+            "while read -r l; do emit --stdout \"<$l>\"; done <<EOF\nfirst\nsecond\nEOF",
+        )
+        .features(&["redirect", "heredoc", "loop"]),
+        Case::posix_only(
+            "redirect/heredoc-is-seekable-for-head",
+            "{ head -n 1; cat; } <<EOF\na\nb\nc\nEOF",
+        )
+        .features(&["redirect", "heredoc", "offset"]),
+        Case::posix_only(
+            "redirect/exec-persists-descriptors",
+            "exec 3> fd3.txt; emit --stdout via3 >&3; exec 3>&-; cat fd3.txt",
+        )
+        .files(&["fd3.txt"])
+        .features(&["redirect", "exec", "high_fd"]),
+        Case::posix_only(
+            "redirect/exec-redirects-the-shell-itself",
+            "exec > log.txt; emit --stdout hidden; exec >&2; cat log.txt >&2",
+        )
+        .files(&["log.txt"])
+        .compare_stderr()
+        .features(&["redirect", "exec"]),
+        Case::posix_only(
+            "redirect/read-from-high-descriptor",
+            "exec 4< lines.txt; read -r a <&4; read -r b <&4; emit --stdout \"$a/$b\"",
+        )
+        .features(&["redirect", "exec", "high_fd", "read"]),
+        Case::posix_only(
+            "redirect/closed-descriptor-fails-only-the-command",
+            "emit --stdout x >&9; emit --stdout \"rc=$?\"",
+        )
+        .features(&["redirect", "error"]),
+        Case::posix_only(
+            "redirect/function-definition-redirect-applies-per-call",
+            "f() { emit --stdout in-f; } > fout.txt; f; cat fout.txt",
+        )
+        .files(&["fout.txt"])
+        .features(&["redirect", "function"]),
+        Case::posix_only(
+            "redirect/noclobber-refuses-and-clobber-overrides",
+            "set -C; : > nc.txt; emit --stdout b > nc.txt; emit --stdout \"rc=$?\"; emit --stdout c >| nc.txt; cat nc.txt",
+        )
+        .files(&["nc.txt"])
+        .features(&["redirect", "noclobber"]),
+        Case::posix_only(
+            "redirect/builtin-write-to-closed-pipe-ends-the-stage",
+            "while :; do echo y; done | head -n 2",
+        )
+        .features(&["redirect", "pipeline", "sigpipe"]),
     ]
 }
 

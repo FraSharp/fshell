@@ -4,10 +4,12 @@
 use async_recursion::async_recursion;
 use brush_parser::ast::*;
 use fshell_core::Val;
+use fshell_engine::descriptors::{self, ChildDescriptors, Descriptor};
 use fshell_engine::{EngineError, Env, Signal};
 
 use crate::expand::{ExpansionConfig, expand_assignment_word, expand_word, expand_word_as_pattern};
 use crate::parser::ParsedScript;
+use crate::redirect::Redirected;
 
 /// How the POSIX evaluator was invoked.
 #[derive(Debug, Clone)]
@@ -18,9 +20,6 @@ pub struct EvalConfig {
     /// evaluating a condition). The *setting* is read live from the env, so
     /// `set -e` inside a script takes effect.
     pub errexit: bool,
-    /// The original source text, used to slice the body of a background job so
-    /// it can be re-run in a child process. Maybe empty for nested evals.
-    pub source: String,
 }
 
 impl Default for EvalConfig {
@@ -31,7 +30,6 @@ impl Default for EvalConfig {
             // read live, so this flag only ever suppresses errexit in the contexts
             // POSIX exempts (a condition, a `!` pipeline).
             errexit: true,
-            source: String::new(),
         }
     }
 }
@@ -56,13 +54,7 @@ pub async fn eval_source(
     let _positional_scope =
         (!cfg.positional.is_empty()).then(|| crate::positional::Scope::new(env, &cfg.positional));
 
-    let result = {
-        let run_cfg = EvalConfig {
-            source: parsed.source.clone(),
-            ..cfg.clone()
-        };
-        eval_program(&parsed.program, env, &run_cfg).await
-    };
+    let result = eval_program(&parsed.program, env, cfg).await;
 
     // EXIT handlers are still part of this script's argument scope. The guard
     // restores the caller only after termination handling finishes.
@@ -79,6 +71,10 @@ pub async fn eval_source(
         }
         Err(PosixError::Break) | Err(PosixError::Continue) => env.set_exit_code(0),
         Err(PosixError::Interrupted) => env.set_exit_code(130),
+        Err(PosixError::Redirection(message)) => {
+            report(env, &message).await;
+            env.set_exit_code(1);
+        }
     };
 
     // Evaluating a whole script is the point at which the shell it ran in is
@@ -89,6 +85,12 @@ pub async fn eval_source(
 }
 
 /// Evaluate a parsed POSIX script and optionally capture its stdout bytes.
+///
+/// Without capture the script runs against the caller's descriptor table, so
+/// `exec 3>log` outlives it. With capture it runs as a substitution does: on a
+/// private copy of the table whose fd 1 feeds the capture, drained concurrently
+/// so output larger than the channel cannot deadlock, and kept even when the
+/// script leaves through exit/return/break/continue.
 pub async fn eval_source_stream(
     parsed: &ParsedScript,
     env: &Env,
@@ -96,23 +98,30 @@ pub async fn eval_source_stream(
     capture_stdout: bool,
 ) -> Result<(i32, Option<Vec<u8>>), EngineError> {
     if !capture_stdout {
-        return eval_source_to_stream(parsed, env, cfg, None)
+        return eval_source_to_stream(parsed, env, cfg)
             .await
             .map(|code| (code, None));
     }
-
-    // Capture at the output boundary, not in successful recursive return values:
-    // exit/return/break/continue must not discard bytes already emitted. Drain
-    // concurrently so a script larger than channel capacity cannot deadlock.
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(32);
-    let drain = async move {
-        let mut bytes = Vec::new();
-        while let Some(chunk) = rx.recv().await {
-            bytes.extend_from_slice(&chunk);
-        }
-        bytes
+    let (read_end, write_end) = descriptors::pipe().map_err(|error| EngineError::IoError {
+        message: format!("cannot capture output: {error}"),
+        span: None,
+    })?;
+    let mut table = env.descriptors.read().clone();
+    table.set(1, Descriptor::File(std::sync::Arc::new(write_end)));
+    let capture_env = env.with_descriptors(table);
+    let run = async move {
+        // Dropping the environment closes the shell's write end; the drain
+        // ends once every child holding a copy has closed it too.
+        let result = eval_source_to_stream(parsed, &capture_env, cfg).await;
+        drop(capture_env);
+        result
     };
-    let (result, captured) = tokio::join!(eval_source_to_stream(parsed, env, cfg, Some(tx)), drain);
+    let drain = descriptors::read_to_end(read_end);
+    let (result, captured) = tokio::join!(run, drain);
+    let captured = captured.map_err(|error| EngineError::IoError {
+        message: format!("cannot capture output: {error}"),
+        span: None,
+    })?;
     result.map(|code| (code, Some(captured)))
 }
 
@@ -120,33 +129,18 @@ async fn eval_source_to_stream(
     parsed: &ParsedScript,
     env: &Env,
     cfg: &EvalConfig,
-    stdout_stream: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
 ) -> Result<i32, EngineError> {
     let _positional_scope =
         (!cfg.positional.is_empty()).then(|| crate::positional::Scope::new(env, &cfg.positional));
     let mut last_code = 0;
 
-    let run_cfg = EvalConfig {
-        source: parsed.source.clone(),
-        ..cfg.clone()
-    };
     for complete in &parsed.program.complete_commands {
         if check_cancelled(env).is_err() {
             env.set_exit_code(130);
             return Err(EngineError::Interrupted { span: None });
         }
-        match eval_compound_list_stream(
-            complete,
-            env,
-            &run_cfg,
-            IoStreamConfig {
-                stdout_stream: stdout_stream.clone(),
-                ..Default::default()
-            },
-        )
-        .await
-        {
-            Ok((code, _)) => {
+        match eval_compound_list(complete, env, cfg).await {
+            Ok(code) => {
                 last_code = code;
                 if code == 130 || env.pipeline_cancelled() {
                     let _ = check_cancelled(env);
@@ -164,6 +158,11 @@ async fn eval_source_to_stream(
             Err(PosixError::Interrupted) => {
                 env.set_exit_code(130);
                 return Err(EngineError::Interrupted { span: None });
+            }
+            Err(PosixError::Redirection(message)) => {
+                report(env, &message).await;
+                last_code = 1;
+                break;
             }
             Err(PosixError::Engine(err)) => return Err(err),
         }
@@ -213,6 +212,11 @@ pub async fn run_exit_trap(env: &Env) -> Result<(), EngineError> {
             status.code = 130;
             Err(EngineError::Interrupted { span: None })
         }
+        Err(PosixError::Redirection(message)) => {
+            report(env, &message).await;
+            status.code = 1;
+            Ok(())
+        }
     }
 }
 
@@ -235,6 +239,8 @@ pub(crate) enum PosixError {
     Break,
     Continue,
     Interrupted,
+    /// A redirection could not be established; the command's status is 1.
+    Redirection(String),
 }
 
 impl From<EngineError> for PosixError {
@@ -252,6 +258,7 @@ impl std::fmt::Display for PosixError {
             PosixError::Break => write!(f, "break"),
             PosixError::Continue => write!(f, "continue"),
             PosixError::Interrupted => write!(f, "interrupted"),
+            PosixError::Redirection(message) => f.write_str(message),
         }
     }
 }
@@ -265,27 +272,6 @@ pub(crate) fn check_cancelled(env: &Env) -> Result<(), PosixError> {
     } else {
         Ok(())
     }
-}
-
-/// Extract the exact source text of an and-or list so a background job can be
-/// re-run verbatim in a child process.
-fn item_fragment(list: &AndOrList, source: &str) -> String {
-    if !source.is_empty()
-        && let Some(span) = SourceLocation::location(list)
-        && let Some(text) = slice_chars(source, span.start.index, span.end.index)
-        && !text.trim().is_empty()
-    {
-        return text;
-    }
-    format!("{list}")
-}
-
-/// Slice `source` by character indices (brush positions are char-based).
-fn slice_chars(source: &str, start: usize, end: usize) -> Option<String> {
-    if start > end {
-        return None;
-    }
-    Some(source.chars().skip(start).take(end - start).collect())
 }
 
 #[async_recursion]
@@ -303,84 +289,32 @@ async fn eval_compound_list(
     env: &Env,
     cfg: &EvalConfig,
 ) -> Result<i32, PosixError> {
-    let (code, _) = eval_compound_list_stream(list, env, cfg, IoStreamConfig::default()).await?;
-    Ok(code)
-}
-
-#[async_recursion]
-async fn eval_compound_list_stream(
-    list: &CompoundList,
-    env: &Env,
-    cfg: &EvalConfig,
-    mut io_cfg: IoStreamConfig,
-) -> Result<(i32, Option<Vec<u8>>), PosixError> {
     let mut last = 0;
-    let mut last_out = None;
-    let mut accumulated = if io_cfg.capture_stdout {
-        Some(Vec::new())
-    } else {
-        None
-    };
-    for (i, item) in list.0.iter().enumerate() {
+    for item in &list.0 {
         check_cancelled(env)?;
         // `cmd &` — run the and-or list in a child process and continue.
         if matches!(item.1, SeparatorOperator::Async) {
-            let fragment = item_fragment(&item.0, &cfg.source);
-            fshell_engine::background::spawn_background(&fragment, env)?;
+            let payload = crate::child::and_or_payload(&item.0, env, cfg)?;
+            fshell_engine::background::spawn_background(&payload, &item.0.to_string(), env)?;
             last = 0;
             continue;
         }
-        let step_io = if i == 0 {
-            IoStreamConfig {
-                stdin_bytes: io_cfg.stdin_bytes.clone(),
-                stdin_stream: io_cfg.stdin_stream.take(),
-                stdout_stream: io_cfg.stdout_stream.clone(),
-                capture_stdout: io_cfg.capture_stdout,
-                redirections: io_cfg.redirections.clone(),
-            }
-        } else {
-            IoStreamConfig {
-                stdin_bytes: None,
-                stdin_stream: None,
-                stdout_stream: io_cfg.stdout_stream.clone(),
-                capture_stdout: io_cfg.capture_stdout,
-                redirections: io_cfg.redirections.clone(),
-            }
-        };
-        let (code, out) = eval_and_or_list_stream(&item.0, env, cfg, step_io).await?;
-        last = code;
-        last_out = out.clone();
-        if let (Some(acc), Some(bytes)) = (&mut accumulated, out) {
-            acc.extend_from_slice(&bytes);
-        }
-        if code == 130 || env.pipeline_cancelled() {
+        last = eval_and_or_list(&item.0, env, cfg).await?;
+        if last == 130 || env.pipeline_cancelled() {
             check_cancelled(env)?;
             return Err(PosixError::Interrupted);
         }
     }
-    let ret_out = if io_cfg.capture_stdout {
-        accumulated
-    } else {
-        last_out
-    };
-    Ok((last, ret_out))
+    Ok(last)
 }
 
 #[async_recursion]
-async fn eval_and_or_list_stream(
+async fn eval_and_or_list(
     list: &AndOrList,
     env: &Env,
     cfg: &EvalConfig,
-    mut io_cfg: IoStreamConfig,
-) -> Result<(i32, Option<Vec<u8>>), PosixError> {
-    let first_io = IoStreamConfig {
-        stdin_bytes: io_cfg.stdin_bytes.clone(),
-        stdin_stream: io_cfg.stdin_stream.take(),
-        stdout_stream: io_cfg.stdout_stream.clone(),
-        capture_stdout: io_cfg.capture_stdout,
-        redirections: io_cfg.redirections.clone(),
-    };
-    let (mut code, mut out) = eval_pipeline_stream(&list.first, env, cfg, first_io).await?;
+) -> Result<i32, PosixError> {
+    let mut code = eval_pipeline(&list.first, env, cfg).await?;
     if code == 130 || env.pipeline_cancelled() {
         check_cancelled(env)?;
         return Err(PosixError::Interrupted);
@@ -388,56 +322,18 @@ async fn eval_and_or_list_stream(
     // Which element the final status belongs to, so errexit can tell a failure the
     // shell must act on from one it is allowed to ignore.
     let mut evaluated_index = 0usize;
-    let mut last_out = out.clone();
-    let mut accumulated = if io_cfg.capture_stdout {
-        let mut v = Vec::new();
-        if let Some(b) = out.take() {
-            v.extend_from_slice(&b);
-        }
-        Some(v)
-    } else {
-        None
-    };
-
     for (index, and_or) in list.additional.iter().enumerate() {
         check_cancelled(env)?;
-        let step_io = IoStreamConfig {
-            stdin_bytes: None,
-            stdin_stream: None,
-            stdout_stream: io_cfg.stdout_stream.clone(),
-            capture_stdout: io_cfg.capture_stdout,
-            redirections: io_cfg.redirections.clone(),
+        let (run, next) = match and_or {
+            AndOr::And(next) => (code == 0, next),
+            AndOr::Or(next) => (code != 0, next),
         };
-        match and_or {
-            AndOr::And(next) => {
-                if code == 0 {
-                    let (c, next_out) = eval_pipeline_stream(next, env, cfg, step_io).await?;
-                    evaluated_index = index + 1;
-                    code = c;
-                    last_out = next_out.clone();
-                    if let (Some(acc), Some(b)) = (&mut accumulated, next_out) {
-                        acc.extend_from_slice(&b);
-                    }
-                    if code == 130 || env.pipeline_cancelled() {
-                        check_cancelled(env)?;
-                        return Err(PosixError::Interrupted);
-                    }
-                }
-            }
-            AndOr::Or(next) => {
-                if code != 0 {
-                    let (c, next_out) = eval_pipeline_stream(next, env, cfg, step_io).await?;
-                    evaluated_index = index + 1;
-                    code = c;
-                    last_out = next_out.clone();
-                    if let (Some(acc), Some(b)) = (&mut accumulated, next_out) {
-                        acc.extend_from_slice(&b);
-                    }
-                    if code == 130 || env.pipeline_cancelled() {
-                        check_cancelled(env)?;
-                        return Err(PosixError::Interrupted);
-                    }
-                }
+        if run {
+            code = eval_pipeline(next, env, cfg).await?;
+            evaluated_index = index + 1;
+            if code == 130 || env.pipeline_cancelled() {
+                check_cancelled(env)?;
+                return Err(PosixError::Interrupted);
             }
         }
     }
@@ -450,7 +346,7 @@ async fn eval_and_or_list_stream(
     if cfg.errexit
         && env.options.read().errexit
         && code != 0
-        && evaluated_index + 1 == list.additional.len() + 1
+        && evaluated_index == list.additional.len()
     {
         let negated = if evaluated_index == 0 {
             list.first.bang
@@ -464,563 +360,182 @@ async fn eval_and_or_list_stream(
             return Err(PosixError::Exit(code));
         }
     }
+    Ok(code)
+}
 
-    let ret_out = if io_cfg.capture_stdout {
-        accumulated
-    } else {
-        last_out
+/// Write a diagnostic line to the environment's standard error, wherever it
+/// currently points. A closed or broken stderr loses the message, as it would
+/// in any shell.
+pub(crate) async fn report(env: &Env, message: &str) {
+    if let Some(stderr) = env.descriptor(2) {
+        let mut line = message.to_string();
+        line.push('\n');
+        let _ = descriptors::write_all(&stderr, line.as_bytes()).await;
+    }
+}
+
+/// Write a builtin's output to standard output. Failing to write is the
+/// builtin's failure (status 1), reported on stderr like any shell does —
+/// except a reader that went away: a process would die of SIGPIPE, so the
+/// shell (or the subshell this runs in) leaves with that status, silently.
+async fn emit(env: &Env, builtin: &str, text: &str) -> Result<i32, PosixError> {
+    if text.is_empty() {
+        return Ok(0);
+    }
+    let result = match env.descriptor(1) {
+        Some(stdout) => descriptors::write_all(&stdout, text.as_bytes()).await,
+        None => Err(std::io::Error::from_raw_os_error(libc::EBADF)),
     };
-    Ok((code, ret_out))
-}
-
-/// Where a standard descriptor points once a command's redirections have been
-/// applied in source order.
-///
-/// The order is the semantics, and it is why this is a table rather than a pair
-/// of flags. `2>&1` means "stderr := whatever stdout points at *right now*", so
-/// `> out 2>&1` sends both streams to `out` while `2>&1 > out` leaves stderr on
-/// the original stdout. A `stderr_to_stdout: bool` cannot express that, because
-/// by the time someone read it the ordering information would already be gone.
-#[derive(Clone)]
-pub(crate) enum FdTarget {
-    /// A descriptor of this process (0, 1 or 2), materialised by duplicating it.
-    /// Duplication is required rather than inheritance: `2>&1` on an
-    /// unredirected stdout has to give the child fd 1, not fd 2.
-    Process(i32),
-    /// The in-process pipeline channel carrying this stage's output.
-    Pipe(tokio::sync::mpsc::Sender<bytes::Bytes>),
-    /// An open file, shared by every descriptor duplicated onto it so concurrent
-    /// writers do not fight over separate offsets.
-    File(std::sync::Arc<std::sync::Mutex<std::fs::File>>),
-    /// Explicitly closed (`n>&-`).
-    Closed,
-}
-
-impl std::fmt::Debug for FdTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FdTarget::Process(fd) => write!(f, "Process({fd})"),
-            FdTarget::Pipe(_) => f.write_str("Pipe"),
-            FdTarget::File(_) => f.write_str("File"),
-            FdTarget::Closed => f.write_str("Closed"),
+    match result {
+        Ok(()) => Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+            Err(PosixError::Exit(128 + libc::SIGPIPE))
+        }
+        Err(error) => {
+            report(
+                env,
+                &format!(
+                    "{builtin}: write error: {}",
+                    crate::redirect::os_message(&error)
+                ),
+            )
+            .await;
+            Ok(1)
         }
     }
 }
 
-/// The result of applying a command's redirections, in order.
-#[derive(Debug, Clone)]
-pub struct RedirectionContext {
-    pub stdin_bytes: Option<Vec<u8>>,
-    pub stdin_file: Option<std::path::PathBuf>,
-    /// Destinations of fd 0, 1 and 2 after every redirection was applied.
-    targets: [FdTarget; 3],
-}
-
-impl Default for RedirectionContext {
-    fn default() -> Self {
-        Self::new(None)
+/// A redirection failed: the command does not run and its status is 1.
+async fn redirection_failed(
+    env: &Env,
+    cfg: &EvalConfig,
+    error: PosixError,
+) -> Result<i32, PosixError> {
+    let PosixError::Redirection(message) = error else {
+        return Err(error);
+    };
+    report(env, &message).await;
+    env.set_exit_code(1);
+    if cfg.errexit && env.options.read().errexit {
+        return Err(PosixError::Exit(1));
     }
-}
-
-impl RedirectionContext {
-    /// Seed the descriptor table for a command, then apply its redirections.
-    ///
-    /// Seeding matters: a stage whose stdout is the pipeline channel starts with
-    /// fd 1 pointing at that channel, so a later `2>&1` correctly duplicates the
-    /// channel rather than the process's own stdout.
-    pub(crate) fn new(stdout_stream: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>) -> Self {
-        Self {
-            stdin_bytes: None,
-            stdin_file: None,
-            targets: [
-                FdTarget::Process(0),
-                match stdout_stream {
-                    Some(tx) => FdTarget::Pipe(tx.clone()),
-                    None => FdTarget::Process(1),
-                },
-                FdTarget::Process(2),
-            ],
-        }
-    }
-
-    /// Destination of fd 1.
-    pub(crate) fn stdout(&self) -> &FdTarget {
-        &self.targets[1]
-    }
-
-    /// Destination of fd 2.
-    pub(crate) fn stderr(&self) -> &FdTarget {
-        &self.targets[2]
-    }
-
-    /// Destination of fd 0.
-    pub(crate) fn stdin(&self) -> &FdTarget {
-        &self.targets[0]
-    }
-
-    /// The open file fd 1 was redirected to, if any.
-    pub(crate) fn stdout_file(&self) -> Option<&std::sync::Arc<std::sync::Mutex<std::fs::File>>> {
-        match &self.targets[1] {
-            FdTarget::File(handle) => Some(handle),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn apply_item(
-        &mut self,
-        redir: &IoRedirect,
-        env: &Env,
-        positional: &[String],
-    ) -> Result<(), PosixError> {
-        match redir {
-            IoRedirect::File(fd_opt, kind, target) => {
-                let default_fd = match kind {
-                    IoFileRedirectKind::Read | IoFileRedirectKind::ReadAndWrite => 0,
-                    _ => 1,
-                };
-                let fd = fd_opt.unwrap_or(default_fd);
-                let append = matches!(kind, IoFileRedirectKind::Append);
-
-                match target {
-                    IoFileRedirectTarget::Filename(w) => {
-                        let path = self.resolve_path(w, env, positional)?;
-                        match fd {
-                            0 => {
-                                let bytes = std::fs::read(&path).map_err(|e| {
-                                    PosixError::Engine(EngineError::IoError {
-                                        message: format!("{}: {}", path.display(), e),
-                                        span: None,
-                                    })
-                                })?;
-                                self.stdin_bytes = Some(bytes);
-                                self.stdin_file = Some(path);
-                            }
-                            1 | 2 => {
-                                // Open the target *now*, before the command runs.
-                                // POSIX establishes the redirection whether or not
-                                // the command writes, so this is what makes
-                                // `: > file` create or truncate it — the idiomatic
-                                // way to clear a file or start a log.
-                                let handle = open_redirect_file(&path, append)?;
-                                self.targets[fd as usize] = FdTarget::File(handle);
-                            }
-                            _ => return Err(unsupported_descriptor(fd)),
-                        }
-                    }
-                    IoFileRedirectTarget::Duplicate(w) => {
-                        let dest =
-                            expand_word(&w.value, env, &ExpansionConfig::default(), positional)?
-                                .join(" ");
-                        self.duplicate(fd, dest.trim())?;
-                    }
-                    IoFileRedirectTarget::Fd(target_fd) => {
-                        self.duplicate(fd, &target_fd.to_string())?;
-                    }
-                    _ => {}
-                }
-            }
-            IoRedirect::HereDocument(_fd, here_doc) => {
-                let raw_body = &here_doc.doc.value;
-                let mut out_lines = Vec::new();
-                for line in raw_body.lines() {
-                    let trimmed = if here_doc.remove_tabs {
-                        line.trim_start_matches('\t')
-                    } else {
-                        line
-                    };
-                    if here_doc.requires_expansion {
-                        let escaped = escape_quotes_for_heredoc(trimmed);
-                        let expanded = expand_word(
-                            &format!("\"{escaped}\""),
-                            env,
-                            &ExpansionConfig {
-                                do_glob: false,
-                                ..Default::default()
-                            },
-                            positional,
-                        )?
-                        .join("");
-                        out_lines.push(expanded);
-                    } else {
-                        out_lines.push(trimmed.to_string());
-                    }
-                }
-                let mut content = out_lines.join("\n");
-                if raw_body.ends_with('\n') {
-                    content.push('\n');
-                }
-                self.stdin_bytes = Some(content.into_bytes());
-            }
-            IoRedirect::HereString(_fd, w) => {
-                let expanded = expand_word(
-                    &w.value,
-                    env,
-                    &ExpansionConfig {
-                        do_glob: false,
-                        ..Default::default()
-                    },
-                    positional,
-                )?
-                .join(" ");
-                let mut content = expanded;
-                content.push('\n');
-                self.stdin_bytes = Some(content.into_bytes());
-            }
-            IoRedirect::OutputAndError(w, append) => {
-                let path = self.resolve_path(w, env, positional)?;
-                let handle = open_redirect_file(&path, *append)?;
-                self.targets[1] = FdTarget::File(handle.clone());
-                self.targets[2] = FdTarget::File(handle);
-            }
-        }
-        Ok(())
-    }
-
-    /// Point `src_fd` at whatever `dest` currently points at.
-    fn duplicate(&mut self, src_fd: i32, dest: &str) -> Result<(), PosixError> {
-        if !(0..=2).contains(&src_fd) {
-            return Err(unsupported_descriptor(src_fd));
-        }
-        if dest == "-" {
-            self.targets[src_fd as usize] = FdTarget::Closed;
-            return Ok(());
-        }
-        let dest_fd: i32 = dest.parse().map_err(|_| {
-            PosixError::Engine(EngineError::Generic {
-                message: format!("{src_fd}>&{dest}: bad file descriptor"),
-                span: None,
-            })
-        })?;
-        if !(0..=2).contains(&dest_fd) {
-            return Err(unsupported_descriptor(dest_fd));
-        }
-        // Copy the *current* target: this is exactly what makes redirection
-        // order observable, and is the whole reason the table is ordered.
-        self.targets[src_fd as usize] = self.targets[dest_fd as usize].clone();
-        Ok(())
-    }
-
-    /// Expand a redirection target word to an absolute path.
-    fn resolve_path(
-        &self,
-        word: &Word,
-        env: &Env,
-        positional: &[String],
-    ) -> Result<std::path::PathBuf, PosixError> {
-        let expanded = expand_word(
-            &word.value,
-            env,
-            &ExpansionConfig {
-                do_glob: false,
-                ..Default::default()
-            },
-            positional,
-        )?;
-        let raw_path = std::path::PathBuf::from(expanded.join(" "));
-        Ok(if raw_path.is_absolute() {
-            raw_path
-        } else {
-            env.cwd().join(raw_path)
-        })
-    }
-}
-
-/// Open a redirection target for writing, truncating unless appending.
-fn open_redirect_file(
-    path: &std::path::Path,
-    append: bool,
-) -> Result<std::sync::Arc<std::sync::Mutex<std::fs::File>>, PosixError> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(!append)
-        .append(append)
-        .open(path)
-        .map_err(|e| {
-            PosixError::Engine(EngineError::IoError {
-                message: format!("{}: {}", path.display(), e),
-                span: None,
-            })
-        })?;
-    Ok(std::sync::Arc::new(std::sync::Mutex::new(file)))
-}
-
-/// Only the three standard descriptors are implemented. Anything else is
-/// rejected rather than silently dropped, because accepting a redirection and
-/// ignoring it is worse than refusing it.
-fn unsupported_descriptor(fd: i32) -> PosixError {
-    PosixError::Engine(EngineError::Generic {
-        message: format!("redirection of file descriptor {fd} is not supported (only 0, 1 and 2)"),
-        span: None,
-    })
-}
-
-/// Escape double quotes for wrapping an expanding heredoc line in `"..."`.
-///
-/// In POSIX heredoc (IEEE Std 1003.1-2017, section 2.7.4), backslash retains its
-/// escape meaning only before `$`, `` ` ``, `\`, and newline. This precisely matches
-/// double-quoted string escape rules, except that heredocs do not treat `"` as a
-/// delimiter. We therefore only escape `"` (unless already escaped), preserving
-/// literal `\$`, `\\`, etc.
-fn escape_quotes_for_heredoc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            out.push('\\');
-            if let Some(&next) = chars.peek() {
-                out.push(next);
-                chars.next();
-            }
-        } else if c == '"' {
-            out.push('\\');
-            out.push('"');
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Write to a shared redirect handle.
-fn write_shared_file(
-    handle: &std::sync::Arc<std::sync::Mutex<std::fs::File>>,
-    bytes: &[u8],
-) -> Result<(), PosixError> {
-    use std::io::Write;
-    let mut file = handle
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    file.write_all(bytes).map_err(|e| {
-        PosixError::Engine(EngineError::IoError {
-            message: format!("redirect write error: {e}"),
-            span: None,
-        })
-    })
-}
-
-/// Duplicate a process descriptor as a child's stdio.
-///
-/// `dup` rather than `Stdio::inherit()`: inheriting gives the child the
-/// descriptor of the *same number*, which is wrong for a duplication such as
-/// `2>&1`, where the child's fd 2 must become this process's fd 1.
-fn dup_stdio(fd: i32) -> Result<std::process::Stdio, PosixError> {
-    duplicate_process_file(fd).map(std::process::Stdio::from)
-}
-
-fn duplicate_process_file(fd: i32) -> Result<std::fs::File, PosixError> {
-    use std::os::fd::FromRawFd;
-    // SAFETY: fcntl validates fd; CLOEXEC prevents the owned duplicate from
-    // escaping through a concurrent spawn. The original descriptor is untouched.
-    let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-    if duplicated < 0 {
-        return Err(PosixError::Engine(EngineError::IoError {
-            message: format!("dup({fd}) failed: {}", std::io::Error::last_os_error()),
-            span: None,
-        }));
-    }
-    // SAFETY: a successful duplication returns one newly owned descriptor.
-    Ok(unsafe { std::fs::File::from_raw_fd(duplicated) })
-}
-
-/// Clone a shared redirect handle for handing to a child process. `try_clone`
-/// duplicates the descriptor, so both fds share one file offset and interleave
-/// in write order.
-fn clone_shared_file(
-    handle: &std::sync::Arc<std::sync::Mutex<std::fs::File>>,
-) -> Result<std::fs::File, PosixError> {
-    let file = handle
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    file.try_clone().map_err(|e| {
-        PosixError::Engine(EngineError::IoError {
-            message: format!("redirect dup error: {e}"),
-            span: None,
-        })
-    })
-}
-
-#[derive(Debug, Default)]
-pub struct IoStreamConfig {
-    pub stdin_bytes: Option<Vec<u8>>,
-    pub stdin_stream: Option<tokio::sync::mpsc::Receiver<bytes::Bytes>>,
-    pub stdout_stream: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
-    pub capture_stdout: bool,
-    /// Descriptor destinations inherited by nested in-process commands.
-    pub redirections: Option<RedirectionContext>,
-}
-
-impl IoStreamConfig {
-    fn redirection_context(&self) -> RedirectionContext {
-        self.redirections
-            .clone()
-            .unwrap_or_else(|| RedirectionContext::new(self.stdout_stream.as_ref()))
-    }
+    Ok(1)
 }
 
 #[async_recursion]
-async fn eval_pipeline_stream(
+async fn eval_pipeline(
     pipeline: &Pipeline,
     env: &Env,
     cfg: &EvalConfig,
-    mut io_cfg: IoStreamConfig,
-) -> Result<(i32, Option<Vec<u8>>), PosixError> {
-    let bang = pipeline.bang;
-
-    if pipeline.seq.is_empty() {
-        return Ok((0, None));
+) -> Result<i32, PosixError> {
+    let mut code = match pipeline.seq.as_slice() {
+        [] => 0,
+        [single] => eval_command(single, env, cfg).await?,
+        stages => {
+            // Every stage is a subshell running concurrently; adjacent stages are
+            // joined by a pipe, exactly as in any shell, so external stages
+            // exchange bytes directly and builtins share the same ends.
+            let mut handles = Vec::with_capacity(stages.len());
+            let mut upstream = None;
+            for (index, stage) in stages.iter().enumerate() {
+                let stage_env = crate::bridge::fork_env_for_subshell(env);
+                {
+                    let mut table = stage_env.descriptors.write();
+                    if let Some(read_end) = upstream.take() {
+                        table.set(0, Descriptor::File(std::sync::Arc::new(read_end)));
+                    }
+                    if index + 1 < stages.len() {
+                        let (read_end, write_end) = descriptors::pipe().map_err(|error| {
+                            PosixError::Engine(EngineError::IoError {
+                                message: format!("cannot create pipe: {error}"),
+                                span: None,
+                            })
+                        })?;
+                        table.set(1, Descriptor::File(std::sync::Arc::new(write_end)));
+                        upstream = Some(read_end);
+                    }
+                }
+                let stage = stage.clone();
+                let stage_cfg = cfg.clone();
+                handles.push(tokio::spawn(async move {
+                    let result = eval_command(&stage, &stage_env, &stage_cfg).await;
+                    subshell_status(&stage_env, result).await
+                }));
+            }
+            let mut last = 0;
+            let mut rightmost_failure = None;
+            for handle in handles {
+                let stage_code = handle.await.map_err(|e| {
+                    PosixError::Engine(EngineError::Generic {
+                        message: format!("pipeline stage failed: {e}"),
+                        span: None,
+                    })
+                })??;
+                if stage_code != 0 {
+                    rightmost_failure = Some(stage_code);
+                }
+                last = stage_code;
+            }
+            match rightmost_failure {
+                Some(failure) if env.options.read().pipefail => failure,
+                _ => last,
+            }
+        }
+    };
+    if pipeline.bang {
+        code = if code == 0 { 1 } else { 0 };
     }
+    env.set_exit_code(code as i64);
+    Ok(code)
+}
 
-    let mut last_code = 0;
-    let mut final_out = None;
-
-    if pipeline.seq.len() == 1 {
-        let (code, out) = eval_command_stream(&pipeline.seq[0], env, cfg, io_cfg).await?;
-        last_code = code;
-        final_out = out;
-    } else {
-        let n = pipeline.seq.len();
-        let mut senders: Vec<Option<tokio::sync::mpsc::Sender<bytes::Bytes>>> =
-            Vec::with_capacity(n);
-        let mut receivers: Vec<Option<tokio::sync::mpsc::Receiver<bytes::Bytes>>> =
-            Vec::with_capacity(n);
-
-        for _ in 0..n - 1 {
-            let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(32);
-            senders.push(Some(tx));
-            receivers.push(Some(rx));
+/// The status a subshell leaves with. Its `exit`, `return`, `break` and
+/// `continue` end only the subshell, and a hard error is reported and ends it
+/// with status 1; an interrupt still propagates.
+async fn subshell_status(env: &Env, result: Result<i32, PosixError>) -> Result<i32, PosixError> {
+    match result {
+        Ok(code) | Err(PosixError::Exit(code)) | Err(PosixError::Return(code)) => Ok(code),
+        Err(PosixError::Break) | Err(PosixError::Continue) => Ok(0),
+        Err(PosixError::Interrupted) => Err(PosixError::Interrupted),
+        Err(PosixError::Redirection(message)) => {
+            report(env, &message).await;
+            Ok(1)
         }
-
-        let mut handles = Vec::with_capacity(n);
-        let mut prev_rx = io_cfg.stdin_stream.take();
-        for (idx, cmd) in pipeline.seq.iter().enumerate() {
-            let is_first = idx == 0;
-            let is_last = idx == n - 1;
-            let sub_env = crate::bridge::fork_env_for_subshell(env);
-            let stage_rx = if is_first {
-                prev_rx.take()
-            } else {
-                receivers[idx - 1].take()
-            };
-            let stage_tx = if is_last {
-                io_cfg.stdout_stream.clone()
-            } else {
-                senders[idx].take()
-            };
-            let mut stage_redir = io_cfg.redirection_context();
-            if !is_first {
-                stage_redir.stdin_bytes = None;
-                stage_redir.stdin_file = None;
-                stage_redir.targets[0] = FdTarget::Process(0);
-            }
-            if !is_last && let Some(tx) = &stage_tx {
-                stage_redir.targets[1] = FdTarget::Pipe(tx.clone());
-            }
-            let stage_io = IoStreamConfig {
-                stdin_bytes: if is_first {
-                    io_cfg.stdin_bytes.clone()
-                } else {
-                    None
-                },
-                stdin_stream: stage_rx,
-                stdout_stream: stage_tx,
-                capture_stdout: is_last && io_cfg.capture_stdout,
-                redirections: Some(stage_redir),
-            };
-
-            let cmd_clone = cmd.clone();
-            let cfg_clone = cfg.clone();
-            handles.push(tokio::spawn(async move {
-                eval_command_stream(&cmd_clone, &sub_env, &cfg_clone, stage_io).await
-            }));
-        }
-
-        drop(senders);
-        drop(receivers);
-
-        let mut pipefail_code = None;
-
-        for (idx, handle) in handles.into_iter().enumerate() {
-            let is_last = idx == n - 1;
-            let (code, out) = handle.await.map_err(|e| {
-                PosixError::Engine(EngineError::Generic {
-                    message: format!("pipeline stage failed: {}", e),
-                    span: None,
-                })
-            })??;
-            if code != 0 {
-                pipefail_code = Some(code);
-            }
-            if is_last {
-                last_code = code;
-                final_out = out;
-            }
-        }
-
-        let pipefail = env.options.read().pipefail;
-        if pipefail && let Some(c) = pipefail_code {
-            last_code = c;
+        Err(PosixError::Engine(error)) => {
+            report(env, &error.to_string()).await;
+            Ok(1)
         }
     }
+}
 
-    if bang {
-        last_code = if last_code == 0 { 1 } else { 0 };
-    }
-
-    env.set_exit_code(last_code as i64);
-    Ok((last_code, final_out))
+fn redirect_items(list: &Option<RedirectList>) -> Vec<&IoRedirect> {
+    list.iter().flat_map(|l| l.0.iter()).collect()
 }
 
 #[async_recursion]
-async fn eval_command_stream(
-    cmd: &Command,
-    env: &Env,
-    cfg: &EvalConfig,
-    io_cfg: IoStreamConfig,
-) -> Result<(i32, Option<Vec<u8>>), PosixError> {
+async fn eval_command(cmd: &Command, env: &Env, cfg: &EvalConfig) -> Result<i32, PosixError> {
     match cmd {
-        Command::Simple(simple) => eval_simple_command(simple, env, cfg, io_cfg).await,
+        Command::Simple(simple) => eval_simple_command(simple, env, cfg).await,
         Command::Compound(compound, redirects) => {
-            let mut redir = io_cfg.redirection_context();
-            if let Some(list) = redirects {
-                for r in &list.0 {
-                    match redir.apply_item(r, env, &cfg.positional) {
-                        Ok(()) => {}
-                        Err(error @ PosixError::Engine(EngineError::ParameterExpansion { .. })) => {
-                            return Err(error);
-                        }
-                        Err(e) => {
-                            eprintln!("{e}");
-                            env.set_exit_code(1);
-                            if cfg.errexit && env.options.read().errexit {
-                                return Err(PosixError::Exit(1));
-                            }
-                            return Ok((1, None));
-                        }
-                    }
-                }
-            }
-            let sub_io = IoStreamConfig {
-                stdin_bytes: redir.stdin_bytes.clone().or(io_cfg.stdin_bytes),
-                stdin_stream: io_cfg.stdin_stream,
-                stdout_stream: io_cfg.stdout_stream,
-                capture_stdout: io_cfg.capture_stdout,
-                redirections: Some(redir),
-            };
-            // Commands write through the inherited table immediately. Buffering
-            // an entire group discarded file output on return/exit and ignored
-            // stderr and nested descriptor overrides.
-            eval_compound_command_stream(compound, env, cfg, sub_io).await
+            let _redirected =
+                match Redirected::apply(env, &redirect_items(redirects), &cfg.positional) {
+                    Ok(applied) => applied,
+                    Err(error) => return redirection_failed(env, cfg, error).await,
+                };
+            eval_compound_command(compound, env, cfg).await
         }
         Command::Function(func_def) => {
-            let name = func_def.fname.value.clone();
-            let body = func_def.body.0.clone();
-            register_posix_function(env, &name, body);
-            Ok((0, None))
+            register_posix_function(env, &func_def.fname.value, func_def.body.clone());
+            Ok(0)
         }
-        Command::ExtendedTest(expr_cmd, _redirects) => {
+        Command::ExtendedTest(expr_cmd, redirects) => {
+            let _redirected =
+                match Redirected::apply(env, &redirect_items(redirects), &cfg.positional) {
+                    Ok(applied) => applied,
+                    Err(error) => return redirection_failed(env, cfg, error).await,
+                };
             let result = eval_extended_test(&expr_cmd.expr, env)?;
-            Ok((if result { 0 } else { 1 }, None))
+            Ok(if result { 0 } else { 1 })
         }
     }
 }
@@ -1146,90 +661,53 @@ fn parse_test_int_for_extended(s: &str) -> Result<i64, PosixError> {
 }
 
 // Registry for POSIX functions scoped to Env (name -> compound command)
-fn register_posix_function(env: &Env, name: &str, body: CompoundCommand) {
+fn register_posix_function(env: &Env, name: &str, body: FunctionBody) {
     let mut m = env.posix_fns.write();
     m.insert(name.to_string(), std::sync::Arc::new(body));
 }
 
-pub fn get_posix_function(env: &Env, name: &str) -> Option<CompoundCommand> {
+/// A function's body with the redirections written after it in the
+/// definition, which apply on every call.
+pub fn get_posix_function(env: &Env, name: &str) -> Option<FunctionBody> {
     let m = env.posix_fns.read();
     m.get(name)
-        .and_then(|arc| arc.downcast_ref::<CompoundCommand>().cloned())
+        .and_then(|arc| arc.downcast_ref::<FunctionBody>().cloned())
 }
 
 #[async_recursion]
-async fn eval_compound_command_stream(
+async fn eval_compound_command(
     compound: &CompoundCommand,
     env: &Env,
     cfg: &EvalConfig,
-    mut io_cfg: IoStreamConfig,
-) -> Result<(i32, Option<Vec<u8>>), PosixError> {
+) -> Result<i32, PosixError> {
+    // POSIX ignores `-e` while evaluating a condition: the clause is *asking*
+    // whether the command succeeds, so its failure is an answer, not a reason
+    // to leave.
+    let cond_cfg = EvalConfig {
+        errexit: false,
+        ..cfg.clone()
+    };
     match compound {
-        CompoundCommand::BraceGroup(brace) => {
-            eval_compound_list_stream(&brace.list, env, cfg, io_cfg).await
-        }
+        CompoundCommand::BraceGroup(brace) => eval_compound_list(&brace.list, env, cfg).await,
         CompoundCommand::Subshell(sub) => {
             // A subshell is a real child process: it gets its own PID and
             // signals, and its `exit`/assignments cannot touch the parent.
-            let fragment = compound_source(&sub.list, &cfg.source);
-            let redir = io_cfg.redirection_context();
-            // The child-shell helper transports stdout back to this evaluator;
-            // file destinations must be materialised here rather than sent to
-            // the enclosing pipeline's channel.
-            let stdout_handle = redir.stdout_file().cloned();
-            if stdout_handle.is_some() {
-                io_cfg.stdout_stream = None;
-                io_cfg.capture_stdout = true;
-            }
-            let (code, out) = run_child_shell(&fragment, io_cfg, env).await?;
+            let payload = crate::child::list_payload(&sub.list, env, cfg)?;
+            let code = run_child_shell(&payload, env).await?;
             env.set_exit_code(code as i64);
-            if let Some(handle) = stdout_handle {
-                if let Some(bytes) = out {
-                    write_shared_file(&handle, &bytes)?;
-                }
-                Ok((code, None))
-            } else {
-                Ok((code, out))
-            }
+            Ok(code)
         }
         CompoundCommand::IfClause(if_clause) => {
-            // POSIX ignores `-e` while evaluating a condition: the clause is
-            // *asking* whether the command succeeds, so its failure is an answer,
-            // not a reason to leave.
-            let cond_cfg = EvalConfig {
-                errexit: false,
-                ..cfg.clone()
-            };
-            let condition_io = || IoStreamConfig {
-                stdin_bytes: io_cfg.stdin_bytes.clone(),
-                stdout_stream: io_cfg.stdout_stream.clone(),
-                capture_stdout: io_cfg.capture_stdout,
-                redirections: io_cfg.redirections.clone(),
-                ..Default::default()
-            };
-            let (cond_code, _) =
-                eval_compound_list_stream(&if_clause.condition, env, &cond_cfg, condition_io())
-                    .await?;
-            if cond_code == 0 {
-                eval_compound_list_stream(&if_clause.then, env, cfg, io_cfg).await
-            } else if let Some(elses) = &if_clause.elses {
-                for else_clause in elses {
-                    if let Some(cond) = &else_clause.condition {
-                        let (c, _) =
-                            eval_compound_list_stream(cond, env, &cond_cfg, condition_io()).await?;
-                        if c == 0 {
-                            return eval_compound_list_stream(&else_clause.body, env, cfg, io_cfg)
-                                .await;
-                        }
-                    } else {
-                        return eval_compound_list_stream(&else_clause.body, env, cfg, io_cfg)
-                            .await;
-                    }
-                }
-                Ok((0, None))
-            } else {
-                Ok((0, None))
+            if eval_compound_list(&if_clause.condition, env, &cond_cfg).await? == 0 {
+                return eval_compound_list(&if_clause.then, env, cfg).await;
             }
+            for else_clause in if_clause.elses.iter().flatten() {
+                match &else_clause.condition {
+                    Some(cond) if eval_compound_list(cond, env, &cond_cfg).await? != 0 => {}
+                    _ => return eval_compound_list(&else_clause.body, env, cfg).await,
+                }
+            }
+            Ok(0)
         }
         CompoundCommand::ForClause(for_clause) => {
             let values: Vec<String> = if let Some(words) = &for_clause.values {
@@ -1250,118 +728,51 @@ async fn eval_compound_command_stream(
                 crate::expand::get_effective_positional(env, &cfg.positional)
             };
             let mut last = 0;
-            let mut accumulated = if io_cfg.capture_stdout {
-                Some(Vec::new())
-            } else {
-                None
-            };
-            let mut prev_stream = io_cfg.stdin_stream;
-            for (i, val) in values.into_iter().enumerate() {
+            for val in values {
                 check_cancelled(env)?;
-                {
-                    let mut vars = env.vars.write();
-                    vars.insert(for_clause.variable_name.clone(), Val::String(val));
-                }
-                let step_io = IoStreamConfig {
-                    stdin_bytes: if i == 0 {
-                        io_cfg.stdin_bytes.clone()
-                    } else {
-                        None
-                    },
-                    stdin_stream: if i == 0 { prev_stream.take() } else { None },
-                    stdout_stream: io_cfg.stdout_stream.clone(),
-                    capture_stdout: io_cfg.capture_stdout,
-                    redirections: io_cfg.redirections.clone(),
-                };
-                match eval_compound_list_stream(&for_clause.body.list, env, cfg, step_io).await {
-                    Ok((code, out)) => {
+                env.set_shell_var(&for_clause.variable_name, Val::String(val));
+                match eval_compound_list(&for_clause.body.list, env, cfg).await {
+                    Ok(code) => {
                         last = code;
                         if code == 130 || env.pipeline_cancelled() {
                             check_cancelled(env)?;
                             return Err(PosixError::Interrupted);
                         }
-                        if let (Some(acc), Some(bytes)) = (&mut accumulated, out) {
-                            acc.extend_from_slice(&bytes);
-                        }
                     }
                     Err(PosixError::Break) => break,
-                    Err(PosixError::Continue) => {
-                        check_cancelled(env)?;
-                        continue;
-                    }
+                    Err(PosixError::Continue) => continue,
                     Err(e) => return Err(e),
                 }
             }
-            Ok((last, accumulated))
+            Ok(last)
         }
         CompoundCommand::WhileClause(while_clause) | CompoundCommand::UntilClause(while_clause) => {
             let is_until = matches!(compound, CompoundCommand::UntilClause(_));
             let mut last = 0;
-            let mut current_stdin_bytes = io_cfg.stdin_bytes;
-            let mut accumulated = if io_cfg.capture_stdout {
-                Some(Vec::new())
-            } else {
-                None
-            };
             loop {
                 check_cancelled(env)?;
-                // The condition is a question, so `-e` does not apply to it; the
-                // body is a command list like any other.
-                let cond_cfg = EvalConfig {
-                    errexit: false,
-                    ..cfg.clone()
-                };
-                let cond_io = IoStreamConfig {
-                    stdin_bytes: current_stdin_bytes.clone(),
-                    stdin_stream: None,
-                    stdout_stream: io_cfg.stdout_stream.clone(),
-                    capture_stdout: io_cfg.capture_stdout,
-                    redirections: io_cfg.redirections.clone(),
-                };
-                let (cond_code, cond_out) =
-                    eval_compound_list_stream(&while_clause.0, env, &cond_cfg, cond_io).await?;
+                let cond_code = eval_compound_list(&while_clause.0, env, &cond_cfg).await?;
                 if cond_code == 130 || env.pipeline_cancelled() {
                     check_cancelled(env)?;
                     return Err(PosixError::Interrupted);
                 }
-                if let Some(rem) = cond_out {
-                    current_stdin_bytes = Some(rem);
-                }
-                let should_continue = if is_until {
-                    cond_code != 0
-                } else {
-                    cond_code == 0
-                };
-                if !should_continue {
+                if (cond_code == 0) == is_until {
                     break;
                 }
-                let body_io = IoStreamConfig {
-                    stdin_bytes: current_stdin_bytes.clone(),
-                    stdin_stream: None,
-                    stdout_stream: io_cfg.stdout_stream.clone(),
-                    capture_stdout: io_cfg.capture_stdout,
-                    redirections: io_cfg.redirections.clone(),
-                };
-                match eval_compound_list_stream(&while_clause.1.list, env, cfg, body_io).await {
-                    Ok((code, out)) => {
+                match eval_compound_list(&while_clause.1.list, env, cfg).await {
+                    Ok(code) => {
                         last = code;
                         if code == 130 || env.pipeline_cancelled() {
                             check_cancelled(env)?;
                             return Err(PosixError::Interrupted);
                         }
-                        if let (Some(acc), Some(bytes)) = (&mut accumulated, out) {
-                            acc.extend_from_slice(&bytes);
-                        }
                     }
                     Err(PosixError::Break) => break,
-                    Err(PosixError::Continue) => {
-                        check_cancelled(env)?;
-                        continue;
-                    }
+                    Err(PosixError::Continue) => continue,
                     Err(e) => return Err(e),
                 }
             }
-            Ok((last, accumulated))
+            Ok(last)
         }
         CompoundCommand::CaseClause(case_clause) => {
             let value_expanded = expand_word(
@@ -1403,21 +814,26 @@ async fn eval_compound_command_stream(
                 }
                 if matched {
                     if let Some(cmd_list) = &item.cmd {
-                        return eval_compound_list_stream(cmd_list, env, cfg, io_cfg).await;
+                        return eval_compound_list(cmd_list, env, cfg).await;
                     } else {
-                        return Ok((0, None));
+                        return Ok(0);
                     }
                 }
             }
-            Ok((0, None))
+            Ok(0)
         }
         CompoundCommand::Arithmetic(arith) => {
-            let expr = arith.expr.value.clone();
-            let code = eval_arithmetic_command(&expr, env)?;
-            Ok((if code != 0 { 0 } else { 1 }, None))
+            let code = eval_arithmetic_command(&arith.expr.value, env)?;
+            Ok(if code != 0 { 0 } else { 1 })
         }
-        CompoundCommand::ArithmeticForClause(_arith_for) => Ok((0, None)),
-        CompoundCommand::Coprocess(_) => Ok((0, None)),
+        CompoundCommand::ArithmeticForClause(_) | CompoundCommand::Coprocess(_) => {
+            report(
+                env,
+                "this bash construct is not supported by the POSIX engine",
+            )
+            .await;
+            Ok(2)
+        }
     }
 }
 
@@ -1540,38 +956,19 @@ async fn eval_simple_command(
     simple: &SimpleCommand,
     env: &Env,
     cfg: &EvalConfig,
-    io_cfg: IoStreamConfig,
-) -> Result<(i32, Option<Vec<u8>>), PosixError> {
+) -> Result<i32, PosixError> {
     let positional = &cfg.positional;
 
-    let mut prefix_assignments: Vec<(String, String)> = Vec::new();
+    // POSIX 2.9.1: collect assignments and redirections, expand the command
+    // word and arguments, perform the redirections, then expand and perform
+    // the assignments left to right.
+    let mut assignments: Vec<&Assignment> = Vec::new();
     let mut redirects: Vec<&IoRedirect> = Vec::new();
-
-    if let Some(prefix) = &simple.prefix {
-        for item in &prefix.0 {
-            match item {
-                CommandPrefixOrSuffixItem::AssignmentWord(assign, _) => {
-                    let name = match &assign.name {
-                        AssignmentName::VariableName(n) => n.clone(),
-                        AssignmentName::ArrayElementName(n, idx) => format!("{}[{}]", n, idx),
-                    };
-                    let value = match &assign.value {
-                        AssignmentValue::Scalar(word) => {
-                            expand_assignment_word(&word.value, env, positional)?
-                        }
-                        AssignmentValue::Array(elems) => elems
-                            .iter()
-                            .map(|(_, w)| w.value.clone())
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    };
-                    prefix_assignments.push((name, value));
-                }
-                CommandPrefixOrSuffixItem::IoRedirect(r) => {
-                    redirects.push(r);
-                }
-                _ => {}
-            }
+    for item in simple.prefix.iter().flat_map(|prefix| prefix.0.iter()) {
+        match item {
+            CommandPrefixOrSuffixItem::AssignmentWord(assign, _) => assignments.push(assign),
+            CommandPrefixOrSuffixItem::IoRedirect(r) => redirects.push(r),
+            _ => {}
         }
     }
 
@@ -1579,7 +976,18 @@ async fn eval_simple_command(
     let assignment_context_start =
         declaration_suffix_start(cmd_word.as_deref(), simple.suffix.as_ref(), env);
 
-    let mut args: Vec<String> = Vec::new();
+    let mut args: Vec<String> = match &cmd_word {
+        Some(word) => expand_word(
+            word,
+            env,
+            &ExpansionConfig {
+                do_glob: !env.options.read().noglob,
+                ..Default::default()
+            },
+            positional,
+        )?,
+        None => Vec::new(),
+    };
     if let Some(suffix) = &simple.suffix {
         for (item_index, item) in suffix.0.iter().enumerate() {
             match item {
@@ -1656,55 +1064,61 @@ async fn eval_simple_command(
         }
     }
 
-    let mut redir = io_cfg.redirection_context();
-    for r in &redirects {
-        match redir.apply_item(r, env, positional) {
-            Ok(()) => {}
-            Err(error @ PosixError::Engine(EngineError::ParameterExpansion { .. })) => {
-                return Err(error);
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                env.set_exit_code(1);
-                if cfg.errexit && env.options.read().errexit {
-                    return Err(PosixError::Exit(1));
-                }
-                return Ok((1, None));
-            }
-        }
-    }
+    let redirected = match Redirected::apply(env, &redirects, positional) {
+        Ok(applied) => applied,
+        Err(error) => return redirection_failed(env, cfg, error).await,
+    };
 
-    if cmd_word.is_none() {
+    // Each name's shell value and command-environment value before this
+    // command assigned it, so temporary assignments can be undone.
+    let mut prior: Vec<(String, Option<Val>, Option<Val>)> = Vec::new();
+    let mut prefix_assignments: Vec<(String, String)> = Vec::new();
+    let (assigned, substitution_status) = crate::expand::tracking_substitutions(|| {
+        for assign in &assignments {
+            let name = match &assign.name {
+                AssignmentName::VariableName(n) => n.clone(),
+                AssignmentName::ArrayElementName(n, idx) => format!("{}[{}]", n, idx),
+            };
+            let value = match &assign.value {
+                AssignmentValue::Scalar(word) => {
+                    expand_assignment_word(&word.value, env, positional)?
+                }
+                AssignmentValue::Array(elems) => elems
+                    .iter()
+                    .map(|(_, w)| w.value.clone())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            };
+            // A later value sees an earlier one: `a=1 b=$a`.
+            let mut vars = env.vars.write();
+            if !prior.iter().any(|(n, _, _)| *n == name) {
+                let in_env = match vars.get("env") {
+                    Some(Val::Map(map)) => map.get(&ustr::ustr(&name)).cloned(),
+                    _ => None,
+                };
+                prior.push((name.clone(), vars.get(&name).cloned(), in_env));
+            }
+            vars.insert(name.clone(), Val::String(value.clone()));
+            drop(vars);
+            prefix_assignments.push((name, value));
+        }
+        Ok::<(), PosixError>(())
+    });
+    assigned?;
+
+    // A command word that expands to nothing hands the role to the next field;
+    // with no fields at all the assignments stay in this shell.
+    if args.is_empty() {
         for (name, value) in prefix_assignments {
             env.set_shell_var(&name, Val::String(value));
         }
-        return Ok((0, None));
+        // The status is that of the last command substitution performed, or
+        // zero: `false; x=1` succeeds, `x=$(exit 3)` fails with 3.
+        let status = substitution_status.unwrap_or(0);
+        env.set_exit_code(status as i64);
+        return Ok(status);
     }
-
-    let raw_cmd = match cmd_word {
-        Some(w) => w,
-        None => return Ok((0, None)),
-    };
-    let expanded_cmd_words = expand_word(
-        &raw_cmd,
-        env,
-        &ExpansionConfig {
-            do_glob: false,
-            ..Default::default()
-        },
-        positional,
-    )?;
-    let (mut cmd_name, extra_args) = if !expanded_cmd_words.is_empty() {
-        (
-            expanded_cmd_words[0].clone(),
-            expanded_cmd_words[1..].to_vec(),
-        )
-    } else {
-        (raw_cmd, Vec::new())
-    };
-    let mut all_args = extra_args;
-    all_args.extend(args);
-    let mut args = all_args;
+    let mut cmd_name = args.remove(0);
 
     // Resolve executable `command` wrappers before prefix-assignment handling.
     // Lookup forms stay as the `command` builtin for execution.
@@ -1736,7 +1150,11 @@ async fn eval_simple_command(
         }
     }
 
-    let capture_stdout = io_cfg.capture_stdout || redir.stdout_file().is_some();
+    // `exec` with only redirections applies them to the shell itself.
+    if cmd_name == "exec" && args.is_empty() && get_posix_function(env, "exec").is_none() {
+        redirected.persist();
+        return Ok(0);
+    }
 
     // `command` suppresses the special properties of special builtins. In
     // particular, a prefix assignment before `command export` is temporary.
@@ -1746,19 +1164,11 @@ async fn eval_simple_command(
         && (suppress_function_lookup || get_posix_function(env, &cmd_name).is_none());
     let is_decl_cmd = is_special_decl_cmd || is_regular_decl_cmd;
 
-    let mut saved_prefix_vars: Vec<(String, Option<Val>)> = Vec::new();
-    if !prefix_assignments.is_empty() {
-        let mut vars = env.vars.write();
+    // A declaration builtin declares a shell variable; only a plain command's
+    // prefix assignment becomes part of that command's environment.
+    if !is_decl_cmd && let Some(Val::Map(map)) = env.vars.write().get_mut("env") {
         for (name, value) in &prefix_assignments {
-            let prev = vars.get(name).cloned();
-            saved_prefix_vars.push((name.clone(), prev));
-            vars.insert(name.clone(), Val::String(value.clone()));
-            // A declaration builtin declares a shell variable; only a plain
-            // command's prefix assignment becomes part of that command's
-            // environment.
-            if !is_decl_cmd && let Some(Val::Map(map)) = vars.get_mut("env") {
-                map.insert(ustr::ustr(name), Val::String(value.clone()));
-            }
+            map.insert(ustr::ustr(name), Val::String(value.clone()));
         }
     }
 
@@ -1766,11 +1176,8 @@ async fn eval_simple_command(
         &cmd_name,
         &args,
         &prefix_assignments,
-        &redir,
-        capture_stdout,
         env,
         cfg,
-        io_cfg,
         suppress_function_lookup,
         search_path_override.as_deref(),
         command_action,
@@ -1790,16 +1197,18 @@ async fn eval_simple_command(
                 }
             }
         }
-    } else if !saved_prefix_vars.is_empty() {
+    } else if !prior.is_empty() {
         let mut vars = env.vars.write();
-        for (name, prev) in saved_prefix_vars {
-            if let Some(p) = prev {
-                vars.insert(name, p);
-            } else {
-                vars.remove(&name);
-                if let Some(Val::Map(map)) = vars.get_mut("env") {
-                    map.shift_remove(&ustr::ustr(&name));
-                }
+        for (name, shell_value, env_value) in prior.into_iter().rev() {
+            match shell_value {
+                Some(value) => vars.insert(name.clone(), value),
+                None => vars.remove(&name),
+            };
+            if let Some(Val::Map(map)) = vars.get_mut("env") {
+                match env_value {
+                    Some(value) => map.insert(ustr::ustr(&name), value),
+                    None => map.shift_remove(&ustr::ustr(&name)),
+                };
             }
         }
     }
@@ -1812,15 +1221,12 @@ async fn eval_simple_command_inner(
     cmd_name: &str,
     args: &[String],
     prefix_assignments: &[(String, String)],
-    redir: &RedirectionContext,
-    capture_stdout: bool,
     env: &Env,
     cfg: &EvalConfig,
-    mut io_cfg: IoStreamConfig,
     suppress_function_lookup: bool,
     search_path_override: Option<&str>,
     command_action: Option<crate::posix_builtins::command::CommandAction>,
-) -> Result<(i32, Option<Vec<u8>>), PosixError> {
+) -> Result<i32, PosixError> {
     if !suppress_function_lookup
         && !crate::posix_builtins::type_cmd::is_special_builtin(cmd_name)
         && let Some(func_body) = get_posix_function(env, cmd_name)
@@ -1829,36 +1235,37 @@ async fn eval_simple_command_inner(
         let fn_cfg = EvalConfig {
             positional: args.to_vec(),
             errexit: cfg.errexit,
-            source: cfg.source.clone(),
         };
-        io_cfg.stdin_bytes = redir.stdin_bytes.clone().or(io_cfg.stdin_bytes);
-        io_cfg.redirections = Some(redir.clone());
-        let result = eval_compound_command_stream(&func_body, env, &fn_cfg, io_cfg).await;
+        let result = match Redirected::apply(env, &redirect_items(&func_body.1), &fn_cfg.positional)
+        {
+            Ok(_redirected) => eval_compound_command(&func_body.0, env, &fn_cfg).await,
+            Err(error) => redirection_failed(env, cfg, error).await,
+        };
         drop(positional_scope);
         // `return` ends the function, not the script that called it: a caller sees
         // the status the function returned with and carries on.
         return match result {
-            Ok((code, out)) => Ok((code, out)),
+            Ok(code) => Ok(code),
             Err(PosixError::Return(code)) => {
                 env.set_exit_code(code as i64);
-                Ok((code, None))
+                Ok(code)
             }
             Err(other) => Err(other),
         };
     }
 
     match cmd_name {
-        ":" | "true" => return Ok((0, None)),
-        "false" => return Ok((1, None)),
+        ":" | "true" => return Ok(0),
+        "false" => return Ok(1),
         "exit" => {
             if args.len() > 1 {
-                eprintln!("exit: too many arguments");
-                return Ok((1, None));
+                report(env, "exit: too many arguments").await;
+                return Ok(1);
             }
             let code = match parse_status_argument(args.first(), env.exit_code()) {
                 Ok(code) => code,
                 Err(error) => {
-                    eprintln!("exit: {error}");
+                    report(env, &format!("exit: {error}")).await;
                     return Err(PosixError::Exit(2));
                 }
             };
@@ -1866,13 +1273,13 @@ async fn eval_simple_command_inner(
         }
         "return" => {
             if args.len() > 1 {
-                eprintln!("return: too many arguments");
-                return Ok((1, None));
+                report(env, "return: too many arguments").await;
+                return Ok(1);
             }
             let code = match parse_status_argument(args.first(), env.exit_code()) {
                 Ok(code) => code,
                 Err(error) => {
-                    eprintln!("return: {error}");
+                    report(env, &format!("return: {error}")).await;
                     return Err(PosixError::Return(2));
                 }
             };
@@ -1894,47 +1301,43 @@ async fn eval_simple_command_inner(
                     }
                 }
             }
-            return Ok((0, None));
+            return Ok(0);
         }
         "break" => return Err(PosixError::Break),
         "continue" => return Err(PosixError::Continue),
         "shift" => {
             if args.len() > 1 {
-                eprintln!("shift: too many arguments");
-                return Ok((2, None));
+                report(env, "shift: too many arguments").await;
+                return Ok(2);
             }
             let n = match args.first() {
                 None => 1,
                 Some(value) => match value.parse::<usize>() {
                     Ok(n) => n,
                     Err(error) => {
-                        eprintln!("shift: invalid count {:?}: {}", value, error);
-                        return Ok((2, None));
+                        report(env, &format!("shift: invalid count {:?}: {}", value, error)).await;
+                        return Ok(2);
                     }
                 },
             };
             match crate::posix_builtins::shift::shift_posix(env, n) {
-                Ok(()) => return Ok((0, None)),
+                Ok(()) => return Ok(0),
                 Err(error) => {
-                    eprintln!("{error}");
-                    return Ok((1, None));
+                    report(env, &error.to_string()).await;
+                    return Ok(1);
                 }
             }
         }
         "set" => {
-            let rendered = crate::posix_builtins::shift::set_posix(env, args).map_err(|e| {
-                PosixError::Engine(EngineError::Generic {
-                    message: e,
-                    span: None,
-                })
-            })?;
-            // `set -o` prints the options, and that output is the command's stdout:
-            // it goes through the redirection machinery like any other builtin's.
-            let out = match &rendered {
-                Some(text) => write_builtin_output(text, redir, capture_stdout).await?,
-                None => None,
-            };
-            return Ok((0, out));
+            return Ok(match crate::posix_builtins::shift::set_posix(env, args) {
+                // `set -o` prints the options as the command's own stdout.
+                Ok(Some(text)) => emit(env, cmd_name, &text).await?,
+                Ok(None) => 0,
+                Err(message) => {
+                    report(env, &message).await;
+                    2
+                }
+            });
         }
         "unset" => {
             let mut unset_fns_only = false;
@@ -1975,7 +1378,7 @@ async fn eval_simple_command_inner(
                     }
                 }
             }
-            return Ok((0, None));
+            return Ok(0);
         }
         "export" => {
             let mut exports = Vec::new();
@@ -1991,8 +1394,8 @@ async fn eval_simple_command_inner(
                         rendered.push_str(&format!("export {}={:?}\n", k, v.to_text()));
                     }
                 }
-                let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout).await?;
-                return Ok((0, out));
+                let written = emit(env, cmd_name, &rendered).await?;
+                return Ok(if written != 0 { written } else { 0 });
             }
             for arg in &exports {
                 if let Some((name, value)) = arg.split_once('=') {
@@ -2005,32 +1408,18 @@ async fn eval_simple_command_inner(
                     env.export_existing_var(arg);
                 }
             }
-            return Ok((0, None));
+            return Ok(0);
         }
         "read" => {
-            let stdin_bytes_val = if let Some(b) = redir
-                .stdin_bytes
-                .as_deref()
-                .or(io_cfg.stdin_bytes.as_deref())
-            {
-                Some(b.to_vec())
-            } else if let Some(mut rx) = io_cfg.stdin_stream.take() {
-                rx.recv().await.map(|chunk| chunk.to_vec())
-            } else {
-                None
-            };
-            let stdin_str = stdin_bytes_val
-                .as_deref()
-                .map(|b| String::from_utf8_lossy(b).into_owned());
-            let (code, remaining_stdin) =
-                crate::posix_builtins::read_cmd::read_posix(args, env, stdin_str.as_deref())
-                    .map_err(|e| {
-                        PosixError::Engine(EngineError::Generic {
-                            message: e,
-                            span: None,
-                        })
-                    })?;
-            return Ok((code, remaining_stdin));
+            return Ok(
+                match crate::posix_builtins::read_cmd::read_posix(args, env).await {
+                    Ok(code) => code,
+                    Err((code, message)) => {
+                        report(env, &message).await;
+                        code
+                    }
+                },
+            );
         }
         "printf" => {
             let result = crate::posix_builtins::printf::format_printf_with_status(
@@ -2044,41 +1433,51 @@ async fn eval_simple_command_inner(
                 })
             })?;
             for diagnostic in &result.diagnostics {
-                eprintln!("{diagnostic}");
+                report(env, diagnostic).await;
             }
-            let out = write_builtin_output(&result.output, redir, io_cfg.capture_stdout).await?;
-            return Ok((result.status, out));
+            let written = emit(env, cmd_name, &result.output).await?;
+            return Ok(if written != 0 { written } else { result.status });
         }
         "getopts" => {
-            let code = crate::posix_builtins::getopts::getopts_posix(args, env).map_err(|e| {
-                PosixError::Engine(EngineError::Generic {
-                    message: e,
-                    span: None,
-                })
-            })?;
-            return Ok((code, None));
+            let mut diagnostics = Vec::new();
+            let result = crate::posix_builtins::getopts::getopts_posix(args, env, &mut diagnostics);
+            for diagnostic in &diagnostics {
+                report(env, diagnostic).await;
+            }
+            return Ok(match result {
+                Ok(code) => code,
+                Err(message) => {
+                    report(env, &message).await;
+                    2
+                }
+            });
         }
         "type" => {
+            let mut diagnostics = Vec::new();
             let (code, rendered) =
-                crate::posix_builtins::type_cmd::type_posix(args, env).map_err(|e| {
-                    PosixError::Engine(EngineError::Generic {
-                        message: e,
-                        span: None,
-                    })
-                })?;
-            let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout).await?;
-            return Ok((code, out));
+                match crate::posix_builtins::type_cmd::type_posix(args, env, &mut diagnostics) {
+                    Ok(result) => result,
+                    Err(message) => {
+                        diagnostics.push(message);
+                        (2, String::new())
+                    }
+                };
+            let written = emit(env, cmd_name, &rendered).await?;
+            for diagnostic in &diagnostics {
+                report(env, diagnostic).await;
+            }
+            return Ok(if written != 0 { written } else { code });
         }
         "command" => {
             let action = command_action
                 .unwrap_or_else(|| crate::posix_builtins::command::parse_command_args(args));
             match action {
                 crate::posix_builtins::command::CommandAction::Noop => {
-                    return Ok((0, None));
+                    return Ok(0);
                 }
                 crate::posix_builtins::command::CommandAction::Error(error) => {
-                    eprintln!("command: {error}");
-                    return Ok((2, None));
+                    report(env, &format!("command: {error}")).await;
+                    return Ok(2);
                 }
                 crate::posix_builtins::command::CommandAction::Lookup {
                     names,
@@ -2093,8 +1492,8 @@ async fn eval_simple_command_inner(
                         env,
                         path_override,
                     );
-                    let out = write_builtin_output(&rendered, redir, io_cfg.capture_stdout).await?;
-                    return Ok((code, out));
+                    let written = emit(env, cmd_name, &rendered).await?;
+                    return Ok(if written != 0 { written } else { code });
                 }
                 crate::posix_builtins::command::CommandAction::Execute { .. } => {
                     return Err(PosixError::Engine(EngineError::Generic {
@@ -2109,7 +1508,7 @@ async fn eval_simple_command_inner(
             let code = crate::posix_builtins::eval_builtin::eval_posix(args, env)
                 .await
                 .map_err(PosixError::Engine)?;
-            return Ok((code, None));
+            return Ok(code);
         }
         "test" | "[" => {
             let test_args: &[String] = if cmd_name == "[" {
@@ -2125,11 +1524,11 @@ async fn eval_simple_command_inner(
                 Ok(true) => 0,
                 Ok(false) => 1,
                 Err(error) => {
-                    eprintln!("test: {error}");
+                    report(env, &format!("test: {error}")).await;
                     2
                 }
             };
-            return Ok((code, None));
+            return Ok(code);
         }
         "echo" => {
             let mut no_newline = false;
@@ -2142,8 +1541,8 @@ async fn eval_simple_command_inner(
             if !no_newline {
                 text.push('\n');
             }
-            let out = write_builtin_output(&text, redir, io_cfg.capture_stdout).await?;
-            return Ok((0, out));
+            let written = emit(env, cmd_name, &text).await?;
+            return Ok(if written != 0 { written } else { 0 });
         }
         "cd" => {
             let target = args.first().map(|s| s.as_str()).unwrap_or("");
@@ -2179,37 +1578,47 @@ async fn eval_simple_command_inner(
                         Val::String(canon.to_string_lossy().to_string()),
                     );
                 }
-                return Ok((0, None));
+                return Ok(0);
             } else {
-                eprintln!("{}: cd: {}: No such file or directory", cmd_name, target);
-                return Ok((1, None));
+                report(
+                    env,
+                    &format!("{}: cd: {}: No such file or directory", cmd_name, target),
+                )
+                .await;
+                return Ok(1);
             }
         }
         "pwd" => {
             let text = format!("{}\n", env.cwd().display());
-            let out = write_builtin_output(&text, redir, io_cfg.capture_stdout).await?;
-            return Ok((0, out));
+            let written = emit(env, cmd_name, &text).await?;
+            return Ok(if written != 0 { written } else { 0 });
         }
         "exec" => {
             if args.is_empty() {
-                return Ok((0, None));
+                return Ok(0);
             }
-            let mut cmd = std::process::Command::new(&args[0]);
-            cmd.current_dir(env.cwd());
-            if args.len() > 1 {
-                cmd.args(&args[1..]);
-            }
-            let status = cmd.status().map(|s| s.code().unwrap_or(127)).unwrap_or(127);
-            return Err(PosixError::Exit(status));
+            // The utility runs with this shell's descriptors, environment and
+            // PATH, and the shell then leaves with its status. Evaluation may
+            // be an in-process subshell, so replacing the whole process image
+            // is not an option.
+            let code = run_external_command(
+                &args[0],
+                &args[1..],
+                prefix_assignments,
+                env,
+                search_path_override,
+            )
+            .await?;
+            return Err(PosixError::Exit(code));
         }
         "trap" => {
             let rendered = handle_posix_trap(args, env)?;
-            let out = write_builtin_output(&rendered, redir, capture_stdout).await?;
-            return Ok((0, out));
+            let written = emit(env, cmd_name, &rendered).await?;
+            return Ok(if written != 0 { written } else { 0 });
         }
         "wait" => {
             let code = handle_posix_wait(args, env).await?;
-            return Ok((code, None));
+            return Ok(code);
         }
         "umask" => {
             match args.first() {
@@ -2218,8 +1627,8 @@ async fn eval_simple_command_inner(
                     let current = unsafe { libc::umask(0o022 as libc::mode_t) };
                     unsafe { libc::umask(current) };
                     let text = format!("{:04o}\n", current);
-                    let out = write_builtin_output(&text, redir, io_cfg.capture_stdout).await?;
-                    return Ok((0, out));
+                    let written = emit(env, cmd_name, &text).await?;
+                    return Ok(if written != 0 { written } else { 0 });
                 }
                 Some(mask_arg) => {
                     let parsed = i32::from_str_radix(mask_arg.trim_start_matches('0'), 8)
@@ -2227,11 +1636,11 @@ async fn eval_simple_command_inner(
                     match parsed {
                         Ok(mask) => {
                             unsafe { libc::umask(mask as libc::mode_t) };
-                            return Ok((0, None));
+                            return Ok(0);
                         }
                         Err(_) => {
-                            eprintln!("umask: invalid mask: {mask_arg}");
-                            return Ok((1, None));
+                            report(env, &format!("umask: invalid mask: {mask_arg}")).await;
+                            return Ok(1);
                         }
                     }
                 }
@@ -2251,8 +1660,8 @@ async fn eval_simple_command_inner(
                 for (name, expansion) in env.get_all_aliases() {
                     out.push_str(&format!("alias {name}='{expansion}'\n"));
                 }
-                let out = write_builtin_output(&out, redir, io_cfg.capture_stdout).await?;
-                return Ok((0, out));
+                let written = emit(env, cmd_name, &out).await?;
+                return Ok(if written != 0 { written } else { 0 });
             }
             let mut listed = String::new();
             let mut status = 0;
@@ -2262,31 +1671,31 @@ async fn eval_simple_command_inner(
                 } else if let Some(expansion) = env.get_alias(arg) {
                     listed.push_str(&format!("alias {arg}='{expansion}'\n"));
                 } else {
-                    eprintln!("alias: {arg}: not found");
+                    report(env, &format!("alias: {arg}: not found")).await;
                     status = 1;
                 }
             }
             if listed.is_empty() {
-                return Ok((status, None));
+                return Ok(status);
             }
-            let out = write_builtin_output(&listed, redir, io_cfg.capture_stdout).await?;
-            return Ok((status, out));
+            let written = emit(env, cmd_name, &listed).await?;
+            return Ok(if written != 0 { written } else { status });
         }
         "unalias" => {
             if args.iter().any(|a| a == "-a") {
                 for (name, _) in env.get_all_aliases() {
                     env.remove_alias(&name);
                 }
-                return Ok((0, None));
+                return Ok(0);
             }
             let mut status = 0;
             for arg in args {
                 if env.remove_alias(arg).is_none() {
-                    eprintln!("unalias: {arg}: not found");
+                    report(env, &format!("unalias: {arg}: not found")).await;
                     status = 1;
                 }
             }
-            return Ok((status, None));
+            return Ok(status);
         }
         "ulimit" => {
             // Report or set a soft resource limit. -n files, -c core, -s stack,
@@ -2302,8 +1711,8 @@ async fn eval_simple_command_inner(
                     Some('v') => resource = libc::RLIMIT_AS,
                     Some('f') | None => {}
                     Some(other) => {
-                        eprintln!("ulimit: unsupported option -{other}");
-                        return Ok((1, None));
+                        report(env, &format!("ulimit: unsupported option -{other}")).await;
+                        return Ok(1);
                     }
                 }
             }
@@ -2312,8 +1721,12 @@ async fn eval_simple_command_inner(
                 rlim_max: 0,
             };
             if unsafe { libc::getrlimit(resource, &mut rl) } != 0 {
-                eprintln!("ulimit: getrlimit: {}", std::io::Error::last_os_error());
-                return Ok((1, None));
+                report(
+                    env,
+                    &format!("ulimit: getrlimit: {}", std::io::Error::last_os_error()),
+                )
+                .await;
+                return Ok(1);
             }
             if let Some(value) = args.get(idx) {
                 rl.rlim_cur = if value == "unlimited" {
@@ -2322,16 +1735,20 @@ async fn eval_simple_command_inner(
                     match value.parse::<u64>() {
                         Ok(v) => v as libc::rlim_t,
                         Err(_) => {
-                            eprintln!("ulimit: invalid value: {value}");
-                            return Ok((1, None));
+                            report(env, &format!("ulimit: invalid value: {value}")).await;
+                            return Ok(1);
                         }
                     }
                 };
                 if unsafe { libc::setrlimit(resource, &rl) } != 0 {
-                    eprintln!("ulimit: setrlimit: {}", std::io::Error::last_os_error());
-                    return Ok((1, None));
+                    report(
+                        env,
+                        &format!("ulimit: setrlimit: {}", std::io::Error::last_os_error()),
+                    )
+                    .await;
+                    return Ok(1);
                 }
-                return Ok((0, None));
+                return Ok(0);
             }
             let text = if rl.rlim_cur == libc::RLIM_INFINITY {
                 "unlimited\n".to_string()
@@ -2341,11 +1758,11 @@ async fn eval_simple_command_inner(
             } else {
                 format!("{}\n", rl.rlim_cur)
             };
-            let out = write_builtin_output(&text, redir, io_cfg.capture_stdout).await?;
-            return Ok((0, out));
+            let written = emit(env, cmd_name, &text).await?;
+            return Ok(if written != 0 { written } else { 0 });
         }
         "times" => {
-            return Ok((0, None));
+            return Ok(0);
         }
         "hash" => {
             // hash -r clears the command hash table (= PATH cache) so mutated
@@ -2353,27 +1770,49 @@ async fn eval_simple_command_inner(
             if args.iter().any(|a| a == "-r") {
                 fshell_engine::invalidate_path_cache();
             }
-            return Ok((0, None));
+            return Ok(0);
         }
         "dot" | "." | "source" => {
-            if let Some(path) = args.first() {
-                let source_path = env.resolve_path(path);
-                let content = std::fs::read_to_string(&source_path).map_err(|e| {
-                    PosixError::Engine(EngineError::IoError {
-                        message: format!("{}: {}: {}", cmd_name, path, e),
-                        span: None,
-                    })
-                })?;
-                let parsed =
-                    crate::parser::parse_posix_script(&content).map_err(PosixError::Engine)?;
-                let cfg2 = EvalConfig {
-                    positional: args[1..].to_vec(),
-                    ..Default::default()
-                };
-                let code = eval_program(&parsed.program, env, &cfg2).await?;
-                return Ok((code, None));
-            }
-            return Ok((0, None));
+            let Some(path) = args.first() else {
+                report(env, &format!("{cmd_name}: filename argument required")).await;
+                return Ok(2);
+            };
+            let Some(source_path) = find_dot_script(path, env) else {
+                report(env, &format!("{cmd_name}: {path}: not found")).await;
+                return Ok(1);
+            };
+            let content = match std::fs::read_to_string(&source_path) {
+                Ok(content) => content,
+                Err(error) => {
+                    report(
+                        env,
+                        &format!(
+                            "{cmd_name}: {path}: {}",
+                            crate::redirect::os_message(&error)
+                        ),
+                    )
+                    .await;
+                    return Ok(1);
+                }
+            };
+            let parsed = crate::parser::parse_posix_script(&content).map_err(PosixError::Engine)?;
+            // Operands become the positional parameters for the duration of the
+            // file; without operands it sees the caller's.
+            let operands = &args[1..];
+            let _positional =
+                (!operands.is_empty()).then(|| crate::positional::Scope::new(env, operands));
+            let dot_cfg = EvalConfig {
+                positional: if operands.is_empty() {
+                    cfg.positional.clone()
+                } else {
+                    operands.to_vec()
+                },
+                errexit: cfg.errexit,
+            };
+            return match eval_program(&parsed.program, env, &dot_cfg).await {
+                Ok(code) | Err(PosixError::Return(code)) => Ok(code),
+                Err(other) => Err(other),
+            };
         }
         _ => {}
     }
@@ -2386,32 +1825,19 @@ async fn eval_simple_command_inner(
     {
         let argv: Vec<Val> = args.iter().map(|a| Val::String(a.clone())).collect();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<fshell_engine::PipelinePayload>(64);
-        handler(None, argv, env, tx, None).map_err(|e| {
-            PosixError::Engine(EngineError::Generic {
-                message: e.to_string(),
-                span: None,
-            })
-        })?;
-        let mut captured = if io_cfg.capture_stdout {
-            Some(Vec::new())
-        } else {
-            None
-        };
+        if let Err(error) = handler(None, argv, env, tx, None) {
+            report(env, &error.to_string()).await;
+            return Ok(1);
+        }
+        let mut status = 0;
         while let Some(payload) = rx.recv().await {
             if let fshell_engine::PipelinePayload::Data(val) = payload {
                 let mut text = val.to_text();
                 text.push('\n');
-                if let Some(acc) = &mut captured {
-                    acc.extend_from_slice(text.as_bytes());
-                }
-                if let Some(tx_out) = io_cfg.stdout_stream.as_ref() {
-                    let _ = tx_out.send(bytes::Bytes::from(text)).await;
-                } else if captured.is_none() {
-                    print!("{text}");
-                }
+                status = status.max(emit(env, cmd_name, &text).await?);
             }
         }
-        return Ok((0, captured));
+        return Ok(status);
     }
 
     // Fallback: subprocess execution with full I/O piping and redirections
@@ -2419,12 +1845,32 @@ async fn eval_simple_command_inner(
         cmd_name,
         args,
         prefix_assignments,
-        redir,
-        io_cfg,
         env,
         search_path_override,
     )
     .await
+}
+
+/// Locate a `.` operand: a name with a slash is a path, anything else is
+/// searched for along PATH (readable, not necessarily executable) and then,
+/// as bash does, in the current directory.
+fn find_dot_script(name: &str, env: &Env) -> Option<std::path::PathBuf> {
+    if name.contains('/') {
+        let path = env.resolve_path(name);
+        return path.is_file().then_some(path);
+    }
+    let search = env
+        .vars
+        .read()
+        .get("PATH")
+        .map(Val::to_text)
+        .unwrap_or_default();
+    search
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| env.resolve_path(dir).join(name))
+        .chain(std::iter::once(env.resolve_path(name)))
+        .find(|candidate| candidate.is_file())
 }
 
 fn parse_status_argument(value: Option<&String>, default: i64) -> Result<i32, String> {
@@ -2598,7 +2044,11 @@ async fn handle_posix_wait(args: &[String], env: &Env) -> Result<i32, PosixError
                 let mut status = 0;
                 let res = unsafe { libc::waitpid(pid, &mut status, 0) };
                 if res <= 0 {
-                    eprintln!("wait: pid {pid} is not a child of this shell");
+                    report(
+                        env,
+                        &format!("wait: pid {pid} is not a child of this shell"),
+                    )
+                    .await;
                     last_code = 127;
                 } else {
                     let code = if (status & 0x7f) == 0 {
@@ -2617,58 +2067,6 @@ async fn handle_posix_wait(args: &[String], env: &Env) -> Result<i32, PosixError
         }));
     }
     Ok(last_code)
-}
-
-async fn write_builtin_output(
-    rendered: &str,
-    redir: &RedirectionContext,
-    capture_stdout: bool,
-) -> Result<Option<Vec<u8>>, PosixError> {
-    match redir.stdout() {
-        // The target was opened when the redirection was applied, so writing must
-        // go through that handle: re-opening by path here would truncate a file
-        // that `>>` or a second redirect in the same command had already touched.
-        FdTarget::File(handle) => {
-            write_shared_file(handle, rendered.as_bytes())?;
-            Ok(if capture_stdout {
-                Some(Vec::new())
-            } else {
-                None
-            })
-        }
-        FdTarget::Pipe(tx) => {
-            let chunk = bytes::Bytes::copy_from_slice(rendered.as_bytes());
-            let _ = tx.send(chunk).await;
-            Ok(if capture_stdout {
-                Some(rendered.as_bytes().to_vec())
-            } else {
-                None
-            })
-        }
-        FdTarget::Closed => Ok(if capture_stdout {
-            Some(Vec::new())
-        } else {
-            None
-        }),
-        FdTarget::Process(1) if capture_stdout => Ok(Some(rendered.as_bytes().to_vec())),
-        FdTarget::Process(fd) => {
-            use std::io::Write;
-            let mut file = duplicate_process_file(*fd)?;
-            file.write_all(rendered.as_bytes()).map_err(|error| {
-                PosixError::Engine(EngineError::IoError {
-                    message: format!("redirect write error: {error}"),
-                    span: None,
-                })
-            })?;
-            Ok(capture_stdout.then(Vec::new))
-        }
-    }
-}
-
-/// Failure from a child process's stdout pump task.
-enum StdoutPumpError {
-    DownstreamClosed,
-    Io(std::io::Error),
 }
 
 struct PosixForegroundGuard<'a> {
@@ -2737,18 +2135,9 @@ async fn run_external_command(
     cmd_name: &str,
     args: &[String],
     prefix_assignments: &[(String, String)],
-    redir: &RedirectionContext,
-    mut io_cfg: IoStreamConfig,
     env: &Env,
     search_path_override: Option<&str>,
-) -> Result<(i32, Option<Vec<u8>>), PosixError> {
-    use std::process::Stdio;
-
-    let effective_stdin = redir
-        .stdin_bytes
-        .as_deref()
-        .or(io_cfg.stdin_bytes.as_deref());
-
+) -> Result<i32, PosixError> {
     // Resolve against the shell's PATH here rather than letting `execvp` search:
     // the shell variable, not the process environment, is authoritative, and a
     // resolved program lets std launch with `posix_spawn` instead of `fork`.
@@ -2770,475 +2159,179 @@ async fn run_external_command(
         ) {
             Some(path) => path,
             None => {
-                eprintln!("{cmd_name}: command not found");
-                return Ok((127, None));
+                report(env, &format!("{cmd_name}: command not found")).await;
+                return Ok(127);
             }
         }
     };
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.arg0(cmd_name);
+    let mut cmd = std::process::Command::new(program);
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.arg0(cmd_name);
+    }
     cmd.args(args);
     cmd.current_dir(env.cwd());
-
-    {
-        let vars = env.vars.read();
-        for (k, v) in vars.iter() {
-            if k == "env" {
-                if let Val::Map(m) = v {
-                    for (ek, ev) in m.iter() {
-                        cmd.env(ek.as_str(), ev.to_text());
-                    }
-                }
-            } else if !k.starts_with(|c: char| c.is_ascii_digit())
-                && k != "@"
-                && k != "#"
-                && k != "?"
-            {
-                cmd.env(k, v.to_text());
-            }
-        }
-    }
-    for (k, v) in prefix_assignments {
-        cmd.env(k, v);
-    }
+    configure_child_environment(&mut cmd, env, prefix_assignments);
     if let Some(path) = search_path_override {
         // `command -p` controls the utility search as well as the environment
-        // used by `execvp` to resolve a bare command name.
+        // the utility itself sees.
         cmd.env("PATH", path);
     }
 
-    if let Some(stdin_file) = &redir.stdin_file {
-        let f = std::fs::File::open(stdin_file).map_err(|e| {
-            PosixError::Engine(EngineError::IoError {
-                message: format!("{}: {}", stdin_file.display(), e),
-                span: None,
-            })
-        })?;
-        cmd.stdin(Stdio::from(f));
-    } else if effective_stdin.is_some() || io_cfg.stdin_stream.is_some() {
-        cmd.stdin(Stdio::piped());
-    } else if matches!(redir.stdin(), FdTarget::Closed) {
-        // `0<&-` (or `<&-`) closes stdin rather than leaving it inherited.
-        cmd.stdin(Stdio::null());
+    let is_interactive = owns_terminal(env);
+    match spawn_supervised(cmd, env, cmd_name, is_interactive).await {
+        Ok(code) => Ok(code),
+        Err(SpawnError::Launch(error)) => {
+            let (code, reason) = match error.kind() {
+                std::io::ErrorKind::NotFound => (127, "command not found".to_string()),
+                std::io::ErrorKind::PermissionDenied => (126, "Permission denied".to_string()),
+                _ => (126, crate::redirect::os_message(&error)),
+            };
+            report(env, &format!("{cmd_name}: {reason}")).await;
+            Ok(code)
+        }
+        Err(SpawnError::Shell(error)) => Err(error),
     }
+}
 
-    // fd 1, taken from the ordered descriptor table. The table was built by
-    // applying the redirections in source order, so whatever it says here already
-    // accounts for things like `2>&1 > out` versus `> out 2>&1`.
-    let capture_requested = io_cfg.capture_stdout && matches!(redir.stdout(), FdTarget::Process(1));
-    match redir.stdout() {
-        FdTarget::File(handle) => {
-            cmd.stdout(Stdio::from(clone_shared_file(handle)?));
-        }
-        FdTarget::Pipe(_) => {
-            cmd.stdout(Stdio::piped());
-        }
-        FdTarget::Closed => {
-            cmd.stdout(Stdio::null());
-        }
-        FdTarget::Process(fd) => {
-            if capture_requested {
-                cmd.stdout(Stdio::piped());
-            } else {
-                cmd.stdout(dup_stdio(*fd)?);
+/// Whether a child would run in the foreground of a controlling terminal: the
+/// shell has one, and the child's stdin and stdout are the shell's own.
+fn owns_terminal(env: &Env) -> bool {
+    !fshell_engine::is_test_mode()
+        && !env.is_captured
+        && unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
+        && fshell_engine::is_stdout_a_tty()
+        && matches!(env.descriptor(0), Some(Descriptor::Process(0)))
+        && matches!(env.descriptor(1), Some(Descriptor::Process(1)))
+}
+
+/// The environment a child starts with: the shell's variables, then this
+/// command's prefix assignments.
+fn configure_child_environment(
+    cmd: &mut std::process::Command,
+    env: &Env,
+    prefix_assignments: &[(String, String)],
+) {
+    let vars = env.vars.read();
+    for (k, v) in vars.iter() {
+        if k == "env" {
+            if let Val::Map(m) = v {
+                for (ek, ev) in m.iter() {
+                    cmd.env(ek.as_str(), ev.to_text());
+                }
             }
+        } else if !k.starts_with(|c: char| c.is_ascii_digit()) && k != "@" && k != "#" && k != "?" {
+            cmd.env(k, v.to_text());
         }
     }
-
-    // fd 2, likewise: if it was duplicated onto fd 1 then it must end up exactly
-    // where fd 1 goes — the same file, or the same pipeline channel.
-    let mut stderr_into_pipe: Option<tokio::sync::mpsc::Sender<bytes::Bytes>> = None;
-    match redir.stderr() {
-        FdTarget::File(handle) => {
-            cmd.stderr(Stdio::from(clone_shared_file(handle)?));
-        }
-        FdTarget::Pipe(tx) => {
-            cmd.stderr(Stdio::piped());
-            stderr_into_pipe = Some(tx.clone());
-        }
-        FdTarget::Closed => {
-            cmd.stderr(Stdio::null());
-        }
-        FdTarget::Process(fd) => {
-            cmd.stderr(dup_stdio(*fd)?);
-        }
+    drop(vars);
+    for (k, v) in prefix_assignments {
+        cmd.env(k, v);
     }
+}
 
-    let has_controlling_terminal = !fshell_engine::is_test_mode()
-        && unsafe {
-            !env.is_captured
-                && libc::isatty(libc::STDIN_FILENO) == 1
-                && fshell_engine::is_stdout_a_tty()
-        };
-    let is_interactive = has_controlling_terminal
-        && !capture_requested
-        && io_cfg.stdout_stream.is_none()
-        && io_cfg.stdin_stream.is_none()
-        && redir.stdin_file.is_none();
+enum SpawnError {
+    /// The child could not be started; the caller reports it as a status.
+    Launch(std::io::Error),
+    /// The shell itself failed (interrupt, descriptor plumbing).
+    Shell(PosixError),
+}
 
-    fshell_engine::job_control::configure_child_launch(cmd.as_std_mut(), 0, is_interactive);
-
-    let child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // POSIX: a missing command is status 127, not a fatal error — the
-            // surrounding script (e.g. a loop) must keep running.
-            eprintln!("{cmd_name}: command not found");
-            return Ok((127, None));
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("{cmd_name}: permission denied");
-            return Ok((126, None));
-        }
-        Err(e) => {
-            return Err(PosixError::Engine(EngineError::IoError {
-                message: format!("{}: {}", cmd_name, e),
-                span: None,
-            }));
-        }
+/// Start `cmd` with this environment's descriptors, register it as the
+/// foreground job, and wait for it while serving its in-process descriptors.
+async fn spawn_supervised(
+    mut cmd: std::process::Command,
+    env: &Env,
+    label: &str,
+    is_interactive: bool,
+) -> Result<i32, SpawnError> {
+    let io_error = |error: std::io::Error| {
+        SpawnError::Shell(PosixError::Engine(EngineError::IoError {
+            message: format!("{label}: {}", crate::redirect::os_message(&error)),
+            span: None,
+        }))
     };
+    let child_fds = ChildDescriptors::prepare(&env.descriptors.read().clone()).map_err(io_error)?;
+    child_fds.attach(&mut cmd).map_err(io_error)?;
+    fshell_engine::job_control::configure_child_launch(&mut cmd, 0, is_interactive);
+
+    let mut cmd = tokio::process::Command::from(cmd);
+    let spawned = {
+        let _launch = fshell_engine::job_control::launch_guard();
+        cmd.spawn()
+    };
+    // The command owns the child's copies of the descriptors; keeping them
+    // would hold pipe write ends open past the child.
+    drop(cmd);
+    let mut child = spawned.map_err(SpawnError::Launch)?;
 
     let child_pid = child.id().map(|id| id as i32);
-    let _fg_guard = PosixForegroundGuard::new(env, child_pid, cmd_name, is_interactive);
+    let _fg_guard = PosixForegroundGuard::new(env, child_pid, label, is_interactive);
 
-    let stdin_bytes = effective_stdin.map(<[u8]>::to_vec);
-    let (status, captured_stdout) = finish_child(
-        child,
-        cmd_name,
-        &mut io_cfg,
-        stdin_bytes,
-        stderr_into_pipe,
-        env,
-        child_pid,
-    )
-    .await?;
-
-    let code = match status.code() {
-        Some(c) => c,
-        None => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                status.signal().map(|s| 128 + s).unwrap_or(127)
-            }
-            #[cfg(not(unix))]
-            127
+    let cancelled = async {
+        while !env.pipeline_cancelled() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     };
-    env.set_exit_code(code as i64);
+    let status = tokio::select! {
+        status = child.wait() => status,
+        _ = cancelled => {
+            match child_pid {
+                Some(pgid) => unsafe {
+                    libc::kill(-pgid, libc::SIGINT);
+                },
+                None => {
+                    let _ = child.start_kill();
+                }
+            }
+            let _ = child.wait().await;
+            return Err(SpawnError::Shell(PosixError::Interrupted));
+        }
+    }
+    .map_err(io_error)?;
 
+    let code = {
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal))
+            .unwrap_or(127)
+    };
+    env.set_exit_code(code as i64);
     if code == 130 || env.pipeline_cancelled() {
         env.job_control
             .sigint_pending
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        return Err(PosixError::Interrupted);
+        return Err(SpawnError::Shell(PosixError::Interrupted));
     }
-
-    if capture_requested {
-        Ok((code, captured_stdout))
-    } else {
-        Ok((code, None))
-    }
+    Ok(code)
 }
 
-/// Pump a spawned child's stdin/stdout according to the POSIX stream
-/// configuration and wait for it to exit.
+/// Evaluate `payload` in a child `fsh` process (POSIX mode), as a subshell.
 ///
-/// Shared by external commands and by `( … )` subshells so both honour stdin
-/// bytes/streams and stdout streams/capture identically.
-async fn finish_child(
-    mut child: tokio::process::Child,
-    label: &str,
-    io_cfg: &mut IoStreamConfig,
-    stdin_bytes: Option<Vec<u8>>,
-    stderr_into_pipe: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
-    env: &Env,
-    child_pgid: Option<i32>,
-) -> Result<(std::process::ExitStatus, Option<Vec<u8>>), PosixError> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let stdin_task = if let Some(bytes) = stdin_bytes
-        && let Some(mut stdin) = child.stdin.take()
-    {
-        Some(tokio::spawn(async move { stdin.write_all(&bytes).await }))
-    } else if let Some(mut rx) = io_cfg.stdin_stream.take()
-        && let Some(mut stdin) = child.stdin.take()
-    {
-        Some(tokio::spawn(async move {
-            while let Some(chunk) = rx.recv().await {
-                stdin.write_all(&chunk).await?;
-            }
-            Ok(())
-        }))
-    } else {
-        None
-    };
-
-    let mut stdout_pump = if let Some(tx) = io_cfg.stdout_stream.clone()
-        && let Some(mut stdout) = child.stdout.take()
-    {
-        Some(tokio::spawn(async move {
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = stdout.read(&mut buf).await.map_err(StdoutPumpError::Io)?;
-                if n == 0 {
-                    break;
-                }
-                let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
-                if tx.send(chunk).await.is_err() {
-                    return Err(StdoutPumpError::DownstreamClosed);
-                }
-            }
-            Ok(Vec::new())
-        }))
-    } else {
-        child.stdout.take().map(|mut stdout| {
-            tokio::spawn(async move {
-                let mut output = Vec::new();
-                stdout
-                    .read_to_end(&mut output)
-                    .await
-                    .map_err(StdoutPumpError::Io)?;
-                Ok(output)
-            })
-        })
-    };
-
-    // When fd 2 was duplicated onto fd 1 this stage's stderr belongs in the same
-    // pipeline channel as its stdout, so it is pumped into that channel too. The
-    // pump has to be running before we wait, or a chatty child could block on a
-    // full stderr pipe.
-    let stderr_pump: Option<tokio::task::JoinHandle<Result<Vec<u8>, StdoutPumpError>>> =
-        if let Some(tx) = stderr_into_pipe
-            && let Some(mut stderr) = child.stderr.take()
-        {
-            Some(tokio::spawn(async move {
-                let mut buf = vec![0u8; 64 * 1024];
-                loop {
-                    let n = stderr.read(&mut buf).await.map_err(StdoutPumpError::Io)?;
-                    if n == 0 {
-                        break;
-                    }
-                    let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
-                    if tx.send(chunk).await.is_err() {
-                        return Err(StdoutPumpError::DownstreamClosed);
-                    }
-                }
-                Ok(Vec::new())
-            }))
-        } else {
-            None
-        };
-
-    let cancel_poll = async {
-        loop {
-            if env.pipeline_cancelled() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    };
-
-    let mut completed_stdout_pump = None;
-    let status = if let Some(stdout_pump) = stdout_pump.as_mut() {
-        tokio::select! {
-            _ = cancel_poll => {
-                if let Some(pgid) = child_pgid {
-                    #[cfg(unix)]
-                    unsafe { libc::kill(-pgid, libc::SIGINT); }
-                } else {
-                    let _ = child.start_kill();
-                }
-                let _ = child.wait().await;
-                return Err(PosixError::Interrupted);
-            }
-            result = child.wait() => result,
-            pump = stdout_pump => {
-                let should_kill = !matches!(&pump, Ok(Ok(_)));
-                if should_kill {
-                    let _ = child.start_kill();
-                }
-                completed_stdout_pump = Some(pump);
-                child.wait().await
-            }
-        }
-    } else {
-        tokio::select! {
-            _ = cancel_poll => {
-                if let Some(pgid) = child_pgid {
-                    #[cfg(unix)]
-                    unsafe { libc::kill(-pgid, libc::SIGINT); }
-                } else {
-                    let _ = child.start_kill();
-                }
-                let _ = child.wait().await;
-                return Err(PosixError::Interrupted);
-            }
-            result = child.wait() => result,
-        }
-    }
-    .map_err(|e| {
-        PosixError::Engine(EngineError::IoError {
-            message: format!("{}: {}", label, e),
-            span: None,
-        })
-    })?;
-
-    // The child has exited, so its stderr pipe is closed and this cannot block.
-    // A closed downstream channel is not an error worth propagating.
-    if let Some(pump) = stderr_pump {
-        let _ = pump.await;
-    }
-
-    let captured_stdout = if let Some(pump) = completed_stdout_pump {
-        match pump {
-            Ok(Ok(output)) => Some(output),
-            Ok(Err(StdoutPumpError::DownstreamClosed)) => None,
-            Ok(Err(StdoutPumpError::Io(e))) => {
-                return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{}: {}", label, e),
-                    span: None,
-                }));
-            }
-            Err(e) => {
-                return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{} output task failed: {}", label, e),
-                    span: None,
-                }));
-            }
-        }
-    } else if let Some(stdout_pump) = stdout_pump {
-        match stdout_pump.await {
-            Ok(Ok(output)) => Some(output),
-            Ok(Err(StdoutPumpError::DownstreamClosed)) => None,
-            Ok(Err(StdoutPumpError::Io(e))) => {
-                return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{}: {}", label, e),
-                    span: None,
-                }));
-            }
-            Err(e) => {
-                return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{} output task failed: {}", label, e),
-                    span: None,
-                }));
-            }
-        }
-    } else {
-        None
-    };
-
-    if let Some(stdin_task) = stdin_task {
-        match stdin_task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-            Ok(Err(e)) => {
-                return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{} stdin: {}", label, e),
-                    span: None,
-                }));
-            }
-            Err(e) => {
-                return Err(PosixError::Engine(EngineError::IoError {
-                    message: format!("{} stdin task failed: {}", label, e),
-                    span: None,
-                }));
-            }
-        }
-    }
-
-    Ok((status, captured_stdout))
-}
-
-/// The source text of a compound list, so a subshell can be re-run as a script.
-fn compound_source(list: &CompoundList, source: &str) -> String {
-    if !source.is_empty()
-        && let Some(span) = SourceLocation::location(list)
-        && let Some(text) = slice_chars(source, span.start.index, span.end.index)
-        && !text.trim().is_empty()
-    {
-        return text;
-    }
-    format!("{list}")
-}
-
-/// Evaluate `source` in a child `fsh` process (POSIX mode), as a subshell.
-///
-/// A real process gives the subshell its own PID, signals and `exit` without
-/// disturbing the parent, matching POSIX.
+/// A real process gives the subshell its own PID, signals, umask and `exit`
+/// without disturbing the parent, matching POSIX. It starts with this
+/// environment's descriptors, exactly as an external command does.
 async fn run_child_shell(
-    source: &str,
-    mut io_cfg: IoStreamConfig,
+    payload: &fshell_engine::background::ChildPayload,
     env: &Env,
-) -> Result<(i32, Option<Vec<u8>>), PosixError> {
-    use std::process::Stdio;
-
-    let launch = fshell_engine::background::prepare_child(source, env)?;
-
-    let mut cmd = tokio::process::Command::new(&launch.program);
+) -> Result<i32, PosixError> {
+    let launch = fshell_engine::background::prepare_child(payload, env)?;
+    let mut cmd = std::process::Command::new(&launch.program);
     cmd.args(&launch.args);
     cmd.current_dir(env.cwd());
-    {
-        let vars = env.vars.read();
-        for (k, v) in vars.iter() {
-            if k == "env" {
-                if let Val::Map(m) = v {
-                    for (ek, ev) in m.iter() {
-                        cmd.env(ek.as_str(), ev.to_text());
-                    }
-                }
-            } else if !k.starts_with(|c: char| c.is_ascii_digit())
-                && k != "@"
-                && k != "#"
-                && k != "?"
-            {
-                cmd.env(k, v.to_text());
-            }
-        }
-    }
-
-    let want_stdin = io_cfg.stdin_bytes.is_some() || io_cfg.stdin_stream.is_some();
-    if want_stdin {
-        cmd.stdin(Stdio::piped());
-    }
-    if io_cfg.stdout_stream.is_some() || io_cfg.capture_stdout {
-        cmd.stdout(Stdio::piped());
-    }
-
-    let child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            for file in &launch.temp_files {
-                let _ = std::fs::remove_file(file);
-            }
-            return Err(PosixError::Engine(EngineError::IoError {
-                message: format!("subshell: {e}"),
-                span: None,
-            }));
-        }
-    };
-
-    let stdin_bytes = io_cfg.stdin_bytes.take();
-    let child_pid = child.id().map(|id| id as i32);
-    let result = finish_child(
-        child,
-        "subshell",
-        &mut io_cfg,
-        stdin_bytes,
-        None,
-        env,
-        child_pid,
-    )
-    .await;
+    configure_child_environment(&mut cmd, env, &[]);
+    let result = spawn_supervised(cmd, env, "subshell", owns_terminal(env)).await;
     for file in &launch.temp_files {
         let _ = std::fs::remove_file(file);
     }
-    let (status, captured) = result?;
-    let code = status.code().unwrap_or(127);
-    if io_cfg.capture_stdout {
-        Ok((code, captured))
-    } else {
-        Ok((code, None))
+    match result {
+        Ok(code) => Ok(code),
+        Err(SpawnError::Launch(error)) => Err(PosixError::Engine(EngineError::IoError {
+            message: format!("subshell: {}", crate::redirect::os_message(&error)),
+            span: None,
+        })),
+        Err(SpawnError::Shell(error)) => Err(error),
     }
 }
 
@@ -3383,15 +2476,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn builtin_output_capture_applies_only_to_the_stdout_descriptor() {
-        let output = write_builtin_output("captured", &RedirectionContext::default(), true)
-            .await
-            .expect("stdout capture");
-        assert_eq!(output, Some(b"captured".to_vec()));
-    }
-
-    #[tokio::test]
-    async fn builtin_output_uses_the_redirected_process_descriptor_even_when_capturing() {
+    async fn builtin_output_goes_to_the_current_stdout_binding() {
         use std::io::Read;
         use std::os::fd::{AsRawFd, FromRawFd};
         let (read_fd, write_fd) =
@@ -3399,26 +2484,54 @@ mod tests {
         // SAFETY: each fresh pipe descriptor is transferred to exactly one File.
         let mut reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
         let writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
-        let mut redir = RedirectionContext::default();
-        redir.targets[1] = FdTarget::Process(writer.as_raw_fd());
-        let output = write_builtin_output("redirected", &redir, true)
-            .await
-            .expect("descriptor output");
-        assert_eq!(
-            output,
-            Some(Vec::new()),
-            "redirected bytes are not captured stdout"
-        );
+        let env = Env::for_command();
+        env.descriptors
+            .write()
+            .set(1, Descriptor::Process(writer.as_raw_fd()));
+        assert_eq!(emit(&env, "echo", "redirected").await.expect("write"), 0);
         assert!(
             writer.metadata().is_ok(),
             "the caller still owns its original descriptor"
         );
+        drop(env);
         drop(writer);
         let mut bytes = Vec::new();
         reader
             .read_to_end(&mut bytes)
             .expect("read redirected bytes");
         assert_eq!(bytes, b"redirected");
+    }
+
+    #[tokio::test]
+    async fn writing_to_a_closed_stdout_is_the_builtins_failure() {
+        let env = Env::for_command();
+        env.descriptors.write().close(1);
+        let (read_end, write_end) = descriptors::pipe().expect("pipe");
+        env.descriptors
+            .write()
+            .set(2, Descriptor::File(std::sync::Arc::new(write_end)));
+        assert_eq!(emit(&env, "echo", "lost").await.expect("status"), 1);
+        drop(env);
+        assert_eq!(
+            descriptors::read_to_end(read_end)
+                .await
+                .expect("diagnostic"),
+            b"echo: write error: Bad file descriptor\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn writing_to_a_pipe_without_readers_ends_like_sigpipe() {
+        let env = Env::for_command();
+        let (read_end, write_end) = descriptors::pipe().expect("pipe");
+        drop(read_end);
+        env.descriptors
+            .write()
+            .set(1, Descriptor::File(std::sync::Arc::new(write_end)));
+        assert!(matches!(
+            emit(&env, "echo", "lost").await,
+            Err(PosixError::Exit(code)) if code == 128 + libc::SIGPIPE
+        ));
     }
 
     #[tokio::test]
@@ -3601,28 +2714,20 @@ mod redirection_ownership {
     }
 
     #[tokio::test]
-    async fn inherited_redirect_handles_close_after_a_hard_error() {
+    async fn a_compound_redirect_is_undone_after_a_hard_error() {
         let directory = tempfile::tempdir().expect("directory");
         let env = Env::for_command();
+        env.set_cwd(directory.path().to_path_buf());
         env.vars.write().remove("env");
-        let handle = open_redirect_file(&directory.path().join("out"), false).expect("output");
-        let weak = std::sync::Arc::downgrade(&handle);
-        let mut redir = RedirectionContext::default();
-        redir.targets[1] = FdTarget::File(handle);
-        let io_cfg = IoStreamConfig {
-            redirections: Some(redir),
-            ..Default::default()
-        };
         let parsed =
-            crate::parse_posix_script("{ printf before; : \"${required:?supply value}\"; }")
+            crate::parse_posix_script("{ printf before; : \"${required:?supply value}\"; } > out")
                 .expect("script");
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            eval_compound_list_stream(
+            eval_compound_list(
                 &parsed.program.complete_commands[0],
                 &env,
                 &EvalConfig::default(),
-                io_cfg,
             ),
         )
         .await
@@ -3632,7 +2737,7 @@ mod redirection_ownership {
             error,
             PosixError::Engine(EngineError::ParameterExpansion { .. })
         ));
-        assert!(weak.upgrade().is_none(), "no descriptor owner remains");
+        assert!(matches!(env.descriptor(1), Some(Descriptor::Process(1))));
         assert_eq!(
             std::fs::read(directory.path().join("out")).expect("written prefix"),
             b"before"
@@ -3640,20 +2745,13 @@ mod redirection_ownership {
     }
 
     #[tokio::test]
-    async fn dropping_a_command_awaiting_eof_releases_its_inherited_redirect() {
+    async fn dropping_a_command_awaiting_eof_restores_the_callers_descriptors() {
         use std::future::Future;
         use std::task::{Context, Waker};
         let directory = tempfile::tempdir().expect("directory");
         let env = Env::for_command();
+        env.set_cwd(directory.path().to_path_buf());
         env.options.write().errexit = false;
-        let handle = open_redirect_file(&directory.path().join("out"), false).expect("output");
-        let weak = std::sync::Arc::downgrade(&handle);
-        let mut redir = RedirectionContext::default();
-        redir.targets[1] = FdTarget::File(handle);
-        let io_cfg = IoStreamConfig {
-            redirections: Some(redir),
-            ..Default::default()
-        };
         let lease = std::sync::Arc::new(std::sync::Mutex::new(None));
         let handler_lease = lease.clone();
         #[expect(
@@ -3665,13 +2763,12 @@ mod redirection_ownership {
             Ok(())
         });
         env.register_builtin("jobs", handler);
-        let parsed = crate::parse_posix_script("{ printf before; jobs; }").expect("script");
+        let parsed = crate::parse_posix_script("{ printf before; jobs; } > out").expect("script");
         let cfg = EvalConfig::default();
-        let mut call = Box::pin(eval_compound_list_stream(
+        let mut call = Box::pin(eval_compound_list(
             &parsed.program.complete_commands[0],
             &env,
             &cfg,
-            io_cfg,
         ));
         assert!(
             call.as_mut()
@@ -3682,30 +2779,34 @@ mod redirection_ownership {
             lease.lock().expect("lease").is_some(),
             "actually awaiting EOF"
         );
-        assert!(
-            weak.upgrade().is_some(),
-            "the pending call owns the redirect"
-        );
+        assert!(matches!(env.descriptor(1), Some(Descriptor::File(_))));
+        drop(call);
+        assert!(matches!(env.descriptor(1), Some(Descriptor::Process(1))));
         assert_eq!(
             std::fs::read(directory.path().join("out")).expect("prefix"),
             b"before"
         );
-        drop(call);
-        assert!(weak.upgrade().is_none(), "all redirect owners are dropped");
         let sender = lease.lock().expect("lease").take().expect("held sender");
         assert!(sender.is_closed(), "the awaiting receiver is dropped");
     }
 
-    #[test]
-    fn unsupported_duplication_sources_are_rejected_before_indexing_the_table() {
-        for destination in ["1", "-"] {
-            let error = RedirectionContext::default()
-                .duplicate(9, destination)
-                .expect_err("unsupported descriptor");
-            assert!(
-                matches!(error, PosixError::Engine(EngineError::Generic { ref message, span: None }) if message == "redirection of file descriptor 9 is not supported (only 0, 1 and 2)")
-            );
-        }
+    #[tokio::test]
+    async fn duplicating_a_closed_descriptor_fails_the_command_only() {
+        let env = Env::for_command();
+        env.options.write().errexit = false;
+        let parsed =
+            crate::parse_posix_script("{ echo x >&9; echo status=$?; } 2>&1").expect("script");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            eval_source_stream(&parsed, &env, &EvalConfig::default(), true),
+        )
+        .await
+        .expect("deadline")
+        .expect("evaluation");
+        assert_eq!(
+            result,
+            (0, Some(b"9: Bad file descriptor\nstatus=1\n".to_vec()))
+        );
     }
 }
 

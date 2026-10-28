@@ -20,11 +20,13 @@
 
 pub mod arithmetic;
 pub mod bridge;
+pub mod child;
 pub mod eval;
 pub mod expand;
 pub mod parser;
 mod positional;
 pub mod posix_builtins;
+mod redirect;
 
 pub use arithmetic::eval_arithmetic_expr;
 pub use eval::{EvalConfig, PosixExit, eval_source, eval_source_capture, eval_source_stream};

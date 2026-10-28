@@ -58,6 +58,8 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<Option<String>, String> {
             "+n" => opts.noexec = false,
             "-f" => opts.noglob = true,
             "+f" => opts.noglob = false,
+            "-C" => opts.noclobber = true,
+            "+C" => opts.noclobber = false,
             "--" => {
                 // Remaining are positional
                 let positional: Vec<fshell_core::Val> = args[i + 1..]
@@ -102,6 +104,7 @@ fn set_named_option(name: &str, enable: bool, opts: &mut fshell_engine::ShellOpt
         "xtrace" => opts.xtrace = enable,
         "noexec" => opts.noexec = enable,
         "noglob" => opts.noglob = enable,
+        "noclobber" => opts.noclobber = enable,
         "pipefail" => opts.pipefail = enable,
         _ => return false,
     }
@@ -117,6 +120,7 @@ fn list_named_options(opts: &fshell_engine::ShellOptions, as_commands: bool) -> 
         ("xtrace", opts.xtrace),
         ("noexec", opts.noexec),
         ("noglob", opts.noglob),
+        ("noclobber", opts.noclobber),
         ("pipefail", opts.pipefail),
     ];
     let mut out = String::new();

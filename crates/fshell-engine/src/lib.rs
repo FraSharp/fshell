@@ -86,6 +86,7 @@ pub mod config;
 pub mod frontend;
 pub mod login;
 pub use completions::{load_completions, save_completions};
+pub mod descriptors;
 pub mod exe;
 pub mod hooks;
 pub mod job_control;
@@ -276,6 +277,8 @@ pub fn create_cloexec_pipe() -> std::io::Result<(std::os::unix::io::RawFd, std::
             return Err(std::io::Error::last_os_error());
         }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _launch = job_control::launch_guard();
     #[cfg(not(target_os = "linux"))]
     unsafe {
         if libc::pipe(fds.as_mut_ptr()) < 0 {
@@ -1109,6 +1112,9 @@ pub struct Env {
     /// when the shell that set it leaves the script, rather than on a signal.
     pub posix_exit_trap: Arc<RwLock<Option<String>>>,
     pub posix_fns: Arc<RwLock<FxHashMap<String, Arc<dyn std::any::Any + Send + Sync>>>>,
+    /// This shell execution environment's descriptor table. Clones of an `Env`
+    /// share it; a subshell gets a copy (see [`Env::with_descriptors`]).
+    pub descriptors: Arc<RwLock<descriptors::DescriptorTable>>,
     pub theme: Arc<RwLock<Arc<fshell_core::theme::Theme>>>,
     pub preview_theme: Arc<RwLock<Option<Arc<fshell_core::theme::Theme>>>>,
     pub profiler: Arc<RwLock<crate::profiler::ProfilerState>>,
@@ -2061,6 +2067,7 @@ impl Env {
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
             posix_exit_trap: Arc::new(RwLock::new(None)),
             posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
+            descriptors: Arc::new(RwLock::new(descriptors::DescriptorTable::standard())),
             theme: Arc::new(RwLock::new(Arc::new(
                 fshell_core::theme::Theme::default_theme(),
             ))),
@@ -2225,6 +2232,7 @@ impl Env {
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
             posix_exit_trap: Arc::new(RwLock::new(None)),
             posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
+            descriptors: Arc::new(RwLock::new(descriptors::DescriptorTable::standard())),
             theme: Arc::new(RwLock::new(Arc::new(
                 fshell_core::theme::Theme::default_theme(),
             ))),
@@ -2277,6 +2285,19 @@ impl Env {
         }
 
         env
+    }
+
+    /// This environment with its own descriptor table, for a subshell or any
+    /// evaluation whose redirections must not reach the caller's table.
+    pub fn with_descriptors(&self, table: descriptors::DescriptorTable) -> Self {
+        let mut env = self.clone();
+        env.descriptors = Arc::new(RwLock::new(table));
+        env
+    }
+
+    /// A copy of one descriptor binding; never hold the table across `.await`.
+    pub fn descriptor(&self, fd: i32) -> Option<descriptors::Descriptor> {
+        self.descriptors.read().get(fd).cloned()
     }
 
     /// Create a lightweight child scope without cloning the full `Env`.
@@ -2335,6 +2356,7 @@ impl Env {
             posix_traps: self.posix_traps.clone(),
             posix_exit_trap: self.posix_exit_trap.clone(),
             posix_fns: self.posix_fns.clone(),
+            descriptors: self.descriptors.clone(),
             theme: self.theme.clone(),
             preview_theme: self.preview_theme.clone(),
             profiler: self.profiler.clone(),

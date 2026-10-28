@@ -68,5 +68,13 @@ Small reproducers are why these cases exist; keep compatibility corrections tied
   `redirect/merge-then-stdout-keeps-stderr` pin the pair that must stay distinguishable: `2>&1`
   duplicates whatever stdout points at *at that moment*, so `> out 2>&1` and `2>&1 > out` differ.
   That is only expressible with a table of descriptor destinations applied in order, which is why the
-  POSIX evaluator now uses `FdTarget` (`crates/fshell-posix/src/eval.rs`) rather than a pair of
-  `bool` flags — the flags were assigned and never read, which silently disabled `2>&1` entirely.
+  POSIX evaluator rebinds entries of the environment's `DescriptorTable`
+  (`crates/fshell-engine/src/descriptors.rs`, applied by `crates/fshell-posix/src/redirect.rs`)
+  rather than a pair of `bool` flags — the flags were assigned and never read, which silently
+  disabled `2>&1` entirely.
+- **Descriptors are real open file descriptions.** Redirected input used to be a byte copy handed to
+  every command, so `{ read a; read b; } < f` read the first line twice and `while read l; do …;
+  done < f` never advanced. Every binding is now a file, pipe end or here-document pipe shared by
+  the builtins and children that inherit it, so input is consumed only as far as each reader reads;
+  descriptors above 2 and `exec` redirections work, and pipeline stages are joined by OS pipes. The
+  `redirect/group-input-shares-one-offset` family pins this.

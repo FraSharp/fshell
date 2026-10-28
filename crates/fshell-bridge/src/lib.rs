@@ -64,7 +64,10 @@ fn spawn_external_command(
     let pgid = launch.as_ref().and_then(|state| **state).unwrap_or(0);
     fshell_engine::job_control::configure_child_launch(cmd, pgid, should_transfer);
 
-    let child_result = cmd.spawn();
+    let child_result = {
+        let _launch = fshell_engine::job_control::launch_guard();
+        cmd.spawn()
+    };
     let child = child_result?;
     let pid = child.id() as i32;
     if let Some(job) = pipeline_job {

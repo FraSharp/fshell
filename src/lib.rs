@@ -44,6 +44,11 @@ struct Cli {
     #[arg(long = "handoff", value_name = "PATH", hide = true)]
     handoff: Option<String>,
 
+    /// Evaluate a parsed POSIX program as a subshell or background job of the
+    /// shell that wrote it (internal)
+    #[arg(long = "posix-program", value_name = "PATH", hide = true)]
+    posix_program: Option<String>,
+
     /// Error output format: graphical, compact, or json
     #[arg(long = "error-format", value_name = "FORMAT")]
     error_format: Option<String>,
@@ -368,6 +373,24 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
         let mut caps = env.caps.caps.write();
         caps.strict_mode = true;
         caps.held.clear();
+    }
+
+    // A subshell process runs exactly the program its parent handed over, in
+    // the parent's restored state: no login, profile or host re-population.
+    if let Some(program_path) = &cli.posix_program {
+        let code = match std::fs::read_to_string(program_path) {
+            Ok(program) => fshell_posix::child::run_child_program(&program, &env)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("fsh: {error}");
+                    1
+                }),
+            Err(error) => {
+                eprintln!("fsh: cannot read child program '{program_path}': {error}");
+                2
+            }
+        };
+        exit_with_trace(&trace, code, TraceMode::Posix, SpanOutcome::Exit);
     }
 
     // For the REPL path the login environment is loaded by ftui's

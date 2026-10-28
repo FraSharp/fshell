@@ -194,7 +194,9 @@ fn resolve_parameter_with_presence(
             SpecialParameter::PositionalParameterCount => (eff_pos.len().to_string(), true),
             SpecialParameter::LastExitStatus => (env.exit_code().to_string(), true),
             SpecialParameter::CurrentOptionFlags => (String::new(), true),
-            SpecialParameter::ProcessId => (std::process::id().to_string(), true),
+            SpecialParameter::ProcessId => {
+                (fshell_engine::background::shell_pid().to_string(), true)
+            }
             SpecialParameter::LastBackgroundProcessId => {
                 // `$!` is the pid of the most recent background job. It must
                 // never be "0": `kill -9 $!` would then signal the whole
@@ -982,6 +984,20 @@ fn expand_glob(pattern: &str, fallback: &str, cwd: &std::path::Path) -> Vec<Stri
     }
 }
 
+thread_local! {
+    static LAST_SUBSTITUTION: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `expand` and report the status of the last command substitution it
+/// performed, if any. Expansion is synchronous and a substitution records its
+/// status on the expanding thread, so nothing else can interleave.
+pub(crate) fn tracking_substitutions<T>(expand: impl FnOnce() -> T) -> (T, Option<i32>) {
+    let outer = LAST_SUBSTITUTION.with(|cell| cell.replace(None));
+    let value = expand();
+    let status = LAST_SUBSTITUTION.with(|cell| cell.replace(outer));
+    (value, status)
+}
+
 fn run_command_subst(
     cmd: &str,
     env: &fshell_engine::Env,
@@ -1021,6 +1037,7 @@ fn run_command_subst(
     // it; an assignment that is nothing but the substitution takes it, which is the
     // whole point (`out=$(cmd); rc=$?`).
     env.set_exit_code(code as i64);
+    LAST_SUBSTITUTION.with(|cell| cell.set(Some(code)));
 
     let bytes = bytes.unwrap_or_default();
     let mut output = String::from_utf8_lossy(&bytes).into_owned();

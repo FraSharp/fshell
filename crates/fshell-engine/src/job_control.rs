@@ -7,6 +7,20 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::Job;
 
+/// Serializes descriptor creation with child launches where the platform
+/// cannot create a close-on-exec pipe atomically.
+///
+/// On macOS `pipe` and `fcntl(FD_CLOEXEC)` are two calls; a child launched by
+/// another thread between them inherits the pipe end, and an inherited write
+/// end keeps a pipeline's reader from ever seeing end of file. The shell's own
+/// pipe creation and launch paths take this lock; Linux uses `pipe2` and needs
+/// none. Launches elsewhere (helper subprocesses of builtins, the editor) do
+/// not create shell pipes and are not serialized.
+pub fn launch_guard() -> Option<fshell_core::lock::MutexGuard<'static, ()>> {
+    static LAUNCH: Mutex<()> = Mutex::new(());
+    (!cfg!(target_os = "linux")).then(|| LAUNCH.lock())
+}
+
 /// Places an external command in process group `pgid` (0 = its own group) and,
 /// when `take_terminal` is set, makes the child claim the controlling terminal
 /// before `exec`.

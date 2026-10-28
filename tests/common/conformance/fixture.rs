@@ -29,6 +29,7 @@ const FILES: &[(&str, &str)] = &[
     ("a.txt", "alpha\n"),
     ("b.txt", "bravo\n"),
     ("c.txt", "charlie\n"),
+    ("lines.txt", "first\nsecond\nthird\n"),
     ("a.rs", "fn a() {}\n"),
     ("b.rs", "fn b() {}\n"),
     ("space file.txt", "spaced\n"),

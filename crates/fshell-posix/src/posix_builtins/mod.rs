@@ -12,7 +12,6 @@ pub mod type_cmd;
 
 pub use eval_builtin::eval_posix;
 pub use getopts::getopts_posix;
-pub use printf::printf_posix;
 pub use read_cmd::read_posix;
 pub use shift::{set_posix, shift_posix};
 pub use test_builtin::eval_test_expr;

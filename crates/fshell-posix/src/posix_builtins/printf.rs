@@ -15,22 +15,6 @@ pub struct PrintfResult {
     pub diagnostics: Vec<String>,
 }
 
-pub fn printf_posix(args: &[String]) -> Result<i32, String> {
-    if args.is_empty() {
-        return Ok(0);
-    }
-
-    let format = &args[0];
-    let values = &args[1..];
-
-    let result = format_printf_with_status(format, values)?;
-    for diagnostic in &result.diagnostics {
-        eprintln!("{diagnostic}");
-    }
-    print!("{}", result.output);
-    Ok(result.status)
-}
-
 pub fn format_printf(format: &str, args: &[String]) -> Result<String, String> {
     Ok(format_printf_with_status(format, args)?.output)
 }

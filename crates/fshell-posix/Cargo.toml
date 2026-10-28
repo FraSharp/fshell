@@ -19,6 +19,8 @@ ustr.workspace = true
 async-recursion = { workspace = true }
 bytes = { workspace = true }
 globset = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

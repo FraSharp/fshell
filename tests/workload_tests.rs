@@ -155,14 +155,7 @@ probe emit --stdout ab"#,
         .bash_only()
         .tree(TREE)
         .stubs(STUBS)
-        .features(&["workload", "function", "capture"])
-        .known_failure(
-            "posix-substitution-loses-the-command-status",
-            "a command substitution records its status while expanding, but a \
-             pure assignment then reports its own 0 instead of taking it, so a \
-             probe that captures output and reads `$?` sees success after a failure",
-            &[Engine::Posix],
-        ),
+        .features(&["workload", "function", "capture"]),
         // A shell inside a shell, both of them stubs: what is under test is the
         // quoting and dispatch of the outer one.
         posix_case(

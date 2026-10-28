@@ -308,12 +308,26 @@ async fn grouped_pipeline_preserves_interstage_transport_and_redirects_only_fina
     fixture.close()
 }
 #[tokio::test]
-async fn unsupported_descriptor_duplication_is_a_command_failure_not_a_panic() {
+async fn descriptors_above_two_bind_and_duplicate_like_the_standard_ones() {
     let env = environment();
     assert_output(
-        capture("printf wrong 9>&1; seen=$?; printf after", &env)
+        capture(
+            "printf one 9>&1; exec 7>&1; printf two >&7; exec 7>&-; printf end",
+            &env,
+        )
+        .await
+        .expect("high descriptors"),
+        0,
+        b"onetwoend",
+    );
+}
+#[tokio::test]
+async fn duplicating_a_closed_descriptor_is_a_command_failure_not_a_panic() {
+    let env = environment();
+    assert_output(
+        capture("printf wrong >&9; seen=$?; printf after", &env)
             .await
-            .expect("unsupported descriptor"),
+            .expect("closed descriptor"),
         0,
         b"after",
     );

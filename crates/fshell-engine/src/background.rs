@@ -83,6 +83,31 @@ fn sweep_stale(dir: &std::path::Path) {
     }
 }
 
+/// What a child shell runs.
+pub enum ChildPayload {
+    /// Source text, parsed by the child in POSIX mode.
+    Source(String),
+    /// A POSIX program the parent already parsed, serialized by the POSIX
+    /// engine. The child evaluates exactly that structure: re-rendering
+    /// parsed shell code as text cannot be done faithfully (here-document
+    /// bodies, for one, must follow the line that names them).
+    PosixProgram(String),
+}
+
+/// The PID `$$` reports: the shell's own, which a subshell process inherits
+/// from its parent rather than reporting its own.
+pub fn shell_pid() -> u32 {
+    *SHELL_PID.get_or_init(std::process::id)
+}
+
+/// Adopt the parent shell's PID as `$$`. Only a child shell calls this, once,
+/// before evaluating anything.
+pub fn inherit_shell_pid(pid: u32) {
+    let _ = SHELL_PID.set(pid);
+}
+
+static SHELL_PID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
 /// A child `fsh` invocation prepared to run a POSIX fragment.
 pub struct ChildLaunch {
     pub program: PathBuf,
@@ -91,11 +116,11 @@ pub struct ChildLaunch {
     pub temp_files: Vec<PathBuf>,
 }
 
-/// Write `source` and the current environment to temp files and describe the
+/// Write `payload` and the current environment to temp files and describe the
 /// child `fsh` invocation that runs it in POSIX mode.
 ///
 /// The caller owns `temp_files` and must remove them when the child exits.
-pub fn prepare_child(source: &str, env: &Env) -> Result<ChildLaunch, EngineError> {
+pub fn prepare_child(payload: &ChildPayload, env: &Env) -> Result<ChildLaunch, EngineError> {
     let program = crate::exe::resolve_exe();
     let dir = crate::cache_dir()
         .ok_or_else(|| generic("cannot resolve cache dir for a child shell".to_string()))?;
@@ -110,7 +135,11 @@ pub fn prepare_child(source: &str, env: &Env) -> Result<ChildLaunch, EngineError
     let state_path = dir.join(format!("bg-{stamp}.handoff.json"));
     let script_path = dir.join(format!("bg-{stamp}.fsh"));
 
-    std::fs::write(&script_path, source)
+    let (text, mode) = match payload {
+        ChildPayload::Source(source) => (source, "--posix"),
+        ChildPayload::PosixProgram(program) => (program, "--posix-program"),
+    };
+    std::fs::write(&script_path, text)
         .map_err(|e| generic(format!("child shell: cannot write script: {e}")))?;
     if let Err(e) = save_handoff_to(&state_path, &capture_handoff(env)) {
         let _ = std::fs::remove_file(&script_path);
@@ -119,12 +148,20 @@ pub fn prepare_child(source: &str, env: &Env) -> Result<ChildLaunch, EngineError
 
     Ok(ChildLaunch {
         program,
-        args: vec![
-            "--posix".into(),
-            "--handoff".into(),
-            state_path.clone().into(),
-            script_path.clone().into(),
-        ],
+        args: match payload {
+            ChildPayload::Source(_) => vec![
+                mode.into(),
+                "--handoff".into(),
+                state_path.clone().into(),
+                script_path.clone().into(),
+            ],
+            ChildPayload::PosixProgram(_) => vec![
+                "--handoff".into(),
+                state_path.clone().into(),
+                mode.into(),
+                script_path.clone().into(),
+            ],
+        },
         temp_files: vec![state_path, script_path],
     })
 }
@@ -132,28 +169,36 @@ pub fn prepare_child(source: &str, env: &Env) -> Result<ChildLaunch, EngineError
 /// Spawn `source` as a background job (POSIX mode) and return its PID.
 ///
 /// Registers the job in the shared job table and records it as `$!`.
-pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
-    let launch = prepare_child(source, env)?;
+pub fn spawn_background(
+    payload: &ChildPayload,
+    label: &str,
+    env: &Env,
+) -> Result<i32, EngineError> {
+    let launch = prepare_child(payload, env)?;
 
-    let mut cmd = std::process::Command::new(&launch.program);
-    cmd.args(&launch.args).stdin(std::process::Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Give the job its own process group so it can be signalled as a unit.
-        cmd.process_group(0);
-    }
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            for file in &launch.temp_files {
-                let _ = std::fs::remove_file(file);
-            }
-            return Err(generic(format!("background: cannot start job: {e}")));
+    let cleanup = |message: String| {
+        for file in &launch.temp_files {
+            let _ = std::fs::remove_file(file);
         }
+        generic(message)
     };
+    let mut cmd = std::process::Command::new(&launch.program);
+    cmd.args(&launch.args);
+    // The job inherits the shell's descriptors, except that without job
+    // control POSIX gives an asynchronous list /dev/null as standard input.
+    let mut table = env.descriptors.read().clone();
+    table.close(0);
+    crate::descriptors::ChildDescriptors::prepare(&table)
+        .and_then(|prepared| prepared.attach(&mut cmd))
+        .map_err(|e| cleanup(format!("background: cannot set up descriptors: {e}")))?;
+    // Its own process group, so it can be signalled as a unit.
+    crate::job_control::configure_child_launch(&mut cmd, 0, false);
+    let spawned = {
+        let _launch = crate::job_control::launch_guard();
+        cmd.spawn()
+    };
+    drop(cmd);
+    let mut child = spawned.map_err(|e| cleanup(format!("background: cannot start job: {e}")))?;
     let pid = child.id() as i32;
 
     let job_id = {
@@ -170,7 +215,7 @@ pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
                 pids: vec![pid],
                 last_stage_pid: None,
                 last_stage_exit_code: None,
-                cmd: source.to_string(),
+                cmd: label.to_string(),
                 status: JobStatus::Running,
                 disowned: false,
                 started_at: Some(std::time::Instant::now()),
@@ -183,7 +228,7 @@ pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
     // Reap on a plain thread: the child is a std process and we only need a
     // blocking wait, so this works with or without a tokio runtime.
     let reaper_env = env.clone();
-    let cmd_str = source.to_string();
+    let cmd_str = label.to_string();
     let temp_files = launch.temp_files;
     std::thread::spawn(move || {
         let code = child

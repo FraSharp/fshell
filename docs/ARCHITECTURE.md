@@ -324,10 +324,23 @@ when a pipeline connects to an external command or terminal output, boundary ope
 
 `fshell-posix` provides a full POSIX-compliant parser and evaluator. it does not invoke `/bin/sh` or `/bin/bash`.
 
-instead, the POSIX abstract syntax tree executes against the same `fshell_engine::Env`:
-- POSIX shell variables read and write to `env.vars`.
-- POSIX functions register into `env.fns`.
-- POSIX pipelines reuse `execute_pipeline` and `fshell-bridge`.
+instead, the POSIX abstract syntax tree (from `brush-parser`) executes against the same `fshell_engine::Env`:
+- POSIX shell variables read and write to `env.vars`; the exported environment is the `env` map.
+- POSIX functions register into `env.posix_fns`, keeping the redirections written after their body.
+- I/O goes through `env.descriptors`, the environment's file-descriptor table
+  (`fshell_engine::descriptors`). Every entry is a real open file description: a file, a pipe end,
+  a here-document's pipe. Redirections rebind entries in source order and are undone when the
+  command finishes (`fshell_posix::redirect`); `exec` keeps them. Builtins read and write through
+  the table, and children start with a copy of it, so a builtin and a child share one input and
+  each consumes only what it reads.
+- pipeline stages run concurrently, each in a copied environment, joined by OS pipes, so external
+  stages exchange bytes without passing through the shell.
+- subshells `( … )` and async lists `cmd &` run in child `fsh` processes. The parent hands over its
+  state (`--handoff`) and the already-parsed list with its positional parameters, `$0` and `$$`
+  (`--posix-program`, `fshell_posix::child`); nothing is re-parsed from source text.
+- external commands are resolved against the shell's `PATH` and launched with `posix_spawn`
+  (`fshell_engine::job_control::configure_child_launch`); only a terminal handoff or a descriptor
+  above 2 needs a `pre_exec` hook.
 
 ### transparent dispatch
 

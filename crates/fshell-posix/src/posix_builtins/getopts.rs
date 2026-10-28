@@ -11,7 +11,13 @@
 use fshell_core::Val;
 use fshell_engine::Env;
 
-pub fn getopts_posix(args: &[String], env: &Env) -> Result<i32, String> {
+/// Diagnostics for an unexpected option are pushed to `diagnostics` for the
+/// caller to write to the shell's standard error.
+pub fn getopts_posix(
+    args: &[String],
+    env: &Env,
+    diagnostics: &mut Vec<String>,
+) -> Result<i32, String> {
     if args.len() < 2 {
         return Err("getopts: usage: getopts optstring name [arg ...]".to_string());
     }
@@ -115,7 +121,10 @@ pub fn getopts_posix(args: &[String], env: &Env) -> Result<i32, String> {
                         vars.insert("OPTIND".to_string(), Val::Int((optind + 1) as i64));
                     }
                 } else {
-                    eprintln!("getopts: option requires an argument -- {}", opt_char);
+                    diagnostics.push(format!(
+                        "getopts: option requires an argument -- {}",
+                        opt_char
+                    ));
                     {
                         let mut vars = env.vars.write();
                         vars.insert(var_name.clone(), Val::String("?".to_string()));
@@ -145,7 +154,7 @@ pub fn getopts_posix(args: &[String], env: &Env) -> Result<i32, String> {
                 vars.insert("OPTIND".to_string(), Val::Int((optind + 1) as i64));
             }
         } else {
-            eprintln!("getopts: illegal option -- {}", opt_char);
+            diagnostics.push(format!("getopts: illegal option -- {}", opt_char));
             {
                 let mut vars = env.vars.write();
                 vars.insert(var_name.clone(), Val::String("?".to_string()));

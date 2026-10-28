@@ -21,7 +21,13 @@ pub enum CommandResolution {
     NotFound,
 }
 
-pub fn type_posix(args: &[String], env: &Env) -> Result<(i32, String), String> {
+/// Names that resolve nowhere are pushed to `diagnostics` for the caller to
+/// write to the shell's standard error.
+pub fn type_posix(
+    args: &[String],
+    env: &Env,
+    diagnostics: &mut Vec<String>,
+) -> Result<(i32, String), String> {
     if args.is_empty() {
         return Ok((0, String::new()));
     }
@@ -44,7 +50,7 @@ pub fn type_posix(args: &[String], env: &Env) -> Result<(i32, String), String> {
             }
             CommandResolution::Path(path) => out.push_str(&format!("{name} is {path}\n")),
             CommandResolution::NotFound => {
-                eprintln!("type: {name}: not found");
+                diagnostics.push(format!("type: {name}: not found"));
                 exit_code = 1;
             }
         }

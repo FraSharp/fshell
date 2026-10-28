@@ -48,6 +48,8 @@ pub fn fork_env_for_subshell(parent: &Env) -> Env {
     child.posix_fns =
         std::sync::Arc::new(fshell_core::RwLock::new(parent.posix_fns.read().clone()));
     child.options = std::sync::Arc::new(fshell_core::RwLock::new(parent.options.read().clone()));
+    child.descriptors =
+        std::sync::Arc::new(fshell_core::RwLock::new(parent.descriptors.read().clone()));
     child
 }
 
