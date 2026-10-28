@@ -674,6 +674,27 @@ fn native_word_model_cases() -> Vec<Case> {
             0,
         )
         .features(&["native", "word", "parameter"]),
+        // A word is typed as a number only when it is that number's canonical
+        // spelling, so a command never receives rewritten text.
+        Case::native(
+            "native/numeric-looking-words-keep-their-spelling",
+            "argvdump +5 007 1_000 1e5 1.50 42 1.5",
+            "argc=7\narg[0]=\"+5\"\narg[1]=\"007\"\narg[2]=\"1_000\"\narg[3]=\"1e5\"\narg[4]=\"1.50\"\narg[5]=\"42\"\narg[6]=\"1.5\"\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "word", "number"]),
+        // A leading `+` starts a word, as a leading `-` does: `date +%Y`.
+        Case::native(
+            "native/plus-word-is-an-argument",
+            "argvdump +%Y +\"x y\" +x",
+            "argc=3\narg[0]=\"+%Y\"\narg[1]=\"+x y\"\narg[2]=\"+x\"\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "word"]),
         Case::native(
             "native/list-is-one-value",
             "let l = [1, 2]; argvdump $l",

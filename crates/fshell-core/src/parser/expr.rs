@@ -475,18 +475,11 @@ impl Parser {
                             && self.input[next_pos + 1] == '|'
                     }
                     Some('+') => {
-                        // `chmod +x file`: `+x` is a flag-style argument, not addition.
-                        // `+` is an operator only when not immediately followed by an
-                        // identifier-ish char (e.g. `a + b`, `x + 1`), so `chmod +x ...`
-                        // parses as a command call. Unlike `-`, a spaced `+` still binds
-                        // (`a + 1`, `sum + x` are expressions): `+` has no standalone
-                        // command-argument convention.
-                        if next_pos + 1 < self.input.len() {
-                            let nc = self.input[next_pos + 1];
-                            !(nc.is_ascii_alphabetic() || nc.is_ascii_digit() || nc == '+')
-                        } else {
-                            false
-                        }
+                        // A `+` that starts a word is an argument — `chmod +x`,
+                        // `date +%Y`, `tail +3`, `set +e` — so after the leading
+                        // word, `+` is addition only when spaced like an infix
+                        // operator (`sum + x`), the same rule as `*`.
+                        next_pos + 1 >= self.input.len() || self.input[next_pos + 1].is_whitespace()
                     }
                     Some('=') | Some('!') => true,
                     Some('*') => {
@@ -1076,18 +1069,21 @@ impl Parser {
                         if value == "null" {
                             return Ok(Expr::Null);
                         }
-                        let numeric = value.replace('_', "");
-                        if !numeric.is_empty() && !value.ends_with('_') {
-                            if let Ok(integer) = numeric.parse::<i64>() {
-                                return Ok(Expr::Int(integer));
-                            }
-                            if (numeric.contains('.')
-                                || numeric.contains('e')
-                                || numeric.contains('E'))
-                                && let Ok(float) = numeric.parse::<f64>()
-                            {
-                                return Ok(Expr::Float(float));
-                            }
+                        // A word is typed as a number only when it is that
+                        // number's canonical spelling, so the text a command
+                        // receives is never rewritten: `+2`, `007`, `1_000`,
+                        // `1e5` and `1.50` stay the words they were written as.
+                        if let Ok(integer) = value.parse::<i64>()
+                            && integer.to_string() == value
+                        {
+                            return Ok(Expr::Int(integer));
+                        }
+                        if value.contains('.')
+                            && let Ok(float) = value.parse::<f64>()
+                            && float.is_finite()
+                            && float.to_string() == value
+                        {
+                            return Ok(Expr::Float(float));
                         }
                         parts.push(StringPart::Lit { text: value, quote });
                     }
