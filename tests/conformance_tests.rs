@@ -1624,6 +1624,29 @@ fn routing_cases() -> Vec<Case> {
         .engines(&[Engine::Auto])
         .expect_engine(Engine::Posix)
         .features(&["routing", "posix"]),
+        // A POSIX reserved word where a command name belongs is POSIX syntax:
+        // native must reject it rather than run a command called `until`.
+        Case::posix(
+            "routing/until-loop-routes-to-posix",
+            "until true; do echo never; done; emit --stdout done",
+        )
+        .engines(&[Engine::Auto])
+        .expect_engine(Engine::Posix)
+        .features(&["routing", "posix", "reserved_word"]),
+        Case::posix(
+            "routing/while-as-pipeline-stage-routes-to-posix",
+            "printf 'a\\nb\\n' | while read -r l; do emit --stdout \"[$l]\"; done",
+        )
+        .engines(&[Engine::Auto])
+        .expect_engine(Engine::Posix)
+        .features(&["routing", "posix", "reserved_word"]),
+        Case::posix(
+            "routing/multiline-if-routes-to-posix",
+            "if true\nthen\n  emit --stdout yes\nfi",
+        )
+        .engines(&[Engine::Auto])
+        .expect_engine(Engine::Posix)
+        .features(&["routing", "posix", "multiline"]),
         Case::posix("routing/brace-group-routes-to-posix", "{ echo hi; }")
             .engines(&[Engine::Auto])
             .expect_engine(Engine::Posix)

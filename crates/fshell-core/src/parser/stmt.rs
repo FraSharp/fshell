@@ -6,6 +6,39 @@ use crate::expand_braces;
 use crate::{ParseError, Parser};
 use miette::SourceSpan;
 
+/// A POSIX reserved word where a command name belongs is POSIX syntax, never
+/// a command: `case x in …`, `until …; do`, `… | while read l; do`. Native's
+/// own `if`/`for`/`while` statements are parsed before a pipeline stage is, so
+/// meeting one here means the input is not native. Rejecting it makes the
+/// input a parse error, which is what hands it to the POSIX frontend — for
+/// execution and for the editor's continuation prompt alike — instead of
+/// running a nonexistent `case` command.
+fn reject_posix_reserved_word(name: &str, span: SourceSpan) -> Result<(), ParseError> {
+    if matches!(
+        name,
+        "case"
+            | "esac"
+            | "if"
+            | "then"
+            | "elif"
+            | "else"
+            | "fi"
+            | "for"
+            | "while"
+            | "until"
+            | "do"
+            | "done"
+            | "in"
+            | "function"
+    ) {
+        return Err(ParseError::SyntaxError {
+            message: format!("`{name}` is a POSIX reserved word, not a native command"),
+            span,
+        });
+    }
+    Ok(())
+}
+
 impl Parser {
     /// Primary entry point: parse a block of statements.
     pub fn parse_statements(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -1411,6 +1444,7 @@ impl Parser {
             return Ok(PipelineStage::BoundaryOperator { format });
         }
         let name = self.parse_command_name()?;
+        reject_posix_reserved_word(&name, self.span_from(start))?;
         self.skip_horizontal_whitespace();
         let has_flag = {
             let mut p = self.pos;
@@ -1433,6 +1467,7 @@ impl Parser {
         self.skip_whitespace();
         let start = self.pos;
         let name = self.parse_command_name()?;
+        reject_posix_reserved_word(&name, self.span_from(start))?;
         self.skip_horizontal_whitespace();
         let has_flag = {
             let mut p = self.pos;
