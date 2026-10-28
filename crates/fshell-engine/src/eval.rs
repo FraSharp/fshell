@@ -4153,10 +4153,17 @@ pub(crate) fn rebuild_path_cache(current_path: &str, now: std::time::Instant) ->
     result
 }
 
-/// Channel feeding shell-PATH directories to the watcher thread, which owns
-/// the only `notify` watcher. Lookups register the normalized PATH they used;
-/// the thread dedupes, so repeat registrations are free.
-static WATCH_TX: std::sync::OnceLock<std::sync::mpsc::Sender<Vec<String>>> =
+/// What wakes the PATH watcher thread, which owns the only `notify` watcher:
+/// directories to watch (lookups register the normalized PATH they used; the
+/// thread dedupes, so repeat registrations are free), or a change in one
+/// already watched. One channel for both, so a registration is acted on at
+/// once rather than after the next filesystem event.
+enum WatcherMessage {
+    Watch(Vec<String>),
+    Changed,
+}
+
+static WATCH_TX: std::sync::OnceLock<std::sync::mpsc::Sender<WatcherMessage>> =
     std::sync::OnceLock::new();
 
 pub(crate) fn start_path_watcher() {
@@ -4170,17 +4177,16 @@ pub(crate) fn start_path_watcher() {
 
     // Created and published before spawning: registrations can never be lost
     // to a thread-scheduling race between start and first note.
-    let (dir_tx, dir_rx) = std::sync::mpsc::channel::<Vec<String>>();
-    WATCH_TX.set(dir_tx).ok();
+    let (tx, rx) = std::sync::mpsc::channel::<WatcherMessage>();
+    WATCH_TX.set(tx.clone()).ok();
 
     std::thread::spawn(move || {
-        let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher =
             match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
                     match event.kind {
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                            let _ = tx.send(());
+                            let _ = tx.send(WatcherMessage::Changed);
                         }
                         _ => {}
                     }
@@ -4199,14 +4205,13 @@ pub(crate) fn start_path_watcher() {
         let mut seen_ids: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
 
         loop {
-            // Drain pending registrations without blocking.
-            while let Ok(dirs) = dir_rx.try_recv() {
-                for dir in dirs {
-                    watch_path_dir(&mut watcher, &mut desired, &mut seen_ids, dir);
-                }
-            }
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(_) => {
+                Ok(WatcherMessage::Watch(dirs)) => {
+                    for dir in dirs {
+                        watch_path_dir(&mut watcher, &mut desired, &mut seen_ids, dir);
+                    }
+                }
+                Ok(WatcherMessage::Changed) => {
                     // Filesystem change in a PATH directory — mark every slot
                     // stale. Data is kept (stale-serve) and the next lookup
                     // refreshes in the background; the watcher thread itself
@@ -4227,11 +4232,6 @@ pub(crate) fn start_path_watcher() {
                     // latency/CPU spike into long-lived sessions for no gain.
                     // Re-assert watches so directories created after startup
                     // (e.g. a late `~/.local/bin`) get picked up.
-                    while let Ok(dirs) = dir_rx.try_recv() {
-                        for dir in dirs {
-                            watch_path_dir(&mut watcher, &mut desired, &mut seen_ids, dir);
-                        }
-                    }
                     reassert_path_watches(&mut watcher, &desired);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -4289,7 +4289,7 @@ fn note_path_dirs(normalized_path: &str) {
             .filter(|d| !d.is_empty())
             .map(|d| d.to_string())
             .collect();
-        let _ = tx.send(dirs);
+        let _ = tx.send(WatcherMessage::Watch(dirs));
     }
 }
 
@@ -4667,13 +4667,16 @@ mod tests {
             fresh_cache_for(&path).is_some(),
             "precondition: cache fresh after blocking refresh"
         );
-        // Register the shell-PATH dirs with the watcher (as warmup/lookups do).
+        // An interactive session starts the watcher; then lookups register
+        // the shell-PATH dirs with it.
+        start_path_watcher();
         note_path_dirs(&path);
         // A new executable landing in a watched dir must invalidate freshness.
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        std::fs::write(dir.path().join(" newcomer"), "#!/bin/sh\n").expect("write newcomer");
+        // The backend only reports changes once its stream is live (FSEvents
+        // takes a variable while to start), so keep adding files until one
+        // is seen rather than betting on a fixed delay.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
+        for attempt in 0.. {
             if fresh_cache_for(&path).is_none() {
                 break;
             }
@@ -4681,7 +4684,9 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "watcher did not mark cache stale within 10s"
             );
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::fs::write(dir.path().join(format!("newcomer{attempt}")), "#!/bin/sh\n")
+                .expect("write newcomer");
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         crate::invalidate_path_cache();
     }
