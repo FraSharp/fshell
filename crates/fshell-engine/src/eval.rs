@@ -884,12 +884,13 @@ fn lookup_variable_fallback(name: &str, env: &Env) -> Result<Val, EngineError> {
         return Ok(Val::Int(crate::background::shell_pid() as i64));
     }
     if name == "!" {
-        // `$!` — pid of the most recent background job, or the null value.
+        // `$!` — pid of the most recent background job; empty, as in any
+        // shell, before there has been one.
         let pid = env.last_bg_pid.load(Ordering::Relaxed);
         return Ok(if pid > 0 {
             Val::Int(pid as i64)
         } else {
-            Val::Null
+            Val::String(String::new())
         });
     }
     if name == "env" {
@@ -3178,7 +3179,9 @@ async fn eval_stmt_inner(
                 },
                 other => format!("{:?}", other),
             };
-            let payload = crate::background::ChildPayload::Source(cmd_str.clone());
+            // The child runs the parsed statement natively: re-rendering it
+            // as text for another engine would change what it means.
+            let payload = crate::background::ChildPayload::native(std::slice::from_ref(stmt))?;
             if crate::background::spawn_background(&payload, &cmd_str, env).is_ok() {
                 return Ok(Flow::Normal);
             }

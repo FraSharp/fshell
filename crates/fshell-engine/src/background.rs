@@ -92,6 +92,18 @@ pub enum ChildPayload {
     /// parsed shell code as text cannot be done faithfully (here-document
     /// bodies, for one, must follow the line that names them).
     PosixProgram(String),
+    /// Native statements the parent already parsed, serialized. Run by the
+    /// native engine in the child, for the same reason.
+    NativeProgram(String),
+}
+
+impl ChildPayload {
+    /// Native statements as a payload.
+    pub fn native(stmts: &[fshell_core::Stmt]) -> Result<Self, EngineError> {
+        serde_json::to_string(stmts)
+            .map(ChildPayload::NativeProgram)
+            .map_err(|e| generic(format!("child shell: cannot serialize program: {e}")))
+    }
 }
 
 /// The PID `$$` reports: the shell's own, which a subshell process inherits
@@ -138,6 +150,7 @@ pub fn prepare_child(payload: &ChildPayload, env: &Env) -> Result<ChildLaunch, E
     let (text, mode) = match payload {
         ChildPayload::Source(source) => (source, "--posix"),
         ChildPayload::PosixProgram(program) => (program, "--posix-program"),
+        ChildPayload::NativeProgram(program) => (program, "--native-program"),
     };
     std::fs::write(&script_path, text)
         .map_err(|e| generic(format!("child shell: cannot write script: {e}")))?;
@@ -155,7 +168,7 @@ pub fn prepare_child(payload: &ChildPayload, env: &Env) -> Result<ChildLaunch, E
                 state_path.clone().into(),
                 script_path.clone().into(),
             ],
-            ChildPayload::PosixProgram(_) => vec![
+            ChildPayload::PosixProgram(_) | ChildPayload::NativeProgram(_) => vec![
                 "--handoff".into(),
                 state_path.clone().into(),
                 mode.into(),

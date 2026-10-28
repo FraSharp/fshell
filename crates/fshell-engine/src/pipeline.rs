@@ -3772,10 +3772,23 @@ async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
         return Ok(Flow::Normal);
     }
 
+    run_statements(&stmts, env, Some(input)).await
+}
+
+/// Run parsed top-level statements the way a script runs: each statement's
+/// status is published, `exit` ends the run, and a stray `break`/`continue`/
+/// `return` is an error. `source` is the text they were parsed from, when
+/// there is one, for `set -x` and diagnostics.
+pub async fn run_statements(
+    stmts: &[Stmt],
+    env: &Env,
+    source: Option<&str>,
+) -> Result<Flow, EngineError> {
+    let input = source.unwrap_or_default();
     for stmt in stmts {
         let xtrace = env.options.read().xtrace;
         if xtrace {
-            let mut current = &stmt;
+            let mut current = stmt;
             let mut span_opt = None;
             while let Stmt::Spanned { stmt: inner, span } = current {
                 span_opt = Some(*span);
@@ -3796,10 +3809,10 @@ async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
         // single uncontended lock check and get None back.
         let _stmt_guard = crate::profiler::ProfilerState::guard(
             &env.profiler,
-            &stmt_label(&stmt),
+            &stmt_label(stmt),
             crate::profiler::ProfilerCategory::Source,
         );
-        match run_script_stmt(&stmt, env).await {
+        match run_script_stmt(stmt, env).await {
             Err(e) => {
                 env.set_last_error_with_source(
                     FshDiag::new(e.clone()),

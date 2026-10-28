@@ -49,6 +49,11 @@ struct Cli {
     #[arg(long = "posix-program", value_name = "PATH", hide = true)]
     posix_program: Option<String>,
 
+    /// Evaluate parsed native statements as a background job of the shell
+    /// that wrote them (internal)
+    #[arg(long = "native-program", value_name = "PATH", hide = true)]
+    native_program: Option<String>,
+
     /// Error output format: graphical, compact, or json
     #[arg(long = "error-format", value_name = "FORMAT")]
     error_format: Option<String>,
@@ -391,6 +396,28 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
             }
         };
         exit_with_trace(&trace, code, TraceMode::Posix, SpanOutcome::Exit);
+    }
+    if let Some(program_path) = &cli.native_program {
+        let statements = std::fs::read_to_string(program_path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| {
+                serde_json::from_str::<Vec<fshell_core::Stmt>>(&text).map_err(|e| e.to_string())
+            });
+        let code = match statements {
+            Ok(statements) => match fshell_engine::run_statements(&statements, &env, None).await {
+                Ok(Flow::Exit(code)) => code,
+                Ok(_) => env.exit_code() as i32,
+                Err(error) => {
+                    eprintln!("fsh: {error}");
+                    1
+                }
+            },
+            Err(error) => {
+                eprintln!("fsh: cannot read child program '{program_path}': {error}");
+                2
+            }
+        };
+        exit_with_trace(&trace, code, TraceMode::Script, SpanOutcome::Exit);
     }
 
     // For the REPL path the login environment is loaded by ftui's

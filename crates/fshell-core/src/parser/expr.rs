@@ -934,7 +934,7 @@ impl Parser {
                     let is_expansion = self.pos + 1 < self.input.len()
                         && (matches!(
                             self.input[self.pos + 1],
-                            '{' | '(' | '\'' | '?' | '#' | '@' | '*' | '$'
+                            '{' | '(' | '\'' | '?' | '#' | '@' | '*' | '$' | '!'
                         ) || self.input[self.pos + 1].is_ascii_digit()
                             || self.input[self.pos + 1].is_ascii_alphabetic()
                             || self.input[self.pos + 1] == '_');

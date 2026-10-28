@@ -842,6 +842,16 @@ fn native_word_model_cases() -> Vec<Case> {
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native)
         .features(&["native", "read"]),
+        // A background statement runs natively, and `wait` reports its status.
+        Case::native(
+            "native/background-runs-natively",
+            "let n = 4; sh -c \"exit $n\" & wait $!; emit --stdout \"rc=$?\"",
+            "rc=4\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "background"]),
         // A leading `+` starts a word, as a leading `-` does: `date +%Y`.
         Case::native(
             "native/plus-word-is-an-argument",

@@ -3883,7 +3883,8 @@ pub use eval::{
 pub use format::{cmp_vals, format_expr, format_pipeline};
 pub use glob::expand_globs;
 pub use pipeline::{
-    collect_pipeline, execute_pipeline, populate_env_from_host, run_script, spawn_pipeline_stream,
+    collect_pipeline, execute_pipeline, populate_env_from_host, run_script, run_statements,
+    spawn_pipeline_stream,
 };
 pub use suggestions::{get_suggested_command, is_script_trusted, parse_json_value};
 
