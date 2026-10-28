@@ -1743,6 +1743,20 @@ fn routing_cases() -> Vec<Case> {
         .engines(&[Engine::Auto])
         .expect_engine(Engine::Posix)
         .features(&["routing", "posix", "multiline"]),
+        // Native models descriptors 0–2. Duplicating among them is native;
+        // naming any other descriptor is POSIX syntax and goes there.
+        Case::posix("routing/stderr-duplication-stays-native", "echo err >&2; echo out")
+            .compare_stderr()
+            .engines(&[Engine::Native, Engine::Auto])
+            .expect_engine(Engine::Native)
+            .features(&["routing", "native", "redirect"]),
+        Case::posix(
+            "routing/high-descriptor-routes-to-posix",
+            "exec 3>&1; emit --stdout via3 >&3",
+        )
+        .engines(&[Engine::Auto])
+        .expect_engine(Engine::Posix)
+        .features(&["routing", "posix", "redirect"]),
         Case::posix("routing/brace-group-routes-to-posix", "{ echo hi; }")
             .engines(&[Engine::Auto])
             .expect_engine(Engine::Posix)

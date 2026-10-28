@@ -1040,8 +1040,70 @@ impl Parser {
         path
     }
 
+    /// Describe a redirection at the cursor that only the POSIX engine can
+    /// perform, if there is one.
+    fn posix_only_redirection(&self) -> Option<String> {
+        let rest = &self.input[self.pos..];
+        let digits = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+        let after = &rest[digits..];
+        let is_redirect = matches!(after.first(), Some('<' | '>'));
+        if !is_redirect {
+            return None;
+        }
+        // The descriptor being redirected.
+        if digits > 0 {
+            let fd: String = rest[..digits].iter().collect();
+            if fd.parse::<u32>().map_or(true, |fd| fd > 2) {
+                return Some(format!("redirection of descriptor {fd} is POSIX syntax"));
+            }
+        }
+        match after {
+            ['<', '>', ..] => Some("`<>` is POSIX syntax".to_string()),
+            ['<', '&', ..] => Some("`<&` is POSIX syntax".to_string()),
+            ['>', '&', target @ ..] => {
+                let n = target.iter().take_while(|c| c.is_ascii_digit()).count();
+                let fd: String = target[..n].iter().collect();
+                (n > 0 && fd.parse::<u32>().map_or(true, |fd| fd > 2))
+                    .then(|| format!("duplication onto descriptor {fd} is POSIX syntax"))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn parse_redirect(&mut self) -> Result<Option<PipelineStage>, ParseError> {
         self.skip_whitespace();
+
+        // Native models descriptors 0–2 only. A redirection naming any other
+        // (`3> f`, `>&5`, `exec 4<&0`) or the read-write and input-duplication
+        // forms is POSIX syntax: reject it so the input goes to the POSIX
+        // engine, which has a full descriptor table, instead of being misread.
+        if let Some(message) = self.posix_only_redirection() {
+            return Err(ParseError::SyntaxError {
+                message,
+                span: self.current_span(),
+            });
+        }
+
+        // `>&N` / `1>&N`: duplicate stdout onto a standard descriptor.
+        if self.peek() == Some('>')
+            && self.input.get(self.pos + 1) == Some(&'&')
+            && let Some(&dst) = self.input.get(self.pos + 2)
+            && matches!(dst, '0'..='2' | '-')
+            && self
+                .input
+                .get(self.pos + 3)
+                .is_none_or(|c| c.is_whitespace() || matches!(c, ';' | '|' | '&' | ')' | '}'))
+        {
+            self.next_char();
+            self.next_char();
+            self.next_char();
+            let dst_fd = if dst == '-' {
+                -1
+            } else {
+                (dst as u8 - b'0') as i32
+            };
+            return Ok(Some(PipelineStage::FdRedirect { src_fd: 1, dst_fd }));
+        }
 
         // Here-string: `<<< word` — feeds word as stdin (with trailing newline)
         if self.peek() == Some('<')
