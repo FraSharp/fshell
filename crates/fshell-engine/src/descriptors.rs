@@ -82,6 +82,18 @@ impl DescriptorTable {
         self.entries.insert(fd, descriptor)
     }
 
+    /// Bind `descriptor` to the lowest number at or above 3 that is free, and
+    /// return that number. Child descriptors start at 3, so a name handed to a
+    /// command (`/dev/fd/N`) stays out of the way of its standard streams.
+    pub fn allocate(&mut self, descriptor: Descriptor) -> i32 {
+        let mut fd = 3;
+        while self.entries.contains_key(&fd) {
+            fd += 1;
+        }
+        self.entries.insert(fd, descriptor);
+        fd
+    }
+
     /// Close `fd`, returning what it was bound to before.
     pub fn close(&mut self, fd: i32) -> Option<Descriptor> {
         self.entries.remove(&fd)

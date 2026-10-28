@@ -1486,6 +1486,15 @@ impl Env {
         invocation
     }
 
+    /// A clone that shares shell state but records status in its own execution
+    /// state, for work that runs concurrently with the statement that started
+    /// it (a process substitution's child).
+    pub fn with_isolated_execution(&self) -> Self {
+        let mut clone = self.clone();
+        clone.execution = Arc::new(execution::ExecutionState::new(self.exit_code()));
+        clone
+    }
+
     /// Clone the environment while assigning explicit ancestry to work started
     /// from that clone. Shared shell state remains shared, but trace context is
     /// a value and is therefore safe to specialize per asynchronous task.

@@ -92,10 +92,13 @@ impl<'a> Redirected<'a> {
                             self.duplicate(fd, parse_fd(&text)?)?;
                         }
                     }
-                    IoFileRedirectTarget::ProcessSubstitution(..) => {
-                        return Err(failure(
-                            "process substitution is a bash extension the POSIX engine does not provide",
-                        ));
+                    IoFileRedirectTarget::ProcessSubstitution(kind, subshell) => {
+                        // `> >(cmd)` sends the shell's output into the child,
+                        // exactly as the `>(cmd)` word names that same pipe.
+                        let shell_end = crate::eval::spawn_process_substitution(
+                            kind, subshell, self.env, positional,
+                        )?;
+                        self.bind(fd, Some(Descriptor::File(Arc::new(shell_end))));
                     }
                 }
             }

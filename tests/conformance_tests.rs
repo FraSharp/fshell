@@ -768,6 +768,13 @@ fn redirection_cases() -> Vec<Case> {
         )
         .expect_engine(Engine::Native)
         .features(&["redirect", "command_not_found", "pipeline"]),
+        Case::posix(
+            "redirect/process-substitution-is-a-word",
+            "diff <(printf 'a\\n') <(printf 'a\\n') && emit --stdout same",
+        )
+        .bash_only()
+        .expect_engine(Engine::Native)
+        .features(&["redirect", "process_substitution", "bash_extension"]),
     ]
 }
 
@@ -1621,16 +1628,10 @@ fn real_world_cases() -> Vec<Case> {
         )
         .bash_posix_only()
         .features(&["real_world", "bash_extension"]),
-        Case::posix_only("real_world/process-substitution", "cat <(emit --stdout sub)")
+        Case::posix("real_world/process-substitution", "cat <(emit --stdout sub)")
             .bash_only()
-            .features(&["real_world", "bash_extension"])
-            .known_failure(
-                "posix-process-substitution-silently-empty",
-                "process substitution is accepted but produces nothing, so \
-                 `cat <(cmd)` prints an empty stream instead of the command's \
-                 output — a silent mis-execution rather than an explicit rejection",
-                &[Engine::Posix],
-            ),
+            .expect_engine(Engine::Native)
+            .features(&["real_world", "bash_extension", "process_substitution"]),
         Case::posix_only(
             "real_world/conditional-execution",
             "[ -f Cargo.toml ] && emit --stdout manifest || emit --stdout absent",

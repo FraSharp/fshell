@@ -1273,12 +1273,9 @@ pub fn eval_expr_flow<'a>(
                     let tmp = tempfile::NamedTempFile::new()
                         .map_err(|e| EngineError::from(format!("process substitution: {}", e)))?;
                     let path = tmp.path().to_path_buf();
-                    let results = collect_pipeline(pipeline, env).await?;
-                    let mut out = String::new();
-                    for r in results {
-                        out.push_str(&r.to_text());
-                        out.push('\n');
-                    }
+                    // The command sees the producer's bytes exactly as they
+                    // left it, not re-framed values.
+                    let out = crate::pipeline::collect_pipeline_bytes(pipeline, env).await?;
                     std::fs::write(&path, &out)
                         .map_err(|e| EngineError::from(format!("process substitution: {}", e)))?;
                     let temp_path = tmp.into_temp_path();
@@ -2051,24 +2048,34 @@ fn try_eval_stmt_sync_inner(
     }
 }
 
+/// Append the bytes `value` contributes to stdout: blobs pass through, every
+/// other value is one line of its external rendering.
+pub(crate) fn append_val_stdout(value: &Val, out: &mut Vec<u8>) {
+    match value {
+        Val::Blob(bytes) => out.extend_from_slice(bytes),
+        Val::String(text) => {
+            out.extend_from_slice(text.as_bytes());
+            out.push(b'\n');
+        }
+        other => {
+            out.extend_from_slice(external_text(other).as_bytes());
+            out.push(b'\n');
+        }
+    }
+}
+
 /// Write a streaming pipeline value to the real stdout, preserving binary
 /// Blob bytes verbatim (no coercion, no added newline).
 pub(crate) fn write_val_stdout(v: &Val) {
     use std::io::Write;
+    let mut bytes = Vec::new();
+    append_val_stdout(v, &mut bytes);
+    if matches!(v, Val::Blob(_)) {
+        fshell_tty::mark_cursor_state_unknown_for_stdout_output(&bytes);
+    }
     let out = std::io::stdout();
     let mut h = out.lock();
-    match v {
-        Val::Blob(b) => {
-            fshell_tty::mark_cursor_state_unknown_for_stdout_output(b);
-            let _ = h.write_all(b);
-        }
-        Val::String(s) => {
-            let _ = writeln!(h, "{s}");
-        }
-        other => {
-            let _ = writeln!(h, "{}", external_text(other));
-        }
-    }
+    let _ = h.write_all(&bytes);
     let _ = h.flush();
 }
 

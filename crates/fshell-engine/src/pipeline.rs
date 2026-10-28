@@ -66,7 +66,18 @@ async fn forward_bytes_as_lines(tx: &PipeSender, b: &[u8]) {
     }
 }
 
-pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>, EngineError> {
+/// One piece of a captured pipeline's output.
+enum CapturedOutput {
+    /// A structured value from a builtin or pipeline stage.
+    Value(Val),
+    /// Bytes an external stage wrote, exactly as they left the process.
+    Bytes(bytes::Bytes),
+}
+
+async fn capture_pipeline_output(
+    pipeline: &Pipeline,
+    env: &Env,
+) -> Result<Vec<CapturedOutput>, EngineError> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
     let mut env_clone = env.clone();
     env_clone.is_captured = true;
@@ -93,10 +104,8 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
             break;
         }
         match payload {
-            PipelinePayload::Data(v) => results.push((*v).clone()),
-            PipelinePayload::Bytes(b) => {
-                results.push(Val::String(String::from_utf8_lossy(&b).into_owned()));
-            }
+            PipelinePayload::Data(v) => results.push(CapturedOutput::Value((*v).clone())),
+            PipelinePayload::Bytes(b) => results.push(CapturedOutput::Bytes(b)),
             PipelinePayload::Structured(d) => {
                 // Command stderr stream content is output, not failure: pass
                 // it to the shell's stderr and keep collecting.
@@ -130,6 +139,36 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
     let nested = crate::pipeline_finalize(&outcomes, Vec::new(), env.options.read().pipefail);
     env.record_stage_status(nested.exit_code);
     Ok(results)
+}
+
+pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>, EngineError> {
+    Ok(capture_pipeline_output(pipeline, env)
+        .await?
+        .into_iter()
+        .map(|output| match output {
+            CapturedOutput::Value(value) => value,
+            CapturedOutput::Bytes(bytes) => {
+                Val::String(String::from_utf8_lossy(&bytes).into_owned())
+            }
+        })
+        .collect())
+}
+
+/// The pipeline's output exactly as it would leave the shell: an external
+/// stage's bytes untouched, a value rendered as stdout renders it. A process
+/// substitution writes this to the path it hands its command.
+pub async fn collect_pipeline_bytes(
+    pipeline: &Pipeline,
+    env: &Env,
+) -> Result<Vec<u8>, EngineError> {
+    let mut bytes = Vec::new();
+    for output in capture_pipeline_output(pipeline, env).await? {
+        match output {
+            CapturedOutput::Bytes(chunk) => bytes.extend_from_slice(&chunk),
+            CapturedOutput::Value(value) => crate::eval::append_val_stdout(&value, &mut bytes),
+        }
+    }
+    Ok(bytes)
 }
 
 /// Spawn a pipeline and return a receiver that streams results as they arrive.

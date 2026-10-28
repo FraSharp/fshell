@@ -710,7 +710,7 @@ async fn eval_compound_command(
             // A subshell is a real child process: it gets its own PID and
             // signals, and its `exit`/assignments cannot touch the parent.
             let payload = crate::child::list_payload(&sub.list, env, cfg)?;
-            let code = run_child_shell(&payload, env).await?;
+            let code = run_child_shell(&payload, env, owns_terminal(env)).await?;
             env.set_exit_code(code as i64);
             Ok(code)
         }
@@ -1005,6 +1005,9 @@ async fn eval_simple_command(
         )?,
         None => Vec::new(),
     };
+    // Process substitutions live for this command: their ends stay bound until
+    // the command has finished with them.
+    let mut process_substitutions = Vec::new();
     if let Some(suffix) = &simple.suffix {
         for (item_index, item) in suffix.0.iter().enumerate() {
             match item {
@@ -1076,7 +1079,15 @@ async fn eval_simple_command(
                 CommandPrefixOrSuffixItem::IoRedirect(r) => {
                     redirects.push(r);
                 }
-                _ => {}
+                CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell) => {
+                    args.push(start_process_substitution(
+                        kind,
+                        subshell,
+                        env,
+                        cfg,
+                        &mut process_substitutions,
+                    )?);
+                }
             }
         }
     }
@@ -2164,7 +2175,7 @@ enum SpawnError {
 /// Start `cmd` with this environment's descriptors, register it as the
 /// foreground job, and wait for it while serving its in-process descriptors.
 async fn spawn_supervised(
-    mut cmd: std::process::Command,
+    cmd: std::process::Command,
     env: &Env,
     label: &str,
     is_interactive: bool,
@@ -2175,19 +2186,7 @@ async fn spawn_supervised(
             span: None,
         }))
     };
-    let child_fds = ChildDescriptors::prepare(&env.descriptors.read().clone()).map_err(io_error)?;
-    child_fds.attach(&mut cmd).map_err(io_error)?;
-    fshell_engine::job_control::configure_child_launch(&mut cmd, 0, is_interactive);
-
-    let mut cmd = tokio::process::Command::from(cmd);
-    let spawned = {
-        let _launch = fshell_engine::job_control::launch_guard();
-        cmd.spawn()
-    };
-    // The command owns the child's copies of the descriptors; keeping them
-    // would hold pipe write ends open past the child.
-    drop(cmd);
-    let mut child = spawned.map_err(SpawnError::Launch)?;
+    let mut child = launch_supervised(cmd, env, is_interactive, &io_error)?;
 
     let child_pid = child.id().map(|id| id as i32);
     let _fg_guard = PosixForegroundGuard::new(env, child_pid, label, is_interactive);
@@ -2231,6 +2230,138 @@ async fn spawn_supervised(
     Ok(code)
 }
 
+/// Start `cmd` with this environment's descriptors and return the child.
+///
+/// Launching is separate from waiting so a process substitution's child can
+/// exist before the command it serves runs, while its reaping stays off the
+/// parent's path.
+fn launch_supervised(
+    mut cmd: std::process::Command,
+    env: &Env,
+    is_interactive: bool,
+    io_error: &impl Fn(std::io::Error) -> SpawnError,
+) -> Result<tokio::process::Child, SpawnError> {
+    let child_fds = ChildDescriptors::prepare(&env.descriptors.read().clone()).map_err(io_error)?;
+    child_fds.attach(&mut cmd).map_err(io_error)?;
+    fshell_engine::job_control::configure_child_launch(&mut cmd, 0, is_interactive);
+
+    let mut cmd = tokio::process::Command::from(cmd);
+    let spawned = {
+        let _launch = fshell_engine::job_control::launch_guard();
+        cmd.spawn()
+    };
+    // The command owns the child's copies of the descriptors; keeping them
+    // would hold pipe write ends open past the child.
+    drop(cmd);
+    spawned.map_err(SpawnError::Launch)
+}
+
+/// A process substitution running for the duration of one command.
+///
+/// The command receives `/dev/fd/N`: N is bound in the shell's descriptor table
+/// to the end the command uses, and the child owns the other end. Dropping the
+/// guard closes the shell's end, which is what lets the child see end-of-input;
+/// the detached task reaps the child.
+struct RunningProcessSubstitution {
+    env: Env,
+    fd: i32,
+}
+
+impl Drop for RunningProcessSubstitution {
+    fn drop(&mut self) {
+        self.env.descriptors.write().close(self.fd);
+    }
+}
+
+/// Start the child of `<(...)` or `>(...)` and return the pipe end the shell's
+/// command uses. The child is a separate process running the subshell in POSIX
+/// mode, with the other end on its standard input or output.
+pub(crate) fn spawn_process_substitution(
+    kind: &ProcessSubstitutionKind,
+    subshell: &SubshellCommand,
+    env: &Env,
+    positional: &[String],
+) -> Result<std::fs::File, PosixError> {
+    let (read_end, write_end) = descriptors::pipe().map_err(|error| {
+        PosixError::Engine(EngineError::IoError {
+            message: format!(
+                "process substitution: {}",
+                crate::redirect::os_message(&error)
+            ),
+            span: None,
+        })
+    })?;
+    let (shell_end, child_end, child_fd) = match kind {
+        ProcessSubstitutionKind::Read => (read_end, write_end, 1),
+        ProcessSubstitutionKind::Write => (write_end, read_end, 0),
+    };
+    let cfg = EvalConfig {
+        positional: positional.to_vec(),
+        errexit: true,
+    };
+    let payload = crate::child::list_payload(&subshell.list, env, &cfg)?;
+    let child_env = crate::bridge::fork_env_for_subshell(env).with_isolated_execution();
+    child_env
+        .descriptors
+        .write()
+        .set(child_fd, Descriptor::File(std::sync::Arc::new(child_end)));
+    let launch = fshell_engine::background::prepare_child(&payload, &child_env)?;
+    let mut cmd = std::process::Command::new(&launch.program);
+    cmd.args(&launch.args);
+    cmd.current_dir(child_env.cwd());
+    configure_child_environment(&mut cmd, &child_env, &[]);
+    // The child exists before the command it serves runs, so data written to
+    // the pipe has a reader. Only reaping is left to the background task.
+    let io_error = |error: std::io::Error| {
+        SpawnError::Shell(PosixError::Engine(EngineError::IoError {
+            message: format!(
+                "process substitution: {}",
+                crate::redirect::os_message(&error)
+            ),
+            span: None,
+        }))
+    };
+    let mut child =
+        launch_supervised(cmd, &child_env, false, &io_error).map_err(|error| match error {
+            SpawnError::Launch(error) => PosixError::Engine(EngineError::IoError {
+                message: format!(
+                    "process substitution: {}",
+                    crate::redirect::os_message(&error)
+                ),
+                span: None,
+            }),
+            SpawnError::Shell(error) => error,
+        })?;
+    let temp_files = launch.temp_files;
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+        for file in &temp_files {
+            let _ = std::fs::remove_file(file);
+        }
+    });
+    Ok(shell_end)
+}
+
+/// Start `<(...)` or `>(...)` as a word and return the path naming its end.
+fn start_process_substitution(
+    kind: &ProcessSubstitutionKind,
+    subshell: &SubshellCommand,
+    env: &Env,
+    cfg: &EvalConfig,
+    running: &mut Vec<RunningProcessSubstitution>,
+) -> Result<String, PosixError> {
+    let shell_end = spawn_process_substitution(kind, subshell, env, &cfg.positional)?;
+    let fd = env
+        .descriptors
+        .write()
+        .allocate(Descriptor::File(std::sync::Arc::new(shell_end)));
+    running.push(RunningProcessSubstitution {
+        env: env.clone(),
+        fd,
+    });
+    Ok(format!("/dev/fd/{fd}"))
+}
+
 /// Evaluate `payload` in a child `fsh` process (POSIX mode), as a subshell.
 ///
 /// A real process gives the subshell its own PID, signals, umask and `exit`
@@ -2239,13 +2370,14 @@ async fn spawn_supervised(
 async fn run_child_shell(
     payload: &fshell_engine::background::ChildPayload,
     env: &Env,
+    is_interactive: bool,
 ) -> Result<i32, PosixError> {
     let launch = fshell_engine::background::prepare_child(payload, env)?;
     let mut cmd = std::process::Command::new(&launch.program);
     cmd.args(&launch.args);
     cmd.current_dir(env.cwd());
     configure_child_environment(&mut cmd, env, &[]);
-    let result = spawn_supervised(cmd, env, "subshell", owns_terminal(env)).await;
+    let result = spawn_supervised(cmd, env, "subshell", is_interactive).await;
     for file in &launch.temp_files {
         let _ = std::fs::remove_file(file);
     }
