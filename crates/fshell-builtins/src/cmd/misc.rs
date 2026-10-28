@@ -699,6 +699,19 @@ fn parse_int_str(s: &str) -> Result<i64, String> {
         .map_err(|_| format!("test: integer expression expected: '{}'", s))
 }
 
+/// A predicate answers through its status. Its Bool value is output only when
+/// something consumes it — a substitution or a later pipeline stage — so
+/// `test -f f && echo yes` prints `yes`, not `true` and `yes`.
+fn emit_predicate(env: &Env, tx: PipeSender, value: bool) {
+    if env.is_captured || !env.is_last_stage {
+        tokio::spawn(async move {
+            let _ = tx
+                .send(PipelinePayload::Data(Arc::new(Val::Bool(value))))
+                .await;
+        });
+    }
+}
+
 pub fn test_builtin(
     _in_rx: Option<PipeStream>,
     args: Vec<Val>,
@@ -707,11 +720,7 @@ pub fn test_builtin(
     span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     if args.is_empty() {
-        tokio::spawn(async move {
-            let _ = tx
-                .send(PipelinePayload::Data(Arc::new(Val::Bool(false))))
-                .await;
-        });
+        emit_predicate(env, tx, false);
         return Err(ShellError::condition_false());
     }
 
@@ -727,11 +736,7 @@ pub fn test_builtin(
         .into());
     }
 
-    tokio::spawn(async move {
-        let _ = tx
-            .send(PipelinePayload::Data(Arc::new(Val::Bool(res))))
-            .await;
-    });
+    emit_predicate(env, tx, res);
 
     if res {
         Ok(())
@@ -1124,30 +1129,22 @@ pub fn printf_builtin(
 pub fn true_builtin(
     _in_rx: Option<PipeStream>,
     _args: Vec<Val>,
-    _env: &Env,
+    env: &Env,
     tx: PipeSender,
     _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
-    tokio::spawn(async move {
-        let _ = tx
-            .send(PipelinePayload::Data(Arc::new(Val::Bool(true))))
-            .await;
-    });
+    emit_predicate(env, tx, true);
     Ok(())
 }
 
 pub fn false_builtin(
     _in_rx: Option<PipeStream>,
     _args: Vec<Val>,
-    _env: &Env,
+    env: &Env,
     tx: PipeSender,
     _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
-    tokio::spawn(async move {
-        let _ = tx
-            .send(PipelinePayload::Data(Arc::new(Val::Bool(false))))
-            .await;
-    });
+    emit_predicate(env, tx, false);
     Err(ShellError::condition_false())
 }
 
