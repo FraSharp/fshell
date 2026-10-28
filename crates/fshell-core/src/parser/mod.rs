@@ -102,6 +102,20 @@ pub struct Parser {
     /// for a block; `)` while parsing a `$(...)` statement list.
     statement_terminator: char,
     recursion_depth: std::cell::Cell<usize>,
+    /// Here-document headers on the command line being parsed, in source order.
+    /// A here-document body starts after the newline that ends the line, so a
+    /// pending header makes that newline a command-line boundary.
+    pending_heredocs: Vec<PendingHeredoc>,
+    /// Bodies read so far, in header order. They are attached to their stages
+    /// once the whole input is parsed, when the AST is available to walk.
+    heredoc_bodies: Vec<Expr>,
+}
+
+/// A `<<DELIM` / `<<-DELIM` header whose body has not been read yet.
+pub(crate) struct PendingHeredoc {
+    delimiter: String,
+    strip_tabs: bool,
+    quoted: bool,
 }
 
 pub(crate) const MAX_PARSER_RECURSION: usize = 1024;
@@ -1807,6 +1821,97 @@ mod tests {
             .parse_statements()
             .unwrap();
         assert_eq!(stmts.len(), 1);
+    }
+
+    /// The pipeline of a statement parsed as a bare command.
+    fn pipeline_of(stmt: &Stmt) -> Option<&Pipeline> {
+        match stmt {
+            Stmt::Spanned { stmt, .. } => pipeline_of(stmt),
+            Stmt::Expr(Expr::Pipeline(pipeline)) => Some(pipeline),
+            Stmt::Expr(Expr::Spanned { expr, .. }) => match expr.unpack() {
+                Expr::Pipeline(pipeline) => Some(pipeline),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn heredoc_body(stmt: &Stmt) -> Option<String> {
+        let stage = pipeline_of(stmt)?
+            .stages
+            .iter()
+            .find(|stage| matches!(stage, PipelineStage::Heredoc { .. }))?;
+        let PipelineStage::Heredoc { content, .. } = stage else {
+            return None;
+        };
+        match content {
+            Expr::RawMultiLineString(text) => Some(text.clone()),
+            Expr::MultiLineString { parts, .. } => Some(
+                parts
+                    .iter()
+                    .map(|part| match part {
+                        StringPart::Lit { text, .. } => text.clone(),
+                        StringPart::Expr { .. } => "<expr>".to_string(),
+                    })
+                    .collect(),
+            ),
+            other => panic!("unexpected here-document body: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_heredocs_on_one_line_read_bodies_in_order() {
+        // Every body starts after the newline that ends the command line, in
+        // header order — `cat <<A; cat <<B` is two commands, each with its own
+        // body, not one command whose body is the rest of the line.
+        let stmts = Parser::new("cat <<A; cat <<B\none\nA\ntwo\nB\n")
+            .parse_statements()
+            .unwrap();
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(heredoc_body(&stmts[0]).as_deref(), Some("one"));
+        assert_eq!(heredoc_body(&stmts[1]).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn test_heredoc_bodies_pair_across_and_chain() {
+        let stmts = Parser::new("cat <<A && cat <<B\none\nA\ntwo\nB\n")
+            .parse_statements()
+            .unwrap();
+        assert_eq!(stmts.len(), 1);
+        let Stmt::And(lhs, rhs) = stmts[0].unpack() else {
+            panic!("expected an and-chain, got {:?}", stmts[0]);
+        };
+        assert_eq!(heredoc_body(lhs).as_deref(), Some("one"));
+        assert_eq!(heredoc_body(rhs).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn test_heredoc_body_may_start_with_a_blank_line() {
+        let stmts = Parser::new("cat <<A\n\nx\nA\n").parse_statements().unwrap();
+        assert_eq!(heredoc_body(&stmts[0]).as_deref(), Some("\nx"));
+    }
+
+    #[test]
+    fn test_heredoc_inside_block_reads_body_after_the_line() {
+        let stmts = Parser::new("if true { cat <<EOF }\nhello\nEOF\n")
+            .parse_statements()
+            .unwrap();
+        assert_eq!(stmts.len(), 1);
+        let Stmt::Spanned { stmt, .. } = &stmts[0] else {
+            panic!("expected a spanned statement");
+        };
+        let Stmt::Expr(Expr::Spanned { expr, .. }) = stmt.unpack() else {
+            panic!("expected an if expression, got {stmt:?}");
+        };
+        let Expr::If { then_body, .. } = expr.unpack() else {
+            panic!("expected an if expression, got {expr:?}");
+        };
+        assert_eq!(heredoc_body(&then_body[0]).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_unterminated_heredoc_is_an_error() {
+        assert!(Parser::new("cat <<EOF\nbody\n").parse_statements().is_err());
     }
 
     #[test]

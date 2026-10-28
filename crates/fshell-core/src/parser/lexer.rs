@@ -25,6 +25,8 @@ impl Parser {
             bool_ops: false,
             statement_terminator: '}',
             recursion_depth: std::cell::Cell::new(0),
+            pending_heredocs: Vec::new(),
+            heredoc_bodies: Vec::new(),
         }
     }
 
@@ -104,6 +106,12 @@ impl Parser {
 
     pub(crate) fn skip_whitespace(&mut self) {
         while let Some(c) = self.peek() {
+            // A here-document body starts after the newline that ends the
+            // command line, so while a header is pending the newline is a
+            // boundary, not whitespace.
+            if !self.pending_heredocs.is_empty() && (c == '\n' || c == '\r') {
+                break;
+            }
             if c.is_whitespace() {
                 self.next_char();
             } else if c == '\\'

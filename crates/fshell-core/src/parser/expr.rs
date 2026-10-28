@@ -2472,30 +2472,15 @@ impl Parser {
         Ok((delimiter, strip_tabs, quoted_delimiter))
     }
 
+    /// Read a here-document body starting at its first line. The caller has
+    /// already consumed the newline that ends the command line carrying the
+    /// header, so a blank first line is body content, not a separator.
     pub(crate) fn collect_heredoc_body(
         &mut self,
         delimiter: &str,
         strip_tabs: bool,
         quoted: bool,
     ) -> Result<Expr, ParseError> {
-        // Body starts at beginning of next line. Consume the single newline after delimiter line if present.
-        if self.peek() == Some('\n') || self.peek() == Some('\r') {
-            self.next_char();
-            if self.peek() == Some('\n') {
-                self.next_char();
-            }
-        } else if !self.is_eof() {
-            // If we are still on same line (e.g. `<<EOF > file` case, the `> file` was already parsed and we are at `\n`), ensure we move to next line.
-            while self.peek() == Some(' ') || self.peek() == Some('\t') {
-                self.next_char();
-            }
-            if self.peek() == Some('\n') || self.peek() == Some('\r') {
-                self.next_char();
-                if self.peek() == Some('\n') {
-                    self.next_char();
-                }
-            }
-        }
         let mut content = String::new();
         let mut found_delimiter = false;
         loop {
@@ -2575,7 +2560,8 @@ impl Parser {
 
     pub(crate) fn parse_heredoc_inner(&mut self) -> Result<(Expr, bool, bool), ParseError> {
         let (delimiter, strip_tabs, quoted) = self.parse_heredoc_header()?;
-        // For `let x = <<EOF` immediate body: consume newline and read body now.
+        // `let x = <<EOF` binds the body that follows this line.
+        self.consume_line_ending();
         let expr = self.collect_heredoc_body(&delimiter, strip_tabs, quoted)?;
         Ok((expr, strip_tabs, quoted))
     }

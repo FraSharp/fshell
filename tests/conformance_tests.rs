@@ -685,6 +685,45 @@ fn redirection_cases() -> Vec<Case> {
             "while :; do echo y; done | head -n 2",
         )
         .features(&["redirect", "pipeline", "sigpipe"]),
+        // --- here-document lines -------------------------------------------------
+        // Every body on a command line follows the newline that ends the line,
+        // in header order, so one line may declare several here-documents.
+        Case::posix(
+            "redirect/two-heredocs-on-one-line",
+            "cat <<A; cat <<B\none\nA\ntwo\nB\n",
+        )
+        .expect_engine(Engine::Native)
+        .features(&["redirect", "heredoc"]),
+        Case::posix(
+            "redirect/heredoc-bodies-pair-across-and-chain",
+            "cat <<A && cat <<B\none\nA\ntwo\nB\n",
+        )
+        .expect_engine(Engine::Native)
+        .features(&["redirect", "heredoc", "and_or"]),
+        Case::posix(
+            "redirect/heredoc-body-may-start-with-a-blank-line",
+            "cat <<A\n\nx\nA\n",
+        )
+        .expect_engine(Engine::Native)
+        .features(&["redirect", "heredoc"]),
+        Case::native(
+            "native/heredoc-in-block-reads-body-after-the-line",
+            "if true { cat <<EOF }\nhello\nEOF\n",
+            "hello\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "heredoc", "block"]),
+        Case::native(
+            "native/heredoc-inside-substitution",
+            "echo $(cat <<EOF\nhi\nEOF\n)",
+            "hi\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "heredoc", "command_substitution"]),
     ]
 }
 

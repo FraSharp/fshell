@@ -769,6 +769,37 @@ mod tests {
             validate_input("let x = <<'EOF'\nhello $world\nEOF\n"),
             ValidationResult::Complete
         );
+        // Several here-documents on one line are complete only once every body
+        // is terminated, and the bodies are read in header order.
+        assert_eq!(
+            validate_input("cat <<A; cat <<B\none\nA\ntwo\nB\n"),
+            ValidationResult::Complete
+        );
+        assert!(matches!(
+            validate_input("cat <<A; cat <<B\none\nA\n"),
+            ValidationResult::Incomplete {
+                prompt_hint: "heredoc"
+            }
+        ));
+        assert!(matches!(
+            validate_input("cat <<A; cat <<B\none\nA\ntwo\n"),
+            ValidationResult::Incomplete {
+                prompt_hint: "heredoc"
+            }
+        ));
+    }
+
+    #[test]
+    fn test_validate_backquote_substitution() {
+        assert!(matches!(
+            validate_input("echo `date"),
+            ValidationResult::Incomplete { .. }
+        ));
+        assert_eq!(validate_input("echo `date`"), ValidationResult::Complete);
+        assert!(matches!(
+            validate_input("echo \"a `date"),
+            ValidationResult::Incomplete { .. }
+        ));
     }
 
     #[test]

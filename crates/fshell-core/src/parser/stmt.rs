@@ -6,6 +6,8 @@ use crate::expand_braces;
 use crate::{ParseError, Parser};
 use miette::SourceSpan;
 
+use super::PendingHeredoc;
+
 /// A POSIX reserved word where a command name belongs is POSIX syntax, never
 /// a command: `case x in …`, `until …; do`, `… | while read l; do`. Native's
 /// own `if`/`for`/`while` statements are parsed before a pipeline stage is, so
@@ -60,6 +62,13 @@ impl Parser {
                 self.skip_whitespace();
                 continue;
             }
+            // A pending here-document makes the newline the end of the command
+            // line: read the bodies there, then parse the next line.
+            if self.at_command_line_end() {
+                self.finish_command_line()?;
+                self.skip_whitespace();
+                continue;
+            }
             let mut stmt = self.parse_statement()?;
             self.skip_whitespace();
             while self.pos + 1 < self.input.len() {
@@ -83,7 +92,274 @@ impl Parser {
                 self.skip_whitespace();
             }
         }
+        // A header at end of input has no newline to end its line; reading the
+        // body reports the unterminated here-document.
+        self.finish_command_line()?;
+        self.assign_heredoc_bodies(&mut stmts);
         Ok(stmts)
+    }
+}
+
+impl Parser {
+    /// Whether the cursor sits at the newline that ends a command line whose
+    /// here-document bodies have not been read yet.
+    fn at_command_line_end(&self) -> bool {
+        !self.pending_heredocs.is_empty() && self.peek().is_none_or(|c| c == '\n' || c == '\r')
+    }
+
+    pub(crate) fn consume_line_ending(&mut self) {
+        if self.peek() == Some('\r') {
+            self.next_char();
+        }
+        if self.peek() == Some('\n') {
+            self.next_char();
+        }
+    }
+
+    /// Read the bodies of the here-document headers queued on the command line
+    /// that just ended. Every body on a line follows its terminating newline, in
+    /// header order, so a line may carry several different here-documents.
+    fn finish_command_line(&mut self) -> Result<(), ParseError> {
+        if self.pending_heredocs.is_empty() {
+            return Ok(());
+        }
+        self.consume_line_ending();
+        for header in std::mem::take(&mut self.pending_heredocs) {
+            let body =
+                self.collect_heredoc_body(&header.delimiter, header.strip_tabs, header.quoted)?;
+            self.heredoc_bodies.push(body);
+        }
+        Ok(())
+    }
+
+    /// Attach the bodies read during the parse to their stages. Bodies are
+    /// queued in the order their headers appeared, and the walk visits the
+    /// stages in source order, so the two sequences pair element by element.
+    fn assign_heredoc_bodies(&mut self, stmts: &mut [Stmt]) {
+        if self.heredoc_bodies.is_empty() {
+            return;
+        }
+        let mut bodies = std::mem::take(&mut self.heredoc_bodies).into_iter();
+        for stmt in stmts {
+            assign_stmt_heredocs(stmt, &mut bodies);
+        }
+        debug_assert!(
+            bodies.next().is_none(),
+            "here-document body left without a stage"
+        );
+    }
+}
+
+/// Walk a statement in source order, giving each here-document stage the next
+/// collected body.
+fn assign_stmt_heredocs(stmt: &mut Stmt, bodies: &mut impl Iterator<Item = Expr>) {
+    match stmt {
+        Stmt::Spanned { stmt, .. } => assign_stmt_heredocs(stmt, bodies),
+        Stmt::And(lhs, rhs) | Stmt::Or(lhs, rhs) => {
+            assign_stmt_heredocs(lhs, bodies);
+            assign_stmt_heredocs(rhs, bodies);
+        }
+        Stmt::Background(inner) => assign_stmt_heredocs(inner, bodies),
+        Stmt::Expr(expr) => assign_expr_heredocs(expr, bodies),
+        Stmt::ReactiveCell { pipeline, .. } => assign_pipeline_heredocs(pipeline, bodies),
+        Stmt::Local { expr, .. } => {
+            if let Some(expr) = expr {
+                assign_expr_heredocs(expr, bodies);
+            }
+        }
+        Stmt::Let { expr, .. }
+        | Stmt::Assign { expr, .. }
+        | Stmt::Update { expr, .. }
+        | Stmt::Source { path: expr, .. }
+        | Stmt::Return(expr) => assign_expr_heredocs(expr, bodies),
+        Stmt::Exit(expr) => {
+            if let Some(expr) = expr {
+                assign_expr_heredocs(expr, bodies);
+            }
+        }
+        Stmt::FnDef { body, .. }
+        | Stmt::ReactiveCellEvery { body, .. }
+        | Stmt::Unsafe { body }
+        | Stmt::Every { body, .. } => {
+            for stmt in body {
+                assign_stmt_heredocs(stmt, bodies);
+            }
+        }
+        Stmt::TryCatch {
+            try_body,
+            catch_body,
+            ..
+        } => {
+            for stmt in try_body.iter_mut().chain(catch_body.iter_mut()) {
+                assign_stmt_heredocs(stmt, bodies);
+            }
+        }
+        Stmt::WithCaps { caps, body } => {
+            for expr in caps {
+                assign_expr_heredocs(expr, bodies);
+            }
+            for stmt in body {
+                assign_stmt_heredocs(stmt, bodies);
+            }
+        }
+        Stmt::While { condition, body } => {
+            assign_expr_heredocs(condition, bodies);
+            for stmt in body {
+                assign_stmt_heredocs(stmt, bodies);
+            }
+        }
+        Stmt::For { iter, body, .. } => {
+            assign_expr_heredocs(iter, bodies);
+            for stmt in body {
+                assign_stmt_heredocs(stmt, bodies);
+            }
+        }
+        Stmt::Match { expr, arms } => {
+            assign_expr_heredocs(expr, bodies);
+            for arm in arms {
+                for stmt in &mut arm.body {
+                    assign_stmt_heredocs(stmt, bodies);
+                }
+            }
+        }
+        Stmt::On { handler, .. } => {
+            if let OnHandler::Block(body) = handler {
+                for stmt in body {
+                    assign_stmt_heredocs(stmt, bodies);
+                }
+            }
+        }
+        Stmt::Comment(_) | Stmt::PosixBlock { .. } | Stmt::Break | Stmt::Continue => {}
+    }
+}
+
+fn assign_expr_heredocs(expr: &mut Expr, bodies: &mut impl Iterator<Item = Expr>) {
+    match expr {
+        Expr::Pipeline(pipeline) | Expr::InlinePipeline(pipeline) => {
+            assign_pipeline_heredocs(pipeline, bodies);
+        }
+        Expr::ProcessSubst { pipeline, .. } => assign_pipeline_heredocs(pipeline, bodies),
+        Expr::Substitution(stmts) => {
+            for stmt in stmts {
+                assign_stmt_heredocs(stmt, bodies);
+            }
+        }
+        Expr::Spanned { expr, .. } | Expr::Not(expr) | Expr::ArithmeticExpansion(expr) => {
+            assign_expr_heredocs(expr, bodies);
+        }
+        Expr::MemberAccess { expr, .. } => assign_expr_heredocs(expr, bodies),
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            assign_expr_heredocs(lhs, bodies);
+            assign_expr_heredocs(rhs, bodies);
+        }
+        Expr::List(items) => {
+            for item in items {
+                assign_expr_heredocs(item, bodies);
+            }
+        }
+        Expr::Map(entries) => {
+            for (_, value) in entries {
+                assign_expr_heredocs(value, bodies);
+            }
+        }
+        Expr::String(parts) | Expr::MultiLineString { parts, .. } => {
+            for part in parts {
+                if let StringPart::Expr { expr, .. } = part {
+                    assign_expr_heredocs(expr, bodies);
+                }
+            }
+        }
+        Expr::VarWithModifier { modifier, .. } => assign_modifier_heredocs(modifier, bodies),
+        Expr::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            assign_expr_heredocs(condition, bodies);
+            for stmt in then_body {
+                assign_stmt_heredocs(stmt, bodies);
+            }
+            if let Some(else_body) = else_body {
+                for stmt in else_body {
+                    assign_stmt_heredocs(stmt, bodies);
+                }
+            }
+        }
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Ident(_)
+        | Expr::Variable(_)
+        | Expr::AnsiCQuote(_)
+        | Expr::RawMultiLineString(_) => {}
+    }
+}
+
+fn assign_modifier_heredocs(modifier: &mut ParamModifier, bodies: &mut impl Iterator<Item = Expr>) {
+    match modifier {
+        ParamModifier::Default(expr)
+        | ParamModifier::AssignDefault(expr)
+        | ParamModifier::ErrorIfUnset(expr)
+        | ParamModifier::Alternate(expr)
+        | ParamModifier::ShortestPrefix(expr)
+        | ParamModifier::LongestPrefix(expr)
+        | ParamModifier::ShortestSuffix(expr)
+        | ParamModifier::LongestSuffix(expr) => assign_expr_heredocs(expr, bodies),
+        ParamModifier::Replace {
+            pattern,
+            replacement,
+            ..
+        } => {
+            assign_expr_heredocs(pattern, bodies);
+            assign_expr_heredocs(replacement, bodies);
+        }
+        ParamModifier::Tail
+        | ParamModifier::Head
+        | ParamModifier::Root
+        | ParamModifier::Ext
+        | ParamModifier::Substring { .. }
+        | ParamModifier::StringLength
+        | ParamModifier::Upper
+        | ParamModifier::Lower => {}
+    }
+}
+
+fn assign_pipeline_heredocs(pipeline: &mut Pipeline, bodies: &mut impl Iterator<Item = Expr>) {
+    for stage in &mut pipeline.stages {
+        match stage {
+            PipelineStage::Heredoc { content, .. } => {
+                if let Some(body) = bodies.next() {
+                    *content = body;
+                }
+            }
+            PipelineStage::CommandCall { args, env, .. } => {
+                for (_, value) in env {
+                    assign_expr_heredocs(value, bodies);
+                }
+                for arg in args {
+                    assign_expr_heredocs(arg, bodies);
+                }
+            }
+            PipelineStage::Filter { condition } => assign_expr_heredocs(condition, bodies),
+            PipelineStage::Map { projections } => {
+                for projection in projections {
+                    assign_expr_heredocs(projection, bodies);
+                }
+            }
+            PipelineStage::Mark { pattern } => assign_expr_heredocs(pattern, bodies),
+            PipelineStage::Limit { amount } => assign_expr_heredocs(amount, bodies),
+            PipelineStage::Traverse { edge_label } => assign_expr_heredocs(edge_label, bodies),
+            PipelineStage::Write { path, .. } | PipelineStage::Read { path } => {
+                assign_expr_heredocs(path, bodies);
+            }
+            PipelineStage::HereString { content } => assign_expr_heredocs(content, bodies),
+            PipelineStage::Sort { .. }
+            | PipelineStage::Count
+            | PipelineStage::BoundaryOperator { .. }
+            | PipelineStage::Hash { .. }
+            | PipelineStage::FdRedirect { .. } => {}
+        }
     }
 }
 
@@ -844,6 +1120,11 @@ impl Parser {
                 self.skip_whitespace();
                 continue;
             }
+            if self.at_command_line_end() {
+                self.finish_command_line()?;
+                self.skip_whitespace();
+                continue;
+            }
             let mut stmt = self.parse_statement()?;
             self.skip_whitespace();
             while self.pos + 1 < self.input.len() {
@@ -921,29 +1202,6 @@ impl Parser {
         while let Some(write_stage) = self.parse_redirect()? {
             stages.push(write_stage);
             self.skip_whitespace();
-        }
-        // Fill deferred heredoc bodies in FIFO order. Bodies start on the line(s) after the command line.
-        // `self.pos` is currently at the end of the command line (before its newline). Advance to body.
-        // Each Heredoc's body is consumed sequentially from the remaining input.
-        for stage in &mut stages {
-            if let PipelineStage::Heredoc {
-                delimiter,
-                content,
-                strip_tabs,
-                quoted,
-            } = stage
-            {
-                // Only fill placeholders (empty RawMultiLineString) — leave already-filled (should not happen for pipeline) alone.
-                // Our placeholder is exactly `RawMultiLineString("")` with delimiter set.
-                let is_placeholder = matches!(content, Expr::RawMultiLineString(s) if s.is_empty());
-                if is_placeholder {
-                    // Move to start of body: skip to next line if we are still on command line.
-                    // The body starts after the command line's newline. If we are still on the command line (before \n), consume its newline first.
-                    // `collect_heredoc_body` handles leading newline consumption itself, but ensure we are at \n boundary.
-                    let filled = self.collect_heredoc_body(delimiter, *strip_tabs, *quoted)?;
-                    *content = filled;
-                }
-            }
         }
         Ok(Pipeline { stages, boundaries })
     }
@@ -1082,8 +1340,10 @@ impl Parser {
             return Ok(Some(PipelineStage::HereString { content }));
         }
 
-        // Heredoc: `<<DELIM` / `<<-DELIM` / `<<'DELIM'` — content becomes stdin
-        // Body is deferred until after all command-line redirections are parsed (so `cat <<A > file <<B` works).
+        // Heredoc: `<<DELIM` / `<<-DELIM` / `<<'DELIM'` — content becomes stdin.
+        // The body is not read here: like POSIX, every body on a command line
+        // follows the newline that ends the line, in header order, so the header
+        // is queued and the body is read when the line ends.
         if self.peek() == Some('<')
             && self.pos + 1 < self.input.len()
             && self.input[self.pos + 1] == '<'
@@ -1093,10 +1353,13 @@ impl Parser {
             self.next_char(); // <
             self.next_char(); // <
             let (delimiter, strip_tabs, quoted) = self.parse_heredoc_header()?;
-            // Placeholder content — will be filled by `parse_pipeline` after all redirections are collected.
-            // Use a sentinel that `parse_pipeline` will replace.
-            return Ok(Some(PipelineStage::Heredoc {
+            self.pending_heredocs.push(PendingHeredoc {
                 delimiter: delimiter.clone(),
+                strip_tabs,
+                quoted,
+            });
+            return Ok(Some(PipelineStage::Heredoc {
+                delimiter,
                 content: Expr::RawMultiLineString(String::new()),
                 strip_tabs,
                 quoted,
