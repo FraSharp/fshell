@@ -2205,23 +2205,23 @@ fn owns_terminal(env: &Env) -> bool {
         && matches!(env.descriptor(1), Some(Descriptor::Process(1)))
 }
 
-/// The environment a child starts with: the shell's variables, then this
-/// command's prefix assignments.
+/// The environment a child starts with: every exported variable with its
+/// current shell value, then this command's prefix assignments.
+///
+/// Membership of the `env` map is the export attribute; the value is the
+/// shell variable's, since an assignment to an exported variable updates only
+/// the shell value. Unexported variables never reach a child.
 fn configure_child_environment(
     cmd: &mut std::process::Command,
     env: &Env,
     prefix_assignments: &[(String, String)],
 ) {
     let vars = env.vars.read();
-    for (k, v) in vars.iter() {
-        if k == "env" {
-            if let Val::Map(m) = v {
-                for (ek, ev) in m.iter() {
-                    cmd.env(ek.as_str(), ev.to_text());
-                }
-            }
-        } else if !k.starts_with(|c: char| c.is_ascii_digit()) && k != "@" && k != "#" && k != "?" {
-            cmd.env(k, v.to_text());
+    if let Some(Val::Map(exported)) = vars.get("env") {
+        cmd.env_clear();
+        for (name, inherited) in exported.iter() {
+            let value = vars.get(name.as_str()).unwrap_or(inherited);
+            cmd.env(name.as_str(), value.to_text());
         }
     }
     drop(vars);

@@ -312,6 +312,22 @@ fn word_model_cases() -> Vec<Case> {
             "TMPV=bar /usr/bin/printenv TMPV",
         )
         .features(&["word", "assignment"]),
+        // Only exported variables reach a child, each with its current value.
+        Case::posix_only(
+            "word/unexported-variable-stays-out-of-child-environment",
+            "NOTEXP=x; /usr/bin/printenv NOTEXP; emit --stdout \"rc=$?\"",
+        )
+        .features(&["word", "environment"]),
+        Case::posix_only(
+            "word/exported-variable-reassignment-reaches-child",
+            "export EXPV=1; EXPV=2; /usr/bin/printenv EXPV",
+        )
+        .features(&["word", "environment"]),
+        Case::posix_only(
+            "word/temporary-assignment-is-undone-in-the-environment",
+            "export TMPE=1; TMPE=2 /usr/bin/printenv TMPE; /usr/bin/printenv TMPE",
+        )
+        .features(&["word", "environment", "assignment"]),
         Case::posix_only(
             "word/suffix-assignment-does-not-set-variable",
             "argvdump n=1 > /dev/null; argvdump \"${n:-unset}\"",
