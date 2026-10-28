@@ -632,7 +632,18 @@ pub async fn run_external(
             match vars.get("env") {
                 Some(Val::Map(map)) => Some(
                     map.iter()
-                        .map(|(k, v)| (*k, val_to_cmd_string(v)))
+                        .filter_map(|(k, inherited)| {
+                            // The map's key set is the export attribute; the
+                            // value is the shell variable's, since an assignment
+                            // to an exported variable updates only that.
+                            let value = vars.get(k.as_str()).unwrap_or(inherited);
+                            // `Val::Null` marks a name exported with no value:
+                            // it is not in a child's environment yet.
+                            if matches!(value, Val::Null) {
+                                return None;
+                            }
+                            Some((*k, val_to_cmd_string(value)))
+                        })
                         .collect(),
                 ),
                 _ => None,

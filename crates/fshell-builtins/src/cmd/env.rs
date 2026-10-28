@@ -8,6 +8,10 @@ use fshell_engine::{CapAction, Env, PipeSender, PipeStream, PipelinePayload};
 use miette::SourceSpan;
 use std::sync::Arc;
 
+/// Render one exported variable. The `env` map's key set is the export
+/// attribute; a key's current value is the shell variable's when it has one,
+/// and the map's own value otherwise. `Val::Null` marks a name exported while
+/// it has no value, so it is absent from the environment a child would see.
 fn show_env_vars(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     env.enforce_capability("env", CapAction::ReadEnv("*".to_string()))?;
     env.ensure_env_populated();
@@ -16,14 +20,12 @@ fn show_env_vars(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
         if let Some(Val::Map(env_map)) = vars.get("env") {
             env_map
                 .iter()
-                .map(|(k, v)| {
-                    let val_str = match v {
-                        Val::String(s) => s.clone(),
-                        Val::Int(i) => i.to_string(),
-                        Val::Float(f) => f.to_string(),
-                        other => serde_json::to_string(other).unwrap_or_default(),
-                    };
-                    (k.to_string(), val_str)
+                .filter_map(|(k, inherited)| {
+                    let value = vars.get(k.as_str()).unwrap_or(inherited);
+                    if matches!(value, Val::Null) {
+                        return None;
+                    }
+                    Some((k.to_string(), val_to_text(value)))
                 })
                 .collect()
         } else {
@@ -46,6 +48,15 @@ fn show_env_vars(env: &Env, tx: PipeSender) -> Result<(), ShellError> {
     Ok(())
 }
 
+fn val_to_text(value: &Val) -> String {
+    match value {
+        Val::String(s) => s.clone(),
+        Val::Int(i) => i.to_string(),
+        Val::Float(f) => f.to_string(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
 pub fn export_builtin(
     _in_rx: Option<PipeStream>,
     args: Vec<Val>,
@@ -58,7 +69,7 @@ pub fn export_builtin(
     }
 
     let mut universal = false;
-    let kv_args: Vec<Val> = args
+    let words: Vec<Val> = args
         .into_iter()
         .filter(|arg| {
             if let Val::String(s) = arg
@@ -70,18 +81,83 @@ pub fn export_builtin(
             true
         })
         .collect();
-
-    let pairs = parse_key_value_pairs(&kv_args, "export")?;
+    if words.is_empty() {
+        return show_env_vars(env, tx);
+    }
     env.ensure_env_populated();
 
-    for (key, val) in pairs {
-        env.enforce_capability("export", CapAction::WriteEnv(key.clone()))?;
-        env.set_exported_var(&key, val.clone());
-
-        if universal {
-            env.save_exported_env_var(&key, val)
-                .map_err(|e| format!("export: failed to persist '{}': {}", key, e))?;
+    let mut i = 0;
+    while i < words.len() {
+        let Val::String(word) = &words[i] else {
+            return Err(BuiltinError::InvalidArgument {
+                cmd: "export".to_string(),
+                arg: format!("{:?}", words[i]),
+                span: None,
+            }
+            .into());
+        };
+        if let Some((key, text)) = word.split_once('=') {
+            // `NAME=` with a following word is the spaced form `NAME= value`;
+            // otherwise an empty value is the literal `NAME=`.
+            let value = if text.is_empty() && i + 1 < words.len() {
+                i += 2;
+                words[i - 1].clone()
+            } else {
+                i += 1;
+                Val::String(text.to_string())
+            };
+            set_exported(env, key, value, universal)?;
+        } else if i + 2 < words.len() && matches!(&words[i + 1], Val::String(eq) if eq == "=") {
+            // `NAME = value`
+            set_exported(env, word, words[i + 2].clone(), universal)?;
+            i += 3;
+        } else if i + 1 < words.len()
+            && let Val::String(next) = &words[i + 1]
+            && let Some(text) = next.strip_prefix('=')
+        {
+            // `NAME ="value"`
+            set_exported(env, word, Val::String(text.to_string()), universal)?;
+            i += 2;
+        } else {
+            // A bare name is an export mark with no value, as in POSIX:
+            // `export FOO` leaves FOO unset, and a later assignment exports it.
+            if word.is_empty() {
+                return Err(BuiltinError::InvalidArgument {
+                    cmd: "export".to_string(),
+                    arg: "empty key".to_string(),
+                    span: None,
+                }
+                .into());
+            }
+            env.enforce_capability("export", CapAction::WriteEnv(word.clone()))?;
+            let had_value = env.export_existing_var(word);
+            if universal
+                && had_value
+                && let Some(value) = env.vars.read().get(word.as_str()).cloned()
+            {
+                env.save_exported_env_var(word, value)
+                    .map_err(|e| format!("export: failed to persist '{}': {}", word, e))?;
+            }
+            i += 1;
         }
+    }
+    Ok(())
+}
+
+fn set_exported(env: &Env, key: &str, value: Val, universal: bool) -> Result<(), ShellError> {
+    if key.is_empty() {
+        return Err(BuiltinError::InvalidArgument {
+            cmd: "export".to_string(),
+            arg: "empty key".to_string(),
+            span: None,
+        }
+        .into());
+    }
+    env.enforce_capability("export", CapAction::WriteEnv(key.to_string()))?;
+    env.set_exported_var(key, value.clone());
+    if universal {
+        env.save_exported_env_var(key, value)
+            .map_err(|e| format!("export: failed to persist '{}': {}", key, e))?;
     }
     Ok(())
 }

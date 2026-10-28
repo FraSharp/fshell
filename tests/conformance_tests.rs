@@ -323,16 +323,32 @@ fn word_model_cases() -> Vec<Case> {
         )
         .features(&["word", "assignment"]),
         // Only exported variables reach a child, each with its current value.
-        Case::posix_only(
+        Case::posix(
             "word/unexported-variable-stays-out-of-child-environment",
             "NOTEXP=x; /usr/bin/printenv NOTEXP; emit --stdout \"rc=$?\"",
         )
+        .expect_engine(Engine::Native)
         .features(&["word", "environment"]),
-        Case::posix_only(
+        Case::posix(
             "word/exported-variable-reassignment-reaches-child",
             "export EXPV=1; EXPV=2; /usr/bin/printenv EXPV",
         )
+        .expect_engine(Engine::Native)
         .features(&["word", "environment"]),
+        // `export NAME` marks the name; it creates no value and no environment
+        // entry until the name is assigned.
+        Case::posix(
+            "word/export-without-value-creates-no-entry",
+            "export MARKED; /usr/bin/printenv MARKED; emit --stdout \"rc=$?\"",
+        )
+        .expect_engine(Engine::Native)
+        .features(&["word", "environment", "export"]),
+        Case::posix(
+            "word/export-without-value-applies-to-a-later-assignment",
+            "export MARKED; MARKED=bar; /usr/bin/printenv MARKED",
+        )
+        .expect_engine(Engine::Native)
+        .features(&["word", "environment", "export"]),
         Case::posix_only(
             "word/temporary-assignment-is-undone-in-the-environment",
             "export TMPE=1; TMPE=2 /usr/bin/printenv TMPE; /usr/bin/printenv TMPE",

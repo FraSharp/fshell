@@ -2140,6 +2140,11 @@ fn configure_child_environment(
         cmd.env_clear();
         for (name, inherited) in exported.iter() {
             let value = vars.get(name.as_str()).unwrap_or(inherited);
+            // A name exported before it has a value is marked with `Val::Null`;
+            // it enters a child's environment only once it has one.
+            if matches!(value, Val::Null) {
+                continue;
+            }
             cmd.env(name.as_str(), value.to_text());
         }
     }

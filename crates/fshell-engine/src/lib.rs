@@ -3980,23 +3980,24 @@ impl Env {
         }
     }
 
-    /// Promote an existing shell variable to the environment (export without value).
-    /// Returns true if the variable existed and was exported.
+    /// Promote a variable to the environment (export without value).
+    ///
+    /// Membership of the `env` map is the export attribute, so a name that has
+    /// no value yet is recorded with `Val::Null`: `export FOO` does not put FOO
+    /// in a child's environment, but a later `FOO=bar` does. Returns whether the
+    /// variable already had a value.
     pub fn export_existing_var(&self, key: &str) -> bool {
-        let val_opt = self.vars.read().get(key).cloned();
-        if let Some(val) = val_opt {
-            {
-                let mut vars = self.vars.write();
-                self.ensure_env_map_insert(&mut vars, key, val);
-            }
-            self.is_env_modified.store(true, Ordering::Release);
-            if key == "PATH" {
-                crate::eval::invalidate_path_cache();
-            }
-            true
-        } else {
-            false
+        let value;
+        {
+            let mut vars = self.vars.write();
+            value = vars.get(key).cloned();
+            self.ensure_env_map_insert(&mut vars, key, value.clone().unwrap_or(Val::Null));
         }
+        self.is_env_modified.store(true, Ordering::Release);
+        if key == "PATH" {
+            crate::eval::invalidate_path_cache();
+        }
+        value.is_some()
     }
 
     /// Remove a variable from shell vars and environment.
