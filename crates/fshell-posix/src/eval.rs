@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+// `async_recursion` marks each boxed-future function `#[must_use]`, and the
+// returned future already is; the duplicate is generated, not written here.
+#![allow(clippy::double_must_use)]
+
 use async_recursion::async_recursion;
 use brush_parser::ast::*;
 use fshell_core::Val;

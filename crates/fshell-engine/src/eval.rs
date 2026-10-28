@@ -980,6 +980,9 @@ fn member_access_dispatch(val: Val, member: &str) -> Result<Val, EngineError> {
 /// is the statement shape, which additionally reports each body statement's
 /// status and captures the branch's value so `if` can be a function's last
 /// expression.
+// `async_recursion` marks the boxed-future function `#[must_use]`, and the
+// returned future already is; the duplicate is generated, not written here.
+#[allow(clippy::double_must_use)]
 #[async_recursion::async_recursion]
 pub(crate) async fn eval_if_stmt(expr: &Expr, env: &Env) -> Result<(Flow, Val), EngineError> {
     let Expr::If {
