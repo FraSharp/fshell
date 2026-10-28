@@ -866,7 +866,8 @@ async fn test_fsh_script_setopt_sandbox_all_confines_external_command() {
     let res = fshell_engine::run_script(script, &env).await;
 
     assert!(
-        res.is_err(),
+        res.is_err() || env.exit_code() != 0,
         "expected touch /etc to fail when sandbox_all is active"
     );
+    assert!(!std::path::Path::new("/etc/fshell_sandbox_all_test").exists());
 }

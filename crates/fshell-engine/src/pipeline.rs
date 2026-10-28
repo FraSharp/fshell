@@ -2032,6 +2032,7 @@ async fn execute_pipeline_inner(
                                 {
                                     Ok(()) => env_clone.complete_stage_success(),
                                     Err(e) => {
+                                        let e = crate::builtin_failure(e);
                                         if !e.is_condition_false() && e.reported_status().is_none()
                                         {
                                             let _ = cancel.send(true);
@@ -2061,6 +2062,7 @@ async fn execute_pipeline_inner(
                                 ) {
                                     Ok(()) => env_clone.complete_stage_success(),
                                     Err(e) => {
+                                        let e = crate::builtin_failure(e);
                                         if !e.is_condition_false() && e.reported_status().is_none()
                                         {
                                             let _ = cancel.send(true);

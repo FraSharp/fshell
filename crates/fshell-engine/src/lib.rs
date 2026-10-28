@@ -3624,6 +3624,24 @@ pub fn is_condition_false_diag(diag: &fshell_core::FshDiag) -> bool {
     diag.is_condition_false()
 }
 
+/// A builtin that returns an error about the world it acted on has failed
+/// *as a command*: like any utility it leaves a status (2 for a usage error, 1
+/// otherwise) and its message is a diagnostic on its own stderr, so
+/// `2>/dev/null` silences it and the script carries on. An error of an
+/// engine class ([`ErrorCode::is_engine_failure`]) stays the shell's failure.
+pub(crate) fn builtin_failure(mut error: ShellError) -> ShellError {
+    if error.exit_status.is_none() && !error.is_condition_false() && !error.code.is_engine_failure()
+    {
+        error.exit_status = Some(match error.code {
+            ErrorCode::TypeErrorArgCount
+            | ErrorCode::InvalidArgument
+            | ErrorCode::MissingArgument => 2,
+            _ => 1,
+        });
+    }
+    error
+}
+
 /// Classify a stage diagnostic into the failure it represents.
 ///
 /// This is the one place that decides what a stage's failure means:

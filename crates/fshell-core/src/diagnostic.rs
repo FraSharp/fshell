@@ -99,6 +99,71 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Whether an error of this class is the shell's own failure rather than a
+    /// command's.
+    ///
+    /// Errors about the language and its evaluation — syntax, names, types,
+    /// arithmetic, `${x:?}`, security policy, cancellation, the engine's own
+    /// faults — unwind the script. Errors about the world a command acted on
+    /// — files, the network, its arguments, its own failure — are that
+    /// command's outcome: a status and a diagnostic on its stderr. The match is
+    /// exhaustive so a new code has to be classified when it is added.
+    pub fn is_engine_failure(self) -> bool {
+        match self {
+            ErrorCode::ParseError
+            | ErrorCode::SyntaxError
+            | ErrorCode::UnexpectedEof
+            | ErrorCode::ExpectedChar
+            | ErrorCode::ExpectedToken
+            | ErrorCode::UnclosedQuote
+            | ErrorCode::VariableNotFound
+            | ErrorCode::FunctionNotFound
+            | ErrorCode::ImmutableVariable
+            | ErrorCode::ParameterExpansion
+            | ErrorCode::TypeError
+            | ErrorCode::TypeConstraintError
+            | ErrorCode::DivisionByZero
+            | ErrorCode::NumericOverflow
+            | ErrorCode::CapabilityDenied
+            | ErrorCode::SandboxDenied
+            | ErrorCode::LockPoisoned
+            | ErrorCode::Cancelled
+            | ErrorCode::CycleDetected
+            | ErrorCode::LintParseError
+            | ErrorCode::LintEmptyStage
+            | ErrorCode::LintEmptyPipeline
+            | ErrorCode::InternalError
+            | ErrorCode::Unimplemented => true,
+            ErrorCode::General
+            | ErrorCode::TypeErrorArgCount
+            | ErrorCode::InvalidNumber
+            | ErrorCode::CommandNotFound
+            | ErrorCode::RuntimeError
+            | ErrorCode::ConditionFalse
+            | ErrorCode::CommandFailed
+            | ErrorCode::CommandNotExecutable
+            | ErrorCode::FileNotFound
+            | ErrorCode::PermissionDenied
+            | ErrorCode::IoError
+            | ErrorCode::AlreadyExists
+            | ErrorCode::IsDirectory
+            | ErrorCode::NotDirectory
+            | ErrorCode::RedirectionFailed
+            | ErrorCode::NetworkError
+            | ErrorCode::Timeout
+            | ErrorCode::ConnectionRefused
+            | ErrorCode::PipelineError
+            | ErrorCode::SortTooManyItems
+            | ErrorCode::BrokenPipe
+            | ErrorCode::SandboxError
+            | ErrorCode::BuiltinError
+            | ErrorCode::InvalidArgument
+            | ErrorCode::MissingArgument
+            | ErrorCode::NotFound
+            | ErrorCode::Unsupported => false,
+        }
+    }
+
     /// Return the canonical uppercase alphanumeric code string (e.g. "FSH-TYPE-001").
     pub fn code_str(&self) -> &'static str {
         match self {

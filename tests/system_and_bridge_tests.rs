@@ -187,7 +187,7 @@ async fn test_alias_pipeline_stage_failure_is_reported() {
 }
 
 #[tokio::test]
-async fn test_alias_pipeline_failure_cancels_parent_pipeline_stages() {
+async fn test_alias_pipeline_failure_keeps_emitted_data_and_forwards_its_diagnostic() {
     let env = setup_test_env();
     let emit_then_fail: BuiltinHandler = Arc::new(|_, _, _, tx, _| {
         tx.blocking_send(PipelinePayload::Data(Arc::new(Val::Int(1))))
@@ -229,7 +229,9 @@ async fn test_alias_pipeline_failure_cancels_parent_pipeline_stages() {
         }
     }
 
-    assert!(data.is_empty(), "cancelled parent stage leaked alias data");
+    // A command's output before it failed is real output, exactly as with any
+    // utility (`printf x; exit 1 | cat` prints x); the failure is its status.
+    assert_eq!(data, vec![Val::Int(1)]);
     assert!(
         diagnostics
             .iter()
@@ -269,9 +271,12 @@ fn test_cli_pipeline_diagnostic_is_rendered_once() {
 
     output
         .assert_failure()
-        .assert_stderr_contains("FSH-PIPE-001");
+        .assert_stderr_contains("fshell-pipeline-outcome-regression");
     assert_eq!(
-        output.stderr.matches("FSH-PIPE-001").count(),
+        output
+            .stderr
+            .matches("fshell-pipeline-outcome-regression")
+            .count(),
         1,
         "pipeline diagnostics must have one rendering owner:\n{}",
         output.stderr

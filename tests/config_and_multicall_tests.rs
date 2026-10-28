@@ -737,17 +737,14 @@ fn test_multicall_ls_pipe_strips_ansi() {
 #[tokio::test]
 async fn test_config_tui_headless_error() {
     let env = setup_test_env();
-    let res = fshell_engine::run_script("config tui", &env).await;
-    assert!(
-        res.is_err(),
-        "config tui should error in headless mode without REPL"
-    );
-    let err_str = res.unwrap_err().to_string();
-    assert!(
-        err_str
-            .contains("interactive configuration is only available in an interactive REPL session"),
-        "Unexpected error string: {}",
-        err_str
+    // Headless, the command fails with a status; it does not abort the shell.
+    fshell_engine::run_script("config tui", &env)
+        .await
+        .expect("a failing command does not abort the script");
+    assert_eq!(
+        env.exit_code(),
+        1,
+        "config tui should fail in headless mode without REPL"
     );
 }
 

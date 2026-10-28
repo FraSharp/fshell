@@ -1135,34 +1135,42 @@ fn dispatch_cases() -> Vec<Case> {
         )
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native),
-        // An engine-level failure is not the command's to redirect: taking the
-        // diagnostic's text away must not turn an abort into a status. Native's
-        // own error report is the shell's, so it is not suppressible — only the
-        // *command's* diagnostics follow the command's stderr.
+        // A builtin is a command like any other: when it fails it leaves a
+        // status and its diagnostic follows its stderr, so `2>/dev/null`
+        // silences it and the script carries on. (dash reports 2 for a failed
+        // `cd`, bash 1, so native's status is pinned literally.)
         Case::native(
-            "dispatch/hard-error-aborts-despite-redirect",
-            "cd /nonexistent 2>/dev/null; emit --stdout unreachable",
-            "",
-            1,
+            "dispatch/builtin-failure-is-a-status-despite-redirect",
+            "cd /nonexistent 2>/dev/null; emit --stdout \"rc=$?\"",
+            "rc=1\n",
+            0,
         )
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native),
         Case::native(
-            "dispatch/hard-error-aborts-after-earlier-output",
-            "emit --stdout f; cd /nonexistent 2>/dev/null",
+            "dispatch/builtin-failure-in-pipeline-keeps-last-stage-status",
+            "cd /nonexistent 2>/dev/null | emit --exit 0; emit --stdout \"rc=$?\"",
+            "rc=0\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native),
+        // Non-fatal is not ignored: a failed builtin trips errexit.
+        Case::native(
+            "dispatch/builtin-failure-trips-errexit",
+            "set -e; emit --stdout f; cd /nonexistent 2>/dev/null; emit --stdout unreachable",
             "f\n",
             1,
         )
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native),
-        // A hard failure belongs to the pipeline, not to whichever stage happens
-        // to be last: a failure in a non-last stage still fails the pipeline. The
-        // sibling records no output, so the case does not depend on whether a
-        // cancelled stage got to print before the abort.
+        // The shell's own failures — evaluating a native expression, not
+        // running a command — still end the script; redirection cannot turn
+        // them into a status.
         Case::native(
-            "dispatch/hard-error-in-pipeline-aborts",
-            "cd /nonexistent | emit --exit 0; emit --stdout unreachable",
-            "",
+            "dispatch/engine-failure-aborts-despite-redirect",
+            "emit --stdout f; emit --stdout $(( 1 / 0 )) 2>/dev/null; emit --stdout unreachable",
+            "f\n",
             1,
         )
         .engines(&[Engine::Native, Engine::Auto])

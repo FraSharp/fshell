@@ -718,6 +718,13 @@ the statuses a command-level failure leaves behind follow posix:
 | command not found | `127` |
 | found but not executable (or its interpreter is missing) | `126` |
 | a redirection that cannot be performed (missing input file, unwritable destination) | `1` |
+| a builtin that fails on the world it acted on (missing file, bad argument, network) | `1`, or `2` for a usage error |
+
+builtins are commands like any other: `cd /missing 2>/dev/null || echo none`
+works, and a builtin's output before it failed still flows down the pipeline.
+what unwinds the script is an error in the *language* — syntax, an unknown
+name, a type mismatch, division by zero, `${x:?}`, a capability denial — since
+no status could describe it.
 
 a stage records its own outcome — status and failure class — in the pipeline's own ledger, which is what the statement finalizer reads. two consequences are worth knowing:
 

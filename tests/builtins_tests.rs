@@ -252,13 +252,12 @@ async fn test_integration_json_invalid_query_fails() {
     env.vars
         .write()
         .insert("payload".to_string(), Val::String("{}".into()));
-    let mut parser = Parser::new("$payload | json '[x]'");
-    let stmts = parser.parse_statements().unwrap();
-    if let Stmt::Expr(expr) = stmts[0].unpack() {
-        assert!(eval_expr(expr, &env).await.is_err());
-    } else {
-        panic!("Expected Stmt::Expr");
-    }
+    // A builtin's error is the command failing: a status, not an abort. An
+    // invalid query is a usage error, status 2.
+    fshell_engine::run_script("$payload | json '[x]'", &env)
+        .await
+        .expect("a failing command does not abort the script");
+    assert_eq!(env.exit_code(), 2);
 }
 
 #[tokio::test]
