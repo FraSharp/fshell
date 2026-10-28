@@ -573,6 +573,17 @@ fn child_exited(pid: u32) -> io::Result<bool> {
     Ok(unsafe { info.si_pid() } != 0)
 }
 
+fn leader_finishes_exit(pid: u32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if child_exited(pid).unwrap_or(false) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
 struct OwnedChild {
     child: Child,
     exited: bool,
@@ -600,7 +611,15 @@ impl OwnedChild {
         let rc = unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
         if rc < 0 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
+            // Darwin reports EPERM, not ESRCH, when no member can be
+            // signalled because each is a zombie or still tearing down in exit
+            // — here the leader that WNOWAIT keeps unreaped. A live member
+            // would have been signalled, so wait briefly for the leader's exit
+            // to complete rather than reporting a failure.
+            let zombie_only_group = cfg!(target_os = "macos")
+                && error.raw_os_error() == Some(libc::EPERM)
+                && (self.exited || leader_finishes_exit(self.child.id()));
+            if error.raw_os_error() != Some(libc::ESRCH) && !zombie_only_group {
                 errors.push(format!("kill launch group: {error}"));
             }
         }
