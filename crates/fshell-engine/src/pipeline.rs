@@ -1081,6 +1081,9 @@ async fn execute_pipeline_inner(
             _ => crate::InputPreference::Records,
         })
         .collect();
+    // Ledger slots are per *command*, so they are addressed by command
+    // ordinal, not by position among planned stages (which include routes).
+    let mut commands_seen = 0usize;
     for (stage_index, planned_stage) in stages.into_iter().enumerate() {
         if let Some(span) = stage_span.take() {
             span.finish(crate::trace::SpanOutcome::Cancelled);
@@ -1107,11 +1110,18 @@ async fn execute_pipeline_inner(
         let (stage_tx, mut stage_rx) = tokio::sync::mpsc::channel(pipeline_channel_size(env));
         let mut env_clone = env.clone();
         env_clone.pipeline_job = stage_pipeline_job.clone();
-        // Every stage records into its own slot; the output-route stage records
-        // as the pipeline's boundary.
+        // Every command records into its own slot. A redirection route belongs
+        // to the command it follows; only the route after the last command is
+        // the pipeline's own output boundary.
         let stage_slot = match &planned_stage {
-            PlannedStage::Ast { .. } => crate::execution::Slot::Stage(stage_index),
-            PlannedStage::OutputRoute { .. } => crate::execution::Slot::Boundary,
+            PlannedStage::Ast { .. } => {
+                commands_seen += 1;
+                crate::execution::Slot::Stage(commands_seen - 1)
+            }
+            PlannedStage::OutputRoute { is_last: true, .. } => crate::execution::Slot::Boundary,
+            PlannedStage::OutputRoute { .. } => {
+                crate::execution::Slot::Stage(commands_seen.saturating_sub(1))
+            }
         };
         env_clone.attach_stage(outcomes.clone(), stage_slot);
         env_clone.attach_pipeline_stop(cancel_rx.clone());
