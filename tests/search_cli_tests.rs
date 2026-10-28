@@ -122,7 +122,7 @@ fn byte_stream_grep_preserves_long_line_boundaries() {
     line.extend_from_slice(b"Z\n");
     std::fs::write(&file, line).unwrap();
     let output = native(
-        &format!("/usr/bin/cat '{}' | grep '^Ax*Z$' | count", file.display()),
+        &format!("/bin/cat '{}' | grep '^Ax*Z$' | count", file.display()),
         tmp.path(),
     );
     assert!(

@@ -7,7 +7,7 @@
 
 mod common;
 use common::*;
-use fshell_core::{Expr, ResourceHandle, Stmt};
+use fshell_core::{Expr, PipelineStage, ResourceHandle, Stmt};
 use fshell_engine::{EngineError, ReactiveEvent, execute_pipeline};
 use std::path::PathBuf;
 
@@ -592,10 +592,23 @@ async fn test_integration_shortcut_reminders() {
     let (params, _, body) = fns.get("ll").unwrap();
     assert!(params.is_empty());
     assert_eq!(body.len(), 1);
-    match (body[0].unpack(), stmts_manual[0].unpack()) {
-        (Stmt::Expr(e1), Stmt::Expr(e2)) => assert_eq!(e1.unpack(), e2.unpack()),
-        _ => panic!("Expected Stmt::Expr on both sides"),
-    }
+    // Structure, not position: the body was parsed at a different offset, so
+    // the spans legitimately differ.
+    let call = |stmt: &Stmt| match stmt.unpack() {
+        Stmt::Expr(expr) => match expr.unpack() {
+            Expr::Pipeline(pipeline) => match pipeline.stages.as_slice() {
+                [
+                    PipelineStage::CommandCall {
+                        name, args, env, ..
+                    },
+                ] => (name.clone(), args.clone(), env.clone()),
+                other => panic!("expected one command call, got {other:?}"),
+            },
+            other => panic!("expected a pipeline, got {other:?}"),
+        },
+        other => panic!("expected an expression statement, got {other:?}"),
+    };
+    assert_eq!(call(&body[0]), call(&stmts_manual[0]));
 }
 
 #[tokio::test]
