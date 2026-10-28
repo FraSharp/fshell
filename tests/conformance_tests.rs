@@ -773,6 +773,17 @@ fn native_word_model_cases() -> Vec<Case> {
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native)
         .features(&["native", "assignment", "environment"]),
+        // `${x:-d}` and friends exist for unset names; only a bare reference
+        // to an undefined name is native's strict error.
+        Case::native(
+            "native/unset-tolerant-modifiers",
+            "argvdump ${NOPE:-d} \"${NOPE:+alt}\" ${NEWV:=v} $NEWV",
+            "argc=4\narg[0]=\"d\"\narg[1]=\"\"\narg[2]=\"v\"\narg[3]=\"v\"\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "parameter"]),
         // A leading `+` starts a word, as a leading `-` does: `date +%Y`.
         Case::native(
             "native/plus-word-is-an-argument",

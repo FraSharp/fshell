@@ -588,6 +588,9 @@ fn try_eval_sync_inner(expr: &Expr, env: &Env) -> Option<Result<Val, EngineError
             let val = eval_sync_val!(expr, env);
             Some(member_access_dispatch(val, member))
         }
+        // An unset-tolerant modifier needs the "not defined" outcome, which
+        // the async path observes.
+        Expr::VarWithModifier { modifier, .. } if modifier.tolerates_unset() => None,
         Expr::VarWithModifier { name, modifier } => {
             let val = eval_sync_val!(&Expr::Variable(name.clone()), env);
             try_apply_modifier_sync(name, val, modifier, env)
@@ -1246,7 +1249,15 @@ pub fn eval_expr_flow<'a>(
                 Ok(ExprOutcome::Value(results.into_value()))
             }
             Expr::VarWithModifier { name, modifier } => {
-                let val = eval_async_flow!(&Expr::Variable(name.clone()), env);
+                let val = match eval_expr_flow(&Expr::Variable(name.clone()), env).await {
+                    Ok(ExprOutcome::Value(val)) => val,
+                    Ok(transfer) => return Ok(transfer),
+                    // `${x:-default}` and friends exist to handle an unset name.
+                    Err(EngineError::VariableNotFound { .. }) if modifier.tolerates_unset() => {
+                        Val::Null
+                    }
+                    Err(error) => return Err(error),
+                };
                 apply_modifier_async(name, val, modifier, env)
                     .await
                     .map(ExprOutcome::Value)

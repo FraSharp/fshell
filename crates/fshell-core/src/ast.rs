@@ -544,6 +544,21 @@ pub enum ParamModifier {
     Lower,
 }
 
+impl ParamModifier {
+    /// Whether the modifier exists to handle an unset name — `${x:-d}`,
+    /// `${x:=d}`, `${x:?msg}`, `${x:+alt}` — so naming an undefined variable
+    /// with it is not an error.
+    pub fn tolerates_unset(&self) -> bool {
+        matches!(
+            self,
+            ParamModifier::Default(_)
+                | ParamModifier::AssignDefault(_)
+                | ParamModifier::ErrorIfUnset(_)
+                | ParamModifier::Alternate(_)
+        )
+    }
+}
+
 /// Direction for process substitution: <(cmd) reads from cmd, >(cmd) writes to cmd.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProcessSubstDirection {
