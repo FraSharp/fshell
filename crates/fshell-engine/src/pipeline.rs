@@ -380,8 +380,20 @@ struct OutputRoutes {
 }
 
 enum PlannedStage {
-    Ast { stage: PipelineStage, is_last: bool },
-    OutputRoute { routes: OutputRoutes, is_last: bool },
+    Ast {
+        stage: PipelineStage,
+        is_last: bool,
+    },
+    OutputRoute {
+        routes: OutputRoutes,
+        is_last: bool,
+    },
+    /// A command whose redirection could not be established. POSIX fails that
+    /// command alone: the rest of the pipeline still runs, and the pipeline's
+    /// status stays its last command's.
+    Failure {
+        message: String,
+    },
 }
 
 fn is_input_redirect(stage: &PipelineStage) -> bool {
@@ -462,10 +474,7 @@ async fn open_output_redirect(
     Ok(Arc::new(tokio::sync::Mutex::new(file)))
 }
 
-async fn build_pipeline_plan(
-    pipeline: &Pipeline,
-    env: &Env,
-) -> Result<Vec<PlannedStage>, PlanError> {
+async fn build_pipeline_plan(pipeline: &Pipeline, env: &Env) -> Result<Vec<PlannedStage>, String> {
     let mut boundaries = pipeline.boundaries.clone();
     if boundaries.is_empty() && pipeline.stages.len() > 1 {
         boundaries = pipeline
@@ -495,9 +504,7 @@ async fn build_pipeline_plan(
         .any(|&boundary| boundary > pipeline.stages.len())
         || boundaries.windows(2).any(|window| window[0] >= window[1])
     {
-        return Err(PlanError::Engine(
-            "invalid pipeline boundary metadata".to_string(),
-        ));
+        return Err("invalid pipeline boundary metadata".to_string());
     }
 
     let mut ranges = Vec::with_capacity(boundaries.len() + 1);
@@ -537,14 +544,10 @@ async fn build_pipeline_plan(
             if inputs.is_empty() && outputs.is_empty() {
                 continue;
             }
-            return Err(PlanError::Engine(
-                "pipeline redirection has no command stage".to_string(),
-            ));
+            return Err("pipeline redirection has no command stage".to_string());
         }
         if operations.len() != 1 {
-            return Err(PlanError::Engine(
-                "pipeline segment contains more than one command stage".to_string(),
-            ));
+            return Err("pipeline segment contains more than one command stage".to_string());
         }
 
         let is_last_segment = segment_index + 1 == ranges.len();
@@ -560,22 +563,34 @@ async fn build_pipeline_plan(
             stderr: OutputRoute::Diagnostic,
         };
         let has_output_route = !outputs.is_empty();
+        // A redirection that cannot be established fails this command, not the
+        // pipeline. Like a shell, stop at the first one: later redirections of
+        // the same command are not performed.
+        let mut redirection_failure = None;
         for redirect in outputs {
+            if redirection_failure.is_some() {
+                break;
+            }
             match redirect {
                 PipelineStage::Write {
                     path,
                     append,
                     redirect_stdout,
                     redirect_stderr,
-                } => {
-                    let file = open_output_redirect(&path, append, env).await?;
-                    if redirect_stdout {
-                        routes.stdout = OutputRoute::File(file.clone());
+                } => match open_output_redirect(&path, append, env).await {
+                    Ok(file) => {
+                        if redirect_stdout {
+                            routes.stdout = OutputRoute::File(file.clone());
+                        }
+                        if redirect_stderr {
+                            routes.stderr = OutputRoute::File(file);
+                        }
                     }
-                    if redirect_stderr {
-                        routes.stderr = OutputRoute::File(file);
-                    }
-                }
+                    Err(PlanError::Redirection(message)) => redirection_failure = Some(message),
+                    // A denied capability is the shell refusing the operation,
+                    // not a redirection that failed: it aborts.
+                    Err(PlanError::Engine(message)) => return Err(message),
+                },
                 PipelineStage::FdRedirect { src_fd, dst_fd } => {
                     if dst_fd == -1 {
                         match src_fd {
@@ -600,10 +615,14 @@ async fn build_pipeline_plan(
             }
         }
 
-        planned.push(PlannedStage::Ast {
-            stage: operations.into_iter().next().expect("checked above"),
-            is_last: is_last_segment && !has_output_route,
-        });
+        let is_last = is_last_segment && !has_output_route;
+        match redirection_failure {
+            Some(message) => planned.push(PlannedStage::Failure { message }),
+            None => planned.push(PlannedStage::Ast {
+                stage: operations.into_iter().next().expect("checked above"),
+                is_last,
+            }),
+        }
         if has_output_route {
             planned.push(PlannedStage::OutputRoute {
                 routes,
@@ -801,17 +820,7 @@ async fn execute_output_route(
             continue;
         }
         let route = match &payload {
-            PipelinePayload::Structured(diag) => {
-                // The boundary is where every diagnostic of the pipeline passes
-                // on its way out, so it is where a stage failure is recorded
-                // before routing decides what happens to the text. Redirecting a
-                // diagnostic away (`2>/dev/null`) then moves the message without
-                // erasing the failure it reports.
-                if diag.reported_status().is_some() || diag.is_condition_false() {
-                    env.record_stage_failure(diag.clone());
-                }
-                &routes.stderr
-            }
+            PipelinePayload::Structured(_) => &routes.stderr,
             _ => &routes.stdout,
         };
         if let Err(error) = route_payload(payload, route, &out_tx).await {
@@ -952,21 +961,7 @@ async fn execute_pipeline_inner(
     if pipeline.stages.is_empty() {
         return Ok(());
     }
-    let stages = match build_pipeline_plan(pipeline, env).await {
-        Ok(stages) => stages,
-        Err(PlanError::Engine(message)) => return Err(message),
-        Err(PlanError::Redirection(message)) => {
-            // A redirection that cannot be established is a command-level failure:
-            // report it and let the statement continue with status 1, exactly as a
-            // failing stage would.
-            let diag = FshDiag::from(fshell_core::ShellError::new(
-                fshell_core::diagnostic::ErrorCode::RedirectionFailed,
-                message,
-            ));
-            let _ = tx.send(PipelinePayload::Structured(diag)).await;
-            return Ok(());
-        }
-    };
+    let stages = build_pipeline_plan(pipeline, env).await?;
     let expected_external_stages = count_direct_external_stages(&stages, env);
     // A multi-stage foreground pipeline is one terminal job. Every external
     // process launched by its stages shares this context, and its final owner
@@ -1033,7 +1028,12 @@ async fn execute_pipeline_inner(
     outcomes.set_stages(
         stages
             .iter()
-            .filter(|planned| matches!(planned, PlannedStage::Ast { .. }))
+            .filter(|planned| {
+                matches!(
+                    planned,
+                    PlannedStage::Ast { .. } | PlannedStage::Failure { .. }
+                )
+            })
             .count(),
     );
 
@@ -1091,7 +1091,7 @@ async fn execute_pipeline_inner(
         // to the command it follows; only the route after the last command is
         // the pipeline's own output boundary.
         let stage_slot = match &planned_stage {
-            PlannedStage::Ast { .. } => {
+            PlannedStage::Ast { .. } | PlannedStage::Failure { .. } => {
                 commands_seen += 1;
                 crate::execution::Slot::Stage(commands_seen - 1)
             }
@@ -1110,6 +1110,22 @@ async fn execute_pipeline_inner(
         );
         let (stage_clone, is_last) = match planned_stage {
             PlannedStage::Ast { stage, is_last } => (Some(stage), is_last),
+            PlannedStage::Failure { message } => {
+                // The command never starts. Its diagnostic still travels through
+                // the following route stage, so redirection decides where it is
+                // shown without deciding whether the command failed.
+                let diag = FshDiag::from(fshell_core::ShellError::new(
+                    fshell_core::diagnostic::ErrorCode::RedirectionFailed,
+                    message,
+                ));
+                let env_for_failure = env_clone.clone();
+                spawn_stage!(async move {
+                    env_for_failure.record_stage_failure(diag.clone());
+                    let _ = stage_tx.send(PipelinePayload::Structured(diag)).await;
+                });
+                current_rx = Some(stage_rx);
+                continue;
+            }
             PlannedStage::OutputRoute { routes, is_last } => {
                 let out_tx = if is_last { tx.clone() } else { stage_tx };
                 let current_rx_for_route = current_rx.take();

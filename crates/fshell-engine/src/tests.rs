@@ -2281,6 +2281,33 @@ mod proptests {
     }
 
     #[test]
+    fn a_later_silent_stage_keeps_the_pipeline_status() {
+        // `nosuchcmd | count`: the missing command is recorded in its own slot,
+        // and the last stage's silence is its success, so `$?` is 0.
+        let outcomes = ledger(2);
+        outcomes.record_failure(
+            crate::execution::Slot::Stage(0),
+            crate::PipelineFailure::Reported { status: 127 },
+        );
+        let outcome = crate::pipeline_finalize(
+            &outcomes,
+            vec![crate::PipelineFailure::Reported { status: 127 }],
+            false,
+        );
+        assert_eq!(outcome.exit_code, 0);
+    }
+
+    #[test]
+    fn a_reported_failure_no_stage_recorded_supplies_the_status() {
+        let outcome = crate::pipeline_finalize(
+            &ledger(1),
+            vec![crate::PipelineFailure::Reported { status: 127 }],
+            false,
+        );
+        assert_eq!(outcome.exit_code, 127);
+    }
+
+    #[test]
     fn pipefail_sees_every_stage_not_just_the_last_writer() {
         // `false | true`: the earlier stage's failure must not be overwritten by
         // the later stage's success. POSIX takes the last stage's status;

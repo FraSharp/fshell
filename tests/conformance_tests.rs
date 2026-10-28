@@ -724,6 +724,26 @@ fn redirection_cases() -> Vec<Case> {
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native)
         .features(&["native", "heredoc", "command_substitution"]),
+        // A redirection that cannot be opened fails its own command; the rest
+        // of the pipeline runs and the last command still decides the status.
+        Case::posix(
+            "redirect/failed-redirect-fails-only-its-command",
+            "true > missing/out | emit --stdout after; emit --stdout \"rc=$?\"",
+        )
+        .expect_engine(Engine::Native)
+        .features(&["redirect", "error", "pipeline"]),
+        Case::posix(
+            "redirect/failed-redirect-in-the-last-command-decides-the-status",
+            "emit --stdout x | true > missing/out; emit --stdout \"rc=$?\"",
+        )
+        .expect_engine(Engine::Native)
+        .features(&["redirect", "error", "pipeline"]),
+        Case::posix(
+            "redirect/command-not-found-does-not-decide-the-status",
+            "nosuchcmd_in_the_fixture | emit --stdout after; emit --stdout \"rc=$?\"",
+        )
+        .expect_engine(Engine::Native)
+        .features(&["redirect", "command_not_found", "pipeline"]),
     ]
 }
 

@@ -3478,15 +3478,14 @@ pub(crate) fn pipeline_finalize(
     if last_hard.is_some() {
         exit_code = exit_code.max(1);
     } else {
-        // A failure names the status only where the pipeline's own stages did not:
-        // POSIX takes the last command's status, so a later successful stage keeps
-        // it (`nosuchcmd | true` is 0), while a stage that recorded nothing yields
-        // to the failure it reported.
+        // A diagnostic that no stage recorded is a fallback, not an override:
+        // when the ledger already accounts for the failure, POSIX still takes the
+        // last command's status, so `nosuchcmd | count` is the count's success.
         let reported = last_reported.or(saw_condition_false.then_some(1));
         let unspecified = if pipefail {
             exit_code == 0
         } else {
-            last_recorded.is_none()
+            !stages.iter().any(|stage| stage.status().is_some())
         };
         if unspecified && let Some(status) = reported {
             exit_code = status;
