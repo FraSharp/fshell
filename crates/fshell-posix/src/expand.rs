@@ -391,7 +391,8 @@ fn expand_word_internal(
                                 preserve_pattern_quoting,
                             );
                         }
-                        WordPiece::CommandSubstitution(cmd) => {
+                        WordPiece::CommandSubstitution(cmd)
+                        | WordPiece::BackquotedCommandSubstitution(cmd) => {
                             let out = run_command_subst(cmd, env)?;
                             append_literal(
                                 &mut expanded,
@@ -401,7 +402,7 @@ fn expand_word_internal(
                             );
                         }
                         WordPiece::ArithmeticExpression(expr) => {
-                            let out = eval_arithmetic(&expr.value, env)?;
+                            let out = eval_arithmetic(&expr.value, env, positional)?;
                             append_literal(
                                 &mut expanded,
                                 &mut glob_pattern,
@@ -415,7 +416,47 @@ fn expand_word_internal(
                             unescape_word_piece(s),
                             preserve_pattern_quoting,
                         ),
-                        _ => {}
+                        // Nothing else is expanded inside double quotes: these
+                        // are literal text there, spelled as written.
+                        WordPiece::SingleQuotedText(t) => append_literal(
+                            &mut expanded,
+                            &mut glob_pattern,
+                            &format!("'{t}'"),
+                            preserve_pattern_quoting,
+                        ),
+                        WordPiece::AnsiCQuotedText(t) => append_literal(
+                            &mut expanded,
+                            &mut glob_pattern,
+                            &format!("$'{t}'"),
+                            preserve_pattern_quoting,
+                        ),
+                        WordPiece::TildeExpansion(te) => {
+                            let text = match te {
+                                word::TildeExpr::Home => "~".to_string(),
+                                word::TildeExpr::UserHome(user) => format!("~{user}"),
+                                word::TildeExpr::WorkingDir => "~+".to_string(),
+                                word::TildeExpr::OldWorkingDir => "~-".to_string(),
+                                word::TildeExpr::NthDirFromTopOfDirStack { n, plus_used } => {
+                                    format!("~{}{n}", if *plus_used { "+" } else { "" })
+                                }
+                                word::TildeExpr::NthDirFromBottomOfDirStack { n } => {
+                                    format!("~-{n}")
+                                }
+                            };
+                            append_literal(
+                                &mut expanded,
+                                &mut glob_pattern,
+                                &text,
+                                preserve_pattern_quoting,
+                            );
+                        }
+                        WordPiece::DoubleQuotedSequence(_)
+                        | WordPiece::GettextDoubleQuotedSequence(_) => {
+                            return Err(fshell_engine::EngineError::Generic {
+                                message: "double quotes cannot nest directly".to_string(),
+                                span: None,
+                            });
+                        }
                     }
                 }
             }
@@ -449,7 +490,7 @@ fn expand_word_internal(
                 append_unquoted(&mut expanded, &mut glob_pattern, &mut has_glob, &out);
             }
             WordPiece::ArithmeticExpression(expr) => {
-                let out = eval_arithmetic(&expr.value, env)?;
+                let out = eval_arithmetic(&expr.value, env, positional)?;
                 append_unquoted(&mut expanded, &mut glob_pattern, &mut has_glob, &out);
             }
             WordPiece::AnsiCQuotedText(t) => {
@@ -1047,10 +1088,25 @@ fn run_command_subst(
     Ok(output)
 }
 
+/// `$(( … ))`: the body is expanded as if double-quoted — parameters,
+/// command substitutions, quote removal — and the result evaluated.
 fn eval_arithmetic(
     expr: &str,
     env: &fshell_engine::Env,
+    positional: &[String],
 ) -> Result<String, fshell_engine::EngineError> {
+    let expanded;
+    let expr = if expr.contains(['$', '`', '\\', '"', '\'']) {
+        let quoted = format!("\"{}\"", expr.replace('"', "\\\""));
+        let config = ExpansionConfig {
+            do_glob: false,
+            ..Default::default()
+        };
+        expanded = expand_word(&quoted, env, &config, positional)?.join(" ");
+        expanded.as_str()
+    } else {
+        expr
+    };
     crate::arithmetic::eval_arithmetic_expr(expr, env)
         .map(|value| value.to_string())
         .map_err(crate::arithmetic::to_engine_error)
