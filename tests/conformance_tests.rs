@@ -752,6 +752,27 @@ fn native_word_model_cases() -> Vec<Case> {
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native)
         .features(&["native", "arithmetic"]),
+        // A newline ends an assignment: these are three statements, not one
+        // command with two prefix assignments.
+        Case::native(
+            "native/newline-separated-assignments",
+            "x=1\ny=2\nargvdump $(( x + y ))",
+            "argc=1\narg[0]=\"3\"\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "assignment"]),
+        // A prefix assignment's value is a whole shell word.
+        Case::native(
+            "native/prefix-assignment-values-are-words",
+            "A='a b' B=$HOME/x C=$(printf c) D= /usr/bin/env | grep -E '^[ABCD]=' | sort",
+            "A=a b\nB={HOME}/x\nC=c\nD=\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "assignment", "environment"]),
         // A leading `+` starts a word, as a leading `-` does: `date +%Y`.
         Case::native(
             "native/plus-word-is-an-argument",
@@ -1745,11 +1766,14 @@ fn routing_cases() -> Vec<Case> {
         .features(&["routing", "posix", "multiline"]),
         // Native models descriptors 0–2. Duplicating among them is native;
         // naming any other descriptor is POSIX syntax and goes there.
-        Case::posix("routing/stderr-duplication-stays-native", "echo err >&2; echo out")
-            .compare_stderr()
-            .engines(&[Engine::Native, Engine::Auto])
-            .expect_engine(Engine::Native)
-            .features(&["routing", "native", "redirect"]),
+        Case::posix(
+            "routing/stderr-duplication-stays-native",
+            "echo err >&2; echo out",
+        )
+        .compare_stderr()
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["routing", "native", "redirect"]),
         Case::posix(
             "routing/high-descriptor-routes-to-posix",
             "exec 3>&1; emit --stdout via3 >&3",

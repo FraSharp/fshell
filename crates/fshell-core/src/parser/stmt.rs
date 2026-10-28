@@ -199,69 +199,17 @@ impl Parser {
                     if peek_pos + 1 < self.input.len() && self.input[peek_pos + 1] == '=' {
                         // `==` comparison — not an assignment
                     } else {
-                        // Check if this looks like inline env var (VAR=value command)
-                        // vs simple assignment (VAR=value)
-                        let eq_pos = peek_pos;
-                        let after_eq = eq_pos + 1;
-                        // Skip past the value to see if there's a command after
-                        let mut scan_pos = after_eq;
-                        // Skip whitespace after =
-                        while scan_pos < self.input.len() && self.input[scan_pos].is_whitespace() {
-                            scan_pos += 1;
-                        }
-                        // Now scan_pos should be at the value
-                        // Skip the value (quoted string, bare word, or $VAR)
-                        if scan_pos < self.input.len() {
-                            if self.input[scan_pos] == '"' {
-                                // Skip quoted string
-                                scan_pos += 1;
-                                while scan_pos < self.input.len() && self.input[scan_pos] != '"' {
-                                    if self.input[scan_pos] == '\\' {
-                                        scan_pos += 1; // skip escaped char
-                                    }
-                                    scan_pos += 1;
-                                }
-                                if scan_pos < self.input.len() {
-                                    scan_pos += 1; // skip closing quote
-                                }
-                            } else if self.input[scan_pos] == '$' {
-                                // Skip $VAR
-                                scan_pos += 1;
-                                while scan_pos < self.input.len()
-                                    && (self.input[scan_pos].is_alphanumeric()
-                                        || self.input[scan_pos] == '_')
-                                {
-                                    scan_pos += 1;
-                                }
-                            } else {
-                                // Skip bare word
-                                while scan_pos < self.input.len()
-                                    && !self.input[scan_pos].is_whitespace()
-                                    && self.input[scan_pos] != '|'
-                                    && self.input[scan_pos] != ';'
-                                {
-                                    scan_pos += 1;
-                                }
-                            }
-                        }
-                        // Now check if there's more content after the value
-                        let mut after_value = scan_pos;
-                        while after_value < self.input.len()
-                            && self.input[after_value].is_whitespace()
-                        {
-                            after_value += 1;
-                        }
-                        let has_command_after = if after_value < self.input.len() {
-                            let c = self.input[after_value];
-                            // Check if it looks like a command (identifier, path, etc.)
-                            c.is_alphabetic()
-                                || c == '_'
-                                || c == '/'
-                                || c == '~'
-                                || c == '.'
-                                || c == '$'
-                        } else {
-                            false
+                        // `NAME=value cmd` (a prefix assignment) or a plain
+                        // assignment? Decide by parsing the value as the word
+                        // it is and looking at what follows on the same line.
+                        // A prefix has `=` right after the name; native's
+                        // spaced `x = value` is always an assignment.
+                        let adjacent = !self.input[peek_pos - 1].is_whitespace();
+                        let has_command_after = adjacent && {
+                            let saved = self.pos;
+                            let found = self.prefix_assignment_precedes_command();
+                            self.pos = saved;
+                            found
                         };
 
                         if has_command_after {
@@ -274,33 +222,7 @@ impl Parser {
                                 }
                                 let name = self.parse_identifier()?;
                                 self.expect('=')?;
-                                let value = match self.peek() {
-                                    Some('"') => self.parse_string_literal()?,
-                                    Some('$') => {
-                                        self.next_char();
-                                        Expr::Variable(self.parse_identifier()?)
-                                    }
-                                    _ => {
-                                        let mut val = String::new();
-                                        while let Some(c) = self.peek() {
-                                            if c.is_whitespace()
-                                                || c == '|'
-                                                || c == '\n'
-                                                || c == '\r'
-                                                || c == ';'
-                                                || c == '}'
-                                            {
-                                                break;
-                                            }
-                                            val.push(self.next_char().ok_or_else(|| {
-                                                ParseError::UnexpectedEof {
-                                                    span: self.current_span(),
-                                                }
-                                            })?);
-                                        }
-                                        Expr::String(vec![StringPart::unquoted(val)])
-                                    }
-                                };
+                                let value = self.parse_assignment_value()?;
                                 inline_env.push((name, value));
                                 self.skip_horizontal_whitespace();
                                 // Check if next token is another VAR=value or a command
@@ -1040,6 +962,41 @@ impl Parser {
         path
     }
 
+    /// Probe from a `NAME=value` at the cursor: whether a command word follows
+    /// the value on the same line. Moves the cursor; the caller restores it.
+    fn prefix_assignment_precedes_command(&mut self) -> bool {
+        if self.peek() == Some('$') {
+            self.next_char();
+        }
+        if self.parse_identifier().is_err() || self.expect('=').is_err() {
+            return false;
+        }
+        if self.parse_assignment_value().is_err() {
+            return false;
+        }
+        self.skip_horizontal_whitespace();
+        self.peek().is_some_and(|c| {
+            c.is_alphabetic() || matches!(c, '_' | '/' | '~' | '.' | '$' | '\'' | '"' | '\\')
+        })
+    }
+
+    /// The value of a `NAME=value` prefix: one shell word, quoted, expanded
+    /// or bare (`X='a b'`, `X=$HOME/bin`, `X=$(cmd)`), or empty (`X= cmd`).
+    fn parse_assignment_value(&mut self) -> Result<Expr, ParseError> {
+        match self.peek() {
+            None | Some(' ' | '\t' | '\n' | '\r' | ';' | '|' | '&' | '}' | ')') => {
+                Ok(Expr::String(Vec::new()))
+            }
+            Some(_) => {
+                let saved = self.cmd_arg_mode;
+                self.cmd_arg_mode = true;
+                let value = self.parse_command_arg();
+                self.cmd_arg_mode = saved;
+                value
+            }
+        }
+    }
+
     /// Describe a redirection at the cursor that only the POSIX engine can
     /// perform, if there is one.
     fn posix_only_redirection(&self) -> Option<String> {
@@ -1440,39 +1397,7 @@ impl Parser {
                     }
                     self.skip_horizontal_whitespace();
                     self.expect('=')?;
-                    let value = match self.peek() {
-                        Some('"') => self.parse_string_literal()?,
-                        Some('$') => {
-                            self.next_char();
-                            Expr::Variable(self.parse_identifier()?)
-                        }
-                        _ => {
-                            let mut val = String::new();
-                            while let Some(c) = self.peek() {
-                                if c.is_whitespace()
-                                    || c == '|'
-                                    || c == '\n'
-                                    || c == '\r'
-                                    || c == ';'
-                                    || c == '}'
-                                {
-                                    break;
-                                }
-                                val.push(self.next_char().ok_or_else(|| {
-                                    ParseError::UnexpectedEof {
-                                        span: self.current_span(),
-                                    }
-                                })?);
-                            }
-                            if val.is_empty() {
-                                return Err(ParseError::SyntaxError {
-                                    message: "Expected value after '='".to_string(),
-                                    span: self.current_span(),
-                                });
-                            }
-                            Expr::String(vec![StringPart::unquoted(val)])
-                        }
-                    };
+                    let value = self.parse_assignment_value()?;
                     inline_env.push((ident, value));
                     self.skip_horizontal_whitespace();
                     continue;
