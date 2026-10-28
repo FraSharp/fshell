@@ -1357,6 +1357,7 @@ dependencies = [
  "fshell-semantic",
  "fshell-terminal",
  "indexmap",
+ "libc",
  "portable-pty",
  "proptest",
  "ratatui",

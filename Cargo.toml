@@ -121,6 +121,7 @@ indexmap = { workspace = true }
 ustr = { workspace = true }
 fshell-terminal = { workspace = true }
 fshell-posix = { workspace = true }
+libc = { workspace = true }
 
 [workspace.dependencies]
 # Internal crates. Published independently, so each carries the same version

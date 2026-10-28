@@ -688,6 +688,13 @@ pub fn run_utility(name: &str, args: &[String]) -> ! {
 }
 
 pub fn run_utility_with_trace(name: &str, args: &[String], trace: Arc<TraceSink>) -> ! {
+    // A standalone utility behaves like any Unix filter: when its reader goes
+    // away (`ls | head -1`) SIGPIPE ends it quietly, rather than the Rust
+    // runtime's ignored SIGPIPE turning every later write into a reported error.
+    // SAFETY: restoring the default disposition before any thread is started.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let runtime_span = trace_span(&trace, "process.runtime_init", TraceMode::Utility);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
