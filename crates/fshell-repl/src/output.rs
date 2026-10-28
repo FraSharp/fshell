@@ -104,12 +104,6 @@ fn drain<W: Write, E: Write>(
                     }
                     last_stdout_byte = match &*value {
                         Val::Blob(bytes) => bytes.last().copied().or(last_stdout_byte),
-                        Val::String(text) if text.starts_with('\0') => last_stdout_byte,
-                        Val::String(text) if text.ends_with('\0') => text.as_bytes()
-                            [..text.len() - 1]
-                            .last()
-                            .copied()
-                            .or(last_stdout_byte),
                         _ => Some(b'\n'),
                     };
                 }
@@ -177,19 +171,11 @@ fn drain<W: Write, E: Write>(
 }
 
 fn write_stderr_record(writer: &mut impl Write, text: &str) -> io::Result<()> {
-    if text.starts_with('\0') {
-        return Ok(());
+    writer.write_all(text.as_bytes())?;
+    if !text.ends_with('\n') {
+        writer.write_all(b"\n")?;
     }
-    if let Some(text) = text.strip_suffix('\0') {
-        fshell_tty::mark_cursor_state_unknown_for_stderr_output(text.as_bytes());
-        writer.write_all(text.as_bytes())
-    } else {
-        writer.write_all(text.as_bytes())?;
-        if !text.ends_with('\n') {
-            writer.write_all(b"\n")?;
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -280,7 +266,7 @@ mod tests {
     #[test]
     fn stderr_is_output_not_an_execution_error() {
         let (summary, _, errors) = collect(vec![PipelinePayload::Structured(
-            fshell_core::FshDiag::new(fshell_core::StderrStream("progress\r\0".into())),
+            fshell_core::FshDiag::new(fshell_core::diagnostic::StderrBytes(b"progress\r".to_vec())),
         )]);
         assert!(!summary.has_errors);
         assert_eq!(errors, b"progress\r");

@@ -1437,20 +1437,15 @@ impl Captured {
         }
     }
 
-    /// A string value is a line of text output — or, ending in the NUL
-    /// sentinel `echo -n`/`printf` use, text without a newline; anything else
-    /// stays typed.
+    /// A string value is a line of text output; anything else stays typed.
     fn push_value(&mut self, value: Val) {
         match value {
-            Val::String(line) => match line.strip_suffix('\0') {
-                Some(unterminated) => self.push_bytes(unterminated.as_bytes()),
-                None => {
-                    self.push_bytes(line.as_bytes());
-                    if !line.ends_with('\n') {
-                        self.push_bytes(b"\n");
-                    }
+            Val::String(line) => {
+                self.push_bytes(line.as_bytes());
+                if !line.ends_with('\n') {
+                    self.push_bytes(b"\n");
                 }
-            },
+            }
             other => self.pieces.push(CapturedPiece::Value(other)),
         }
     }
@@ -2054,8 +2049,7 @@ fn try_eval_stmt_sync_inner(
 }
 
 /// Write a streaming pipeline value to the real stdout, preserving binary
-/// Blob bytes verbatim (no coercion, no added newline) and honoring the
-/// `echo -n` NUL sentinel (strip it and skip the trailing newline).
+/// Blob bytes verbatim (no coercion, no added newline).
 pub(crate) fn write_val_stdout(v: &Val) {
     use std::io::Write;
     let out = std::io::stdout();
@@ -2066,16 +2060,7 @@ pub(crate) fn write_val_stdout(v: &Val) {
             let _ = h.write_all(b);
         }
         Val::String(s) => {
-            if s.starts_with('\0') {
-                return;
-            }
-            if s.ends_with('\0') {
-                let output = &s[..s.len() - 1];
-                fshell_tty::mark_cursor_state_unknown_for_stdout_output(output.as_bytes());
-                let _ = write!(h, "{output}");
-            } else {
-                let _ = writeln!(h, "{s}");
-            }
+            let _ = writeln!(h, "{s}");
         }
         other => {
             let _ = writeln!(h, "{}", external_text(other));

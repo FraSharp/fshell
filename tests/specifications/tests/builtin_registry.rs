@@ -74,6 +74,7 @@ fn explicit_contract_registration_restores_only_the_requested_metadata() {
         BuiltinContract {
             input: InputPreference::Bytes,
             query: false,
+            accepts: None,
         },
     );
     let contract = env.builtin_contract("probe-query");

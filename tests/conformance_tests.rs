@@ -795,6 +795,37 @@ fn native_word_model_cases() -> Vec<Case> {
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native)
         .features(&["native", "test"]),
+        // Text output is exact bytes: no newline is added or lost on its way
+        // to a file, a utility's stdin or a descriptor.
+        Case::native(
+            "native/text-output-is-byte-exact",
+            "echo -n abc > o.txt; wc -c < o.txt | tr -d ' '; printf 'b\\na\\n' | /usr/bin/sort",
+            "3\na\nb\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "bytes"]),
+        // A builtin that shadows a utility implements a subset of it; every
+        // other invocation is the utility's.
+        Case::native(
+            "native/shadowing-builtins-hand-over-unimplemented-options",
+            "printf '10\\n9\\n' | sort -n; cat -n lines.txt | head -n 1 | tr -d ' '",
+            "9\n10\n1\tfirst\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "builtin"]),
+        Case::native(
+            "native/cat-reports-a-missing-file-and-continues",
+            "cat nope a.txt 2>/dev/null; emit --stdout \"rc=$?\"",
+            "alpha\nrc=1\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "builtin"]),
         // A leading `+` starts a word, as a leading `-` does: `date +%Y`.
         Case::native(
             "native/plus-word-is-an-argument",

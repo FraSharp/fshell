@@ -41,6 +41,7 @@ mod search_input;
 mod search_output;
 pub mod select;
 pub mod serve;
+mod shadowing;
 pub mod string_ops;
 pub mod trap;
 pub mod utils;
@@ -232,6 +233,7 @@ pub fn init(env: &Env) {
         fshell_engine::BuiltinContract {
             input: fshell_engine::InputPreference::Bytes,
             query: true,
+            accepts: None,
         },
     );
     for (name, handler) in [
@@ -258,6 +260,7 @@ pub fn init(env: &Env) {
             },
         );
     }
+    shadowing::register(env);
     env.register_async_builtin("exec", exec_builtin);
     env.register_async_builtin("command", external::command_builtin);
     #[cfg(feature = "sandbox")]

@@ -1648,6 +1648,16 @@ impl Env {
         self.record_hard_stage_failure();
     }
 
+    /// Record a failure a builtin discovers after its handler returned (in
+    /// the task streaming its output), classified as a returned error would
+    /// be. The caller sends the returned diagnostic downstream so it reaches
+    /// the stage's stderr.
+    pub fn record_command_failure(&self, error: ShellError) -> FshDiag {
+        let diag = FshDiag::new(builtin_failure(error));
+        self.record_stage_failure(diag.clone());
+        diag
+    }
+
     pub fn report_stage_error_code(&self, code: i64) {
         self.record_stage_status(code);
     }
@@ -2466,6 +2476,35 @@ impl Env {
     ) {
         self.register_builtin(name, handler);
         self.command_contracts.write().insert(name.into(), contract);
+    }
+
+    /// Whether the builtin `name` declines these arguments in favour of the
+    /// standard utility it shadows, which must exist on the shell's PATH.
+    pub fn builtin_declines(&self, name: &str, args: &[Val]) -> bool {
+        let Some(accepts) = self.builtin_contract(name).accepts else {
+            return false;
+        };
+        if accepts(args) {
+            return false;
+        }
+        let path = self.vars.read().get("PATH").map(Val::to_text);
+        crate::eval::is_external_command_at(name, path.as_deref(), &self.cwd())
+    }
+
+    /// What the command `name` wants as input. A native command declares it in
+    /// its contract; an external utility — and a POSIX function, which reads
+    /// like one — reads bytes, so text must reach it exactly as written rather
+    /// than framed into records and re-serialized.
+    pub fn command_input_preference(&self, name: &str) -> InputPreference {
+        let native = self.fns.read().contains_key(name)
+            || self.get_alias(name).is_some()
+            || self.get_builtin(name).is_some()
+            || self.get_async_builtin(name).is_some();
+        if native {
+            self.builtin_contract(name).input
+        } else {
+            InputPreference::Bytes
+        }
     }
 
     pub fn builtin_contract(&self, name: &str) -> BuiltinContract {
@@ -3693,15 +3732,9 @@ pub(crate) fn render_stage_diag(env: &Env, diag: &fshell_core::FshDiag) {
 /// reroutes stay byte-identical with the terminal writer.
 pub(crate) fn write_stderr_stream(text: &str) {
     use std::io::Write;
-    if text.starts_with('\0') {
-        return;
-    }
     let err = std::io::stderr();
     let mut handle = err.lock();
-    if let Some(text) = text.strip_suffix('\0') {
-        fshell_tty::mark_cursor_state_unknown_for_stderr_output(text.as_bytes());
-        let _ = handle.write_all(text.as_bytes());
-    } else if text.ends_with('\n') {
+    if text.ends_with('\n') {
         let _ = handle.write_all(text.as_bytes());
     } else {
         let _ = writeln!(handle, "{text}");

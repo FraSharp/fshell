@@ -10,13 +10,18 @@ use miette::SourceSpan;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-pub fn sort_builtin(
-    in_rx: Option<PipeStream>,
-    args: Vec<Val>,
-    env: &Env,
-    tx: PipeSender,
+pub(crate) struct SortArgs {
+    reverse: bool,
+    key: Option<String>,
+    direct_list: Option<Vec<Val>>,
+}
+
+/// The options this builtin implements: `-r`/`--reverse`, `-k`/`--key FIELD`
+/// and a list operand. Anything else is the `sort` utility's.
+pub(crate) fn parse_sort_args(
+    args: &[Val],
     span: Option<SourceSpan>,
-) -> Result<(), ShellError> {
+) -> Result<SortArgs, ShellError> {
     let mut reverse = false;
     let mut key = None;
     let mut direct_list = None;
@@ -98,6 +103,26 @@ pub fn sort_builtin(
         }
         idx += 1;
     }
+
+    Ok(SortArgs {
+        reverse,
+        key,
+        direct_list,
+    })
+}
+
+pub fn sort_builtin(
+    in_rx: Option<PipeStream>,
+    args: Vec<Val>,
+    env: &Env,
+    tx: PipeSender,
+    span: Option<SourceSpan>,
+) -> Result<(), ShellError> {
+    let SortArgs {
+        reverse,
+        key,
+        direct_list,
+    } = parse_sort_args(&args, span)?;
 
     let sort_max_items = env.options.read().sort_max_items;
 

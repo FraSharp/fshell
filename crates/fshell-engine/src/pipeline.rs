@@ -93,10 +93,9 @@ pub async fn collect_pipeline(pipeline: &Pipeline, env: &Env) -> Result<Vec<Val>
             break;
         }
         match payload {
-            PipelinePayload::Data(v) => results.push(strip_capture_sentinel((*v).clone())),
+            PipelinePayload::Data(v) => results.push((*v).clone()),
             PipelinePayload::Bytes(b) => {
-                let s = String::from_utf8_lossy(&b).into_owned();
-                results.push(strip_capture_sentinel(Val::String(s)));
+                results.push(Val::String(String::from_utf8_lossy(&b).into_owned()));
             }
             PipelinePayload::Structured(d) => {
                 // Command stderr stream content is output, not failure: pass
@@ -145,25 +144,6 @@ pub fn spawn_pipeline_stream(pipeline: &Pipeline, env: &Env) -> PipeStream {
         }
     });
     rx
-}
-
-/// Remove the trailing NUL that `echo -n`/`echo -e…\c` uses to signal "no
-/// trailing newline". It is meaningful only to terminal/refer writers; a
-/// captured value must not carry the sentinel (`let x = echo -n hi` ⇒ `$x` is
-/// `hi`, not `hi\0`).
-fn strip_capture_sentinel(val: Val) -> Val {
-    match val {
-        Val::String(s) => {
-            let s = if s.ends_with('\0') {
-                s[..s.len() - 1].to_string()
-            } else {
-                s
-            };
-            Val::String(s)
-        }
-        Val::List(items) => Val::List(items.into_iter().map(strip_capture_sentinel).collect()),
-        other => other,
-    }
 }
 
 /// Check that a Val satisfies the given type constraint.
@@ -676,18 +656,11 @@ async fn write_redirect_file(
                     .map_err(|e| format!("redirect write error: {e}"))?;
                 return Ok(());
             }
-            let mut text = value.to_text();
-            let mut no_newline = false;
-            if let Val::String(value) = &**value
-                && value.ends_with('\0')
-            {
-                text = value[..value.len() - 1].to_string();
-                no_newline = true;
-            }
+            let text = value.to_text();
             file.write_all(text.as_bytes())
                 .await
                 .map_err(|e| format!("redirect write error: {e}"))?;
-            if !no_newline && !text.ends_with('\n') {
+            if !text.ends_with('\n') {
                 file.write_all(b"\n")
                     .await
                     .map_err(|e| format!("redirect write error: {e}"))?;
@@ -737,11 +710,12 @@ async fn route_payload(
                         fshell_core::diagnostic::StderrStream(value.to_text()),
                     ))
                 }
-                PipelinePayload::Bytes(bytes) => PipelinePayload::Structured(
-                    fshell_core::diagnostic::FshDiag::new(fshell_core::diagnostic::StderrStream(
-                        String::from_utf8_lossy(&bytes).into_owned(),
-                    )),
-                ),
+                // Raw bytes stay raw: a record would gain a newline.
+                PipelinePayload::Bytes(bytes) => {
+                    PipelinePayload::Structured(fshell_core::diagnostic::FshDiag::new(
+                        fshell_core::diagnostic::StderrBytes(bytes.to_vec()),
+                    ))
+                }
                 other => other,
             };
             out_tx
@@ -1077,7 +1051,10 @@ async fn execute_pipeline_inner(
             PlannedStage::Ast {
                 stage: PipelineStage::CommandCall { name, .. },
                 ..
-            } => env.builtin_contract(name).input,
+            } => env.command_input_preference(name),
+            // A redirection moves bytes to a file or descriptor; framing a
+            // command's text into records first would add newlines.
+            PlannedStage::OutputRoute { .. } => crate::InputPreference::Bytes,
             _ => crate::InputPreference::Records,
         })
         .collect();
@@ -1505,6 +1482,9 @@ async fn execute_pipeline_inner(
                                 &env_clone,
                             )?
                         };
+                        // A builtin shadowing a standard utility hands the
+                        // utility every invocation it does not implement.
+                        let builtin_declines = env_clone.builtin_declines(&name, &evaluated_args);
                         // Helper to restore env values after command execution
                         fn restore_inline_env(
                             env: &Env,
@@ -2013,7 +1993,9 @@ async fn execute_pipeline_inner(
                                 // Restore inline env vars
                                 restore_inline_env(&env_clone, saved_env_values, saved_top_values);
                             });
-                        } else if let Some(handler) = env_clone.get_async_builtin(&name) {
+                        } else if !builtin_declines
+                            && let Some(handler) = env_clone.get_async_builtin(&name)
+                        {
                             let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();
                             let cancel = cancel_tx.clone();
@@ -2045,7 +2027,9 @@ async fn execute_pipeline_inner(
                                 }
                                 restore_inline_env(&env_clone, saved_env_values, saved_top_values);
                             });
-                        } else if let Some(handler) = env_clone.get_builtin(&name) {
+                        } else if !builtin_declines
+                            && let Some(handler) = env_clone.get_builtin(&name)
+                        {
                             let handler_span = if span.is_empty() { None } else { Some(span) };
                             let stage_cancel = cancel_rx.clone();
                             let cancel = cancel_tx.clone();
@@ -3308,14 +3292,7 @@ async fn execute_pipeline_inner(
                                             }
                                             continue;
                                         }
-                                        let mut text = val.to_text();
-                                        let mut no_newline = false;
-                                        if let Val::String(s) = &*val
-                                            && s.ends_with('\0')
-                                        {
-                                            text = s[..s.len() - 1].to_string();
-                                            no_newline = true;
-                                        }
+                                        let text = val.to_text();
                                         if let Err(e) = file.write_all(text.as_bytes()).await {
                                             env_clone.report_stage_error();
                                             let _ = out_tx
@@ -3325,8 +3302,7 @@ async fn execute_pipeline_inner(
                                                 .await;
                                             return;
                                         }
-                                        if !no_newline
-                                            && !text.ends_with('\n')
+                                        if !text.ends_with('\n')
                                             && let Err(e) = file.write_all(b"\n").await
                                         {
                                             env_clone.report_stage_error();
@@ -3440,9 +3416,34 @@ async fn execute_pipeline_inner(
                     continue;
                 }
 
+                let wants_bytes = env_clone.downstream_input() == crate::InputPreference::Bytes;
                 spawn_stage!(async move {
-                    use tokio::io::AsyncBufReadExt;
+                    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
                     match tokio::fs::File::open(&path_buf).await {
+                        // A byte reader (an external utility) gets the file
+                        // exactly as stored, not re-framed into lines.
+                        Ok(mut file) if wants_bytes => {
+                            let mut buf = vec![0u8; 64 * 1024];
+                            loop {
+                                let n = match file.read(&mut buf).await {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => n,
+                                };
+                                if env_clone.pipeline_cancelled() {
+                                    break;
+                                }
+                                if crate::send_with_backpressure(
+                                    &env_clone,
+                                    &out_tx,
+                                    PipelinePayload::Bytes(buf[..n].to_vec().into()),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
                         Ok(file) => {
                             let mut reader = tokio::io::BufReader::new(file);
                             let mut buf = Vec::new();

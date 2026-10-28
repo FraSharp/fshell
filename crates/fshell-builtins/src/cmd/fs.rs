@@ -1093,7 +1093,7 @@ fn split_bytes_lines(payload: &PipelinePayload) -> Vec<PipelinePayload> {
         .collect()
 }
 
-fn parse_head_tail_args(args: &[Val]) -> Result<(usize, Vec<String>), ShellError> {
+pub(crate) fn parse_head_tail_args(args: &[Val]) -> Result<(usize, Vec<String>), ShellError> {
     let mut n = 10usize;
     let mut paths = Vec::new();
     let mut i = 0;
@@ -1352,7 +1352,7 @@ enum DuplicateFilter {
 }
 
 #[derive(Debug, Clone)]
-struct UniqArgs {
+pub(crate) struct UniqArgs {
     filter: DuplicateFilter,
     count: bool,
     ignore_case: bool,
@@ -1363,7 +1363,10 @@ struct UniqArgs {
     output_file: Option<String>,
 }
 
-fn parse_uniq_args(args: &[Val], span: Option<SourceSpan>) -> Result<UniqArgs, ShellError> {
+pub(crate) fn parse_uniq_args(
+    args: &[Val],
+    span: Option<SourceSpan>,
+) -> Result<UniqArgs, ShellError> {
     let mut config = UniqArgs {
         filter: DuplicateFilter::All,
         count: false,
@@ -2017,20 +2020,21 @@ pub fn echo_builtin(
     }
     let echo_str = parts.join(" ");
 
-    let (mut result_str, stop_output) = if interpret_escapes {
+    let (result_str, stop_output) = if interpret_escapes {
         interpret_ansi_escapes(&echo_str)
     } else {
         (echo_str, false)
     };
 
-    if no_newline || stop_output {
-        result_str.push('\0');
-    }
-
+    // A line is a value; text without its newline (`-n`, `\c`) is exactly
+    // these bytes, which every writer passes through unchanged.
+    let payload = if no_newline || stop_output {
+        PipelinePayload::Bytes(result_str.into_bytes().into())
+    } else {
+        PipelinePayload::Data(Arc::new(Val::String(result_str)))
+    };
     tokio::spawn(async move {
-        let _ = tx
-            .send(PipelinePayload::Data(Arc::new(Val::String(result_str))))
-            .await;
+        let _ = tx.send(payload).await;
     });
 
     Ok(())
@@ -2417,6 +2421,11 @@ pub fn cat_builtin(
         i += 1;
     }
 
+    // A records consumer — a structured stage, or a collection of the
+    // pipeline's values — receives one record per line; the terminal and byte
+    // readers get the text exactly as stored.
+    let as_records = env.downstream_input() == fshell_engine::InputPreference::Records
+        && (!env.is_last_stage || env.is_captured);
     let tx_clone = tx.clone();
     let env_clone = env.clone();
 
@@ -2434,81 +2443,93 @@ pub fn cat_builtin(
                 continue;
             }
 
+            // Like the utility, a file that cannot be read is reported and the
+            // rest are still printed; the command then fails with status 1.
+            let fail = |message: String| {
+                env_clone.record_command_failure(ShellError::new(ErrorCode::FileNotFound, message))
+            };
             let path = resolve_user_path(&path_str, &env_clone);
             if let Err(e) = check_read_file(&env_clone, "cat", path.clone()) {
-                let _ = tx_clone
-                    .send(PipelinePayload::Data(Arc::new(Val::String(format!(
-                        "cat: {}",
-                        e
-                    )))))
-                    .await;
+                let diag = fail(format!("cat: {e}"));
+                let _ = tx_clone.send(PipelinePayload::Structured(diag)).await;
                 continue;
             }
-
-            match tokio::fs::File::open(&path).await {
-                Ok(file) => {
-                    use std::sync::atomic::Ordering;
-                    use tokio::io::AsyncBufReadExt;
-                    let mut reader = tokio::io::BufReader::new(file);
-                    let mut line_buf = Vec::new();
-                    loop {
-                        if env_clone.job_control.cancellation.load(Ordering::Acquire) {
-                            break;
-                        }
-                        line_buf.clear();
-                        match reader.read_until(b'\n', &mut line_buf).await {
-                            Ok(0) => break, // EOF
-                            Ok(_) => match std::str::from_utf8(&line_buf) {
-                                Ok(text) => {
-                                    let trimmed = text
-                                        .strip_suffix("\r\n")
-                                        .unwrap_or_else(|| text.strip_suffix('\n').unwrap_or(text));
-                                    if tx_clone
-                                        .send(PipelinePayload::Data(Arc::new(Val::String(
-                                            trimmed.to_string(),
-                                        ))))
-                                        .await
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-                                }
-                                Err(_) => {
-                                    if tx_clone
-                                        .send(PipelinePayload::Data(Arc::new(Val::Blob(
-                                            line_buf.clone(),
-                                        ))))
-                                        .await
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                let _ =
-                                    tx_clone
-                                        .send(PipelinePayload::Data(Arc::new(Val::String(
-                                            format!("cat: {}: {}", path.display(), e),
-                                        ))))
-                                        .await;
-                                break;
-                            }
-                        }
-                    }
-                }
+            let file = match tokio::fs::File::open(&path).await {
+                Ok(file) => file,
                 Err(e) => {
-                    let _ = tx_clone
-                        .send(PipelinePayload::Data(Arc::new(Val::String(format!(
-                            "cat: {}: {}",
-                            path.display(),
-                            e
-                        )))))
-                        .await;
+                    let diag = fail(format!("cat: {path_str}: {}", io_reason(&e)));
+                    let _ = tx_clone.send(PipelinePayload::Structured(diag)).await;
+                    continue;
                 }
+            };
+            if let Err(e) = send_file(file, as_records, &tx_clone, &env_clone).await {
+                let diag = fail(format!("cat: {path_str}: {}", io_reason(&e)));
+                let _ = tx_clone.send(PipelinePayload::Structured(diag)).await;
             }
         }
     });
 
     Ok(())
+}
+
+/// An I/O error's description without Rust's "(os error N)" suffix.
+fn io_reason(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    match text.rfind(" (os error ") {
+        Some(index) => text[..index].to_string(),
+        None => text,
+    }
+}
+
+/// Stream a file: raw chunks, or one record per line for a records consumer.
+async fn send_file(
+    file: tokio::fs::File,
+    as_records: bool,
+    tx: &PipeSender,
+    env: &Env,
+) -> std::io::Result<()> {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let cancelled = || env.job_control.cancellation.load(Ordering::Acquire);
+    if !as_records {
+        let mut file = file;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 || cancelled() {
+                return Ok(());
+            }
+            if tx
+                .send(PipelinePayload::Bytes(buf[..n].to_vec().into()))
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+    }
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).await? == 0 || cancelled() {
+            return Ok(());
+        }
+        let value = match std::str::from_utf8(&line) {
+            Ok(text) => Val::String(
+                text.strip_suffix("\r\n")
+                    .or_else(|| text.strip_suffix('\n'))
+                    .unwrap_or(text)
+                    .to_string(),
+            ),
+            Err(_) => Val::Blob(line.clone()),
+        };
+        if tx
+            .send(PipelinePayload::Data(Arc::new(value)))
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+    }
 }

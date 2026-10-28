@@ -17,6 +17,12 @@ pub enum InputPreference {
 pub struct BuiltinContract {
     pub input: InputPreference,
     pub query: bool,
+    /// For a builtin that shadows a standard utility: whether it implements
+    /// these arguments. When it does not — an option only the utility knows,
+    /// such as `sort -n` or `cat -v` — the invocation goes to the utility on
+    /// PATH instead, so shadowing never takes an interface away. `None`
+    /// means the builtin takes any arguments.
+    pub accepts: Option<fn(&[fshell_core::Val]) -> bool>,
 }
 
 #[cfg(test)]
@@ -32,6 +38,7 @@ mod tests {
         let contract = BuiltinContract {
             input: InputPreference::Bytes,
             query: true,
+            accepts: None,
         };
         env.register_builtin_with_contract("search", handler.clone(), contract);
         assert!(env.builtin_contract("search").query);

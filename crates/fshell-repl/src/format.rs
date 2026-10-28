@@ -580,11 +580,7 @@ fn render_val_to_string(val: &Val, theme: &fshell_core::theme::Theme) -> String 
             let _ = writeln!(out, "{}", style.paint(f.to_string()));
         }
         Val::String(s) => {
-            if s.ends_with('\0') {
-                let _ = write!(out, "{}", &s[..s.len() - 1]);
-            } else {
-                let _ = writeln!(out, "{}", s);
-            }
+            let _ = writeln!(out, "{}", s);
         }
         Val::DateTime(dt) => {
             let style = theme.syntax.type_name.to_style_bold();
@@ -742,14 +738,7 @@ pub(crate) fn write_item_streaming(
             writeln!(writer, "{{ {} }}", parts.join(", "))
         }
         Val::Blob(bytes) => writer.write_all(bytes),
-        Val::String(text) if text.starts_with('\0') => Ok(()),
-        Val::String(text) => {
-            if let Some(text) = text.strip_suffix('\0') {
-                writer.write_all(text.as_bytes())
-            } else {
-                writeln!(writer, "{text}")
-            }
-        }
+        Val::String(text) => writeln!(writer, "{text}"),
         other => writer.write_all(render_val_to_string(other, theme).as_bytes()),
     }
 }

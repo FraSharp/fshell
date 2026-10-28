@@ -711,8 +711,7 @@ impl FshDiag {
     }
 
     /// Unmodified subprocess stderr bytes. Prefer this over `stderr_text` for
-    /// transport: chunks may split UTF-8 and do not imply record newlines/NULs.
-    /// Native text records retain their separate sentinel-aware writer policy.
+    /// transport: chunks may split UTF-8 and do not imply record newlines.
     pub fn stderr_bytes(&self) -> Option<&[u8]> {
         self.report
             .downcast_ref::<StderrBytes>()

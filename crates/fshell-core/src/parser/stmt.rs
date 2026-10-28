@@ -1503,7 +1503,16 @@ impl Parser {
                 }
                 Ok(PipelineStage::Map { projections })
             }
-            "sort" if !has_flag && self.peek_identifier().is_some() => {
+            // The structured stage sorts by a column named by a whole word
+            // (`sort size`); `sort file.txt` is the sort utility on a file.
+            "sort"
+                if !has_flag
+                    && self.peek_identifier().is_some_and(|column| {
+                        self.input
+                            .get(self.pos + column.len())
+                            .is_none_or(|c| c.is_whitespace() || matches!(c, '|' | ';' | ')' | '}'))
+                    }) =>
+            {
                 self.skip_whitespace();
                 let mut descending = false;
                 let mut col = self.parse_identifier()?;

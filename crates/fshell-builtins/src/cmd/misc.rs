@@ -1113,13 +1113,11 @@ pub fn printf_builtin(
     let (interpreted_format, _) = interpret_ansi_escapes(&format_str);
     let output = format_printf(&interpreted_format, format_args).map_err(ShellError::from)?;
 
-    // `printf` emits exactly what its format says, so the display boundary must
-    // not add a newline: the trailing NUL is this shell's marker for that.
-    let output = format!("{output}\0");
-
+    // `printf` emits exactly what its format says: bytes, which no writer
+    // decorates with a newline.
     tokio::spawn(async move {
         let _ = tx
-            .send(PipelinePayload::Data(Arc::new(Val::String(output))))
+            .send(PipelinePayload::Bytes(output.into_bytes().into()))
             .await;
     });
 

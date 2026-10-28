@@ -968,9 +968,9 @@ async fn test_integration_cat_short_circuit() {
         }
     }
 
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0], Val::String("hello".to_string()));
-    assert_eq!(results[1], Val::String("world".to_string()));
+    // Bound for the terminal, the file's text arrives exactly as stored.
+    let text: String = results.iter().map(Val::to_text).collect();
+    assert_eq!(text, "hello\nworld\n");
 
     let _ = std::fs::remove_file(&test_file);
 }
