@@ -446,7 +446,7 @@ fn scan_delimiters(input: &str, up_to_char: Option<usize>) -> DelimiterScan {
                 } else {
                     raw_line.clone()
                 };
-                if check_line == delim || check_line.trim() == delim {
+                if check_line == delim {
                     // Delimiter matched! Remove from front of queue
                     heredoc_stack.remove(0);
                     i = line_end;
@@ -594,31 +594,56 @@ fn scan_delimiters(input: &str, up_to_char: Option<usize>) -> DelimiterScan {
             while j < len && (chars[j] == ' ' || chars[j] == '\t') {
                 j += 1;
             }
+            // The delimiter is one shell word after quote removal: `EOF`,
+            // `'EOF'`, `"EOF"`, `E\OF` and `E"O"F` all name `EOF`.
             let mut delim = String::new();
-            if j < len && chars[j] == '\'' {
-                j += 1;
-                while j < len && chars[j] != '\'' {
-                    delim.push(chars[j]);
-                    j += 1;
+            let mut quoted = false;
+            while j < len
+                && !chars[j].is_whitespace()
+                && !matches!(chars[j], ';' | '&' | '|' | '<' | '>' | '(' | ')')
+            {
+                match chars[j] {
+                    '\'' => {
+                        quoted = true;
+                        j += 1;
+                        while j < len && chars[j] != '\'' {
+                            delim.push(chars[j]);
+                            j += 1;
+                        }
+                        j += 1;
+                    }
+                    '"' => {
+                        quoted = true;
+                        j += 1;
+                        while j < len && chars[j] != '"' {
+                            if chars[j] == '\\'
+                                && j + 1 < len
+                                && matches!(chars[j + 1], '"' | '\\' | '$' | '`')
+                            {
+                                j += 1;
+                            }
+                            delim.push(chars[j]);
+                            j += 1;
+                        }
+                        j += 1;
+                    }
+                    '\\' if j + 1 < len => {
+                        quoted = true;
+                        delim.push(chars[j + 1]);
+                        j += 2;
+                    }
+                    other => {
+                        delim.push(other);
+                        j += 1;
+                    }
                 }
-                if j < len && chars[j] == '\'' {
-                    j += 1;
-                }
-            } else if j < len && chars[j] == '"' {
-                j += 1;
-                while j < len && chars[j] != '"' {
-                    delim.push(chars[j]);
-                    j += 1;
-                }
-                if j < len && chars[j] == '"' {
-                    j += 1;
-                }
-            } else {
-                while j < len && (chars[j].is_alphanumeric() || chars[j] == '_' || chars[j] == '-')
-                {
-                    delim.push(chars[j]);
-                    j += 1;
-                }
+            }
+            let j = j.min(len);
+            if quoted && delim.is_empty() {
+                // `<<''` names the empty line as the delimiter.
+                pending_heredocs.push((String::new(), strip_tabs));
+                i = j;
+                continue;
             }
             if !delim.is_empty() {
                 pending_heredocs.push((delim, strip_tabs));
@@ -744,6 +769,30 @@ mod tests {
             validate_input("let x = <<'EOF'\nhello $world\nEOF\n"),
             ValidationResult::Complete
         );
+    }
+
+    #[test]
+    fn heredoc_delimiters_are_words_after_quote_removal() {
+        // The scanner alone decides here: none of these parse natively.
+        for input in [
+            "cat <<E\\OF\nbody\nEOF",
+            "cat <<E\"O\"F\nbody\nEOF",
+            "cat <<'E'OF\nbody\nEOF",
+            "cat <<EOF;echo\nbody\nEOF",
+        ] {
+            assert!(
+                !scan_delimiters(input, None).unclosed_heredoc,
+                "terminated: {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn heredoc_terminator_must_match_the_whole_line() {
+        assert!(scan_delimiters("cat <<EOF\nbody\n  EOF", None).unclosed_heredoc);
+        assert!(!scan_delimiters("cat <<-EOF\n\tbody\n\tEOF", None).unclosed_heredoc);
+        assert!(scan_delimiters("cat <<A; cat <<B\none\nA", None).unclosed_heredoc);
+        assert!(!scan_delimiters("cat <<A; cat <<B\none\nA\ntwo\nB", None).unclosed_heredoc);
     }
 
     #[test]
