@@ -4,6 +4,7 @@
 use crate::error::BuiltinError;
 use fshell_core::ShellError;
 use fshell_core::Val;
+use fshell_core::diagnostic::ErrorCode;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use miette::SourceSpan;
 use std::collections::HashSet;
@@ -421,28 +422,55 @@ pub fn kill_builtin(
     Ok(())
 }
 
+/// `wait [pid|%job ...]`: wait for every background job, or for the given
+/// ones, and leave the last one's exit status (127 for one this shell does
+/// not know). It prints nothing.
 pub fn wait_builtin(
     _in_rx: Option<PipeStream>,
-    _args: Vec<Val>,
+    args: Vec<Val>,
     env: &Env,
     tx: PipeSender,
     _span: Option<SourceSpan>,
 ) -> Result<(), ShellError> {
     let env = env.clone();
-    let tx = tx.clone();
+    let operands: Vec<String> = args.iter().map(Val::to_text).collect();
     tokio::spawn(async move {
-        loop {
-            let notified = env.background_notify.notified();
-            if env
-                .background_count
-                .load(std::sync::atomic::Ordering::Relaxed)
-                == 0
-            {
-                break;
-            }
-            notified.await;
+        // Holding the output sender keeps the stage open until waiting ends.
+        let _stage_open = tx;
+        if operands.is_empty() {
+            fshell_engine::background::wait_all_jobs(&env).await;
+            return;
         }
-        let _ = tx.send(PipelinePayload::Data(Arc::new(Val::Int(0)))).await;
+        let mut status = 0;
+        for operand in &operands {
+            let job = fshell_engine::background::wait_operand_pid(&env, operand);
+            status = match job {
+                Some(pid) => match fshell_engine::background::wait_job(&env, pid).await {
+                    Some(code) => code,
+                    None => {
+                        env.record_command_failure(
+                            ShellError::new(
+                                ErrorCode::NotFound,
+                                format!("wait: pid {pid} is not a child of this shell"),
+                            )
+                            .with_exit_status(127),
+                        );
+                        return;
+                    }
+                },
+                None => {
+                    env.record_command_failure(
+                        ShellError::new(
+                            ErrorCode::NotFound,
+                            format!("wait: {operand}: no such job"),
+                        )
+                        .with_exit_status(127),
+                    );
+                    return;
+                }
+            };
+        }
+        env.report_stage_error_code(i64::from(status));
     });
     Ok(())
 }

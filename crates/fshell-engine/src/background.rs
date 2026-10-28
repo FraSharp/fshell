@@ -233,13 +233,21 @@ pub fn spawn_background(
     std::thread::spawn(move || {
         let code = child
             .wait()
-            .ok()
-            .and_then(|status| status.code())
-            .unwrap_or(0);
+            .map(|status| {
+                use std::os::unix::process::ExitStatusExt;
+                status
+                    .code()
+                    .or_else(|| status.signal().map(|signal| 128 + signal))
+                    .unwrap_or(1)
+            })
+            .unwrap_or(1);
+        // Record the status before the job leaves the table, so a waiter
+        // always finds one or the other.
+        reaper_env.job_control.finished.lock().insert(pid, code);
         reaper_env.job_control.jobs.write().remove(&pid);
-        if reaper_env.background_count.fetch_sub(1, Ordering::Relaxed) == 1 {
-            reaper_env.background_notify.notify_waiters();
-        }
+        reaper_env.background_count.fetch_sub(1, Ordering::Relaxed);
+        // Every completion wakes waiters: one may be waiting for this job.
+        reaper_env.background_notify.notify_waiters();
         for file in &temp_files {
             let _ = std::fs::remove_file(file);
         }
@@ -250,4 +258,56 @@ pub fn spawn_background(
     });
 
     Ok(pid)
+}
+
+/// Resolve a `wait` operand — a pid or a `%N` job id — to the job's pid.
+pub fn wait_operand_pid(env: &Env, operand: &str) -> Option<i32> {
+    match operand.strip_prefix('%') {
+        Some(id) => {
+            let id: usize = id.parse().ok()?;
+            let jobs = env.job_control.jobs.read();
+            jobs.iter()
+                .find(|(_, job)| job.id == id)
+                .map(|(pid, _)| *pid)
+        }
+        None => operand.parse().ok(),
+    }
+}
+
+/// Wait for the background job `pid` and return its exit status, or `None`
+/// when `pid` is not a job of this shell (POSIX: status 127).
+pub async fn wait_job(env: &Env, pid: i32) -> Option<i32> {
+    loop {
+        // Subscribe before looking, so a job finishing in between still wakes us.
+        let notified = env.background_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(code) = env.job_control.finished.lock().remove(&pid) {
+            return Some(code);
+        }
+        if !env.job_control.jobs.read().contains_key(&pid) {
+            return None;
+        }
+        notified.await;
+    }
+}
+
+/// Wait for every background job (POSIX `wait` without operands).
+pub async fn wait_all_jobs(env: &Env) {
+    loop {
+        let notified = env.background_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let running = env
+            .job_control
+            .jobs
+            .read()
+            .values()
+            .any(|job| !job.disowned && matches!(job.status, JobStatus::Running));
+        if !running && env.background_count.load(Ordering::Relaxed) == 0 {
+            env.job_control.finished.lock().clear();
+            return;
+        }
+        notified.await;
+    }
 }

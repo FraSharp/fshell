@@ -2020,6 +2020,7 @@ impl Env {
                 cancellation: Arc::new(AtomicBool::new(false)),
                 cancellation_notify: Arc::new(Notify::new()),
                 exit_request: Arc::new(Mutex::new(None)),
+                finished: Arc::new(Mutex::new(FxHashMap::default())),
             },
             reactive: reactive::Reactivity {
                 cells: Arc::new(RwLock::new(FxHashMap::default())),
@@ -2183,6 +2184,7 @@ impl Env {
                 cancellation: Arc::new(AtomicBool::new(false)),
                 cancellation_notify: Arc::new(Notify::new()),
                 exit_request: Arc::new(Mutex::new(None)),
+                finished: Arc::new(Mutex::new(FxHashMap::default())),
             },
             reactive: reactive::Reactivity {
                 cells: Arc::new(RwLock::new(FxHashMap::default())),

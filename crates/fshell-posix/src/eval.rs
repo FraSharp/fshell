@@ -1941,104 +1941,34 @@ fn handle_posix_trap(args: &[String], env: &Env) -> Result<String, PosixError> {
     Ok(String::new())
 }
 
+/// POSIX `wait [pid|%job ...]`: with no operands wait for every background
+/// job and succeed; otherwise the status of the last operand's job, or 127
+/// when it is not a job of this shell.
 async fn handle_posix_wait(args: &[String], env: &Env) -> Result<i32, PosixError> {
-    use std::sync::atomic::Ordering;
     if args.is_empty() {
-        loop {
-            let count = env.background_count.load(Ordering::Relaxed);
-            if count == 0 {
-                // Also ensure jobs map has no non-disowned background pids
-                let has_bg = {
-                    let jobs = env.job_control.jobs.read();
-                    jobs.values().any(|j| !j.disowned && j.pgid > 0)
-                };
-                if !has_bg {
-                    break;
-                }
-            }
-            env.background_notify.notified().await;
-        }
+        fshell_engine::background::wait_all_jobs(env).await;
         return Ok(0);
     }
     let mut last_code = 0;
     for arg in args {
-        let trimmed = arg.trim_start_matches('%');
-        // Try as job id first
-        if let Ok(jid) = trimmed.parse::<usize>() {
-            let pgid_opt = {
-                let jobs = env.job_control.jobs.read();
-                jobs.values()
-                    .find(|j| j.id == jid && !j.disowned)
-                    .map(|j| j.pgid)
-            };
-            if let Some(pgid) = pgid_opt {
-                loop {
-                    let still = {
-                        let jobs = env.job_control.jobs.read();
-                        jobs.get(&pgid).is_some()
-                    };
-                    if !still {
-                        break;
-                    }
-                    env.background_notify.notified().await;
-                }
-                last_code = env.exit_code() as i32;
-                continue;
-            }
-        }
-        // Try as pid
-        if let Ok(pid) = arg.parse::<i32>() {
-            // If job exists, wait via jobs map
-            let pgid_opt = {
-                let jobs = env.job_control.jobs.read();
-                if jobs.contains_key(&pid) {
-                    Some(pid)
-                } else {
-                    jobs.values()
-                        .find(|j| j.pgid == pid || j.pids.contains(&pid))
-                        .map(|j| j.pgid)
-                }
-            };
-            if let Some(pgid) = pgid_opt {
-                loop {
-                    let still = {
-                        let jobs = env.job_control.jobs.read();
-                        jobs.get(&pgid).is_some()
-                    };
-                    if !still {
-                        break;
-                    }
-                    env.background_notify.notified().await;
-                }
-                last_code = env.exit_code() as i32;
-            } else {
-                // No job: the process may be an external child (already reaped
-                // by the background reaper) or not ours. POSIX treats an
-                // unknown pid as status 127 and keeps going — never fatal.
-                let mut status = 0;
-                let res = unsafe { libc::waitpid(pid, &mut status, 0) };
-                if res <= 0 {
+        let job = fshell_engine::background::wait_operand_pid(env, arg);
+        last_code = match job {
+            Some(pid) => match fshell_engine::background::wait_job(env, pid).await {
+                Some(code) => code,
+                None => {
                     report(
                         env,
                         &format!("wait: pid {pid} is not a child of this shell"),
                     )
                     .await;
-                    last_code = 127;
-                } else {
-                    let code = if (status & 0x7f) == 0 {
-                        (status >> 8) & 0xff
-                    } else {
-                        128 + (status & 0x7f)
-                    };
-                    last_code = code;
+                    127
                 }
+            },
+            None => {
+                report(env, &format!("wait: {arg}: no such job")).await;
+                127
             }
-            continue;
-        }
-        return Err(PosixError::Engine(EngineError::Generic {
-            message: format!("wait: {arg}: no such job"),
-            span: None,
-        }));
+        };
     }
     Ok(last_code)
 }

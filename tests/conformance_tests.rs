@@ -394,6 +394,12 @@ fn composition_cases() -> Vec<Case> {
         .features(&["compose", "pipeline", "pipefail", "exit_status"]),
         Case::posix_only("compose/subshell-runs", "(emit --stdout sub)")
             .features(&["compose", "subshell"]),
+        // `wait` reports the job's own status, including a signal death.
+        Case::posix_only(
+            "compose/wait-reports-the-job-status",
+            "sh -c 'exit 7' & wait $!; emit --stdout \"rc=$?\"; sh -c 'kill -9 $$' & wait $!; emit --stdout \"rc=$?\"",
+        )
+        .features(&["compose", "background", "wait"]),
         // `cd` and `pwd` are logical: the path travelled, not the resolved one.
         Case::posix_only(
             "compose/cd-is-logical-through-a-symlink",

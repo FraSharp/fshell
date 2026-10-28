@@ -190,6 +190,9 @@ pub struct JobControl {
     /// The statement driver observes it after the pipeline completes and turns
     /// it into `Flow::Exit`.
     pub exit_request: Arc<Mutex<Option<i32>>>,
+    /// Exit statuses of background jobs that finished, by pid, kept until a
+    /// `wait` collects them — what makes `wait $!` report the job's status.
+    pub finished: Arc<Mutex<fshell_hash::FxHashMap<i32, i32>>>,
 }
 
 impl std::fmt::Debug for JobControl {
@@ -212,6 +215,7 @@ impl Clone for JobControl {
             cancellation: self.cancellation.clone(),
             cancellation_notify: self.cancellation_notify.clone(),
             exit_request: self.exit_request.clone(),
+            finished: self.finished.clone(),
         }
     }
 }
