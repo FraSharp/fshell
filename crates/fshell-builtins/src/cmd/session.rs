@@ -7,7 +7,6 @@ use fshell_core::Val;
 use fshell_engine::handoff::HandoffState;
 use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload};
 use miette::SourceSpan;
-use std::os::unix::process::CommandExt;
 use std::sync::Arc;
 
 const CMD: &str = "session";
@@ -71,18 +70,6 @@ fn cmd_resume(id: Option<&str>, env: &Env, tx: PipeSender) -> Result<(), ShellEr
 
     // Inherit current working directory
     cmd.current_dir(env.cwd());
-
-    // Reset signal mask in child before exec — same pattern as fshell-bridge
-    unsafe {
-        cmd.pre_exec(move || {
-            let mut set = std::mem::zeroed::<libc::sigset_t>();
-            libc::sigemptyset(&mut set);
-            libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
-            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-            Ok(())
-        });
-    }
 
     let env = env.clone();
 

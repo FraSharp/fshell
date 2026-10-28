@@ -11,7 +11,6 @@ use fshell_engine::{Env, PipeSender, PipeStream, PipelinePayload, resolve_cached
 use miette::SourceSpan;
 use std::io::Write;
 use std::os::unix::io::FromRawFd;
-use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,7 +55,6 @@ fn spawn_external_command(
     cmd: &mut std::process::Command,
     pipeline_job: Option<&fshell_engine::job_control::PipelineJobContext>,
     has_controlling_terminal: bool,
-    debug_fg: bool,
 ) -> std::io::Result<(std::process::Child, i32)> {
     // Keep leader selection, spawn, and terminal handoff in one synchronous
     // critical section. No non-Send lock guard escapes into the async future.
@@ -64,31 +62,7 @@ fn spawn_external_command(
     let is_pipeline_leader = launch.as_ref().is_some_and(|state| state.is_none());
     let should_transfer = has_controlling_terminal && (launch.is_none() || is_pipeline_leader);
     let pgid = launch.as_ref().and_then(|state| **state).unwrap_or(0);
-    cmd.process_group(pgid);
-
-    // Reset the child signal mask and dispositions inherited from Tokio/Rust.
-    // The child must receive terminal-generated signals normally.
-    // SAFETY: pre_exec runs after fork and before exec; all operations here are
-    // async-signal-safe and use only stack data.
-    unsafe {
-        cmd.pre_exec(move || {
-            let mut set = std::mem::zeroed::<libc::sigset_t>();
-            libc::sigemptyset(&mut set);
-            libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
-            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-            if should_transfer {
-                libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-                libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
-                libc::signal(libc::SIGTTOU, libc::SIG_DFL);
-            }
-            if debug_fg {
-                let msg = "[FSH_DEBUG_FG] child: pre_exec complete\n";
-                let _ = libc::write(libc::STDERR_FILENO, msg.as_ptr().cast(), msg.len());
-            }
-            Ok(())
-        });
-    }
+    fshell_engine::job_control::configure_child_launch(cmd, pgid, should_transfer);
 
     let child_result = cmd.spawn();
     let child = child_result?;
@@ -773,12 +747,8 @@ pub async fn run_external(
         env.trace_mode,
         serde_json::Map::new(),
     );
-    let spawn_result = spawn_external_command(
-        &mut cmd,
-        pipeline_job.as_deref(),
-        has_controlling_terminal,
-        debug_fg,
-    );
+    let spawn_result =
+        spawn_external_command(&mut cmd, pipeline_job.as_deref(), has_controlling_terminal);
     if let Some(trace_span) = spawn_span.take() {
         trace_span.finish(if spawn_result.is_ok() {
             fshell_engine::trace::SpanOutcome::Ok

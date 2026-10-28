@@ -7,6 +7,40 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::Job;
 
+/// Places an external command in process group `pgid` (0 = its own group) and,
+/// when `take_terminal` is set, makes the child claim the controlling terminal
+/// before `exec`.
+///
+/// Only the terminal handoff installs a `pre_exec` hook. Any hook forces std to
+/// `fork`, and forking a multithreaded process is unsafe on macOS: a child
+/// forked while another thread is inside a libSystem one-time initialiser
+/// (libnotify, XPC) is killed in its atfork handler before `exec`. Without a
+/// hook std uses `posix_spawn`, which already starts the child with an empty
+/// signal mask, default SIGPIPE and default dispositions for every caught
+/// signal — everything the hook used to reset by hand.
+pub fn configure_child_launch(cmd: &mut std::process::Command, pgid: i32, take_terminal: bool) {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(pgid);
+    if take_terminal {
+        // SAFETY: runs between fork and exec; only async-signal-safe calls.
+        // The child claims the terminal itself so it can never read the tty
+        // before the parent-side `tcsetpgrp` lands.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut set = std::mem::zeroed::<libc::sigset_t>();
+                libc::sigemptyset(&mut set);
+                libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+                libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+                libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
+                libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+    }
+}
+
 /// Shared process-group and terminal ownership for the external processes in
 /// one foreground pipeline. The pipeline executor owns the context; bridge
 /// stages use `launch` to join the same group while the executor restores the

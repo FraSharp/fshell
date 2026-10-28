@@ -141,7 +141,7 @@ every session initializes components in strict bottom-up dependency order:
 5. **`fshell_bridge::init(&env)`**: registers external command fallback dispatch and glob expansion.
 6. **`init_posix_handler()`**: registers the `fshell-posix` execution callback into `fshell-engine`.
 7. **login & profile loading**: loads host login environment and evaluates startup profiles (`init.fsh` / `config.toml`).
-8. **path cache warmup**: runs `warmup_path_cache()` in the background to build the binary lookup index.
+8. **path cache warmup** (interactive only): the REPL runs `warmup_path_cache()` to start the PATH watcher and prefetches the binary lookup index in the background. One-shot `-c` and script processes skip it: exact lookups probe `$PATH` directly.
 9. **REPL or execution**:
    - `fsh -c <cmd>`: executes the inline command and exits.
    - `fsh <script.fsh>`: executes the file non-interactively.

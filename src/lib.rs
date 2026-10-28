@@ -251,9 +251,6 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
             },
         );
 
-        let mut timing = trace_span(&trace, "startup.path_warmup", TraceMode::Command);
-        fshell_engine::warmup_path_cache(Some(&env));
-        finish_span(&mut timing, SpanOutcome::Ok);
         apply_cli_render_options(&env, &cli);
 
         // POSIX mode: evaluate via fshell-posix engine
@@ -410,10 +407,6 @@ pub async fn run_with_trace(trace: Arc<TraceSink>) {
 
     let mut timing = trace_span(&trace, "startup.host_environment", env.trace_mode);
     fshell_engine::populate_env_from_host(&env);
-    finish_span(&mut timing, SpanOutcome::Ok);
-
-    let mut timing = trace_span(&trace, "startup.path_warmup", env.trace_mode);
-    fshell_engine::warmup_path_cache(Some(&env));
     finish_span(&mut timing, SpanOutcome::Ok);
 
     apply_cli_render_options(&env, &cli);

@@ -2749,7 +2749,34 @@ async fn run_external_command(
         .as_deref()
         .or(io_cfg.stdin_bytes.as_deref());
 
-    let mut cmd = tokio::process::Command::new(cmd_name);
+    // Resolve against the shell's PATH here rather than letting `execvp` search:
+    // the shell variable, not the process environment, is authoritative, and a
+    // resolved program lets std launch with `posix_spawn` instead of `fork`.
+    let program = if cmd_name.contains('/') {
+        cmd_name.to_string()
+    } else {
+        let search_path = search_path_override.map(str::to_string).or_else(|| {
+            prefix_assignments
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "PATH")
+                .map(|(_, v)| v.clone())
+                .or_else(|| env.vars.read().get("PATH").map(Val::to_text))
+        });
+        match fshell_engine::resolve_cached_command_path_at(
+            cmd_name,
+            search_path.as_deref(),
+            &env.cwd(),
+        ) {
+            Some(path) => path,
+            None => {
+                eprintln!("{cmd_name}: command not found");
+                return Ok((127, None));
+            }
+        }
+    };
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.arg0(cmd_name);
     cmd.args(args);
     cmd.current_dir(env.cwd());
 
@@ -2849,26 +2876,7 @@ async fn run_external_command(
         && io_cfg.stdin_stream.is_none()
         && redir.stdin_file.is_none();
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.as_std_mut().process_group(0);
-        unsafe {
-            cmd.as_std_mut().pre_exec(move || {
-                let mut set = std::mem::zeroed::<libc::sigset_t>();
-                libc::sigemptyset(&mut set);
-                libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
-                libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-                if is_interactive {
-                    libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-                    libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
-                    libc::signal(libc::SIGTTOU, libc::SIG_DFL);
-                }
-                Ok(())
-            });
-        }
-    }
+    fshell_engine::job_control::configure_child_launch(cmd.as_std_mut(), 0, is_interactive);
 
     let child = match cmd.spawn() {
         Ok(child) => child,

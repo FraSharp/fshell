@@ -4218,9 +4218,9 @@ fn reassert_path_watches(
 /// cheap (a Tab-rate channel send; the thread dedupes), so every lookup site
 /// that normalizes a PATH calls it and mid-session `export PATH=...` stays
 /// covered. Uses the shell's normalized PATH — never the process PATH, which
-/// skews after login enrichment.
+/// skews after login enrichment. A no-op until an interactive session has
+/// started the watcher: one-shot processes rely on the TTL alone.
 fn note_path_dirs(normalized_path: &str) {
-    start_path_watcher();
     if let Some(tx) = WATCH_TX.get()
         && !normalized_path.is_empty()
     {
@@ -4235,6 +4235,11 @@ fn note_path_dirs(normalized_path: &str) {
 
 /// Ensure the PATH subsystem is ready: the fs watcher is started and pointed
 /// at the shell's current PATH so later enumeration fills stay fresh.
+///
+/// Interactive sessions only. The watcher is a long-lived thread whose
+/// platform setup (FSEvents on macOS) must not overlap a one-shot process's
+/// first child launch, and a process that exits after one command gains
+/// nothing from it.
 ///
 /// This deliberately performs NO synchronous scan. Exact command lookups use
 /// the Tier-1 direct probe (µs, always correct cold), and enumeration
@@ -4373,7 +4378,6 @@ pub fn get_path_executables(env_path: Option<&str>) -> Vec<String> {
 
 /// Return executable names from PATH resolved against an explicit logical cwd.
 pub fn get_path_executables_at(env_path: Option<&str>, cwd: &std::path::Path) -> Vec<String> {
-    start_path_watcher();
     let current_path = normalize_path_for_cwd(
         env_path
             .map(|p| p.to_string())

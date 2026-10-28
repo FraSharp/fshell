@@ -142,12 +142,7 @@ pub fn spawn_background(source: &str, env: &Env) -> Result<i32, EngineError> {
     {
         use std::os::unix::process::CommandExt;
         // Give the job its own process group so it can be signalled as a unit.
-        unsafe {
-            cmd.pre_exec(|| {
-                let _ = libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
+        cmd.process_group(0);
     }
 
     let mut child = match cmd.spawn() {

@@ -126,3 +126,45 @@ fn nonzero_exit_is_an_observation_without_a_diagnostic() -> io::Result<()> {
     assert_output(&output, 3, b"", b"");
     fixture.close()
 }
+
+/// Child launch must not race the shell's own threads. On macOS a child
+/// forked while another thread runs a libSystem one-time initialiser is
+/// killed before `exec`, which surfaced as status 137 or a silently empty
+/// pipeline in a fraction of one-shot runs.
+#[test]
+fn repeated_one_shot_launches_never_lose_a_child() -> io::Result<()> {
+    let fixture = ShellFixture::new()?;
+    for engine in ["--native", "--posix"] {
+        for _ in 0..25 {
+            let output = command(&fixture)?
+                .args([engine, "-c", "seq 3 | tail -1"])
+                .run()
+                .expect("one-shot pipeline");
+            assert_output(&output, 0, b"3\n", b"");
+        }
+    }
+    fixture.close()
+}
+
+#[test]
+fn posix_bare_command_resolves_with_the_shell_path_and_keeps_its_argv0() -> io::Result<()> {
+    let fixture = ShellFixture::new()?;
+    let output = command(&fixture)?
+        .args([
+            "--posix",
+            "-c",
+            r#"mkdir bin; ln -s /bin/sh bin/alias-sh
+PATH="$PWD/bin:$PATH" alias-sh -c 'printf "%s|" "$0"'
+PATH="$PWD/bin:$PATH"; alias-sh -c 'printf "%s|" "$0"'
+missing-spec-tool; printf '%s' "$?""#,
+        ])
+        .run()
+        .expect("POSIX PATH resolution");
+    assert_output(
+        &output,
+        0,
+        b"alias-sh|alias-sh|127",
+        b"missing-spec-tool: command not found\n",
+    );
+    fixture.close()
+}
