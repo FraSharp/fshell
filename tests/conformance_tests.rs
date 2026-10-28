@@ -826,6 +826,16 @@ fn native_word_model_cases() -> Vec<Case> {
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native)
         .features(&["native", "builtin"]),
+        // `read` is the utility: it assigns `$IFS` fields and prints nothing.
+        Case::native(
+            "native/read-assigns-fields-and-prints-nothing",
+            "read a b <<EOF\nfirst second third\nEOF\nemit --stdout \"$a|$b\"",
+            "first|second third\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "read"]),
         // A leading `+` starts a word, as a leading `-` does: `date +%Y`.
         Case::native(
             "native/plus-word-is-an-argument",

@@ -912,15 +912,15 @@ async fn test_integration_read_builtin_timeout() {
     )
     .unwrap();
 
-    // Wait for the spawned task to complete
-    let mut val = None;
+    // Wait for the spawned task to complete. Like the utility, `read`
+    // assigns and outputs nothing.
     while let Some(payload) = rx.recv().await {
-        if let PipelinePayload::Data(v) = payload {
-            val = Some((*v).clone());
-        }
+        assert!(
+            !matches!(payload, PipelinePayload::Data(_)),
+            "read produced output"
+        );
     }
 
-    assert!(val.is_some());
     // The variable TEST_VAR should be set in env
     let vars = env.vars.read();
     let var_val = vars.get("TEST_VAR").unwrap();

@@ -96,6 +96,7 @@ pub mod multicall;
 pub mod profiler;
 pub mod prompt;
 pub mod reactive;
+pub mod read_input;
 pub mod scope;
 pub mod trace;
 pub use scope::{ConfigTuiHandler, LocalScope};
