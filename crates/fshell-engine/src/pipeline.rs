@@ -249,7 +249,27 @@ fn collect_expr_idents(expr: &Expr, idents: &mut FxHashSet<String>) {
         Expr::VarWithModifier { name, .. } => {
             idents.insert(name.clone());
         }
-        Expr::ArithmeticExpansion(inner) => collect_expr_idents(inner, idents),
+        Expr::ArithmeticExpansion(inner) => {
+            collect_expr_idents(inner, idents);
+            // Arithmetic text names variables bare: `$(( count + 1 ))`.
+            if let Expr::String(parts) = inner.unpack() {
+                for part in parts {
+                    if let StringPart::Lit { text, .. } = part {
+                        let mut word = String::new();
+                        for c in text.chars().chain(std::iter::once(' ')) {
+                            if c.is_ascii_alphanumeric() || c == '_' {
+                                word.push(c);
+                            } else if !word.is_empty() {
+                                if !word.starts_with(|c: char| c.is_ascii_digit()) {
+                                    idents.insert(std::mem::take(&mut word));
+                                }
+                                word.clear();
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Expr::If {
             condition,
             then_body,

@@ -1072,9 +1072,9 @@ async fn test_cmd_substitution_syntax() {
     let stmts = parser.parse_statements().unwrap();
     assert_eq!(stmts.len(), 1);
     if let Stmt::Let { expr, .. } = stmts[0].unpack() {
-        assert!(matches!(expr.unpack(), Expr::InlinePipeline(_)));
+        assert!(matches!(expr.unpack(), Expr::Substitution(_)));
     } else {
-        panic!("Expected Let with InlinePipeline");
+        panic!("Expected Let with Substitution");
     }
 }
 
@@ -1086,9 +1086,9 @@ async fn test_backtick_substitution_syntax() {
     let stmts = parser.parse_statements().unwrap();
     assert_eq!(stmts.len(), 1);
     if let Stmt::Let { expr, .. } = stmts[0].unpack() {
-        assert!(matches!(expr.unpack(), Expr::InlinePipeline(_)));
+        assert!(matches!(expr.unpack(), Expr::Substitution(_)));
     } else {
-        panic!("Expected Let with InlinePipeline from backtick");
+        panic!("Expected Let with Substitution from backtick");
     }
 }
 

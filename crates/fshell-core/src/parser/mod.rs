@@ -366,30 +366,12 @@ fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
                         // Arithmetic expansion `$(( ... ))` — try it first and fall
                         // back to command substitution if it does not close.
                         let mut handled = false;
-                        if p.peek() == Some('(') && p.input.get(p.pos + 1).copied() == Some('(') {
-                            let saved_pos = p.pos;
-                            p.next_char(); // first '('
-                            p.next_char(); // second '('
-                            if let Ok(inner) = p.parse_expr() {
-                                p.skip_whitespace();
-                                if p.peek() == Some(')') {
-                                    p.next_char();
-                                    p.skip_whitespace();
-                                    if p.peek() == Some(')') {
-                                        p.next_char();
-                                        parts.push(StringPart::Expr {
-                                            expr: Box::new(Expr::ArithmeticExpansion(Box::new(
-                                                inner,
-                                            ))),
-                                            quote: QuoteKind::Double,
-                                        });
-                                        handled = true;
-                                    }
-                                }
-                            }
-                            if !handled {
-                                p.pos = saved_pos;
-                            }
+                        if let Some(arithmetic) = p.try_parse_arithmetic_expansion()? {
+                            parts.push(StringPart::Expr {
+                                expr: Box::new(arithmetic),
+                                quote: QuoteKind::Double,
+                            });
+                            handled = true;
                         }
                         if !handled {
                             let e = p.parse_cmd_substitution()?;
@@ -430,6 +412,29 @@ fn parse_string_parts_inner(s: &str) -> Result<Vec<StringPart>, ParseError> {
                         lit.push('$');
                     }
                 }
+            }
+            // As in a POSIX here-document, a backslash quotes `$`, `` ` `` and
+            // itself, joins lines before a newline, and is literal elsewhere.
+            '\\' => {
+                p.next_char();
+                match p.peek() {
+                    Some(quoted @ ('$' | '`' | '\\')) => {
+                        p.next_char();
+                        lit.push(quoted);
+                    }
+                    Some('\n') => {
+                        p.next_char();
+                    }
+                    _ => lit.push('\\'),
+                }
+            }
+            '`' => {
+                flush(&mut parts, &mut lit);
+                let e = p.parse_backquote_substitution()?;
+                parts.push(StringPart::Expr {
+                    expr: Box::new(e),
+                    quote: QuoteKind::Double,
+                });
             }
             _ => {
                 lit.push(p.next_char().expect("peeked a character"));
@@ -1559,9 +1564,9 @@ mod tests {
         let stmts = p.parse_statements().unwrap();
         assert_eq!(stmts.len(), 1);
         if let Stmt::Let { expr, .. } = stmts[0].unpack() {
-            assert!(matches!(expr.unpack(), Expr::InlinePipeline(_)));
+            assert!(matches!(expr.unpack(), Expr::Substitution(_)));
         } else {
-            panic!("expected Let with InlinePipeline from backtick");
+            panic!("expected Let with Substitution from backtick");
         }
     }
 
@@ -1582,9 +1587,9 @@ mod tests {
         let stmts = p.parse_statements().unwrap();
         assert_eq!(stmts.len(), 1);
         if let Stmt::Let { expr, .. } = stmts[0].unpack() {
-            assert!(matches!(expr.unpack(), Expr::InlinePipeline(_)));
+            assert!(matches!(expr.unpack(), Expr::Substitution(_)));
         } else {
-            panic!("expected Let with InlinePipeline");
+            panic!("expected Let with Substitution");
         }
     }
 
@@ -1751,7 +1756,7 @@ mod tests {
         assert!(matches!(&parts[0], StringPart::Lit { text: value, .. } if value == "before "));
         assert!(matches!(
             &parts[1],
-            StringPart::Expr { expr, .. } if matches!(expr.unpack(), Expr::InlinePipeline(_))
+            StringPart::Expr { expr, .. } if matches!(expr.unpack(), Expr::Substitution(_))
         ));
         assert!(matches!(&parts[2], StringPart::Lit { text: value, .. } if value == " "));
         assert!(matches!(
@@ -2502,8 +2507,9 @@ mod tests {
     fn parse_arithmetic_expansion() {
         let expr = Parser::new("$((1 + 2))").parse_expr().unwrap();
         match expr.unpack() {
+            // The body is shell arithmetic text, expanded then evaluated.
             Expr::ArithmeticExpansion(inner) => {
-                assert!(matches!(inner.unpack(), Expr::BinaryOp { .. }));
+                assert!(matches!(inner.unpack(), Expr::String(_)));
             }
             _ => panic!("Expected ArithmeticExpansion, got {:?}", expr),
         }
@@ -2513,8 +2519,9 @@ mod tests {
     fn parse_arithmetic_with_variable() {
         let expr = Parser::new("$((x * 2))").parse_expr().unwrap();
         match expr.unpack() {
+            // The body is shell arithmetic text, expanded then evaluated.
             Expr::ArithmeticExpansion(inner) => {
-                assert!(matches!(inner.unpack(), Expr::BinaryOp { .. }));
+                assert!(matches!(inner.unpack(), Expr::String(_)));
             }
             _ => panic!("Expected ArithmeticExpansion, got {:?}", expr),
         }
@@ -2524,8 +2531,9 @@ mod tests {
     fn parse_arithmetic_nested() {
         let expr = Parser::new("$(((2 + 3) * 4))").parse_expr().unwrap();
         match expr.unpack() {
+            // The body is shell arithmetic text, expanded then evaluated.
             Expr::ArithmeticExpansion(inner) => {
-                assert!(matches!(inner.unpack(), Expr::BinaryOp { .. }));
+                assert!(matches!(inner.unpack(), Expr::String(_)));
             }
             _ => panic!("Expected ArithmeticExpansion, got {:?}", expr),
         }
@@ -2536,8 +2544,9 @@ mod tests {
         // Space between (( and inner expr should be handled
         let expr = Parser::new("$(( 1 + 2 ))").parse_expr().unwrap();
         match expr.unpack() {
+            // The body is shell arithmetic text, expanded then evaluated.
             Expr::ArithmeticExpansion(inner) => {
-                assert!(matches!(inner.unpack(), Expr::BinaryOp { .. }));
+                assert!(matches!(inner.unpack(), Expr::String(_)));
             }
             _ => panic!("Expected ArithmeticExpansion, got {:?}", expr),
         }
@@ -2548,8 +2557,9 @@ mod tests {
         // Parenthesized sub-expression with space after ((
         let expr = Parser::new("$(( ($x + 5) * 2 ))").parse_expr().unwrap();
         match expr.unpack() {
+            // The body is shell arithmetic text, expanded then evaluated.
             Expr::ArithmeticExpansion(inner) => {
-                assert!(matches!(inner.unpack(), Expr::BinaryOp { .. }));
+                assert!(matches!(inner.unpack(), Expr::String(_)));
             }
             _ => panic!("Expected ArithmeticExpansion, got {:?}", expr),
         }

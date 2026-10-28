@@ -79,6 +79,7 @@ where
 pub fn classify_posix(input: &str) -> Option<PosixSyntax> {
     POSIX_CLASSIFIER.read().as_ref().map(|c| c(input))
 }
+pub mod arithmetic;
 pub mod background;
 pub mod caps;
 pub mod completions;

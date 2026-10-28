@@ -1196,7 +1196,10 @@ pub fn eval_expr_flow<'a>(
                 let mut sub_env = env.clone();
                 sub_env.is_captured = true;
                 sub_env.output = Some(tx);
-                let mut results = Vec::new();
+                let mut results = Captured::default();
+                // `$?` stays what it was while the rest of the word expands;
+                // the substitution's own status is recorded for an assignment.
+                let status_before = env.exit_code();
                 let mut hard: Option<EngineError> = None;
                 for stmt in stmts {
                     match stmt.unpack() {
@@ -1211,7 +1214,7 @@ pub fn eval_expr_flow<'a>(
                             ) =>
                         {
                             match eval_expr_flow(e, &sub_env).await? {
-                                ExprOutcome::Value(v) => results.push(v),
+                                ExprOutcome::Value(v) => results.push_value(v),
                                 other => return Ok(other),
                             }
                         }
@@ -1235,10 +1238,12 @@ pub fn eval_expr_flow<'a>(
                     }
                 }
                 drain_captured(&mut rx, &mut results, env, &mut hard);
+                env.execution.record_substitution_status(env.exit_code());
+                env.set_exit_code(status_before);
                 if let Some(e) = hard {
                     return Err(e);
                 }
-                Ok(ExprOutcome::Value(Val::List(results)))
+                Ok(ExprOutcome::Value(results.into_value()))
             }
             Expr::VarWithModifier { name, modifier } => {
                 let val = eval_async_flow!(&Expr::Variable(name.clone()), env);
@@ -1387,26 +1392,12 @@ pub fn eval_expr_flow<'a>(
                 Ok(ExprOutcome::Value(Val::String(res)))
             }
             Expr::ArithmeticExpansion(inner) => {
-                let val = eval_async_flow!(inner, env);
-                match &val {
-                    Val::Int(_) | Val::Float(_) => Ok(ExprOutcome::Value(val)),
-                    Val::String(s) => {
-                        if let Ok(i) = s.trim().parse::<i64>() {
-                            Ok(ExprOutcome::Value(Val::Int(i)))
-                        } else if let Ok(f) = s.trim().parse::<f64>() {
-                            Ok(ExprOutcome::Value(Val::Float(f)))
-                        } else {
-                            Err(EngineError::from(format!(
-                                "arithmetic expansion: cannot coerce '{}' to number",
-                                s
-                            )))
-                        }
-                    }
-                    _ => Err(EngineError::from(format!(
-                        "arithmetic expansion: expected number, got {:?}",
-                        val
-                    ))),
-                }
+                // The body is expanded first, then evaluated as shell
+                // arithmetic by the evaluator both engines share.
+                let text = eval_async_flow!(inner, env).to_text();
+                crate::arithmetic::eval_arithmetic_expr(&text, env)
+                    .map(|value| ExprOutcome::Value(Val::Int(value)))
+                    .map_err(crate::arithmetic::to_engine_error)
             }
         }
     })
@@ -1414,28 +1405,82 @@ pub fn eval_expr_flow<'a>(
 
 /// Drain a captured `$(...)` statement list's output into `out`, recording the
 /// first hard stage failure in `hard`.
+/// What a command substitution collected, in order: text kept contiguous
+/// exactly as it was written (a chunk boundary is not a line boundary), and
+/// structured values as themselves.
+#[derive(Default)]
+struct Captured {
+    pieces: Vec<CapturedPiece>,
+}
+
+enum CapturedPiece {
+    Text(Vec<u8>),
+    Value(Val),
+}
+
+impl Captured {
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        match self.pieces.last_mut() {
+            Some(CapturedPiece::Text(text)) => text.extend_from_slice(bytes),
+            _ => self.pieces.push(CapturedPiece::Text(bytes.to_vec())),
+        }
+    }
+
+    /// A string value is a line of text output — or, ending in the NUL
+    /// sentinel `echo -n`/`printf` use, text without a newline; anything else
+    /// stays typed.
+    fn push_value(&mut self, value: Val) {
+        match value {
+            Val::String(line) => match line.strip_suffix('\0') {
+                Some(unterminated) => self.push_bytes(unterminated.as_bytes()),
+                None => {
+                    self.push_bytes(line.as_bytes());
+                    if !line.ends_with('\n') {
+                        self.push_bytes(b"\n");
+                    }
+                }
+            },
+            other => self.pieces.push(CapturedPiece::Value(other)),
+        }
+    }
+
+    /// The substitution's single value: its text with trailing newlines
+    /// removed, its one typed value, or — for several typed values — a list.
+    fn into_value(self) -> Val {
+        fn text(bytes: Vec<u8>) -> Val {
+            let text = String::from_utf8_lossy(&bytes);
+            Val::String(text.trim_end_matches('\n').to_string())
+        }
+        let mut pieces = self.pieces;
+        match pieces.len() {
+            0 => Val::String(String::new()),
+            1 => match pieces.remove(0) {
+                CapturedPiece::Text(bytes) => text(bytes),
+                CapturedPiece::Value(value) => value,
+            },
+            _ => Val::List(
+                pieces
+                    .into_iter()
+                    .map(|piece| match piece {
+                        CapturedPiece::Text(bytes) => text(bytes),
+                        CapturedPiece::Value(value) => value,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
 fn drain_captured(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<PipelinePayload>,
-    out: &mut Vec<Val>,
+    out: &mut Captured,
     env: &Env,
     hard: &mut Option<EngineError>,
 ) {
     while let Ok(payload) = rx.try_recv() {
         match payload {
-            // Each item is a substitution fragment and is joined with a newline
-            // when rendered, so a trailing newline on the fragment would double.
-            PipelinePayload::Data(v) => {
-                let val = (*v).clone();
-                out.push(match val {
-                    Val::String(s) => Val::String(s.trim_end_matches('\n').to_string()),
-                    other => other,
-                });
-            }
-            PipelinePayload::Bytes(b) => out.push(Val::String(
-                String::from_utf8_lossy(&b)
-                    .trim_end_matches('\n')
-                    .to_string(),
-            )),
+            PipelinePayload::Data(v) => out.push_value((*v).clone()),
+            PipelinePayload::Bytes(b) => out.push_bytes(&b),
             PipelinePayload::Structured(d) => {
                 // Command stderr stream content is output, not failure: pass
                 // it to the shell's stderr without recording anything.
@@ -1852,6 +1897,7 @@ fn try_eval_stmt_sync_inner(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            env.set_exit_code(0);
             if let Some(constraint) = ty
                 && let Err(message) = crate::pipeline::check_type_constraint(&val, constraint)
             {
@@ -1871,6 +1917,7 @@ fn try_eval_stmt_sync_inner(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            env.set_exit_code(0);
             if let Some(ref locals) = env.local_vars
                 && locals.update(name, val.clone())
             {
@@ -2155,6 +2202,8 @@ pub(crate) fn publishes_own_status(stmt: &Stmt) -> bool {
     matches!(
         stmt.unpack(),
         Stmt::Expr(_)
+            | Stmt::Let { .. }
+            | Stmt::Assign { .. }
             | Stmt::While { .. }
             | Stmt::For { .. }
             | Stmt::TryCatch { .. }
@@ -2232,7 +2281,10 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::Let { name, ty, expr } => {
+            env.execution.take_substitution_status();
             let val = eval_rhs!(expr, env);
+            // An assignment's status is its last substitution's, or success.
+            env.set_exit_code(env.execution.take_substitution_status().unwrap_or(0));
             if let Some(constraint) = ty
                 && let Err(message) = check_type_constraint(&val, constraint)
             {
@@ -2247,7 +2299,10 @@ async fn eval_stmt_inner(
             Ok(Flow::Normal)
         }
         Stmt::Assign { name, expr } => {
+            env.execution.take_substitution_status();
             let val = eval_rhs!(expr, env);
+            // An assignment's status is its last substitution's, or success.
+            env.set_exit_code(env.execution.take_substitution_status().unwrap_or(0));
             if let Some(ref locals) = env.local_vars
                 && locals.update(name, val.clone())
             {

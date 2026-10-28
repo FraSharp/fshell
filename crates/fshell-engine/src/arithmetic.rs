@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+//! Shell arithmetic: the one evaluator for `$(( … ))`, `(( … ))` and
+//! arithmetic operands, shared by the native and POSIX engines so the two can
+//! never disagree about what an expression means.
+
+use crate::Env;
 use fshell_core::Val;
-use fshell_engine::Env;
 use std::cell::Cell;
 
 /// Bounds re-entrant arithmetic evaluation. A variable whose value names
@@ -58,14 +62,26 @@ pub fn eval_arithmetic_expr(expr: &str, env: &Env) -> Result<i64, String> {
     Ok(result)
 }
 
-pub(crate) fn to_engine_error(error: String) -> fshell_engine::EngineError {
+pub fn to_engine_error(error: String) -> crate::EngineError {
     if error.contains("Division by zero") || error.contains("Modulo by zero") {
-        fshell_engine::EngineError::DivisionByZero { span: None }
+        crate::EngineError::DivisionByZero { span: None }
     } else {
-        fshell_engine::EngineError::Generic {
+        crate::EngineError::Generic {
             message: format!("arithmetic error: {error}"),
             span: None,
         }
+    }
+}
+
+/// A shell variable, or else an inherited environment variable.
+fn lookup_var(env: &Env, name: &str) -> Option<Val> {
+    let vars = env.vars.read();
+    if let Some(val) = vars.get(name) {
+        return Some(val.clone());
+    }
+    match vars.get("env") {
+        Some(Val::Map(environment)) => environment.get(&ustr::ustr(name)).cloned(),
+        _ => None,
     }
 }
 
@@ -328,7 +344,7 @@ impl<'a> ArithParser<'a> {
         {
             Some(v)
         } else {
-            crate::expand::lookup_var(self.env, name)
+            lookup_var(self.env, name)
         };
         if let Some(v) = v_opt {
             let text = match v {
@@ -347,14 +363,10 @@ impl<'a> ArithParser<'a> {
         Ok(0)
     }
 
+    /// An assignment sets the shell variable; whether it is exported is the
+    /// variable's own attribute, not the arithmetic's business.
     fn set_var(&self, name: &str, val: i64) {
-        {
-            let mut vars = self.env.vars.write();
-            vars.insert(name.to_string(), Val::Int(val));
-            if let Some(Val::Map(map)) = vars.get_mut("env") {
-                map.insert(ustr::ustr(name), Val::String(val.to_string()));
-            }
-        }
+        self.env.set_shell_var(name, Val::Int(val));
     }
 
     // Comma operator: expr, expr, ...

@@ -142,10 +142,16 @@ impl PipelineOutcomes {
 ///   the statement's finalizer reduces to a status. `$?` must never read that:
 ///   while `echo "$?"` expands, it holds whatever the executor happens to be
 ///   doing, which is precisely the bug that reading it caused.
+///
+/// A command substitution is a third: it runs a command while a statement's
+/// words expand, so it records its status here instead of in `$?` (which stays
+/// stable for the rest of the expansion), and an assignment whose value ran
+/// substitutions takes the last one's status, as POSIX requires.
 #[derive(Debug)]
 pub struct ExecutionState {
     exit_code: RwLock<i64>,
     last_error: RwLock<Option<FshDiag>>,
+    substitution_status: RwLock<Option<i64>>,
 }
 
 impl ExecutionState {
@@ -153,7 +159,18 @@ impl ExecutionState {
         Self {
             exit_code: RwLock::new(exit_code),
             last_error: RwLock::new(None),
+            substitution_status: RwLock::new(None),
         }
+    }
+
+    /// Record the status of a command substitution that just finished.
+    pub fn record_substitution_status(&self, code: i64) {
+        *self.substitution_status.write() = Some(code);
+    }
+
+    /// Forget recorded substitutions, returning the last one's status.
+    pub fn take_substitution_status(&self) -> Option<i64> {
+        self.substitution_status.write().take()
     }
 
     pub fn exit_code(&self) -> i64 {

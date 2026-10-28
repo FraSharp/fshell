@@ -395,22 +395,34 @@ fshell provides three syntax forms to capture pipeline output into a value:
    ```fsh
    let pids = $| ps | filter cpu > 20.0 | map pid |
    ```
-2. **command substitution `$( ... )`**: evaluates commands and captures their text/value:
+2. **command substitution `$( ... )`**: evaluates commands and captures *one*
+   value:
    ```fsh
    let branch = $(git rev-parse --abbrev-ref HEAD)
    ```
    the body is a statement list, so a redirection, a command list (`;`), an
    and-or list (`&&`/`||`) and an assignment are all accepted
-   (`$(cd "$dir" && pwd)`). trailing newlines on the captured output are
-   stripped, as in posix.
-3. **backtick substitution `` `...` ``**: posix-compatible shorthand:
+   (`$(cd "$dir" && pwd)`). text output becomes one string with its trailing
+   newlines removed, as in posix (but never field-split); a single typed value
+   (`$(1 + 2)`, a builtin's one result) is that value; several typed values
+   are a list. use `$| … |` when you want the records themselves.
+
+   while a command's words expand, `$?` keeps the status it had before the
+   command; an assignment whose value ran substitutions takes the status of the
+   last one, so `let out = $(cmd)` followed by `$?` checks `cmd`.
+3. **backtick substitution `` `...` ``**: the posix spelling of `$( ... )`, with
+   the same meaning in arguments, double quotes and here-documents:
    ```fsh
    let now = `date +%s`
    ```
 
 ### arithmetic expansion
 
-arithmetic expansion evaluates math expressions inside `$(( ... ))`:
+arithmetic expansion evaluates shell arithmetic inside `$(( ... ))`, with the
+same evaluator the posix engine uses: integers, the C operators (`%`, `<<`,
+`&`, `?:`, `**`, assignment forms such as `+=`), bare variable names and
+numeric strings (`let n = $(echo 5); $(( n + 1 ))`). `$var`, `${…}` and `$(…)`
+inside expand first:
 
 ```fsh
 let offset = 4

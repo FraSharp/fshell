@@ -18,7 +18,8 @@
 //!   5 — source bridge replacement
 //!   6 — compliance tests
 
-pub mod arithmetic;
+/// Shell arithmetic lives in the engine, shared with the native frontend.
+pub use fshell_engine::arithmetic;
 pub mod bridge;
 pub mod child;
 pub mod eval;

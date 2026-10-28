@@ -1031,11 +1031,12 @@ async fn test_phase3_builtins_integration() {
     }
     {
         let vars = env.vars.read();
-        assert_eq!(vars.get("t1"), Some(&Val::List(vec![Val::Bool(false)])));
-        assert_eq!(vars.get("t2"), Some(&Val::List(vec![Val::Bool(true)])));
-        assert_eq!(vars.get("t3"), Some(&Val::List(vec![Val::Bool(true)])));
-        assert_eq!(vars.get("t4"), Some(&Val::List(vec![Val::Bool(true)])));
-        assert_eq!(vars.get("t5"), Some(&Val::List(vec![Val::Bool(true)])));
+        // A substitution is one value: the single result a command produced.
+        assert_eq!(vars.get("t1"), Some(&Val::Bool(false)));
+        assert_eq!(vars.get("t2"), Some(&Val::Bool(true)));
+        assert_eq!(vars.get("t3"), Some(&Val::Bool(true)));
+        assert_eq!(vars.get("t4"), Some(&Val::Bool(true)));
+        assert_eq!(vars.get("t5"), Some(&Val::Bool(true)));
     }
 
     // 2. printf
@@ -1047,7 +1048,7 @@ async fn test_phase3_builtins_integration() {
         let vars = env.vars.read();
         assert_eq!(
             vars.get("p1"),
-            Some(&Val::List(vec![Val::String("hello world 42".to_string())]))
+            Some(&Val::String("hello world 42".to_string()))
         );
     }
 
@@ -1061,8 +1062,8 @@ async fn test_phase3_builtins_integration() {
     }
     {
         let vars = env.vars.read();
-        assert_eq!(vars.get("tr"), Some(&Val::List(vec![Val::Bool(true)])));
-        assert_eq!(vars.get("fa"), Some(&Val::List(vec![Val::Bool(false)])));
+        assert_eq!(vars.get("tr"), Some(&Val::Bool(true)));
+        assert_eq!(vars.get("fa"), Some(&Val::Bool(false)));
     }
 
     // 4. sleep
@@ -1085,13 +1086,10 @@ async fn test_phase3_builtins_integration() {
         let vars = env.vars.read();
         // `echo -n` appends a NUL sentinel only for terminal writers; captured
         // values must be clean (the sentinel is stripped at the capture boundary).
-        assert_eq!(
-            vars.get("e1"),
-            Some(&Val::List(vec![Val::String("hello".to_string())]))
-        );
+        assert_eq!(vars.get("e1"), Some(&Val::String("hello".to_string())));
         assert_eq!(
             vars.get("e2"),
-            Some(&Val::List(vec![Val::String("hello\tworld".to_string())]))
+            Some(&Val::String("hello\tworld".to_string()))
         );
     }
 }

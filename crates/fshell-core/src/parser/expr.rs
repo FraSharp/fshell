@@ -962,6 +962,14 @@ impl Parser {
                         }),
                     }
                 }
+                '`' => {
+                    flush_literal(&mut parts, &mut literal, &mut literal_quote);
+                    let substitution = self.parse_backquote_substitution()?;
+                    parts.push(StringPart::Expr {
+                        expr: Box::new(substitution),
+                        quote: QuoteKind::Unquoted,
+                    });
+                }
                 '<' | '>' if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '(' => {
                     flush_literal(&mut parts, &mut literal, &mut literal_quote);
                     let saved_arg = self.cmd_arg_mode;
@@ -1226,36 +1234,8 @@ impl Parser {
                 }
                 // Check for $( command substitution
                 if self.peek() == Some('(') {
-                    // Check for $((...)) arithmetic expansion
-                    let saved_pos = self.pos;
-                    self.next_char(); // consume first (
-                    if self.peek() == Some('(') {
-                        self.next_char(); // consume second (
-                        match self.parse_expr() {
-                            Ok(inner) => {
-                                // Skip any whitespace between the inner expression
-                                // and the closing `))` — parse_expr_with_precedence restores pos to
-                                // before trailing whitespace on `None` from binop check.
-                                self.skip_whitespace();
-                                if self.peek() == Some(')') {
-                                    self.next_char(); // consume first )
-                                    self.skip_whitespace();
-                                    if self.peek() == Some(')') {
-                                        self.next_char(); // consume second )
-                                        return Ok(Expr::ArithmeticExpansion(Box::new(inner)));
-                                    }
-                                }
-                                // Backtrack — not arithmetic
-                                self.pos = saved_pos;
-                            }
-                            Err(_) => {
-                                // Backtrack — not arithmetic
-                                self.pos = saved_pos;
-                            }
-                        }
-                    } else {
-                        // Single ( — not arithmetic, restore and parse as cmd substitution
-                        self.pos = saved_pos;
+                    if let Some(arithmetic) = self.try_parse_arithmetic_expansion()? {
+                        return Ok(arithmetic);
                     }
                     return self.parse_cmd_substitution();
                 }
@@ -1369,51 +1349,7 @@ impl Parser {
                     quote: QuoteKind::Single,
                 }]))
             }
-            Some('`') => {
-                self.next_char();
-                let mut content = String::new();
-                loop {
-                    match self.peek() {
-                        None => {
-                            return Err(ParseError::UnexpectedEof {
-                                span: self.current_span(),
-                            });
-                        }
-                        Some('`') => {
-                            self.next_char();
-                            break;
-                        }
-                        Some('\\') => {
-                            self.next_char();
-                            match self.next_char() {
-                                Some('`') => content.push('`'),
-                                Some(c) => {
-                                    content.push('\\');
-                                    content.push(c);
-                                }
-                                None => {
-                                    return Err(ParseError::UnexpectedEof {
-                                        span: self.current_span(),
-                                    });
-                                }
-                            }
-                        }
-                        Some(c) => {
-                            content.push(c);
-                            self.next_char();
-                        }
-                    }
-                }
-                // Parse the content between backticks as a pipeline
-                let mut inner = Parser::new(&content);
-                let pipeline = inner
-                    .parse_pipeline()
-                    .map_err(|e| ParseError::SyntaxError {
-                        message: format!("invalid pipeline in backtick substitution: {e}"),
-                        span: self.current_span(),
-                    })?;
-                Ok(Expr::InlinePipeline(pipeline))
-            }
+            Some('`') => self.parse_backquote_substitution(),
             Some('(') => {
                 self.next_char();
                 let saved_arg = self.cmd_arg_mode;
@@ -1669,6 +1605,57 @@ impl Parser {
         Ok(Expr::InlinePipeline(Pipeline::new(stages)))
     }
 
+    /// Parse `$(( … ))` with the current char at its first `(`. Returns
+    /// `None`, consuming nothing, when no matching `))` closes it — then it is a
+    /// command substitution whose body starts with a subshell (`$((a) | b)`).
+    ///
+    /// The body is shell arithmetic, not a native expression: it is kept as
+    /// interpolated text (`$x`, `${…}` and `$(…)` expand first, as in POSIX)
+    /// and evaluated by the shared arithmetic evaluator, so `%`, `<<`, `?:`,
+    /// `+=` and numeric strings mean exactly what they mean in any shell.
+    pub(crate) fn try_parse_arithmetic_expansion(&mut self) -> Result<Option<Expr>, ParseError> {
+        if !(self.peek() == Some('(') && self.input.get(self.pos + 1) == Some(&'(')) {
+            return Ok(None);
+        }
+        let body_start = self.pos + 2;
+        let mut depth = 0usize;
+        let mut i = body_start;
+        let mut quote: Option<char> = None;
+        let body_end = loop {
+            let Some(&c) = self.input.get(i) else {
+                return Ok(None);
+            };
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), '\\') => i += 1,
+                (Some(_), _) => {}
+                (None, '\'' | '"') => quote = Some(c),
+                (None, '\\') => i += 1,
+                (None, '(') => depth += 1,
+                (None, ')') if depth > 0 => depth -= 1,
+                (None, ')') => {
+                    if self.input.get(i + 1) == Some(&')') {
+                        break i;
+                    }
+                    return Ok(None);
+                }
+                (None, _) => {}
+            }
+            i += 1;
+        };
+        let start = self.pos;
+        let body: String = self.input[body_start..body_end].iter().collect();
+        let parts =
+            super::parse_string_parts_inner(&body).map_err(|e| ParseError::SyntaxError {
+                message: format!("invalid arithmetic expansion: {e}"),
+                span: self.span_from(start),
+            })?;
+        self.pos = body_end + 2;
+        Ok(Some(Expr::ArithmeticExpansion(Box::new(Expr::String(
+            parts,
+        )))))
+    }
+
     /// Parse `$(pipeline)` — command substitution, desugars to inline pipeline.
     /// Called after `$` has been consumed, with `(` as the current char.
     pub(crate) fn parse_cmd_substitution(&mut self) -> Result<Expr, ParseError> {
@@ -1677,15 +1664,47 @@ impl Parser {
         // a command list, an and-or list, or an assignment inside `$(...)` is
         // accepted the way POSIX allows.
         let stmts = self.parse_statements_until(')')?;
+        // Always a substitution, whose value is one value (see the evaluator).
+        // The structured capture of a pipeline's records is `$| … |`.
+        Ok(Expr::Substitution(stmts))
+    }
 
-        // A single pipeline keeps the inline-pipeline representation, so the
-        // meaning of `$(cmd)` and `$(cmd | cmd)` is unchanged.
-        if stmts.len() == 1
-            && let Stmt::Expr(e) = stmts[0].unpack()
-            && let Expr::Pipeline(pipeline) = e.unpack()
-        {
-            return Ok(Expr::InlinePipeline(pipeline.clone()));
+    /// Parse `` `…` `` — the POSIX spelling of `$(…)`. Called with the opening
+    /// backquote as the current char. Inside, a backslash quotes only `$`,
+    /// `` ` `` and `\`; any other backslash is kept for the body.
+    pub(crate) fn parse_backquote_substitution(&mut self) -> Result<Expr, ParseError> {
+        let start = self.pos;
+        self.next_char(); // consume `
+        let mut body = String::new();
+        loop {
+            match self.next_char() {
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        span: self.span_from(start),
+                    });
+                }
+                Some('`') => break,
+                Some('\\') => match self.next_char() {
+                    Some(c @ ('$' | '`' | '\\')) => body.push(c),
+                    Some(c) => {
+                        body.push('\\');
+                        body.push(c);
+                    }
+                    None => {
+                        return Err(ParseError::UnexpectedEof {
+                            span: self.span_from(start),
+                        });
+                    }
+                },
+                Some(c) => body.push(c),
+            }
         }
+        let stmts = Parser::new(&body)
+            .parse_statements()
+            .map_err(|e| ParseError::SyntaxError {
+                message: format!("invalid command in backquote substitution: {e}"),
+                span: self.span_from(start),
+            })?;
         Ok(Expr::Substitution(stmts))
     }
 
@@ -2133,6 +2152,19 @@ impl Parser {
                     self.next_char(); // skip '\\'
                     current_lit.push_str(&self.parse_escape_seq()?);
                 }
+                Some('`') => {
+                    if !current_lit.is_empty() {
+                        parts.push(StringPart::Lit {
+                            text: std::mem::take(&mut current_lit),
+                            quote: QuoteKind::Double,
+                        });
+                    }
+                    let substitution = self.parse_backquote_substitution()?;
+                    parts.push(StringPart::Expr {
+                        expr: Box::new(substitution),
+                        quote: QuoteKind::Double,
+                    });
+                }
                 Some('$') => {
                     // Handle command substitution $(...) and arithmetic $((...)) inside double quotes.
                     // These must be interpolated (e.g. "a $(echo hi) b") rather than left literal.
@@ -2144,33 +2176,12 @@ impl Parser {
                             });
                         }
                         self.next_char(); // consume '$'
-                        // Check for arithmetic expansion $((...))
-                        if self.peek() == Some('(')
-                            && self.pos + 1 < self.input.len()
-                            && self.input[self.pos + 1] == '('
-                        {
-                            let saved_pos = self.pos;
-                            self.next_char(); // first '('
-                            self.next_char(); // second '('
-                            let inner_res = self.parse_expr();
-                            if let Ok(inner) = inner_res {
-                                self.skip_whitespace();
-                                if self.peek() == Some(')') {
-                                    self.next_char();
-                                    self.skip_whitespace();
-                                    if self.peek() == Some(')') {
-                                        self.next_char();
-                                        parts.push(StringPart::Expr {
-                                            expr: Box::new(Expr::ArithmeticExpansion(Box::new(
-                                                inner,
-                                            ))),
-                                            quote: QuoteKind::Double,
-                                        });
-                                        continue;
-                                    }
-                                }
-                            }
-                            self.pos = saved_pos;
+                        if let Some(arithmetic) = self.try_parse_arithmetic_expansion()? {
+                            parts.push(StringPart::Expr {
+                                expr: Box::new(arithmetic),
+                                quote: QuoteKind::Double,
+                            });
+                            continue;
                         }
                         // Command substitution $(...)
                         let expr = self.parse_cmd_substitution()?;

@@ -685,6 +685,47 @@ fn native_word_model_cases() -> Vec<Case> {
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native)
         .features(&["native", "word", "number"]),
+        // `$(…)` is one value: the command's text with trailing newlines
+        // removed, never split and never a list of lines.
+        Case::native(
+            "native/substitution-is-one-text-value",
+            "argvdump $(printf 'a b\\nc\\n\\n') x$(printf y)z",
+            "argc=2\narg[0]=\"a b\\nc\"\narg[1]=\"xyz\"\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "word", "command_substitution"]),
+        Case::native(
+            "native/backquote-is-a-substitution-everywhere",
+            "argvdump `printf a` \"in `printf b`\"",
+            "argc=2\narg[0]=\"a\"\narg[1]=\"in b\"\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "word", "command_substitution"]),
+        // An assignment takes its substitution's status, the `out=$(cmd) ||`
+        // idiom; within one command's words `$?` stays put.
+        Case::native(
+            "native/assignment-takes-the-substitution-status",
+            "let out = $(sh -c 'exit 3'); emit --stdout \"rc=$?\"",
+            "rc=3\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "command_substitution", "exit_status"]),
+        // Shell arithmetic is one evaluator shared with the POSIX engine.
+        Case::native(
+            "native/arithmetic-is-shell-arithmetic",
+            "let n = $(printf 5); let i = 1; argvdump $(( n % 3 )) $(( 1 << 4 )) $(( i += 2 )) $(( n > 2 ? 10 : 20 ))",
+            "argc=4\narg[0]=\"2\"\narg[1]=\"16\"\narg[2]=\"3\"\narg[3]=\"10\"\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "arithmetic"]),
         // A leading `+` starts a word, as a leading `-` does: `date +%Y`.
         Case::native(
             "native/plus-word-is-an-argument",
