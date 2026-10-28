@@ -919,9 +919,11 @@ fn lookup_variable_fallback(name: &str, env: &Env) -> Result<Val, EngineError> {
     }
 }
 
-/// One-time nudge the first time a bare assignment auto-declares a variable.
+/// One-time nudge, in an interactive session, the first time a bare
+/// assignment auto-declares a variable. A script or `-c` command is not the
+/// place for style advice: its stderr is its caller's.
 fn warn_auto_declare(env: &Env, name: &str) {
-    if env.auto_declare_warned.swap(true, Ordering::Relaxed) {
+    if !env.options.read().interactive || env.auto_declare_warned.swap(true, Ordering::Relaxed) {
         return;
     }
     eprintln!(

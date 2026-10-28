@@ -849,6 +849,11 @@ pub struct ShellOptions {
     /// Print a subtle notice when a line is executed via the POSIX fallback.
     #[serde(default = "default_true")]
     pub posix_fallback_notice: bool,
+    /// The shell is reading commands from a person at a terminal (POSIX
+    /// `-i`). Set by the REPL; never carried to a child shell, which is not
+    /// interactive whatever its parent was.
+    #[serde(skip)]
+    pub interactive: bool,
 }
 
 fn default_true() -> bool {
@@ -899,6 +904,7 @@ impl Default for ShellOptions {
             sandbox_all: false,
             interp_mode: frontend::InterpMode::default(),
             posix_fallback_notice: true,
+            interactive: false,
         }
     }
 }

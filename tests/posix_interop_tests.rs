@@ -15,8 +15,13 @@ fn bare_assignment_declares_like_bash() {
         .unwrap();
     out.assert_success();
     out.assert_stdout_contains("G=/tmp/eboot.bin");
-    // ... and nudges toward `let` once.
-    out.assert_stderr_contains("declared");
+    // A script's stderr belongs to its caller: the interactive-only nudge
+    // toward `let` stays out of it.
+    assert!(
+        !out.stderr.contains("declared"),
+        "non-interactive run printed the `let` nudge: {}",
+        out.stderr
+    );
 }
 
 #[test]

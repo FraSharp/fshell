@@ -2299,6 +2299,7 @@ fn check_first_run_onboarding(env: &Env) {
 }
 
 pub fn init(env: &Env) {
+    env.options.write().interactive = true;
     if let Err(e) = init_db() {
         eprintln!("warning: command history disabled: {e}");
     }
