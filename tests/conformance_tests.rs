@@ -150,6 +150,16 @@ fn word_model_cases() -> Vec<Case> {
         )
         .features(&["word", "command_substitution", "field_split"]),
         // --- arithmetic and tilde ------------------------------------------
+        Case::posix_only(
+            "word/backquote-inside-double-quotes",
+            "argvdump \"a `printf b` c\"",
+        )
+        .features(&["word", "command_substitution", "double_quote"]),
+        Case::posix_only(
+            "word/arithmetic-expands-substitutions-first",
+            "X=2; argvdump $(( $(printf 3) + $X * `printf 4` ))",
+        )
+        .features(&["word", "arithmetic", "command_substitution"]),
         Case::posix_only("word/arithmetic-expansion", "argvdump $((1 + 2))")
             .features(&["word", "arithmetic"]),
         Case::posix_only("word/tilde-expands-to-home", "argvdump ~").features(&["word", "tilde"]),
@@ -384,6 +394,22 @@ fn composition_cases() -> Vec<Case> {
         .features(&["compose", "pipeline", "pipefail", "exit_status"]),
         Case::posix_only("compose/subshell-runs", "(emit --stdout sub)")
             .features(&["compose", "subshell"]),
+        // `cd` and `pwd` are logical: the path travelled, not the resolved one.
+        Case::posix_only(
+            "compose/cd-is-logical-through-a-symlink",
+            "ln -s dir link && cd link && emit --stdout \"$(basename \"$(pwd)\") $(basename \"$(pwd -P)\")\"; cd .. && emit --stdout \"$(basename \"$PWD\")\" > /dev/null",
+        )
+        .features(&["compose", "cd"]),
+        Case::posix_only(
+            "compose/cd-dash-prints-the-new-directory",
+            "cd dir && cd .. && cd - | sed 's,.*/,,'",
+        )
+        .features(&["compose", "cd"]),
+        Case::posix_only(
+            "compose/cd-follows-cdpath-and-prints-it",
+            "mkdir -p dir/deep && CDPATH=dir && cd deep | sed 's,.*/,,'",
+        )
+        .features(&["compose", "cd"]),
         Case::posix_only(
             "compose/subshell-cd-isolated",
             "(cd dir && emit --stdout ok); emit --stdout \"pwd=$(basename \"$PWD\")\"",

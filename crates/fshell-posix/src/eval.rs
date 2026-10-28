@@ -1549,53 +1549,23 @@ async fn eval_simple_command_inner(
             return Ok(if written != 0 { written } else { 0 });
         }
         "cd" => {
-            let target = args.first().map(|s| s.as_str()).unwrap_or("");
-            let path = if target.is_empty() {
-                env.home_dir().to_string_lossy().into_owned()
-            } else if target == "-" {
-                let vars = env.vars.read();
-                vars.get("OLDPWD")
-                    .map(|v| v.to_text())
-                    .unwrap_or_else(|| "/".to_string())
-            } else {
-                target.to_string()
-            };
-            let target_path = std::path::PathBuf::from(path);
-            let prev_cwd = env.cwd();
-            let resolved = if target_path.is_absolute() {
-                target_path
-            } else {
-                prev_cwd.join(&target_path)
-            };
-            if let Ok(canon) = resolved.canonicalize()
-                && canon.is_dir()
-            {
-                env.set_cwd(canon.clone());
-                {
-                    let mut vars = env.vars.write();
-                    vars.insert(
-                        "OLDPWD".to_string(),
-                        Val::String(prev_cwd.to_string_lossy().to_string()),
-                    );
-                    vars.insert(
-                        "PWD".to_string(),
-                        Val::String(canon.to_string_lossy().to_string()),
-                    );
+            return Ok(match crate::posix_builtins::cd::cd_posix(args, env) {
+                Ok(Some(line)) => emit(env, cmd_name, &line).await?,
+                Ok(None) => 0,
+                Err((code, message)) => {
+                    report(env, &message).await;
+                    code
                 }
-                return Ok(0);
-            } else {
-                report(
-                    env,
-                    &format!("{}: cd: {}: No such file or directory", cmd_name, target),
-                )
-                .await;
-                return Ok(1);
-            }
+            });
         }
         "pwd" => {
-            let text = format!("{}\n", env.cwd().display());
-            let written = emit(env, cmd_name, &text).await?;
-            return Ok(if written != 0 { written } else { 0 });
+            return Ok(match crate::posix_builtins::cd::pwd_posix(args, env) {
+                Ok(line) => emit(env, cmd_name, &line).await?,
+                Err((code, message)) => {
+                    report(env, &message).await;
+                    code
+                }
+            });
         }
         "exec" => {
             if args.is_empty() {
