@@ -410,9 +410,14 @@ async fn emit(env: &Env, builtin: &str, text: &str) -> Result<i32, PosixError> {
 }
 
 /// A redirection failed: the command does not run and its status is 1.
+///
+/// A redirection error on a special built-in is fatal to a non-interactive
+/// shell (POSIX 2.8.1): `exec > /dev/tty` that cannot open the terminal must
+/// not leave the script running with the redirection silently missing.
 async fn redirection_failed(
     env: &Env,
     cfg: &EvalConfig,
+    command: Option<&str>,
     error: PosixError,
 ) -> Result<i32, PosixError> {
     let PosixError::Redirection(message) = error else {
@@ -420,6 +425,14 @@ async fn redirection_failed(
     };
     report(env, &message).await;
     env.set_exit_code(1);
+    if !env.options.read().interactive
+        && command.is_some_and(|name| {
+            crate::posix_builtins::type_cmd::is_special_builtin(name)
+                && get_posix_function(env, name).is_none()
+        })
+    {
+        return Err(PosixError::Exit(1));
+    }
     if cfg.errexit && env.options.read().errexit {
         return Err(PosixError::Exit(1));
     }
@@ -524,7 +537,7 @@ async fn eval_command(cmd: &Command, env: &Env, cfg: &EvalConfig) -> Result<i32,
             let _redirected =
                 match Redirected::apply(env, &redirect_items(redirects), &cfg.positional) {
                     Ok(applied) => applied,
-                    Err(error) => return redirection_failed(env, cfg, error).await,
+                    Err(error) => return redirection_failed(env, cfg, None, error).await,
                 };
             eval_compound_command(compound, env, cfg).await
         }
@@ -536,7 +549,7 @@ async fn eval_command(cmd: &Command, env: &Env, cfg: &EvalConfig) -> Result<i32,
             let _redirected =
                 match Redirected::apply(env, &redirect_items(redirects), &cfg.positional) {
                     Ok(applied) => applied,
-                    Err(error) => return redirection_failed(env, cfg, error).await,
+                    Err(error) => return redirection_failed(env, cfg, None, error).await,
                 };
             let result = eval_extended_test(&expr_cmd.expr, env)?;
             Ok(if result { 0 } else { 1 })
@@ -1070,7 +1083,9 @@ async fn eval_simple_command(
 
     let redirected = match Redirected::apply(env, &redirects, positional) {
         Ok(applied) => applied,
-        Err(error) => return redirection_failed(env, cfg, error).await,
+        Err(error) => {
+            return redirection_failed(env, cfg, args.first().map(String::as_str), error).await;
+        }
     };
 
     // Each name's shell value and command-environment value before this
@@ -1243,7 +1258,7 @@ async fn eval_simple_command_inner(
         let result = match Redirected::apply(env, &redirect_items(&func_body.1), &fn_cfg.positional)
         {
             Ok(_redirected) => eval_compound_command(&func_body.0, env, &fn_cfg).await,
-            Err(error) => redirection_failed(env, cfg, error).await,
+            Err(error) => redirection_failed(env, cfg, None, error).await,
         };
         drop(positional_scope);
         // `return` ends the function, not the script that called it: a caller sees

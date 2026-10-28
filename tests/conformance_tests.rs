@@ -651,13 +651,21 @@ fn redirection_cases() -> Vec<Case> {
         )
         .files(&["fd3.txt"])
         .features(&["redirect", "exec", "high_fd"]),
-        Case::posix_only(
+        Case::posix(
             "redirect/exec-redirects-the-shell-itself",
             "exec > log.txt; emit --stdout hidden; exec >&2; cat log.txt >&2",
         )
         .files(&["log.txt"])
         .compare_stderr()
+        .expect_engine(Engine::Posix)
         .features(&["redirect", "exec"]),
+        Case::posix(
+            "redirect/exec-redirect-error-is-fatal",
+            "exec > missing/out\nemit --stdout after\n",
+        )
+        .bash_posix_only()
+        .expect_engine(Engine::Posix)
+        .features(&["redirect", "exec", "error"]),
         Case::posix_only(
             "redirect/read-from-high-descriptor",
             "exec 4< lines.txt; read -r a <&4; read -r b <&4; emit --stdout \"$a/$b\"",

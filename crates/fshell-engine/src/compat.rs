@@ -44,6 +44,10 @@ pub enum PosixRequirement {
     /// `~user`. Native expands `~` and `~/` only, so a bare `~user` reaches
     /// argv unexpanded.
     PosixTildeUser,
+    /// `exec` with no command and a redirection applies the redirection to the
+    /// shell itself, which outlives the command. Native runs every pipeline
+    /// against its own routes and cannot persist one.
+    ExecShellRedirection,
 }
 
 impl PosixRequirement {
@@ -52,6 +56,7 @@ impl PosixRequirement {
         match self {
             PosixRequirement::PosixSpecialParameter => "PosixSpecialParameter",
             PosixRequirement::PosixTildeUser => "PosixTildeUser",
+            PosixRequirement::ExecShellRedirection => "ExecShellRedirection",
         }
     }
 }
@@ -267,12 +272,45 @@ fn visit_expr(expr: &Expr, found: &mut Option<PosixRequirement>) {
 }
 
 fn visit_pipeline(pipeline: &Pipeline, found: &mut Option<PosixRequirement>) {
+    if exec_shell_redirection(pipeline) {
+        record(found, PosixRequirement::ExecShellRedirection);
+    }
     for stage in &pipeline.stages {
         visit_stage(stage, found);
         if found.is_some() {
             return;
         }
     }
+}
+
+/// Whether this is a standalone `exec` carrying redirections.
+///
+/// With a command, `exec` runs it; inside a pipeline, its redirections belong
+/// to the subshell. Only the bare form changes the shell itself, and only that
+/// form needs the POSIX engine to persist it.
+pub(crate) fn exec_shell_redirection(pipeline: &Pipeline) -> bool {
+    if !pipeline.boundaries.is_empty() {
+        return false;
+    }
+    let mut exec_without_command = false;
+    let mut has_redirection = false;
+    for stage in &pipeline.stages {
+        match stage {
+            PipelineStage::CommandCall { name, args, .. } => {
+                if name != "exec" || !args.is_empty() {
+                    return false;
+                }
+                exec_without_command = true;
+            }
+            PipelineStage::Write { .. }
+            | PipelineStage::Read { .. }
+            | PipelineStage::FdRedirect { .. }
+            | PipelineStage::Heredoc { .. }
+            | PipelineStage::HereString { .. } => has_redirection = true,
+            _ => return false,
+        }
+    }
+    exec_without_command && has_redirection
 }
 
 fn visit_stage(stage: &PipelineStage, found: &mut Option<PosixRequirement>) {
@@ -317,6 +355,28 @@ mod tests {
             .parse_statements()
             .unwrap_or_else(|e| panic!("{script:?} should parse: {e}"));
         required_posix_semantics(&stmts)
+    }
+
+    #[test]
+    fn exec_with_redirections_needs_posix() {
+        // A bare `exec` carrying a redirection changes the shell itself, which
+        // native cannot persist. With a command or inside a pipeline the
+        // redirection is scoped to that command, so native keeps those.
+        assert_eq!(
+            requirement("exec > out.txt"),
+            Some(PosixRequirement::ExecShellRedirection)
+        );
+        assert_eq!(
+            requirement("exec 2>&1"),
+            Some(PosixRequirement::ExecShellRedirection)
+        );
+        assert_eq!(
+            requirement("exec < in.txt"),
+            Some(PosixRequirement::ExecShellRedirection)
+        );
+        assert_eq!(requirement("exec ls > out.txt"), None);
+        assert_eq!(requirement("exec > out.txt | cat"), None);
+        assert_eq!(requirement("exec"), None);
     }
 
     #[test]

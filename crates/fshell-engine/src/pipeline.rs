@@ -475,6 +475,15 @@ async fn open_output_redirect(
 }
 
 async fn build_pipeline_plan(pipeline: &Pipeline, env: &Env) -> Result<Vec<PlannedStage>, String> {
+    // The router sends this form to the POSIX engine, so reaching it here means
+    // native was chosen explicitly. Native cannot persist a redirection on the
+    // shell, and silently doing nothing to the shell is worse than saying so.
+    if crate::compat::exec_shell_redirection(pipeline) {
+        return Err(
+            "`exec` with redirections changes the shell itself, which is POSIX semantics"
+                .to_string(),
+        );
+    }
     let mut boundaries = pipeline.boundaries.clone();
     if boundaries.is_empty() && pipeline.stages.len() > 1 {
         boundaries = pipeline
