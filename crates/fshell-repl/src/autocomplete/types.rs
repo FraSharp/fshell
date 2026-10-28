@@ -174,6 +174,14 @@ impl CompletionCancel {
     }
 }
 
+/// A provider may return fallback candidates before its asynchronous source is
+/// ready. Those are display-only until a later, final batch is published.
+#[derive(Default)]
+pub(crate) struct CompletionBatch {
+    pub candidates: Vec<CompletionCandidate>,
+    pub pending: bool,
+}
+
 /// Core completer trait implemented by `FshellCompleter`.
 pub trait Completer: Send + Sync {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<CompletionCandidate>;

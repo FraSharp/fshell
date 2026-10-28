@@ -115,21 +115,25 @@ async fn evaluate_bounded(
     Vec::new()
 }
 
+fn runtime() -> Option<&'static tokio::runtime::Runtime> {
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("fsh-completion")
+                .enable_all()
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 pub(super) fn evaluate_fsh_completions_with_runtime(
     expr: &str,
     env: &Env,
     cancel: Option<&CompletionCancel>,
 ) -> Vec<String> {
-    let runtime = RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("fsh-completion")
-            .enable_all()
-            .build()
-            .ok()
-    });
-    runtime
-        .as_ref()
+    runtime()
         .map(|runtime| runtime.block_on(evaluate_bounded(expr, env, cancel, PROVIDER_TIMEOUT)))
         .unwrap_or_default()
 }
@@ -155,6 +159,87 @@ pub(super) fn evaluate_fsh_completions_sync(
         }),
         Err(_) => evaluate_fsh_completions_with_runtime(expr, env, cancel),
     }
+}
+
+/// Blocking-worker API for external completion generators. Bound process
+/// lifetime and output, and terminate the launch group on error or
+/// cancellation. Group cleanup only runs before the direct child is reaped,
+/// while its PID still reserves the process-group ID.
+pub(super) fn run_process(
+    program: &str,
+    args: &[String],
+    cwd: &std::path::Path,
+    search_path: &std::ffi::OsStr,
+    cancel: Option<&CompletionCancel>,
+) -> Option<Vec<u8>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    if cancel.is_some_and(CompletionCancel::is_cancelled) {
+        return None;
+    }
+    runtime()?.block_on(async {
+        use tokio::io::AsyncReadExt;
+        let mut child = tokio::process::Command::new(program)
+            .args(args)
+            .current_dir(cwd)
+            .env("PATH", search_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .ok()?;
+        let group = i32::try_from(child.id()?).ok()?;
+        let stdout = child.stdout.take()?;
+        // Reaping releases the PID, which also identifies the launch group. A
+        // cancellation race can select this branch after the work future has
+        // already waited, so record the reap before deciding to signal.
+        let reaped = std::sync::Arc::new(AtomicBool::new(false));
+        let observed = reaped.clone();
+        let work = tokio::time::timeout(PROVIDER_TIMEOUT, async {
+            const MAX_BYTES: usize = 1024 * 1024;
+            let mut bytes = Vec::new();
+            if stdout
+                .take((MAX_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .is_err()
+            {
+                return (None, false);
+            }
+            if bytes.len() > MAX_BYTES {
+                return (None, false);
+            }
+            let status = child.wait().await;
+            observed.store(true, Ordering::Release);
+            match status {
+                Ok(status) => (status.success().then_some(bytes), true),
+                Err(_) => (None, true),
+            }
+        });
+        let cancelled = async {
+            match cancel {
+                Some(cancel) => cancel.cancelled().await,
+                None => std::future::pending().await,
+            }
+        };
+        let (output, work_reaped) = tokio::select! {
+            result = work => result.unwrap_or((None, false)),
+            _ = cancelled => (None, false),
+        };
+        let leader_reaped = work_reaped || reaped.load(Ordering::Acquire);
+        if output.is_none() && !leader_reaped {
+            // SAFETY: the direct child has not been reaped, so its PID and the
+            // process-group ID created by process_group(0) are still reserved.
+            // A negative PID signals only that launch group.
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(CANCEL_GRACE, child.wait()).await;
+        }
+        output
+    })
 }
 
 #[cfg(test)]

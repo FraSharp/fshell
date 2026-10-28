@@ -3,7 +3,7 @@
 
 use crate::FshellCompleter;
 use crate::autocomplete::ranking::RankedCompletion;
-use crate::autocomplete::{Completer, CompletionCandidate, CompletionKind, TextSpan};
+use crate::autocomplete::{CompletionCandidate, CompletionKind, TextSpan};
 use crate::theme_ext::ThemeColorRatatui;
 use fshell_core::theme::{CompletionsTheme, Theme};
 use fshell_engine::Env;
@@ -453,7 +453,7 @@ struct CompletionRequest {
 
 struct CompletionResponse {
     request: CompletionRequest,
-    suggestions: Vec<CompletionCandidate>,
+    batch: crate::autocomplete::types::CompletionBatch,
 }
 
 fn spawn_completion_worker(
@@ -467,14 +467,16 @@ fn spawn_completion_worker(
     let runtime = tokio::runtime::Handle::try_current().ok()?;
     let (request_tx, mut request_rx) = watch::channel::<Option<CompletionRequest>>(None);
     let (result_tx, result_rx) = mpsc::unbounded_channel();
+    let mut source_updates = crate::autocomplete::sources::subscribe();
     runtime.spawn(async move {
         // Keystroke bursts coalesce here: wait out fast typing before spawning
         // blocking work. Explicit Tab (`force_visible`) skips the wait so the
         // first paint is immediate.
         const TYPE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(60);
         loop {
-            if request_rx.changed().await.is_err() {
-                break;
+            tokio::select! {
+                result = request_rx.changed() => { if result.is_err() { break; } },
+                result = source_updates.changed() => { if result.is_err() { break; } },
             }
             let Some(mut request) = request_rx.borrow_and_update().clone() else {
                 continue;
@@ -501,18 +503,21 @@ fn spawn_completion_worker(
                 let task = tokio::task::spawn_blocking(move || {
                     compute_completion_candidates(&worker_env, &worker_request, Some(cancel))
                 });
-                let suggestions = task.await.unwrap_or_default();
+                let batch = task.await.unwrap_or_default();
 
                 match request_rx.borrow_and_update().clone() {
                     Some(latest) if latest.generation != request.generation => {
                         request = latest;
                     }
                     Some(_) => {
+                        if source_updates.has_changed().unwrap_or(false) {
+                            // Do not publish a final fallback from a source
+                            // snapshot that changed during this computation.
+                            source_updates.borrow_and_update();
+                            continue;
+                        }
                         if result_tx
-                            .send(CompletionResponse {
-                                request,
-                                suggestions,
-                            })
+                            .send(CompletionResponse { request, batch })
                             .is_ok()
                             && let Some(waker) = &waker
                         {
@@ -533,10 +538,10 @@ fn compute_completion_candidates(
     env: &Env,
     request: &CompletionRequest,
     cancel: Option<crate::autocomplete::types::CompletionCancel>,
-) -> Vec<CompletionCandidate> {
+) -> crate::autocomplete::types::CompletionBatch {
     if request.line.trim().is_empty() {
         if !request.force_visible {
-            return Vec::new();
+            return crate::autocomplete::types::CompletionBatch::default();
         }
 
         let builtins = env.get_all_builtins();
@@ -584,7 +589,10 @@ fn compute_completion_candidates(
 
         raw.sort_by_key(|candidate| candidate.value.to_lowercase());
         raw.truncate(50);
-        return raw;
+        return crate::autocomplete::types::CompletionBatch {
+            candidates: raw,
+            pending: false,
+        };
     }
 
     let mut completer = FshellCompleter {
@@ -597,7 +605,7 @@ fn compute_completion_candidates(
         .nth(request.cursor_pos)
         .map(|(index, _)| index)
         .unwrap_or(request.line.len());
-    completer.complete(&request.line, cursor_byte)
+    completer.complete_with_sources(&request.line, cursor_byte)
 }
 
 pub struct CompletionsManager {
@@ -752,8 +760,8 @@ impl CompletionsManager {
             self.loading = true;
             self.visible = true;
         } else {
-            let suggestions = compute_completion_candidates(&self.completer.env, &request, None);
-            self.apply_result(&request, suggestions);
+            let batch = compute_completion_candidates(&self.completer.env, &request, None);
+            self.apply_result(&request, batch.candidates);
         }
     }
 
@@ -776,8 +784,8 @@ impl CompletionsManager {
             if response.request.generation != self.generation {
                 continue;
             }
-            self.loading = false;
-            self.apply_result(&response.request, response.suggestions);
+            self.apply_result(&response.request, response.batch.candidates);
+            self.loading = response.batch.pending;
             changed = true;
         }
         changed
@@ -1857,10 +1865,10 @@ mod tests {
             }
         }
         let wake = Arc::new(CompletionWake(tokio::sync::Notify::new()));
-        let mut manager = CompletionsManager::new_async_with_waker(
-            Env::new(),
-            std::task::Waker::from(wake.clone()),
-        );
+        let env = Env::new();
+        fshell_builtins::init(&env);
+        let mut manager =
+            CompletionsManager::new_async_with_waker(env, std::task::Waker::from(wake.clone()));
         manager.update("echo ./", 7, true);
         tokio::time::timeout(std::time::Duration::from_secs(2), wake.0.notified())
             .await

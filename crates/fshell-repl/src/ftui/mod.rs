@@ -407,7 +407,7 @@ pub async fn run_ftui_repl(
             }
 
             if comp_mgr.apply_pending_results() {
-                if pending_completion_tab == Some(comp_mgr.generation()) {
+                if pending_completion_tab == Some(comp_mgr.generation()) && !comp_mgr.loading {
                     pending_completion_tab = None;
                     accept_first_tab_completion(&mut comp_mgr, &mut text_buf);
                 }

@@ -9,9 +9,9 @@ pub mod files;
 pub mod help;
 mod provider;
 pub mod ranking;
+pub(crate) mod sources;
 pub mod types;
 
-pub use self::carapace::*;
 pub use self::custom::*;
 pub use self::files::*;
 pub use self::help::*;
@@ -194,6 +194,30 @@ impl FshellCompleter {
 
 impl Completer for FshellCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<CompletionCandidate> {
+        self.complete_with_sources(line, pos).candidates
+    }
+}
+
+impl FshellCompleter {
+    pub(crate) fn complete_with_sources(
+        &mut self,
+        line: &str,
+        pos: usize,
+    ) -> types::CompletionBatch {
+        let mut pending = false;
+        let candidates = self.complete_inner(line, pos, &mut pending);
+        types::CompletionBatch {
+            candidates,
+            pending,
+        }
+    }
+
+    fn complete_inner(
+        &mut self,
+        line: &str,
+        pos: usize,
+        pending: &mut bool,
+    ) -> Vec<CompletionCandidate> {
         let pos = crate::text::floor_char_boundary(line, pos);
         let prefix = &line[..pos];
         let words: Vec<&str> = prefix.split_whitespace().collect();
@@ -234,13 +258,20 @@ impl Completer for FshellCompleter {
         };
 
         if is_external {
-            if let Some(cached) = complete_with_carapace_cached(stmt, last_word, pos)
-                && !cached.is_empty()
-            {
-                return cached;
+            let cwd = self.env.cwd();
+            match carapace::complete_cached_at(stmt, last_word, pos, &cwd) {
+                Some(cached) if !cached.is_empty() => return cached,
+                Some(_) => {} // A fresh negative answer is final too.
+                None => {
+                    let words = stmt.iter().map(|word| word.to_string()).collect();
+                    *pending = carapace::spawn_refresh_at(
+                        words,
+                        last_word.to_string(),
+                        cwd,
+                        self.cancel.clone(),
+                    );
+                }
             }
-            let words_owned: Vec<String> = stmt.iter().map(|s| s.to_string()).collect();
-            spawn_carapace_refresh(words_owned, last_word.to_string());
         }
 
         let is_cd = stmt.len() >= 2 && stmt[stmt.len() - 2] == "cd" || prefix.trim_end() == "cd";
