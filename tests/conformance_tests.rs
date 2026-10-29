@@ -408,6 +408,20 @@ fn composition_cases() -> Vec<Case> {
         )
         .expect_engine(Engine::Posix)
         .features(&["compose", "nounset", "positional"]),
+        // A recorded signal handler is never installed: the signal keeps its
+        // default action. Pinned until trap installs a real disposition.
+        Case::posix_only(
+            "compose/signal-trap-runs-when-the-shell-is-signalled",
+            "trap 'emit --stdout caught' USR1; kill -USR1 $$; emit --stdout after",
+        )
+        .features(&["compose", "trap", "signal"])
+        .known_failure(
+            "posix-signal-traps-not-installed",
+            "`trap` records the handler but installs no signal disposition, so a \
+             trapped signal keeps its default action and terminates the shell \
+             instead of running the action and continuing",
+            &[Engine::Posix],
+        ),
         Case::posix_only("compose/or-short-circuits", "true || emit --stdout nope")
             .features(&["compose", "or_if"]),
         Case::posix_only("compose/or-runs-on-failure", "false || emit --stdout yes")
