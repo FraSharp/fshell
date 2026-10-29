@@ -114,6 +114,16 @@ fn word_model_cases() -> Vec<Case> {
         ]),
         Case::posix_only("word/no-match-glob-passes-through", "argvdump nomatch-*.zz")
             .features(&["word", "glob"]),
+        // Bracket expressions include POSIX character classes, and a pattern
+        // ending in `/` names directories and keeps the separator.
+        Case::posix("word/character-class-glob", "echo [[:alpha:]].txt")
+            .tree(&[("a.txt", ""), ("b.txt", ""), ("1.txt", "")])
+            .expect_engine(Engine::Native)
+            .features(&["word", "glob", "character_class"]),
+        Case::posix("word/trailing-slash-glob", "echo d*/")
+            .tree(&[("d1/x", ""), ("d2/y", "")])
+            .expect_engine(Engine::Native)
+            .features(&["word", "glob", "directory"]),
         // --- mixed quoted / unquoted words ---------------------------------
         Case::posix_only(
             "word/mixed-quoting-concatenates",

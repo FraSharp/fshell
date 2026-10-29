@@ -47,13 +47,21 @@ pub fn expand_args_with_words(
             matches
                 .into_iter()
                 .map(|path| {
-                    if relative {
+                    let trailing_separator = path.ends_with('/');
+                    let rendered = if relative {
                         std::path::Path::new(&path)
                             .strip_prefix(env.cwd())
                             .map(|p| p.to_string_lossy().into_owned())
                             .unwrap_or(path)
                     } else {
                         path
+                    };
+                    // `Path::strip_prefix` drops a trailing separator; the
+                    // pattern's `d*/` must keep producing `d1/ d2/`.
+                    if trailing_separator && !rendered.ends_with('/') {
+                        format!("{rendered}/")
+                    } else {
+                        rendered
                     }
                 })
                 .collect::<Vec<_>>()

@@ -20,6 +20,7 @@ pub mod parser;
 pub mod presets;
 pub mod prompt_config;
 pub mod shell_error;
+pub mod shell_glob;
 pub mod theme;
 pub mod val;
 pub mod validator;

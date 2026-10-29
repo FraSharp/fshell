@@ -459,7 +459,12 @@ fn expand_glob_impl(
         };
         expand_components(&root, &components, nocaseglob, authorize, &mut raw)?;
         if clean_pattern.ends_with('/') {
+            // The pattern names directories, and the shell keeps the trailing
+            // separator in what it produces: `d*/` is `d1/ d2/`.
             raw.retain(|p| Path::new(p).is_dir());
+            for path in &mut raw {
+                path.push('/');
+            }
         }
         raw
     };
@@ -536,15 +541,6 @@ fn expand_components(
             output,
         )?;
     } else {
-        let Ok(glob) = globset::GlobBuilder::new(component)
-            .backslash_escape(true)
-            .literal_separator(true)
-            .case_insensitive(nocase)
-            .build()
-        else {
-            return Ok(());
-        };
-        let matcher = glob.compile_matcher();
         authorize(dir)?;
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -554,7 +550,8 @@ fn expand_components(
                 {
                     continue;
                 }
-                if matcher.is_match(Path::new(&entry.file_name())) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if crate::shell_glob::component_matches(component, &name, nocase) {
                     expand_components(
                         &prefix.join(entry.file_name()),
                         rest,

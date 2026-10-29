@@ -968,61 +968,52 @@ fn eval_parameter_expr(
 /// shell's logical cwd keeps this function correct for both ordinary commands
 /// and environments whose cwd differs from the process cwd.
 fn expand_glob(pattern: &str, fallback: &str, cwd: &std::path::Path) -> Vec<String> {
+    // POSIX has no recursive globstar: `**` is two stars and therefore one run
+    // of any characters, exactly like `*`.
+    let normalized: String = pattern
+        .split('/')
+        .map(|component| if component == "**" { "*" } else { component })
+        .collect::<Vec<_>>()
+        .join("/");
     let is_absolute = std::path::Path::new(fallback).is_absolute();
-    let search_pattern = if is_absolute {
-        pattern.to_string()
-    } else {
-        let cwd_pattern = glob::Pattern::escape(&cwd.to_string_lossy());
-        format!("{cwd_pattern}/{pattern}")
-    };
-
-    let matcher = match glob::Pattern::new(&search_pattern) {
-        Ok(pattern) => pattern,
-        // Invalid bracket expressions are ordinary unmatched shell words.
-        Err(_) => return vec![fallback.to_string()],
-    };
-    let traversal_options = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: true,
-        // Filter hidden components with the complete pattern below.  The
-        // glob crate prunes dotfiles before matching when this is true, which
-        // incorrectly rejects patterns whose component explicitly begins '.'.
-        require_literal_leading_dot: false,
-    };
-    let paths = match glob::glob_with(&search_pattern, traversal_options) {
-        Ok(paths) => paths,
-        // Invalid bracket expressions are ordinary unmatched shell words.
-        Err(_) => return vec![fallback.to_string()],
-    };
-
-    let mut matches = Vec::new();
-    let matching_options = glob::MatchOptions {
-        require_literal_leading_dot: true,
-        ..traversal_options
-    };
-    for path in paths.flatten() {
-        if !matcher.matches_path_with(&path, matching_options) {
-            continue;
-        }
-        let rendered = if is_absolute {
-            path.to_string_lossy().into_owned()
-        } else {
-            // `search_pattern` retains lexical `./` and `../` components, so
-            // stripping the logical cwd preserves the spelling the user gave.
-            path.strip_prefix(cwd)
-                .map(|relative| relative.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| path.to_string_lossy().into_owned())
-        };
-        matches.push(rendered);
-    }
-
+    let matches = fshell_core::glob_utils::expand_glob_checked_at(
+        &normalized,
+        // Let the caller supply the spelling of an unmatched pattern: it is the
+        // word after quote removal, not the escaped glob form.
+        true,
+        false,
+        cwd,
+        &mut |_| Ok(()),
+    )
+    .unwrap_or_default();
     if matches.is_empty() {
         // POSIX leaves an unmatched pathname pattern unchanged.
-        vec![fallback.to_string()]
-    } else {
-        matches.sort();
-        matches
+        return vec![fallback.to_string()];
     }
+    let mut rendered: Vec<String> = matches
+        .into_iter()
+        .map(|matched| {
+            let trailing_separator = matched.ends_with('/');
+            let rendered = if is_absolute {
+                matched
+            } else {
+                // Matches are joined onto the logical cwd; strip it to keep the
+                // spelling the user gave (`./x`, `../x`). `Path` drops a trailing
+                // separator, so put it back: `d*/` expands to `d1/ d2/`.
+                std::path::Path::new(&matched)
+                    .strip_prefix(cwd)
+                    .map(|relative| relative.to_string_lossy().into_owned())
+                    .unwrap_or(matched)
+            };
+            if trailing_separator && !rendered.ends_with('/') {
+                format!("{rendered}/")
+            } else {
+                rendered
+            }
+        })
+        .collect();
+    rendered.sort();
+    rendered
 }
 
 thread_local! {
