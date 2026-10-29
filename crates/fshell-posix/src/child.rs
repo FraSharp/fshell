@@ -24,6 +24,9 @@ struct ChildProgram {
     positional: Vec<String>,
     arg0: String,
     shell_pid: u32,
+    /// The parent's `set -u` state: a subshell inherits the option.
+    #[serde(default)]
+    nounset: bool,
 }
 
 /// The payload that runs `list` in a child shell of `env`.
@@ -44,6 +47,7 @@ pub(crate) fn list_payload(
             .map(Val::to_text)
             .unwrap_or_else(|| "fsh".to_string()),
         shell_pid: fshell_engine::background::shell_pid(),
+        nounset: env.posix_nounset.load(std::sync::atomic::Ordering::Relaxed),
     };
     serde_json::to_string(&program)
         .map(ChildPayload::PosixProgram)
@@ -79,6 +83,8 @@ pub async fn run_child_program(serialized: &str, env: &Env) -> Result<i32, Engin
             span: None,
         })?;
     fshell_engine::background::inherit_shell_pid(child.shell_pid);
+    env.posix_nounset
+        .store(child.nounset, std::sync::atomic::Ordering::Relaxed);
     {
         let mut vars = env.vars.write();
         vars.insert("0".to_string(), Val::String(child.arg0));

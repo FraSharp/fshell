@@ -414,9 +414,18 @@ pub fn apply_option(env: &Env, key: &str, val: &Val) -> Result<(), ShellError> {
     let bare_key = key.strip_prefix("options.").unwrap_or(key);
     if ShellOptions::bool_keys().contains(&bare_key) {
         let b = parse_bool(val)?;
-        let mut opts = env.options.write();
-        opts.set_bool(bare_key, b)
-            .map_err(|e| format!("set: {e}"))?;
+        {
+            let mut opts = env.options.write();
+            opts.set_bool(bare_key, b)
+                .map_err(|e| format!("set: {e}"))?;
+        }
+        if bare_key == "nounset" {
+            // `setopt nounset` is native's spelling of `set -u`. The POSIX
+            // engine keeps its own state, and a setting the user asks for
+            // explicitly applies there too.
+            env.posix_nounset
+                .store(b, std::sync::atomic::Ordering::Relaxed);
+        }
     } else {
         match bare_key {
             "sandbox_mode" => {

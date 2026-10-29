@@ -50,8 +50,12 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<Option<String>, String> {
         match args[i].as_str() {
             "-e" => opts.errexit = true,
             "+e" => opts.errexit = false,
-            "-u" => opts.nounset = true,
-            "+u" => opts.nounset = false,
+            "-u" => env
+                .posix_nounset
+                .store(true, std::sync::atomic::Ordering::Relaxed),
+            "+u" => env
+                .posix_nounset
+                .store(false, std::sync::atomic::Ordering::Relaxed),
             "-x" => opts.xtrace = true,
             "+x" => opts.xtrace = false,
             "-n" => opts.noexec = true,
@@ -72,13 +76,16 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<Option<String>, String> {
             "-o" | "+o" => {
                 let enable = args[i] == "-o";
                 match args.get(i + 1).map(String::as_str) {
-                    Some(name) if set_named_option(name, enable, &mut opts) => {
+                    Some(name) if set_named_option(name, enable, env, &mut opts) => {
                         i += 1;
                     }
                     // `set -o` with no name prints the options; an unrecognised
                     // name is a usage error rather than a silent success, so a
                     // script cannot believe an option is on when it is not.
-                    None => return Ok(Some(list_named_options(&opts, enable))),
+                    None => {
+                        let nounset = env.posix_nounset.load(std::sync::atomic::Ordering::Relaxed);
+                        return Ok(Some(list_named_options(&opts, nounset, enable)));
+                    }
                     Some(name) => return Err(format!("set: unknown option name '{name}'")),
                 }
             }
@@ -97,10 +104,20 @@ pub fn set_posix(env: &Env, args: &[String]) -> Result<Option<String>, String> {
 /// Returns false for a name this shell does not implement, which the caller
 /// reports: POSIX names only a few, and quietly ignoring the rest is how a script
 /// ends up running with weaker settings than it asked for.
-fn set_named_option(name: &str, enable: bool, opts: &mut fshell_engine::ShellOptions) -> bool {
+fn set_named_option(
+    name: &str,
+    enable: bool,
+    env: &Env,
+    opts: &mut fshell_engine::ShellOptions,
+) -> bool {
     match name {
         "errexit" => opts.errexit = enable,
-        "nounset" => opts.nounset = enable,
+        "nounset" => {
+            // The POSIX engine keeps its own `-u` state; `ShellOptions::nounset`
+            // is native's, and its default is not a POSIX setting.
+            env.posix_nounset
+                .store(enable, std::sync::atomic::Ordering::Relaxed);
+        }
         "xtrace" => opts.xtrace = enable,
         "noexec" => opts.noexec = enable,
         "noglob" => opts.noglob = enable,
@@ -113,10 +130,14 @@ fn set_named_option(name: &str, enable: bool, opts: &mut fshell_engine::ShellOpt
 
 /// Render the implemented options for `set -o` (readable) or `set +o` (a command
 /// that would restore them), the way POSIX requires.
-fn list_named_options(opts: &fshell_engine::ShellOptions, as_commands: bool) -> String {
+fn list_named_options(
+    opts: &fshell_engine::ShellOptions,
+    nounset: bool,
+    as_commands: bool,
+) -> String {
     let options = [
         ("errexit", opts.errexit),
-        ("nounset", opts.nounset),
+        ("nounset", nounset),
         ("xtrace", opts.xtrace),
         ("noexec", opts.noexec),
         ("noglob", opts.noglob),

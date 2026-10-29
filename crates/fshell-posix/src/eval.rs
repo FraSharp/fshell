@@ -318,7 +318,17 @@ async fn eval_and_or_list(
     env: &Env,
     cfg: &EvalConfig,
 ) -> Result<i32, PosixError> {
-    let mut code = eval_pipeline(&list.first, env, cfg).await?;
+    // POSIX 2.8.1 exempts every command of an and-or list except its last one —
+    // and every `!`-negated pipeline — from errexit: those commands are being
+    // asked a question, so their failure is information, not a reason to leave.
+    // The exemption applies *inside* them too: a function or group that fails is
+    // not how the shell decides to exit.
+    let element_cfg = |is_last: bool, bang: bool| EvalConfig {
+        errexit: cfg.errexit && is_last && !bang,
+        ..cfg.clone()
+    };
+    let first_cfg = element_cfg(list.additional.is_empty(), list.first.bang);
+    let mut code = eval_pipeline(&list.first, env, &first_cfg).await?;
     if code == 130 || env.pipeline_cancelled() {
         check_cancelled(env)?;
         return Err(PosixError::Interrupted);
@@ -333,7 +343,9 @@ async fn eval_and_or_list(
             AndOr::Or(next) => (code != 0, next),
         };
         if run {
-            code = eval_pipeline(next, env, cfg).await?;
+            let is_last = index + 1 == list.additional.len();
+            let next_cfg = element_cfg(is_last, next.bang);
+            code = eval_pipeline(next, env, &next_cfg).await?;
             evaluated_index = index + 1;
             if code == 130 || env.pipeline_cancelled() {
                 check_cancelled(env)?;

@@ -256,6 +256,34 @@ fn resolve_parameter(param: &Parameter, env: &fshell_engine::Env, positional: &[
     resolve_parameter_with_presence(param, env, positional).0
 }
 
+/// Resolve a plain `$parameter`, honouring `set -u`.
+///
+/// POSIX exempts only `$@` and `$*`, which expand to nothing when there are no
+/// positional parameters. Every other unset parameter — including `$!` with no
+/// background job and a positional parameter beyond the arguments — makes the
+/// expansion fail.
+fn resolve_parameter_checked(
+    param: &Parameter,
+    env: &fshell_engine::Env,
+    positional: &[String],
+) -> Result<String, fshell_engine::EngineError> {
+    let (value, is_set) = resolve_parameter_with_presence(param, env, positional);
+    if !is_set
+        && env.posix_nounset.load(std::sync::atomic::Ordering::Relaxed)
+        && !matches!(
+            param,
+            Parameter::Special(SpecialParameter::AllPositionalParameters { .. })
+        )
+    {
+        return Err(fshell_engine::EngineError::ParameterExpansion {
+            parameter: param.to_string(),
+            message: format!("parameter {} is unset", param),
+            span: None,
+        });
+    }
+    Ok(value)
+}
+
 /// Expand a single POSIX word into zero or more expanded strings.
 ///
 /// Implements the 4-phase expansion:
@@ -603,9 +631,9 @@ fn eval_parameter_expr(
 ) -> Result<String, fshell_engine::EngineError> {
     use word::ParameterExpr as PE;
     let value = match expr {
-        PE::Parameter { parameter, .. } => resolve_parameter(parameter, env, positional),
+        PE::Parameter { parameter, .. } => resolve_parameter_checked(parameter, env, positional)?,
         PE::ParameterLength { parameter, .. } => {
-            let val = resolve_parameter(parameter, env, positional);
+            let val = resolve_parameter_checked(parameter, env, positional)?;
             val.chars().count().to_string()
         }
         PE::UseDefaultValues {

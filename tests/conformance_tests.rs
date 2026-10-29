@@ -382,6 +382,32 @@ fn composition_cases() -> Vec<Case> {
         .features(&["compose", "sequence"]),
         Case::posix_only("compose/and-short-circuits", "false && emit --stdout nope")
             .features(&["compose", "and_if"]),
+        // `set -e` is ignored for commands being tested, and that exemption
+        // reaches inside them: a function that fails is an answer, not an exit.
+        Case::posix(
+            "compose/errexit-is-ignored-inside-a-tested-command",
+            "set -e; f() { false; }; f || emit --stdout caught; emit --stdout after",
+        )
+        .expect_engine(Engine::Posix)
+        .features(&["compose", "errexit", "function"]),
+        // `set -u` fails an unset parameter. The reference shells disagree on the
+        // status (bash 127 under `-c`, dash 2), so the expectation is literal:
+        // the command does not run and the shell leaves with status 1.
+        Case::native(
+            "compose/nounset-fails-an-unset-parameter",
+            "set -u; emit --stdout $UNSET_IN_THE_FIXTURE; emit --stdout after",
+            "",
+            1,
+        )
+        .engines(&[Engine::Posix, Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["compose", "nounset", "parameter"]),
+        Case::posix(
+            "compose/nounset-allows-the-empty-positional-list",
+            "set -u; for x in \"$@\"; do emit --stdout $x; done; emit --stdout done",
+        )
+        .expect_engine(Engine::Posix)
+        .features(&["compose", "nounset", "positional"]),
         Case::posix_only("compose/or-short-circuits", "true || emit --stdout nope")
             .features(&["compose", "or_if"]),
         Case::posix_only("compose/or-runs-on-failure", "false || emit --stdout yes")

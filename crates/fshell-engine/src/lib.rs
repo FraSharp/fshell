@@ -1119,6 +1119,12 @@ pub struct Env {
     /// `EXIT` is not a signal, so it cannot live in [`posix_traps`]: it fires once,
     /// when the shell that set it leaves the script, rather than on a signal.
     pub posix_exit_trap: Arc<RwLock<Option<String>>>,
+    /// `set -u` as the POSIX engine tracks it.
+    ///
+    /// It is deliberately separate from [`ShellOptions::nounset`], whose
+    /// default is native's: a POSIX script starts with `-u` off and turns it on
+    /// with `set -u`, whatever native's configuration says.
+    pub posix_nounset: Arc<AtomicBool>,
     pub posix_fns: Arc<RwLock<FxHashMap<String, Arc<dyn std::any::Any + Send + Sync>>>>,
     /// This shell execution environment's descriptor table. Clones of an `Env`
     /// share it; a subshell gets a copy (see [`Env::with_descriptors`]).
@@ -2094,6 +2100,7 @@ impl Env {
             special_vars: Arc::new(special_vars::SpecialVars::new()),
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
             posix_exit_trap: Arc::new(RwLock::new(None)),
+            posix_nounset: Arc::new(AtomicBool::new(false)),
             posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
             descriptors: Arc::new(RwLock::new(descriptors::DescriptorTable::standard())),
             theme: Arc::new(RwLock::new(Arc::new(
@@ -2260,6 +2267,7 @@ impl Env {
             special_vars: Arc::new(special_vars::SpecialVars::new()),
             posix_traps: Arc::new(RwLock::new(FxHashMap::default())),
             posix_exit_trap: Arc::new(RwLock::new(None)),
+            posix_nounset: Arc::new(AtomicBool::new(false)),
             posix_fns: Arc::new(RwLock::new(FxHashMap::default())),
             descriptors: Arc::new(RwLock::new(descriptors::DescriptorTable::standard())),
             theme: Arc::new(RwLock::new(Arc::new(
@@ -2384,6 +2392,7 @@ impl Env {
             special_vars: self.special_vars.clone(),
             posix_traps: self.posix_traps.clone(),
             posix_exit_trap: self.posix_exit_trap.clone(),
+            posix_nounset: self.posix_nounset.clone(),
             posix_fns: self.posix_fns.clone(),
             descriptors: self.descriptors.clone(),
             theme: self.theme.clone(),

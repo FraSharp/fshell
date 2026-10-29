@@ -294,6 +294,8 @@ sh {
 - `shift [N]`: shifts positional parameters left by `N`.
 - `set -e` / `set -u` / `set -x` / `set -o pipefail`: configures shell execution options.
 
+`set -u` is the POSIX engine's own state: a POSIX script starts with it off and turns it on with `set -u`, whatever native's `nounset` setting (on by default) says. a subshell inherits it. `set -e` is ignored for any command being tested — every element of an `&&`/`||` list except the last, every `!`-negated pipeline, and everything evaluated inside `if`/`while`/`until` conditions.
+
 ### `read`
 
 reads a line from standard input, performing `$IFS` splitting into variables:
