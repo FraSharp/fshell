@@ -808,6 +808,17 @@ fn native_word_model_cases() -> Vec<Case> {
         .features(&["native", "word", "parameter"]),
         // A word is typed as a number only when it is that number's canonical
         // spelling, so a command never receives rewritten text.
+        // A word followed by an operator at the end of the line is a command
+        // argument: `echo *` globs, `echo +` prints, `echo and` prints.
+        Case::native(
+            "native/trailing-operator-is-a-command-argument",
+            "echo zz* + and",
+            "zz* + and\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "word", "operator"]),
         Case::native(
             "native/numeric-looking-words-keep-their-spelling",
             "argvdump +5 007 1_000 1e5 1.50 42 1.5",

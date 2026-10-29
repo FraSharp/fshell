@@ -1265,6 +1265,35 @@ mod tests {
     }
 
     #[test]
+    fn test_trailing_operator_is_a_command_argument() {
+        // A word followed by an operator is only an expression when an operand
+        // follows it. At the end of a line the token is a command argument, and
+        // the trailing newline must not change that.
+        for (src, argument) in [
+            ("echo *\n", "*"),
+            ("echo +\n", "+"),
+            ("echo and\n", "and"),
+            ("echo * ; echo ok\n", "*"),
+        ] {
+            let stage = last_stage_of(src);
+            let PipelineStage::CommandCall { name, args, .. } = &stage else {
+                panic!("{src:?}: expected a command call, got {stage:?}");
+            };
+            assert_eq!(name, "echo", "{src:?}");
+            assert_eq!(
+                args.iter()
+                    .map(|arg| match arg.unpack() {
+                        Expr::String(parts) => StringPart::literal_text(parts).unwrap_or_default(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect::<Vec<_>>(),
+                vec![argument.to_string()],
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_standalone_dash_is_command_argument() {
         // A lone `-` after a command word is a command argument (a flag or the
         // POSIX stdin/stdout marker), never the subtraction operator. Regression

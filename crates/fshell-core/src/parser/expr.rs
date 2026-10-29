@@ -383,6 +383,17 @@ impl Parser {
         })
     }
 
+    /// Whether a token at `from` is followed by an operand on the same command
+    /// line. A trailing operator is a command argument: `echo *` globs.
+    fn infix_operand_follows(&self, from: usize) -> bool {
+        let mut at = from;
+        while at < self.input.len() && matches!(self.input[at], ' ' | '\t') {
+            at += 1;
+        }
+        at < self.input.len()
+            && !matches!(self.input[at], '\n' | '\r' | ';' | '|' | '&' | ')' | '}')
+    }
+
     fn parse_expr_with_pipeline_inner(&mut self, allow_pipeline: bool) -> Result<Expr, ParseError> {
         let start = self.pos;
 
@@ -461,6 +472,9 @@ impl Parser {
                 // command because `1` follows `echo`. A `-` is deliberately *not* an
                 // operator: after a command word it is a flag or the stdin/stdout
                 // marker (`cmd - <<EOF`), not subtraction.
+                // An operator needs a right operand on this command line: a word
+                // followed by a trailing `*`, `+`, `=` or `and` is a command with an
+                // argument (`echo *` globs), not an incomplete multiplication.
                 let is_operator = match next_char {
                     // In a value/condition context `&&`/`||` are boolean
                     // operators, so `a && b` is an expression, not a command.
@@ -479,17 +493,23 @@ impl Parser {
                         // `date +%Y`, `tail +3`, `set +e` — so after the leading
                         // word, `+` is addition only when spaced like an infix
                         // operator (`sum + x`), the same rule as `*`.
-                        next_pos + 1 >= self.input.len() || self.input[next_pos + 1].is_whitespace()
+                        next_pos + 1 < self.input.len()
+                            && self.input[next_pos + 1].is_whitespace()
+                            && self.infix_operand_follows(next_pos + 1)
                     }
-                    Some('=') | Some('!') => true,
+                    Some('=') | Some('!') => self.infix_operand_follows(next_pos + 1),
                     Some('*') => {
                         // * is multiplication only if followed by whitespace (binary op with spaces).
                         // Immediately followed by non-whitespace means it's a glob pattern (e.g., *.md, **/*.rs).
-                        next_pos + 1 < self.input.len() && self.input[next_pos + 1].is_whitespace()
+                        next_pos + 1 < self.input.len()
+                            && self.input[next_pos + 1].is_whitespace()
+                            && self.infix_operand_follows(next_pos + 1)
                     }
                     Some('<') => {
                         // `<=` is comparison operator. `<` (and `<<`, `<<<`, `<(`) is redirection / command argument.
-                        next_pos + 1 < self.input.len() && self.input[next_pos + 1] == '='
+                        next_pos + 1 < self.input.len()
+                            && self.input[next_pos + 1] == '='
+                            && self.infix_operand_follows(next_pos + 2)
                     }
                     // A `-` after the leading word is a command argument, never
                     // subtraction: it is a flag (`-x`, `--long`, `-5`, `-$VAR`) or the
@@ -519,7 +539,8 @@ impl Parser {
                                 break;
                             }
                         }
-                        next_ident == "and" || next_ident == "or"
+                        (next_ident == "and" || next_ident == "or")
+                            && self.infix_operand_follows(temp_pos)
                     }
                 };
 
