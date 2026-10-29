@@ -1944,6 +1944,56 @@ mod tests {
     }
 
     #[test]
+    fn test_heredoc_delimiter_is_one_word_after_quote_removal() {
+        for (src, delimiter) in [
+            ("cat <<E.O.F\nbody\nE.O.F\n", "E.O.F"),
+            ("cat <<E\"O\"F\nbody\nEOF\n", "EOF"),
+            ("cat <<E\\OF\nbody\nEOF\n", "EOF"),
+            ("cat <<'EOF'\nbody\nEOF\n", "EOF"),
+        ] {
+            let stmts = Parser::new(src).parse_statements().unwrap();
+            let stage = pipeline_of(&stmts[0])
+                .unwrap()
+                .stages
+                .iter()
+                .find(|stage| matches!(stage, PipelineStage::Heredoc { .. }))
+                .unwrap();
+            let PipelineStage::Heredoc {
+                delimiter: parsed,
+                content,
+                ..
+            } = stage
+            else {
+                unreachable!("found above");
+            };
+            assert_eq!(parsed, delimiter, "{src:?}");
+            assert!(
+                !matches!(content, Expr::MultiLineString { .. } if src.contains("E\"O\"F")),
+                "a quoted delimiter part must suppress interpolation in {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_heredoc_terminator_is_the_whole_line() {
+        // `EOF` followed by blanks names a different line: the body continues.
+        assert!(
+            Parser::new("cat <<EOF\nbody\nEOF   \n")
+                .parse_statements()
+                .is_err()
+        );
+        assert_eq!(
+            heredoc_body(
+                &Parser::new("cat <<EOF\nbody\nEOF\n")
+                    .parse_statements()
+                    .unwrap()[0]
+            )
+            .as_deref(),
+            Some("body")
+        );
+    }
+
+    #[test]
     fn test_background_single_ampersand() {
         let stmts = Parser::new("sleep 1 &").parse_statements().unwrap();
         assert_eq!(stmts.len(), 1);

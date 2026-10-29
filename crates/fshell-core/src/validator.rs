@@ -970,7 +970,14 @@ EOF"#;
         }
     }
     EOF"#;
-        assert_eq!(validate_input(indented_heredoc), ValidationResult::Complete);
+        // `<<-` strips leading tabs; a plain `<<EOF` terminator must be the whole
+        // line, so an indented body is still waiting for its delimiter.
+        assert!(matches!(
+            validate_input(indented_heredoc),
+            ValidationResult::Incomplete {
+                prompt_hint: "heredoc"
+            }
+        ));
 
         let and_backslash = r#"echo "=== Step 1: Checking code ===" && \
 git status --short && \

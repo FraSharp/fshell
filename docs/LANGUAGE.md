@@ -273,6 +273,7 @@ EOF
 - `<<EOF`: multi-line string with `$` interpolation.
 - `<<'EOF'`: raw multi-line string (no interpolation).
 - `<<-EOF`: strips leading tab characters from each line.
+- the delimiter is one word after quote removal — `E.O.F`, `E"O"F` and `E\OF` all name `E.O.F`, and any quoted part suppresses interpolation. its terminator line must be exactly that word; only `<<-` ignores leading tabs.
 
 > [!NOTE]
 > triple-quoted strings and heredocs are raw *text* bodies: they expand

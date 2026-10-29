@@ -758,6 +758,26 @@ fn redirection_cases() -> Vec<Case> {
         .engines(&[Engine::Native, Engine::Auto])
         .expect_engine(Engine::Native)
         .features(&["native", "heredoc", "command_substitution"]),
+        // A delimiter is one word after quote removal, and any quoted part
+        // suppresses expansion in the body.
+        Case::native(
+            "native/heredoc-delimiter-is-a-word",
+            "cat <<E.O.F\nbody\nE.O.F\n",
+            "body\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "heredoc", "delimiter"]),
+        Case::native(
+            "native/heredoc-quoted-delimiter-part-is-literal",
+            "cat <<E\"O\"F\nbody $HOME\nEOF\n",
+            "body $HOME\n",
+            0,
+        )
+        .engines(&[Engine::Native, Engine::Auto])
+        .expect_engine(Engine::Native)
+        .features(&["native", "heredoc", "delimiter", "quoting"]),
         // A redirection that cannot be opened fails its own command; the rest
         // of the pipeline runs and the last command still decides the status.
         Case::posix(

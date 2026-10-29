@@ -2440,7 +2440,8 @@ impl Parser {
     }
 
     pub(crate) fn parse_heredoc_header(&mut self) -> Result<(String, bool, bool), ParseError> {
-        // Assumes `<<` already consumed; parses optional `-` and delimiter, skips trailing horizontal whitespace, but does NOT consume body.
+        // Assumes `<<` already consumed; parses optional `-` and the delimiter
+        // word, skips trailing horizontal whitespace, but does NOT consume body.
         let strip_tabs = if self.peek() == Some('-') {
             self.next_char();
             true
@@ -2448,49 +2449,79 @@ impl Parser {
             false
         };
         self.skip_horizontal_whitespace();
-        let delimiter: String;
-        let quoted_delimiter: bool;
-        match self.peek() {
-            Some('\'') => {
-                quoted_delimiter = true;
-                self.next_char();
-                let mut d = String::new();
-                while let Some(c) = self.peek() {
-                    if c == '\'' {
-                        self.next_char();
-                        break;
+        // The delimiter is one shell word after quote removal — `EOF`, `'EOF'`,
+        // `"EOF"`, `E\OF` and `E"O"F` all name `EOF` and all suppress expansion
+        // in the body. It is not expanded itself: `<<$X` names `$X`.
+        let mut delimiter = String::new();
+        let mut quoted = false;
+        loop {
+            match self.peek() {
+                Some('\'') => {
+                    quoted = true;
+                    self.next_char();
+                    loop {
+                        match self.next_char() {
+                            Some('\'') => break,
+                            Some(c) => delimiter.push(c),
+                            None => {
+                                return Err(ParseError::UnexpectedEof {
+                                    span: self.current_span(),
+                                });
+                            }
+                        }
                     }
-                    d.push(self.next_char().ok_or_else(|| ParseError::UnexpectedEof {
-                        span: self.current_span(),
-                    })?);
                 }
-                delimiter = d;
-            }
-            Some('"') => {
-                quoted_delimiter = true;
-                self.next_char();
-                let mut d = String::new();
-                while let Some(c) = self.peek() {
-                    if c == '"' {
-                        self.next_char();
-                        break;
+                Some('"') => {
+                    quoted = true;
+                    self.next_char();
+                    loop {
+                        match self.next_char() {
+                            Some('"') => break,
+                            Some('\\') if matches!(self.peek(), Some('"' | '\\' | '$' | '`')) => {
+                                delimiter.push(self.next_char().expect("peeked a character"));
+                            }
+                            Some(c) => delimiter.push(c),
+                            None => {
+                                return Err(ParseError::UnexpectedEof {
+                                    span: self.current_span(),
+                                });
+                            }
+                        }
                     }
-                    d.push(self.next_char().ok_or_else(|| ParseError::UnexpectedEof {
-                        span: self.current_span(),
-                    })?);
                 }
-                delimiter = d;
+                Some('\\') => {
+                    quoted = true;
+                    self.next_char();
+                    match self.next_char() {
+                        Some(c) => delimiter.push(c),
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                span: self.current_span(),
+                            });
+                        }
+                    }
+                }
+                Some(c)
+                    if !c.is_whitespace()
+                        && !matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')') =>
+                {
+                    delimiter.push(c);
+                    self.next_char();
+                }
+                _ => break,
             }
-            _ => {
-                quoted_delimiter = false;
-                delimiter = self.parse_identifier()?;
-            }
+        }
+        if delimiter.is_empty() && !quoted {
+            return Err(ParseError::SyntaxError {
+                message: "here-document delimiter is missing".to_string(),
+                span: self.current_span(),
+            });
         }
         // Skip only horizontal whitespace after delimiter; the outer `parse_pipeline` will handle following `> file` redirects before body.
         while self.peek() == Some(' ') || self.peek() == Some('\t') {
             self.next_char();
         }
-        Ok((delimiter, strip_tabs, quoted_delimiter))
+        Ok((delimiter, strip_tabs, quoted))
     }
 
     /// Read a here-document body starting at its first line. The caller has
@@ -2515,11 +2546,9 @@ impl Parser {
             } else {
                 &line
             };
-            if trimmed_line.trim_end_matches('\n') == delimiter
-                || trimmed_line.trim_end_matches('\r') == delimiter
-                || trimmed_line.trim_end_matches('\n').trim_end_matches('\r') == delimiter
-                || trimmed_line.trim() == delimiter
-            {
+            // The terminator must be the whole line: trailing blanks name a
+            // different line, exactly as they do in posix.
+            if trimmed_line == delimiter {
                 self.pos = saved;
                 while let Some(c) = self.peek() {
                     if c == '\n' {
