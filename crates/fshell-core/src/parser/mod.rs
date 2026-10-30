@@ -338,6 +338,103 @@ pub(crate) fn strip_leading_tabs(s: &str) -> String {
         .collect()
 }
 
+/// A here-document delimiter scanned from text beginning with `<<`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeredocDelimiter {
+    /// Delimiter after quote removal.
+    pub delimiter: String,
+    /// `<<-`: leading tabs are stripped from body lines and the terminator.
+    pub strip_tabs: bool,
+    /// Bytes consumed from the start of the input, including trailing blanks.
+    pub consumed: usize,
+}
+
+/// Scan a here-document header at the start of `input`.
+///
+/// This is the shared lexical rule for the delimiter word: quote removal,
+/// backslash escapes, and the characters that end a word. It returns `None`
+/// when the input does not start a here-document (`<<<`, `<<(`, or no delimiter
+/// word), so callers can fall back to ordinary tokenization. Expansion is not
+/// this function's concern; quoting only matters here for an empty delimiter.
+pub fn scan_heredoc_delimiter(input: &str) -> Option<HeredocDelimiter> {
+    let mut it = input.char_indices().peekable();
+    if it.next().map(|(_, c)| c) != Some('<') || it.next().map(|(_, c)| c) != Some('<') {
+        return None;
+    }
+    let strip_tabs = if it.peek().map(|&(_, c)| c) == Some('-') {
+        it.next();
+        true
+    } else {
+        false
+    };
+    // `<<<` is a here-string and `<<(` is process substitution.
+    if matches!(it.peek().map(|&(_, c)| c), Some('<' | '(')) {
+        return None;
+    }
+    while matches!(it.peek().map(|&(_, c)| c), Some(' ' | '\t')) {
+        it.next();
+    }
+
+    let mut delimiter = String::new();
+    let mut quoted = false;
+    while let Some(&(_, c)) = it.peek() {
+        match c {
+            '\'' => {
+                quoted = true;
+                it.next();
+                loop {
+                    let (_, ch) = it.next()?;
+                    if ch == '\'' {
+                        break;
+                    }
+                    delimiter.push(ch);
+                }
+            }
+            '"' => {
+                quoted = true;
+                it.next();
+                loop {
+                    let (_, ch) = it.next()?;
+                    match ch {
+                        '"' => break,
+                        '\\' => match it.peek().map(|&(_, c)| c) {
+                            Some(n @ ('"' | '\\' | '$' | '`')) => {
+                                it.next();
+                                delimiter.push(n);
+                            }
+                            _ => delimiter.push('\\'),
+                        },
+                        other => delimiter.push(other),
+                    }
+                }
+            }
+            '\\' => {
+                quoted = true;
+                it.next();
+                let (_, ch) = it.next()?;
+                delimiter.push(ch);
+            }
+            c if !c.is_whitespace() && !matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')') => {
+                delimiter.push(c);
+                it.next();
+            }
+            _ => break,
+        }
+    }
+    if delimiter.is_empty() && !quoted {
+        return None;
+    }
+    while matches!(it.peek().map(|&(_, c)| c), Some(' ' | '\t')) {
+        it.next();
+    }
+    let consumed = it.peek().map(|&(index, _)| index).unwrap_or(input.len());
+    Some(HeredocDelimiter {
+        delimiter,
+        strip_tabs,
+        consumed,
+    })
+}
+
 /// Parse the interpolation markers of a raw string body into `StringPart`s.
 ///
 /// This is the single interpolation grammar shared by triple-quoted strings and
@@ -1749,6 +1846,55 @@ mod tests {
         let input = "  \tindented\n\ttabbed\n";
         let result = strip_leading_tabs(input);
         assert_eq!(result, "  \tindented\ntabbed\n");
+    }
+
+    #[test]
+    fn test_scan_heredoc_delimiter_words() {
+        let spec = scan_heredoc_delimiter("<<EOF\n").expect("header");
+        assert_eq!(spec.delimiter, "EOF");
+        assert!(!spec.strip_tabs);
+        assert_eq!(spec.consumed, 5);
+
+        let spec = scan_heredoc_delimiter("<<-EOF\n").expect("dash header");
+        assert_eq!(spec.delimiter, "EOF");
+        assert!(spec.strip_tabs);
+        assert_eq!(spec.consumed, 6);
+
+        for src in ["<<'E O F'\n", "<<\"E O F\"\n"] {
+            let spec = scan_heredoc_delimiter(src).expect("quoted delimiter");
+            assert_eq!(spec.delimiter, "E O F", "{src:?}");
+        }
+        for (src, delimiter) in [
+            ("<<E\\OF\n", "EOF"),
+            ("<<E\"O\"F\n", "EOF"),
+            ("<<'E'OF\n", "EOF"),
+        ] {
+            let spec = scan_heredoc_delimiter(src).expect("mixed delimiter");
+            assert_eq!(spec.delimiter, delimiter, "{src:?}");
+        }
+        let spec = scan_heredoc_delimiter("<<$X rest").expect("literal delimiter");
+        assert_eq!(spec.delimiter, "$X");
+    }
+
+    #[test]
+    fn test_scan_heredoc_delimiter_rejects_non_headers() {
+        assert!(scan_heredoc_delimiter("<<<word").is_none());
+        assert!(scan_heredoc_delimiter("<<(cmd)").is_none());
+        assert!(scan_heredoc_delimiter("<<").is_none());
+        assert!(scan_heredoc_delimiter("<<-").is_none());
+        assert!(scan_heredoc_delimiter("<<\n").is_none());
+        assert!(scan_heredoc_delimiter("cat <<EOF").is_none());
+    }
+
+    #[test]
+    fn test_scan_heredoc_delimiter_counts_bytes() {
+        let spec = scan_heredoc_delimiter("<<δ rest").expect("unicode delimiter");
+        assert_eq!(spec.delimiter, "δ");
+        // `<<` (2) + `δ` (2) + the trailing blank.
+        assert_eq!(spec.consumed, 5);
+
+        let spec = scan_heredoc_delimiter("<<EOF   rest").expect("trailing blanks");
+        assert_eq!(spec.consumed, 8);
     }
 
     #[test]

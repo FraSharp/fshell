@@ -37,7 +37,7 @@ pub use glob_utils::{
     determine_base_dir, expand_brace_range, expand_braces, expand_glob, expand_glob_with_options,
 };
 pub use lock::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
-pub use parser::{ParseError, Parser};
+pub use parser::{HeredocDelimiter, ParseError, Parser, scan_heredoc_delimiter};
 pub use prompt_config::{ColorSpec, PromptConfig, SegmentConfig, SegmentType, SeparatorStyle};
 pub use shell_error::ShellError;
 pub use val::{EdgeData, FxIndexMap, GraphStorage, NodeData, NodeId, ResourceHandle, Val};

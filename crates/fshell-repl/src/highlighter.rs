@@ -27,10 +27,6 @@ impl StyledText {
     }
 }
 
-std::thread_local! {
-    static HEREDOC_ACTIVE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
-
 /// fshell syntax highlighter with command validation (like fish).
 pub struct FshellHighlighter {
     builtins: FxHashSet<String>,
@@ -95,10 +91,6 @@ impl FshellHighlighter {
             );
         }
         false
-    }
-
-    fn is_heredoc_continuation() -> bool {
-        HEREDOC_ACTIVE.with(|h| h.borrow().is_some())
     }
 
     fn classify_token(&self, tok: &str) -> NuStyle {
@@ -243,74 +235,14 @@ fn is_keyword(token: &str) -> bool {
     )
 }
 
-/// Clamp cursor to the nearest valid UTF-8 char boundary at or before pos.
-#[cfg(test)]
-fn clamp_cursor(line: &str, cursor: usize) -> usize {
-    crate::text::floor_char_boundary(line, cursor)
-}
-
-// is_inside_string_literal is no longer part of the Highlighter trait in reedline 0.49.
-// The logic survives only under #[cfg(test)] for regression coverage.
-#[cfg(test)]
 impl FshellHighlighter {
-    fn is_inside_string_literal(&self, line: &str, cursor: usize) -> bool {
-        // Heredoc continuation
-        if Self::is_heredoc_continuation() {
-            return true;
-        }
-
-        // Check for heredoc start on this line before cursor
-        if let Some(pos) = line[..clamp_cursor(line, cursor)].find("<<") {
-            // After << there should be a token name (not another <)
-            let after = &line[pos + 2..];
-            let token_end = after
-                .find(|c: char| c.is_whitespace())
-                .unwrap_or(after.len());
-            if token_end > 0
-                && after[..token_end]
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '\'' || c == '"')
-            {
-                return true;
-            }
-        }
-
-        // Raw string detection r#"..."#
-        if let Some(raw_start) = line[..clamp_cursor(line, cursor)].find("r#\"") {
-            let after = &line[raw_start + 3..];
-            if let Some(end) = after.find("\"#") {
-                let end_abs = raw_start + 3 + end + 2;
-                if cursor <= end_abs {
-                    return true;
-                }
-            } else {
-                // Unclosed raw string
-                return true;
-            }
-        }
-
-        // Regular string detection
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut escaped = false;
-        for &byte in &line.as_bytes()[..cursor.min(line.len())] {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match byte {
-                b'\\' => escaped = true,
-                b'\'' if !in_double => in_single = !in_single,
-                b'"' if !in_single => in_double = !in_double,
-                _ => {}
-            }
-        }
-        in_single || in_double
-    }
-}
-
-impl FshellHighlighter {
-    pub fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
+    /// Highlight a whole buffer.
+    ///
+    /// The pass is pure: every call starts from the text it is given, so a
+    /// here-document in one command cannot tint the next one. The concatenation
+    /// of the returned spans is always exactly `input`; styling never drops or
+    /// invents a character.
+    pub fn highlight(&self, input: &str, _cursor: usize) -> StyledText {
         let mut styled = StyledText::new();
         let s = &self.theme.syntax;
         let comment_style = s.comment.to_style();
@@ -319,209 +251,339 @@ impl FshellHighlighter {
         let escape_style = s.escape.to_style_bold();
         let pipe_style = s.pipe.to_style_bold();
         let alias_style = s.alias.to_style_italic();
+        let plain_style = NuStyle::new();
 
+        let chars: Vec<char> = input.chars().collect();
         let mut current_token = String::new();
+        let mut is_first = true;
         let mut in_single = false;
         let mut in_double = false;
         let mut escaped = false;
-        let mut is_first = true;
+        let mut triple: Option<(usize, char)> = None;
+        let mut heredoc: Option<(String, bool)> = None;
+        let mut arithmetic_depth = 0usize;
+        let mut parameter_depth = 0usize;
+        let mut i = 0usize;
 
-        // Heredoc continuation: if we're inside a heredoc from a previous line
-        let in_heredoc_line = Self::is_heredoc_continuation();
-        if in_heredoc_line {
-            let end_marker = HEREDOC_ACTIVE.with(|h| h.borrow().clone());
-            if let Some(ref marker) = end_marker
-                && line.trim() == *marker
-            {
-                styled.push((string_style, line.to_string()));
-                HEREDOC_ACTIVE.with(|h| *h.borrow_mut() = None);
-                return styled;
+        while i < chars.len() {
+            let c = chars[i];
+
+            // A here-document body is string data until the whole delimiter
+            // line. Terminator matching mirrors the parser: the line, minus its
+            // ending, must be exactly the delimiter; `<<-` ignores leading tabs.
+            if let Some((delimiter, strip_tabs)) = heredoc.as_ref() {
+                let line_start = i;
+                let mut line_end = i;
+                while line_end < chars.len() && chars[line_end] != '\n' {
+                    line_end += 1;
+                }
+                let mut content: String = chars[line_start..line_end].iter().collect();
+                if let Some(without_cr) = content.strip_suffix('\r') {
+                    content.truncate(without_cr.len());
+                }
+                let check = if *strip_tabs {
+                    content.trim_start_matches('\t')
+                } else {
+                    content.as_str()
+                };
+                let matched = check == delimiter;
+                let mut end = line_end;
+                if end < chars.len() {
+                    end += 1;
+                }
+                let span: String = chars[line_start..end].iter().collect();
+                if !span.is_empty() {
+                    styled.push((string_style, span));
+                }
+                i = end;
+                is_first = true;
+                if matched {
+                    heredoc = None;
+                }
+                continue;
             }
-            // Still inside heredoc, entire line is string content
-            styled.push((string_style, line.to_string()));
-            return styled;
-        }
 
-        // Use char_indices() for correct byte-offset tracking.
-        let mut chars = line.char_indices().peekable();
+            // A triple-quoted body is string data across newlines.
+            if let Some((start, quote)) = triple {
+                if c == quote
+                    && i + 2 < chars.len()
+                    && chars[i + 1] == quote
+                    && chars[i + 2] == quote
+                {
+                    i += 3;
+                    styled.push((string_style, chars[start..i].iter().collect()));
+                    triple = None;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
 
-        while let Some((_byte_idx, c)) = chars.next() {
+            if !in_single
+                && !in_double
+                && (c == '"' || c == '\'')
+                && i + 2 < chars.len()
+                && chars[i + 1] == c
+                && chars[i + 2] == c
+            {
+                self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                triple = Some((i, c));
+                i += 3;
+                continue;
+            }
+
             if escaped {
                 current_token.push(c);
                 escaped = false;
-                continue;
-            }
-            if c == '\\' && (in_single || in_double) {
-                current_token.push(c);
-                escaped = true;
-                continue;
-            }
-
-            // Single-quoted strings
-            if c == '\'' && !in_double {
-                if in_single {
-                    current_token.push(c);
-                    styled.push((string_style, current_token.clone()));
-                    current_token.clear();
-                    in_single = false;
-                } else {
-                    self.flush_token(&mut current_token, &mut styled, &mut is_first);
-                    current_token.push(c);
-                    in_single = true;
-                }
-                continue;
-            }
-
-            // Double-quoted strings
-            if c == '"' && !in_single {
-                if in_double {
-                    current_token.push(c);
-                    styled.push((string_style, current_token.clone()));
-                    current_token.clear();
-                    in_double = false;
-                } else if current_token == "r#" {
-                    // Raw string r#"..."#
-                    styled.push((string_style, "r#".to_string()));
-                    current_token.clear();
-                    let rest = &line[_byte_idx + 1..];
-                    if let Some(end) = rest.find("\"#") {
-                        let raw_content = &rest[..end];
-                        styled.push((string_style, format!("\"{}\"#", raw_content)));
-                        for _ in 0..rest[..=end + 1].chars().count() {
-                            chars.next();
-                        }
-                    } else {
-                        styled.push((string_style, "\"".to_string()));
-                        in_double = true;
-                    }
-                } else {
-                    self.flush_token(&mut current_token, &mut styled, &mut is_first);
-                    current_token.push(c);
-                    in_double = true;
-                }
-                continue;
-            }
-
-            if in_double {
-                // Escape sequences in double-quoted strings
-                if c == '\\' {
-                    current_token.push(c);
-                    if let Some(&(_, nc)) = chars.peek() {
-                        if matches!(nc, 'n' | 't' | 'r' | '\\' | '"' | '0') {
-                            chars.next();
-                            current_token.push(nc);
-                            styled.push((escape_style, current_token.clone()));
-                            current_token.clear();
-                            continue;
-                        }
-                        if nc == 'x' || nc == 'u' {
-                            chars.next();
-                            current_token.push(nc);
-                            // Consume hex digits
-                            while let Some(&(_, nc)) = chars.peek() {
-                                if nc.is_ascii_hexdigit() || nc == '{' || nc == '}' {
-                                    chars.next();
-                                    current_token.push(nc);
-                                } else {
-                                    break;
-                                }
-                            }
-                            styled.push((escape_style, current_token.clone()));
-                            current_token.clear();
-                            continue;
-                        }
-                    }
-                }
-                current_token.push(c);
+                i += 1;
                 continue;
             }
 
             if in_single {
                 current_token.push(c);
+                if c == '\'' {
+                    styled.push((string_style, std::mem::take(&mut current_token)));
+                    in_single = false;
+                }
+                i += 1;
                 continue;
             }
 
-            // Raw string prefix: r# (not a comment)
-            if c == '#' && current_token == "r" {
-                current_token.push(c);
-                continue;
-            }
-
-            // Comments
-            if c == '#' {
-                self.flush_token(&mut current_token, &mut styled, &mut is_first);
-                let rest: String = line[_byte_idx..].to_string();
-                styled.push((comment_style, rest));
-                return styled;
-            }
-
-            // Heredoc start: <<TOKEN, <<'TOKEN', <<"TOKEN"
-            if c == '<' && chars.peek().is_some_and(|&(_, nc)| nc == '<') {
-                self.flush_token(&mut current_token, &mut styled, &mut is_first);
-                chars.next(); // consume second '<'
-                styled.push((string_style, "<<".to_string()));
-                // Consume whitespace and optional quotes
-                let mut heredoc_token = String::new();
-                let mut after_heredoc = false;
-                for (_, nc) in chars.by_ref() {
-                    if !after_heredoc {
-                        if nc.is_whitespace() {
+            if in_double {
+                if c == '\\' {
+                    current_token.push(c);
+                    i += 1;
+                    if let Some(&nc) = chars.get(i) {
+                        if matches!(nc, 'n' | 't' | 'r' | '\\' | '"' | '0') {
+                            current_token.push(nc);
+                            i += 1;
+                            styled.push((escape_style, std::mem::take(&mut current_token)));
                             continue;
                         }
-                        if matches!(nc, '\'' | '"') {
-                            after_heredoc = true;
+                        if nc == 'x' || nc == 'u' {
+                            current_token.push(nc);
+                            i += 1;
+                            while i < chars.len()
+                                && (chars[i].is_ascii_hexdigit()
+                                    || chars[i] == '{'
+                                    || chars[i] == '}')
+                            {
+                                current_token.push(chars[i]);
+                                i += 1;
+                            }
+                            styled.push((escape_style, std::mem::take(&mut current_token)));
                             continue;
                         }
-                        after_heredoc = true;
-                        heredoc_token.push(nc);
-                    } else if matches!(nc, '\'' | '"') || nc.is_whitespace() {
-                        break;
-                    } else {
-                        heredoc_token.push(nc);
                     }
+                    continue;
                 }
-                if !heredoc_token.is_empty() {
-                    styled.push((string_style, heredoc_token.clone()));
-                    HEREDOC_ACTIVE.with(|h| *h.borrow_mut() = Some(heredoc_token));
+                current_token.push(c);
+                if c == '"' {
+                    styled.push((string_style, std::mem::take(&mut current_token)));
+                    in_double = false;
+                }
+                i += 1;
+                continue;
+            }
+
+            // Raw string prefix `r#"…"#`: keep the whole literal as one span.
+            if c == '#' && current_token == "r" && chars.get(i + 1) == Some(&'"') {
+                current_token.clear();
+                let start = i - 1;
+                let mut end = i + 2;
+                while end + 1 < chars.len() && !(chars[end] == '"' && chars[end + 1] == '#') {
+                    end += 1;
+                }
+                if end + 1 < chars.len() {
+                    end += 2;
+                } else {
+                    end = chars.len();
+                }
+                styled.push((string_style, chars[start..end].iter().collect()));
+                i = end;
+                continue;
+            }
+
+            if c == '#' && current_token.is_empty() {
+                self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                let start = i;
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                styled.push((comment_style, chars[start..i].iter().collect()));
+                continue;
+            }
+
+            if c == '<' && chars.get(i + 1) == Some(&'<') {
+                let rest: String = chars[i..].iter().collect();
+                if let Some(spec) = fshell_core::scan_heredoc_delimiter(&rest) {
+                    self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                    let consumed_chars = rest[..spec.consumed].chars().count();
+                    styled.push((string_style, chars[i..i + consumed_chars].iter().collect()));
+                    i += consumed_chars;
+                    heredoc = Some((spec.delimiter, spec.strip_tabs));
+                    continue;
+                }
+            }
+
+            if c == '$' && chars.get(i + 1) == Some(&'(') && chars.get(i + 2) == Some(&'(') {
+                self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                current_token.push_str("$((");
+                arithmetic_depth = 2;
+                i += 3;
+                continue;
+            }
+            if arithmetic_depth > 0 {
+                current_token.push(c);
+                match c {
+                    '(' => arithmetic_depth += 1,
+                    ')' => arithmetic_depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+                if arithmetic_depth == 0 {
+                    styled.push((var_style, std::mem::take(&mut current_token)));
                 }
                 continue;
             }
 
-            // Variables ($name)
+            if c == '$' && chars.get(i + 1) == Some(&'{') {
+                self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                current_token.push_str("${");
+                parameter_depth = 1;
+                i += 2;
+                continue;
+            }
+            if parameter_depth > 0 {
+                current_token.push(c);
+                match c {
+                    '{' => parameter_depth += 1,
+                    '}' => parameter_depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+                if parameter_depth == 0 {
+                    styled.push((var_style, std::mem::take(&mut current_token)));
+                }
+                continue;
+            }
+
             if c == '$' {
                 self.flush_token(&mut current_token, &mut styled, &mut is_first);
-                let mut var_name = String::from("$");
-                while let Some(&(_, nc)) = chars.peek() {
-                    if nc.is_alphanumeric() || nc == '_' {
-                        var_name.push(nc);
-                        chars.next();
-                    } else {
+                let mut name = String::from("$");
+                i += 1;
+                if i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                        name.push(chars[i]);
+                        i += 1;
+                    }
+                } else if i < chars.len()
+                    && matches!(
+                        chars[i],
+                        '?' | '#' | '@' | '!' | '-' | '$' | '*' | '0'..='9'
+                    )
+                {
+                    name.push(chars[i]);
+                    i += 1;
+                }
+                styled.push((var_style, name));
+                continue;
+            }
+
+            if c == '\'' {
+                self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                current_token.push('\'');
+                in_single = true;
+                i += 1;
+                continue;
+            }
+            if c == '"' {
+                self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                current_token.push('"');
+                in_double = true;
+                i += 1;
+                continue;
+            }
+
+            if c == '`' {
+                self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                let start = i;
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '\\' {
+                        i = (i + 2).min(chars.len());
+                        continue;
+                    }
+                    if chars[i] == '`' {
+                        i += 1;
                         break;
                     }
+                    i += 1;
                 }
-                styled.push((var_style, var_name));
+                styled.push((string_style, chars[start..i].iter().collect()));
                 continue;
             }
 
-            // Pipe
             if c == '|' {
                 self.flush_token(&mut current_token, &mut styled, &mut is_first);
-                is_first = true; // Next token after pipe is a new command
                 styled.push((pipe_style, "|".to_string()));
+                is_first = true;
+                i += 1;
                 continue;
             }
 
-            // Whitespace
+            if c == ';' || c == '&' {
+                self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                let mut text = String::from(c);
+                i += 1;
+                if c == '&' && i < chars.len() && chars[i] == '&' {
+                    text.push('&');
+                    i += 1;
+                }
+                styled.push((plain_style, text));
+                is_first = true;
+                continue;
+            }
+
+            if c == '\n' {
+                self.flush_token(&mut current_token, &mut styled, &mut is_first);
+                styled.push((plain_style, "\n".to_string()));
+                is_first = true;
+                i += 1;
+                continue;
+            }
+
             if c.is_whitespace() {
                 self.flush_token(&mut current_token, &mut styled, &mut is_first);
-                styled.push((NuStyle::new(), c.to_string()));
+                styled.push((plain_style, c.to_string()));
+                i += 1;
+                continue;
+            }
+
+            if c == '\\' {
+                current_token.push(c);
+                i += 1;
+                if i < chars.len() {
+                    current_token.push(chars[i]);
+                    i += 1;
+                }
                 continue;
             }
 
             current_token.push(c);
+            i += 1;
         }
 
-        self.flush_token(&mut current_token, &mut styled, &mut is_first);
+        if let Some((start, _)) = triple {
+            styled.push((string_style, chars[start..].iter().collect()));
+        } else if in_single || in_double {
+            if !current_token.is_empty() {
+                styled.push((string_style, current_token));
+            }
+        } else {
+            self.flush_token(&mut current_token, &mut styled, &mut is_first);
+        }
+
         if let Some(ref alias_state) = self.alias_state {
             let expansions = alias_state.active_expansions();
             if !expansions.is_empty() {
@@ -573,13 +635,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_inside_string() {
-        let hl = FshellHighlighter::new(vec![]);
-        assert!(hl.is_inside_string_literal(r#"let x = "hello"#, 12));
-        assert!(!hl.is_inside_string_literal(r#"let x = "hello""#, 15));
-    }
-
-    #[test]
     fn test_highlight_variables() {
         let hl = FshellHighlighter::new(vec![]);
         let result = hl.highlight("echo $HOME", 0);
@@ -610,15 +665,116 @@ mod tests {
     #[test]
     fn test_highlight_heredoc_start() {
         let hl = FshellHighlighter::new(vec![]);
-        let result = hl.highlight("cat << EOF", 0);
-        let raw = result.raw_string();
+        let input = "cat << EOF\nhello\nEOF\n";
+        let result = hl.highlight(input, 0);
+        assert_eq!(result.raw_string(), input);
         assert!(
-            raw.contains("EOF"),
+            result.buffer.iter().any(|(_, s)| s.contains("EOF")),
             "heredoc marker should be highlighted: {:?}",
-            raw
+            result.buffer
         );
-        // Reset heredoc state
-        HEREDOC_ACTIVE.with(|h| *h.borrow_mut() = None);
+    }
+
+    #[test]
+    fn test_highlight_is_lossless() {
+        let hl = FshellHighlighter::new(vec!["ls".to_string()]);
+        for input in [
+            "cat <<EOF\n    indented\n      more\nEOF\n",
+            "cat <<-'EOF'\n\tvalue\n\tEOF\n",
+            "cat <<'EOF'\n$HOME stays literal\nEOF\n",
+            "cat <<EOF\nbody with } and \"quotes\"\nEOF\n",
+            "let q = \"\"\"\n  multi\n  line\n\"\"\"\necho q\n",
+            "let q = '''\nraw\n'''\n",
+            "echo \"a\nb\" 'c\nd'\n",
+            "echo $(date) ${HOME:-/tmp} $((1 << 2))\n",
+            "# comment\nls\n",
+            "awk '{print $1}' file\n",
+            "let x = r#\"a \"b\" c\"#\n",
+            "cat <<EOF\r\nbody\r\nEOF\r\n",
+            "echo `date\n +%s`\n",
+        ] {
+            assert_eq!(
+                hl.highlight(input, 0).raw_string(),
+                input,
+                "highlighting lost characters for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_highlight_heredoc_state_does_not_leak() {
+        let hl = FshellHighlighter::new(vec!["ls".to_string()]);
+        let theme = Theme::default_theme();
+
+        let heredoc = hl.highlight("cat <<EOF\nbody\nEOF\n", 0);
+        assert_eq!(heredoc.raw_string(), "cat <<EOF\nbody\nEOF\n");
+
+        let next = hl.highlight("ls\n", 0);
+        let ls = next
+            .buffer
+            .iter()
+            .find(|(_, s)| s == "ls")
+            .expect("ls span");
+        assert_ne!(
+            ls.0,
+            theme.syntax.string.to_style(),
+            "a previous heredoc must not tint the next buffer"
+        );
+    }
+
+    #[test]
+    fn test_highlight_heredoc_terminator_is_the_whole_line() {
+        let hl = FshellHighlighter::new(vec!["ls".to_string()]);
+        let theme = Theme::default_theme();
+        let input = "cat <<EOF\nEOF   \nEOF\nls\n";
+        let result = hl.highlight(input, 0);
+        assert_eq!(result.raw_string(), input);
+        let ls = result
+            .buffer
+            .iter()
+            .find(|(_, s)| s == "ls")
+            .expect("ls span");
+        assert_ne!(
+            ls.0,
+            theme.syntax.string.to_style(),
+            "only an exact delimiter line ends the body"
+        );
+    }
+
+    #[test]
+    fn test_highlight_triple_quoted_body_is_one_string_span() {
+        let hl = FshellHighlighter::new(vec!["echo".to_string()]);
+        let theme = Theme::default_theme();
+        let input = "let q = \"\"\"\n  multi\n  line\n\"\"\"\necho q\n";
+        let result = hl.highlight(input, 0);
+        assert_eq!(result.raw_string(), input);
+        let body = result
+            .buffer
+            .iter()
+            .find(|(_, s)| s.contains("multi"))
+            .expect("body span");
+        assert_eq!(body.0, theme.syntax.string.to_style());
+        let echo = result
+            .buffer
+            .iter()
+            .find(|(_, s)| s == "echo")
+            .expect("echo");
+        assert_eq!(echo.0, theme.syntax.builtin.to_style_bold());
+    }
+
+    #[test]
+    fn test_highlight_comment_stops_at_the_newline() {
+        let hl = FshellHighlighter::new(vec!["echo".to_string()]);
+        let theme = Theme::default_theme();
+        let input = "# comment\necho hi\n";
+        let result = hl.highlight(input, 0);
+        assert_eq!(result.raw_string(), input);
+        let echo = result
+            .buffer
+            .iter()
+            .find(|(_, s)| s == "echo")
+            .expect("echo");
+        assert_eq!(echo.0, theme.syntax.builtin.to_style_bold());
     }
 
     #[test]
@@ -628,15 +784,6 @@ mod tests {
         let raw = result.raw_string();
         assert!(raw.contains("hello"), "string content should be present");
         assert!(raw.contains(r#"\n"#), "escape sequence should be present");
-    }
-
-    #[test]
-    fn test_is_inside_raw_string() {
-        let hl = FshellHighlighter::new(vec![]);
-        // Inside raw string between r#" and "#
-        assert!(hl.is_inside_string_literal(r##"let x = r#"hello"##, 17));
-        // After closing raw string
-        assert!(!hl.is_inside_string_literal(r##"let x = r#"hello"#; "##, 22));
     }
 
     #[test]
