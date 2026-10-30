@@ -35,6 +35,30 @@ impl Default for TextBuffer {
     }
 }
 
+/// Normalize clipboard and editor line endings to `\n`.
+///
+/// Shell input is line-oriented: a carriage return from a CRLF clipboard is a
+/// line ending, not data. `$'\r'` and `printf '\r'` remain the ways to embed a
+/// literal carriage return in a command.
+fn normalize_newlines(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 impl TextBuffer {
     pub fn new() -> Self {
         Self {
@@ -96,6 +120,7 @@ impl TextBuffer {
     }
 
     pub fn replace_content(&mut self, s: &str) {
+        let s = normalize_newlines(s);
         let old_text = self.text();
         if old_text == s {
             return;
@@ -109,10 +134,7 @@ impl TextBuffer {
         self.apply_op(delete_op.clone());
         self.current_transaction.push(delete_op);
 
-        let insert_op = EditOp::Insert {
-            pos: 0,
-            text: s.to_string(),
-        };
+        let insert_op = EditOp::Insert { pos: 0, text: s };
         self.apply_op(insert_op.clone());
         self.current_transaction.push(insert_op);
 
@@ -562,6 +584,7 @@ impl TextBuffer {
     /// "close the net-unclosed delimiters" heuristic appended a stray `]` to
     /// `sed 's/\x1b\[[0-9;]*m//g'` and silently broke it.
     pub fn insert_str(&mut self, s: &str) {
+        let s = normalize_newlines(s);
         if s.is_empty() {
             return;
         }
@@ -571,7 +594,7 @@ impl TextBuffer {
         }
         let op = EditOp::Insert {
             pos: self.cursor,
-            text: s.to_string(),
+            text: s,
         };
         self.apply_op(op.clone());
         self.current_transaction.push(op);
@@ -726,6 +749,27 @@ mod tests {
         let mut buf = TextBuffer::new();
         buf.insert_str("for f in a b; do echo $f; done\n");
         assert_eq!(buf.text(), "for f in a b; do echo $f; done\n");
+    }
+
+    #[test]
+    fn test_insert_str_normalizes_line_endings() {
+        let mut buf = TextBuffer::new();
+        buf.insert_str("echo one\r\necho two\r");
+        assert_eq!(buf.text(), "echo one\necho two\n");
+    }
+
+    #[test]
+    fn test_replace_content_normalizes_line_endings() {
+        let mut buf = TextBuffer::new();
+        buf.replace_content("echo one\r\necho two\r\n");
+        assert_eq!(buf.text(), "echo one\necho two\n");
+    }
+
+    #[test]
+    fn test_normalize_newlines_leaves_lf_alone() {
+        assert_eq!(normalize_newlines("a\nb\n"), "a\nb\n");
+        assert_eq!(normalize_newlines("a\r\nb\r\n"), "a\nb\n");
+        assert_eq!(normalize_newlines("a\rb"), "a\nb");
     }
 
     #[test]
