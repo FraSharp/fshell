@@ -2602,7 +2602,26 @@ impl Parser {
 
     pub(crate) fn parse_heredoc_inner(&mut self) -> Result<(Expr, bool, bool), ParseError> {
         let (delimiter, strip_tabs, quoted) = self.parse_heredoc_header()?;
-        // `let x = <<EOF` binds the body that follows this line.
+        // A value-position here-document binds the body that follows *this
+        // line*. Nothing may follow the header on the same line: the body
+        // starts at the next newline, so `let x = <<EOF ; echo hi` is a
+        // syntax error rather than a header that swallows `; echo hi` into
+        // the value. A trailing comment is harmless and allowed.
+        self.skip_horizontal_whitespace();
+        if self.peek() == Some('#') {
+            while let Some(c) = self.peek() {
+                if c == '\n' || c == '\r' {
+                    break;
+                }
+                self.next_char();
+            }
+        }
+        if !matches!(self.peek(), None | Some('\n') | Some('\r')) {
+            return Err(ParseError::SyntaxError {
+                message: "a here-document header must end its line".to_string(),
+                span: self.current_span(),
+            });
+        }
         self.consume_line_ending();
         let expr = self.collect_heredoc_body(&delimiter, strip_tabs, quoted)?;
         Ok((expr, strip_tabs, quoted))

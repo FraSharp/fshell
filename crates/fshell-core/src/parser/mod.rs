@@ -1921,6 +1921,50 @@ mod tests {
         }
     }
 
+    /// Text of a `let` bound to a multi-line string.
+    fn let_multiline_text(stmt: &Stmt) -> String {
+        let Stmt::Let { expr, .. } = stmt.unpack() else {
+            panic!("expected a let statement, got {stmt:?}");
+        };
+        let Expr::MultiLineString { parts } = expr.unpack() else {
+            panic!("expected a multi-line string, got {expr:?}");
+        };
+        parts
+            .iter()
+            .map(|part| match part {
+                StringPart::Lit { text, .. } => text.clone(),
+                StringPart::Expr { .. } => "<expr>".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_value_heredoc_keeps_the_trailing_newline() {
+        let stmts = Parser::new("let x = <<EOF\nbody\nEOF\n")
+            .parse_statements()
+            .unwrap();
+        assert_eq!(let_multiline_text(&stmts[0]), "body\n");
+    }
+
+    #[test]
+    fn test_value_heredoc_allows_a_trailing_comment() {
+        let stmts = Parser::new("let x = <<EOF # note\nbody\nEOF\n")
+            .parse_statements()
+            .unwrap();
+        assert_eq!(let_multiline_text(&stmts[0]), "body\n");
+    }
+
+    #[test]
+    fn test_value_heredoc_header_must_end_its_line() {
+        let err = Parser::new("let x = <<EOF ; echo hi\nbody\nEOF\n")
+            .parse_statements()
+            .unwrap_err();
+        assert!(
+            matches!(&err, ParseError::SyntaxError { message, .. } if message.contains("must end its line")),
+            "unexpected error: {err:?}"
+        );
+    }
+
     #[test]
     fn test_heredoc_body_preserves_indentation_and_trailing_newline() {
         let src = "cat <<EOF\n    hello\n      world\nEOF\n";
