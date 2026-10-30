@@ -1965,6 +1965,78 @@ mod tests {
         );
     }
 
+    /// Body captured for `sh { ... }`.
+    fn posix_block_body(src: &str) -> String {
+        let stmts = Parser::new(src).parse_statements().unwrap();
+        match stmts[0].unpack() {
+            Stmt::PosixBlock { body } => body.clone(),
+            other => panic!("expected a POSIX block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_posix_block_heredoc_body_inside_the_block() {
+        let src = "sh {\ncat <<EOF\nbody with } brace\nEOF\n}\n";
+        let body = posix_block_body(src);
+        assert!(body.contains("body with } brace"), "{body:?}");
+    }
+
+    #[test]
+    fn test_posix_block_heredoc_body_after_the_closing_brace() {
+        let body = posix_block_body("sh { cat <<EOF }\nhello\nEOF\n");
+        assert!(body.contains("cat <<EOF"), "{body:?}");
+        assert!(body.contains("\nhello\nEOF\n"), "{body:?}");
+    }
+
+    #[test]
+    fn test_posix_block_heredocs_after_the_closing_brace_keep_header_order() {
+        let body = posix_block_body("sh { cat <<A; cat <<B }\none\nA\ntwo\nB\n");
+        let one = body.find("one\nA\n").expect("first body");
+        let two = body.find("two\nB\n").expect("second body");
+        assert!(one < two, "{body:?}");
+    }
+
+    #[test]
+    fn test_posix_block_hash_in_a_word_is_not_a_comment() {
+        let body = posix_block_body("sh { echo foo#bar }\n");
+        assert!(body.contains("foo#bar"), "{body:?}");
+    }
+
+    #[test]
+    fn test_posix_block_comment_ignores_heredoc_headers_and_braces() {
+        let body = posix_block_body("sh { # <<EOF }\necho hi }\n");
+        assert!(body.contains("# <<EOF }"), "{body:?}");
+    }
+
+    #[test]
+    fn test_posix_block_arithmetic_shift_is_not_a_heredoc() {
+        let body = posix_block_body("sh { echo $((1 << 2)) }\n");
+        assert!(body.contains("$((1 << 2))"), "{body:?}");
+    }
+
+    #[test]
+    fn test_posix_block_parameter_expansion_brace_is_not_the_closer() {
+        let body = posix_block_body("sh { echo ${var:-x} }\n");
+        assert!(body.contains("${var:-x}"), "{body:?}");
+    }
+
+    #[test]
+    fn test_posix_block_quoted_brace_is_literal() {
+        let body = posix_block_body("sh { echo '}' }\n");
+        assert!(body.contains("'}'"), "{body:?}");
+    }
+
+    #[test]
+    fn test_posix_block_heredoc_must_end_the_block_line() {
+        let err = Parser::new("sh { cat <<EOF }; echo hi\nbody\nEOF\n")
+            .parse_statements()
+            .unwrap_err();
+        assert!(
+            matches!(&err, ParseError::SyntaxError { message, .. } if message.contains("must end the block's line")),
+            "unexpected error: {err:?}"
+        );
+    }
+
     #[test]
     fn test_heredoc_body_preserves_indentation_and_trailing_newline() {
         let src = "cat <<EOF\n    hello\n      world\nEOF\n";

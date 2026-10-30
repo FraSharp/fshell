@@ -2520,15 +2520,19 @@ impl Parser {
         Ok((delimiter, strip_tabs, quoted))
     }
 
-    /// Read a here-document body starting at its first line. The caller has
-    /// already consumed the newline that ends the command line carrying the
-    /// header, so a blank first line is body content, not a separator.
-    pub(crate) fn collect_heredoc_body(
+    /// Read one here-document body starting at its first line and consume its
+    /// terminator line. The caller has already consumed the newline that ends
+    /// the command line carrying the header, so a blank first line is body
+    /// content, not a separator.
+    ///
+    /// Returns the raw body (without the terminator). The parser is left after
+    /// the terminator's line ending, which lets callers that only need to skip
+    /// a body reuse the exact same terminator rules.
+    pub(crate) fn read_heredoc_body_content(
         &mut self,
         delimiter: &str,
         strip_tabs: bool,
-        quoted: bool,
-    ) -> Result<Expr, ParseError> {
+    ) -> Result<String, ParseError> {
         let mut content = String::new();
         let mut found_delimiter = false;
         loop {
@@ -2584,6 +2588,18 @@ impl Parser {
                 span: self.current_span(),
             });
         }
+        Ok(content)
+    }
+
+    /// Read a here-document body and turn it into the expression that feeds its
+    /// stage.
+    pub(crate) fn collect_heredoc_body(
+        &mut self,
+        delimiter: &str,
+        strip_tabs: bool,
+        quoted: bool,
+    ) -> Result<Expr, ParseError> {
+        let content = self.read_heredoc_body_content(delimiter, strip_tabs)?;
         // The body is data: it keeps its indentation and its trailing
         // newline. Only `<<-` transforms it, and it does so whether the
         // delimiter is quoted or not; quoting decides expansion alone.

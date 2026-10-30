@@ -778,6 +778,8 @@ sh {
 
 the block executes in-process via `fshell-posix` against the live `Env`. variables defined in the enclosing fshell environment are shared directly with the block, and changes to variables inside the block update the shell environment.
 
+the block boundary is found with posix lexical rules: quotes, backticks, comments, `${...}`, `$((...))` and here-documents all hide or consume braces that do not close the block. a here-document body may live inside the block, and `sh { cat <<EOF }` may place the body after the closing brace as long as the brace ends its line; the bodies are then appended to the posix source exactly as a posix shell reads them.
+
 ### `source` and `source --bash`
 
 ```fsh

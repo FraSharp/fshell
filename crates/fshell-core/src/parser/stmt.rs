@@ -41,6 +41,19 @@ fn reject_posix_reserved_word(name: &str, span: SourceSpan) -> Result<(), ParseE
     Ok(())
 }
 
+/// Whether a `#` at this position begins a POSIX comment.
+///
+/// POSIX starts a comment only when `#` begins a word, so `foo#bar` stays a
+/// word while `echo # note`, `;# note` and a `#` at the start of a line do not.
+fn posix_hash_starts_comment(previous: Option<char>) -> bool {
+    match previous {
+        None => true,
+        Some(c) => {
+            c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>' | '{' | '}')
+        }
+    }
+}
+
 impl Parser {
     /// Primary entry point: parse a block of statements.
     pub fn parse_statements(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -1040,52 +1053,238 @@ impl Parser {
 
     /// Parse raw POSIX block body: balanced-brace capture until matching `}`.
     /// Does not parse as fsh — the content is handed to the POSIX engine.
+    ///
+    /// The capture understands enough POSIX lexical structure to find the right
+    /// closing brace: comments, quotes, backticks, `${...}`, `$((...))`, and
+    /// here-documents. Here-document bodies that live inside the block are
+    /// consumed as body text, so a `}` inside one cannot close the block. A
+    /// header whose body follows the closing brace is supported when the brace
+    /// ends its line; the bodies are appended to the POSIX source, exactly as
+    /// a POSIX shell reads them after the command line.
     pub(crate) fn parse_posix_block_body(&mut self) -> Result<String, ParseError> {
         let start = self.pos;
         let mut depth = 1usize;
         let mut in_single = false;
         let mut in_double = false;
+        let mut in_backtick = false;
+        let mut in_comment = false;
         let mut escaped = false;
+        let mut arithmetic_depth = 0usize;
+        let mut parameter_depth = 0usize;
+        let mut pending: Vec<PendingHeredoc> = Vec::new();
+        let mut previous: Option<char> = None;
+
         while self.pos < self.input.len() && depth > 0 {
             let c = self.input[self.pos];
+
             if escaped {
+                // An escaped character is word content: `\ #` does not start a
+                // comment even though a space was escaped.
                 escaped = false;
-            } else if in_single {
+                previous = Some('\\');
+                self.pos += 1;
+                continue;
+            }
+            if in_single {
                 if c == '\'' {
                     in_single = false;
                 }
-            } else if in_double {
+                previous = Some(c);
+                self.pos += 1;
+                continue;
+            }
+            if in_double {
                 if c == '\\' {
                     escaped = true;
                 } else if c == '"' {
                     in_double = false;
                 }
-            } else {
+                previous = Some(c);
+                self.pos += 1;
+                continue;
+            }
+            if in_backtick {
+                if c == '\\' {
+                    escaped = true;
+                } else if c == '`' {
+                    in_backtick = false;
+                    previous = Some('0');
+                } else {
+                    previous = Some(c);
+                }
+                self.pos += 1;
+                continue;
+            }
+            if arithmetic_depth > 0 {
                 match c {
-                    '\'' => in_single = true,
-                    '"' => in_double = true,
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
+                    '(' => arithmetic_depth += 1,
+                    ')' => {
+                        arithmetic_depth -= 1;
+                        if arithmetic_depth == 0 {
+                            previous = Some('0');
                         }
                     }
                     _ => {}
                 }
-            }
-            if depth > 0 {
                 self.pos += 1;
+                continue;
+            }
+            if parameter_depth > 0 {
+                match c {
+                    '{' => parameter_depth += 1,
+                    '}' => {
+                        parameter_depth -= 1;
+                        if parameter_depth == 0 {
+                            previous = Some('0');
+                        }
+                    }
+                    _ => {}
+                }
+                self.pos += 1;
+                continue;
+            }
+            if in_comment {
+                if c == '\n' || c == '\r' {
+                    in_comment = false;
+                } else {
+                    self.pos += 1;
+                    continue;
+                }
+            }
+
+            match c {
+                '\'' => {
+                    in_single = true;
+                    previous = Some(c);
+                    self.pos += 1;
+                }
+                '"' => {
+                    in_double = true;
+                    previous = Some(c);
+                    self.pos += 1;
+                }
+                '`' => {
+                    in_backtick = true;
+                    previous = Some(c);
+                    self.pos += 1;
+                }
+                '\\' => {
+                    escaped = true;
+                    self.pos += 1;
+                }
+                '$' if self.pos + 2 < self.input.len()
+                    && self.input[self.pos + 1] == '('
+                    && self.input[self.pos + 2] == '(' =>
+                {
+                    arithmetic_depth = 2;
+                    self.pos += 3;
+                }
+                '$' if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '{' => {
+                    parameter_depth = 1;
+                    self.pos += 2;
+                }
+                '#' if posix_hash_starts_comment(previous) => {
+                    in_comment = true;
+                    self.pos += 1;
+                }
+                '<' if self.pos + 1 < self.input.len()
+                    && self.input[self.pos + 1] == '<'
+                    && !(self.pos + 2 < self.input.len()
+                        && matches!(self.input[self.pos + 2], '<' | '(')) =>
+                {
+                    self.pos += 2;
+                    let (delimiter, strip_tabs, quoted) = self.parse_heredoc_header()?;
+                    pending.push(PendingHeredoc {
+                        delimiter,
+                        strip_tabs,
+                        quoted,
+                    });
+                    // The header parser skipped the trailing blanks, so the
+                    // next `#` is at the start of a word.
+                    previous = Some(' ');
+                }
+                '{' => {
+                    depth += 1;
+                    previous = Some(c);
+                    self.pos += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    previous = Some(c);
+                    self.pos += 1;
+                }
+                '\n' | '\r' => {
+                    if c == '\r'
+                        && self.pos + 1 < self.input.len()
+                        && self.input[self.pos + 1] == '\n'
+                    {
+                        self.pos += 2;
+                    } else {
+                        self.pos += 1;
+                    }
+                    previous = Some('\n');
+                    // The line inside the block ends here, so any pending
+                    // bodies are part of the block: consume them as body text.
+                    if !pending.is_empty() {
+                        for header in std::mem::take(&mut pending) {
+                            self.read_heredoc_body_content(&header.delimiter, header.strip_tabs)?;
+                        }
+                    }
+                }
+                _ => {
+                    previous = Some(c);
+                    self.pos += 1;
+                }
             }
         }
+
         if depth != 0 {
             return Err(ParseError::SyntaxError {
                 message: "Unclosed POSIX block — missing '}'".to_string(),
                 span: self.span_from(start),
             });
         }
-        let body: String = self.input[start..self.pos].iter().collect();
+
+        let mut body: String = self.input[start..self.pos].iter().collect();
         self.next_char(); // consume closing '}'
+
+        if pending.is_empty() {
+            return Ok(body);
+        }
+
+        // The headers are on the line that closes the block, so their bodies
+        // follow the closing brace. Only the end of that line (optionally with
+        // a comment) may follow: anything else belongs to the surrounding fsh
+        // syntax, where the body's position would be ambiguous.
+        self.skip_horizontal_whitespace();
+        if self.peek() == Some('#') {
+            while let Some(c) = self.peek() {
+                if c == '\n' || c == '\r' {
+                    break;
+                }
+                self.next_char();
+            }
+        }
+        if !matches!(self.peek(), None | Some('\n') | Some('\r')) {
+            return Err(ParseError::SyntaxError {
+                message:
+                    "a here-document inside an inline `sh { ... }` block must end the block's line"
+                        .to_string(),
+                span: self.current_span(),
+            });
+        }
+        self.consume_line_ending();
+        if !body.ends_with('\n') && !body.ends_with('\r') {
+            body.push('\n');
+        }
+        for header in std::mem::take(&mut pending) {
+            let body_start = self.pos;
+            self.read_heredoc_body_content(&header.delimiter, header.strip_tabs)?;
+            body.extend(self.input[body_start..self.pos].iter());
+        }
         Ok(body)
     }
 

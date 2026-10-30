@@ -738,6 +738,18 @@ EOF
 }
 
 #[tokio::test]
+async fn test_happy_inline_posix_block_heredoc_after_the_closing_brace() {
+    // `sh { cat <<EOF }` keeps the header on the block's line while the body
+    // follows the closing brace, exactly as a POSIX shell reads it.
+    let out = FshCmd::new()
+        .cmd("sh { cat <<'EOF' }\nbrace-heredoc-ok\nEOF\n")
+        .run()
+        .unwrap();
+    out.assert_success()
+        .assert_stdout_trimmed_eq("brace-heredoc-ok");
+}
+
+#[tokio::test]
 async fn test_happy_reactive_cell_declaration_and_query() {
     let env = setup_test_env();
     let script = r#"
