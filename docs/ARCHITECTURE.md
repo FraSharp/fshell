@@ -348,9 +348,10 @@ the shell seamlessly switches execution modes:
 1. **shebang detection**: `source script.sh` automatically routes to `fshell-posix` if the file begins with `#!/bin/sh` or `#!/bin/bash`.
 2. **inline blocks**: `sh { ... }` blocks parse the inner string as POSIX source and evaluate it in-process.
 3. **CLI flag**: `fsh --posix script.sh` evaluates the entire file in POSIX mode.
-4. **auto mode**: the native parser runs first; an input that is wholly valid POSIX is handed to
-   `fshell-posix`. input that contains a native-only construct (`let`, `fn`, `match`, `sh { ... }`, …)
-   is never reinterpreted as POSIX, even where a POSIX parser accepts the same words as command names.
+4. **auto mode**: the native parser runs first; when it rejects an input that is wholly valid POSIX,
+   `fshell-posix` gets it. input that contains a native-only construct (`let`, `fn`, `match`,
+   `sh { ... }`, …) is never reinterpreted as POSIX, even where a POSIX parser accepts the same words
+   as command names.
 
 ---
 
