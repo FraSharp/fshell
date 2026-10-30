@@ -1242,9 +1242,10 @@ impl Parser {
         }
 
         if depth != 0 {
-            return Err(ParseError::SyntaxError {
+            return Err(ParseError::Incomplete {
+                construct: "posix",
                 message: "Unclosed POSIX block — missing '}'".to_string(),
-                span: self.span_from(start),
+                span: self.current_span(),
             });
         }
 

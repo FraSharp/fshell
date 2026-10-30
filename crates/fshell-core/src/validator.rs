@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use crate::parser::{ParseError, Parser};
+use crate::parser::{ParseError, Parser, scan_heredoc_delimiter};
 use miette::SourceSpan;
 
 /// Result of validating a shell input buffer for completion status.
@@ -15,370 +15,61 @@ pub enum ValidationResult {
     Invalid { message: String, span: SourceSpan },
 }
 
-fn is_word(input: &str, word: &str) -> bool {
-    let mut i = 0;
-    let bytes = input.as_bytes();
-    let w = word.as_bytes();
-    while i + w.len() <= bytes.len() {
-        if bytes[i..i + w.len()].eq_ignore_ascii_case(w) {
-            let before_ok = i == 0 || {
-                let c = bytes[i - 1] as char;
-                !c.is_alphanumeric() && c != '_'
-            };
-            let after_ok = i + w.len() == bytes.len() || {
-                let c = bytes[i + w.len()] as char;
-                !c.is_alphanumeric() && c != '_'
-            };
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-fn count_word(input: &str, word: &str) -> usize {
-    let mut count = 0;
-    let mut i = 0;
-    let bytes = input.as_bytes();
-    let w = word.as_bytes();
-    while i + w.len() <= bytes.len() {
-        if bytes[i..i + w.len()].eq_ignore_ascii_case(w) {
-            let before_ok = i == 0 || {
-                let c = bytes[i - 1] as char;
-                !c.is_alphanumeric() && c != '_'
-            };
-            let after_ok = i + w.len() == bytes.len() || {
-                let c = bytes[i + w.len()] as char;
-                !c.is_alphanumeric() && c != '_'
-            };
-            if before_ok && after_ok {
-                count += 1;
-                i += w.len();
-                continue;
-            }
-        }
-        i += 1;
-    }
-    count
-}
-
-fn looks_like_posix_shell(input: &str) -> bool {
-    let mut trimmed = input.trim_start();
-    if let Some(first_line) = trimmed.lines().next()
-        && let Some(rest) = first_line.strip_prefix("#!")
-        && let Some(shell) = rest.split_whitespace().next()
-    {
-        let name = std::path::Path::new(shell)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if matches!(name.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
-            return true;
-        }
-    }
-
-    // Only inspect the first command word.  Looking for `if`, `for`, `do`,
-    // and friends anywhere in the input classifies ordinary arguments such as
-    // `echo "for do"` as POSIX control flow and incorrectly requests a
-    // continuation prompt.
-    if let Some(first_line) = trimmed.lines().next()
-        && first_line.trim_start().starts_with("#!")
-    {
-        trimmed = trimmed[first_line.len()..].trim_start();
-    }
-    let first_word = trimmed
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | '{'))
-        .find(|word| !word.is_empty())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    if first_word == "function" && trimmed.contains("()") {
-        return true;
-    }
-    if first_word == "if" && (is_word(trimmed, "then") || is_word(trimmed, "fi")) {
-        return true;
-    }
-    if first_word == "case" && is_word(trimmed, "esac") {
-        return true;
-    }
-    let has_do = is_word(trimmed, "do");
-    let has_done = is_word(trimmed, "done");
-    if has_do && has_done {
-        return true;
-    }
-    if has_do && matches!(first_word.as_str(), "for" | "while" | "until") {
-        return true;
-    }
-    false
-}
-
-fn posix_block_incomplete(input: &str) -> Option<bool> {
-    if !looks_like_posix_shell(input) {
-        return None;
-    }
-    let mut depth: i32 = 0;
-    let words: Vec<String> = input
-        .split(|c: char| {
-            c.is_whitespace() || c == ';' || c == '&' || c == '|' || c == '(' || c == ')'
-        })
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase())
-        .collect();
-    for w in words {
-        match w.as_str() {
-            "for" | "while" | "until" | "if" | "case" | "select" => depth += 1,
-            "done" | "fi" | "esac" => depth -= 1,
-            _ => {}
-        }
-    }
-    let do_c = count_word(input, "do");
-    let done_c = count_word(input, "done");
-    if do_c != done_c {
-        return Some(true);
-    }
-    if depth > 0 {
-        return Some(true);
-    }
-    Some(false)
-}
-
 /// Validates whether the given input text is complete, incomplete, or invalid.
+/// Validates whether the given input text is complete, incomplete, or invalid.
+///
+/// The parser is the single authority: a successful parse is complete, and an
+/// error caused by the input ending inside an open construct is incomplete. No
+/// second scanner re-lexes the text to guess what the parser already knows.
 pub fn validate_input(input: &str) -> ValidationResult {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
+    if input.trim().is_empty() {
         return ValidationResult::Complete;
     }
-
-    // The parser is the authority for whether a complete input is valid. A
-    // generic delimiter scan cannot know that characters such as `[` may be
-    // literal arguments to an external command.
-    let parse_error = match Parser::new(input).parse_statements() {
-        Ok(_) => return ValidationResult::Complete,
-        Err(err) => err,
-    };
-
-    // 1. Fast lexical scan for unclosed delimiters, quotes, and heredocs
-    let lex = scan_delimiters(input, None);
-
-    if let Some(quote_hint) = lex.unclosed_quote {
-        return ValidationResult::Incomplete {
-            prompt_hint: quote_hint,
-        };
+    match Parser::new(input).parse_statements() {
+        Ok(_) => ValidationResult::Complete,
+        Err(error) => classify_parse_error(input, error),
     }
+}
 
-    if lex.unclosed_heredoc {
-        return ValidationResult::Incomplete {
-            prompt_hint: "heredoc",
-        };
-    }
-
-    if lex.brace_depth > 0 {
-        return ValidationResult::Incomplete {
-            prompt_hint: "brace",
-        };
-    }
-
-    if lex.paren_depth > 0 {
-        return ValidationResult::Incomplete {
-            prompt_hint: "paren",
-        };
-    }
-
-    if lex.bracket_depth > 0 {
-        return ValidationResult::Incomplete {
-            prompt_hint: "bracket",
-        };
-    }
-
-    // 1.5 POSIX shell fast-path: `for ...; do ... done` etc. use POSIX balancing
-    if let Some(incomplete) = posix_block_incomplete(input) {
-        if incomplete {
-            return ValidationResult::Incomplete {
-                prompt_hint: "posix",
-            };
-        } else {
-            return ValidationResult::Complete;
-        }
-    }
-
-    // 2. Check for trailing line continuations, operators, or keywords
-    let chars: Vec<char> = input.chars().collect();
-    let mut end_pos = chars.len();
-    while end_pos > 0 && chars[end_pos - 1].is_whitespace() {
-        end_pos -= 1;
-    }
-
-    if end_pos > 0 {
-        let expression_context = {
-            let first = input
-                .trim_start()
-                .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | '{'))
-                .find(|word| !word.is_empty())
-                .unwrap_or_default();
-            matches!(
-                first,
-                "let" | "local" | "if" | "while" | "match" | "return" | "for" | "until"
-            ) || input
-                .trim_start()
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit() || matches!(c, '$' | '(' | '[' | '!'))
-        };
-
-        if end_pos >= 2 && chars[end_pos - 2] == '&' && chars[end_pos - 1] == '&' {
-            return ValidationResult::Incomplete { prompt_hint: "and" };
-        }
-
-        if end_pos >= 2 && chars[end_pos - 2] == '|' && chars[end_pos - 1] == '|' {
-            return ValidationResult::Incomplete { prompt_hint: "or" };
-        }
-
-        if end_pos >= 2
-            && chars[end_pos - 2] == '|'
-            && (chars[end_pos - 1] == '>' || chars[end_pos - 1] == '?')
-        {
-            return ValidationResult::Incomplete {
-                prompt_hint: "pipe",
-            };
-        }
-
-        if expression_context
-            && end_pos >= 2
-            && (chars[end_pos - 2] == '+'
-                || chars[end_pos - 2] == '-'
-                || chars[end_pos - 2] == '*'
-                || chars[end_pos - 2] == '/')
-            && chars[end_pos - 1] == '='
-        {
-            return ValidationResult::Incomplete {
-                prompt_hint: "operator",
-            };
-        }
-
-        // Count trailing backslashes to determine if the line ends with an unescaped backslash
-        let mut backslash_count = 0usize;
-        let mut idx = end_pos;
-        while idx > 0 && chars[idx - 1] == '\\' {
-            backslash_count += 1;
-            idx -= 1;
-        }
-        if backslash_count % 2 == 1 {
-            return ValidationResult::Incomplete {
-                prompt_hint: "backslash",
-            };
-        }
-
-        let last_char = chars[end_pos - 1];
-        if last_char == '|' {
-            return ValidationResult::Incomplete {
-                prompt_hint: "pipe",
-            };
-        }
-
-        if expression_context
-            && matches!(last_char, '+' | '*' | '=')
-            && !(end_pos >= 2
-                && ((last_char == '+' && chars[end_pos - 2] == '+')
-                    || (last_char == '*' && chars[end_pos - 2] == '*')
-                    || (last_char == '=' && chars[end_pos - 2] == '=')))
-        {
-            return ValidationResult::Incomplete {
-                prompt_hint: "operator",
-            };
-        }
-
-        // Check trailing keywords and tokens
-        let non_ws_chars = &chars[..end_pos];
-        let last_word: String = non_ws_chars
-            .split(|c| c.is_whitespace() || *c == ';' || *c == '(' || *c == '{')
-            .rfind(|s| !s.is_empty())
-            .map(|slice| slice.iter().collect())
-            .unwrap_or_default();
-
-        if matches!(
-            last_word.as_str(),
-            "fn" | "if"
-                | "else"
-                | "while"
-                | "match"
-                | "try"
-                | "catch"
-                | "with"
-                | "for"
-                | "in"
-                | "caps"
-                | "sh"
-                | "posix"
-                | "bash"
-                | "=>"
-                | "->"
-        ) {
-            return ValidationResult::Incomplete {
-                prompt_hint: "keyword",
-            };
-        }
-    }
-
-    // 3. Classify the authoritative parser error after the continuation hints
-    // above have had a chance to provide a more useful prompt.
-    let at_eof = parse_error.span().offset() >= input.len();
-    match parse_error {
+fn classify_parse_error(input: &str, error: ParseError) -> ValidationResult {
+    let span = error.span();
+    let at_eof = span.offset() >= input.len();
+    match error {
+        // The parser names the construct it was inside when the input ended.
+        ParseError::Incomplete { construct, .. } => ValidationResult::Incomplete {
+            prompt_hint: construct,
+        },
         ParseError::UnexpectedEof { .. } => ValidationResult::Incomplete {
             prompt_hint: "incomplete",
         },
         ParseError::ExpectedChar {
-            span: _,
-            expected,
-            found,
+            expected, found, ..
         } if at_eof || found == '\0' => ValidationResult::Incomplete {
-            prompt_hint: match expected {
-                '{' | '}' => "brace",
-                '(' | ')' => "paren",
-                '[' | ']' => "bracket",
-                _ => "incomplete",
-            },
+            prompt_hint: char_hint(expected),
         },
-        ParseError::ExpectedChar {
-            span,
-            expected,
-            found: _,
-        } => ValidationResult::Invalid {
-            message: format!("Expected character '{}'", expected),
-            span,
+        ParseError::ExpectedToken { .. } if at_eof => ValidationResult::Incomplete {
+            prompt_hint: "incomplete",
         },
-        ParseError::ExpectedToken {
-            span: _,
-            ref expected,
-            ..
-        } if at_eof => ValidationResult::Incomplete {
-            prompt_hint: match expected.as_str() {
-                "{" | "}" => "brace",
-                "(" | ")" => "paren",
-                "[" | "]" => "bracket",
-                "catch" => "catch",
-                "in" => "in",
-                "=>" => "arm",
-                _ => "incomplete",
-            },
+        // Any other syntax error that points at the end of the input is an
+        // unterminated construct the parser did not name.
+        ParseError::SyntaxError { .. } if at_eof => ValidationResult::Incomplete {
+            prompt_hint: "incomplete",
         },
-        ParseError::ExpectedToken { span, expected, .. } => ValidationResult::Invalid {
-            message: format!("Expected {}", expected),
-            span,
+        other => ValidationResult::Invalid {
+            message: other.to_string(),
+            span: other.span(),
         },
-        ParseError::SyntaxError { ref message, span } => {
-            if at_eof || message.to_lowercase().contains("unterminated") {
-                ValidationResult::Incomplete {
-                    prompt_hint: "incomplete",
-                }
-            } else {
-                ValidationResult::Invalid {
-                    message: message.clone(),
-                    span,
-                }
-            }
-        }
+    }
+}
+
+fn char_hint(expected: char) -> &'static str {
+    match expected {
+        '{' | '}' => "brace",
+        '(' | ')' => "paren",
+        '[' | ']' => "bracket",
+        '"' => "dquote",
+        '\'' => "squote",
+        _ => "incomplete",
     }
 }
 
@@ -394,11 +85,8 @@ pub fn compute_indent_depth_at(input: &str, up_to_char: Option<usize>) -> usize 
 
 #[derive(Debug)]
 struct DelimiterScan {
-    unclosed_quote: Option<&'static str>,
     unclosed_heredoc: bool,
     brace_depth: usize,
-    paren_depth: usize,
-    bracket_depth: usize,
 }
 
 fn scan_delimiters(input: &str, up_to_char: Option<usize>) -> DelimiterScan {
@@ -417,8 +105,6 @@ fn scan_delimiters(input: &str, up_to_char: Option<usize>) -> DelimiterScan {
     let mut in_comment = false;
 
     let mut brace_depth = 0usize;
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
 
     // Heredoc tracking: FIFO queue of (delimiter, strip_tabs)
     let mut heredoc_stack: Vec<(String, bool)> = Vec::new();
@@ -568,121 +254,34 @@ fn scan_delimiters(input: &str, up_to_char: Option<usize>) -> DelimiterScan {
             continue;
         }
 
-        // Heredocs: `<<` or `<<-`
+        // Here-documents use the shared delimiter rule so indentation and
+        // execution can never disagree about what a header names.
         if c == '<' && i + 1 < len && chars[i + 1] == '<' {
-            if i + 2 < len && chars[i + 2] == '<' {
-                // Here-string `<<<`
-                i += 3;
+            let rest: String = chars[i..].iter().collect();
+            if let Some(spec) = scan_heredoc_delimiter(&rest) {
+                let consumed_chars = rest[..spec.consumed].chars().count();
+                pending_heredocs.push((spec.delimiter, spec.strip_tabs));
+                i += consumed_chars;
                 continue;
             }
-            if i + 2 < len && chars[i + 2] == '(' {
-                // Process substitution `<(`
-                i += 1;
-                continue;
-            }
-            let mut j = i + 2;
-            let mut strip_tabs = false;
-            if j < len && chars[j] == '-' {
-                strip_tabs = true;
-                j += 1;
-            }
-            while j < len && (chars[j] == ' ' || chars[j] == '\t') {
-                j += 1;
-            }
-            // The delimiter is one shell word after quote removal: `EOF`,
-            // `'EOF'`, `"EOF"`, `E\OF` and `E"O"F` all name `EOF`.
-            let mut delim = String::new();
-            let mut quoted = false;
-            while j < len
-                && !chars[j].is_whitespace()
-                && !matches!(chars[j], ';' | '&' | '|' | '<' | '>' | '(' | ')')
-            {
-                match chars[j] {
-                    '\'' => {
-                        quoted = true;
-                        j += 1;
-                        while j < len && chars[j] != '\'' {
-                            delim.push(chars[j]);
-                            j += 1;
-                        }
-                        j += 1;
-                    }
-                    '"' => {
-                        quoted = true;
-                        j += 1;
-                        while j < len && chars[j] != '"' {
-                            if chars[j] == '\\'
-                                && j + 1 < len
-                                && matches!(chars[j + 1], '"' | '\\' | '$' | '`')
-                            {
-                                j += 1;
-                            }
-                            delim.push(chars[j]);
-                            j += 1;
-                        }
-                        j += 1;
-                    }
-                    '\\' if j + 1 < len => {
-                        quoted = true;
-                        delim.push(chars[j + 1]);
-                        j += 2;
-                    }
-                    other => {
-                        delim.push(other);
-                        j += 1;
-                    }
-                }
-            }
-            let j = j.min(len);
-            if quoted && delim.is_empty() {
-                // `<<''` names the empty line as the delimiter.
-                pending_heredocs.push((String::new(), strip_tabs));
-                i = j;
-                continue;
-            }
-            if !delim.is_empty() {
-                pending_heredocs.push((delim, strip_tabs));
-                i = j;
-                continue;
-            } else {
-                i += 2;
-                continue;
-            }
+            i += 1;
+            continue;
         }
 
         match c {
             '{' => brace_depth += 1,
             '}' => brace_depth = brace_depth.saturating_sub(1),
-            '(' => paren_depth += 1,
-            ')' => paren_depth = paren_depth.saturating_sub(1),
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth = bracket_depth.saturating_sub(1),
             _ => {}
         }
 
         i += 1;
     }
 
-    let unclosed_quote = if in_triple_double_quote {
-        Some("triple_dquote")
-    } else if in_triple_single_quote {
-        Some("triple_squote")
-    } else if in_single_quote {
-        Some("squote")
-    } else if in_double_quote {
-        Some("dquote")
-    } else {
-        None
-    };
-
     let unclosed_heredoc = !heredoc_stack.is_empty() || !pending_heredocs.is_empty();
 
     DelimiterScan {
-        unclosed_quote,
         unclosed_heredoc,
         brace_depth,
-        paren_depth,
-        bracket_depth,
     }
 }
 
@@ -869,43 +468,51 @@ mod tests {
 
     #[test]
     fn test_validate_trailing_operators() {
+        // Every one of these ends inside the parser's grammar, so the parser
+        // reports the end of input and the classifier asks for a continuation.
+        for input in [
+            "ls |",
+            "echo a &&",
+            "echo a ||",
+            "echo a \\",
+            "items |>",
+            "let x = 1 +",
+            "let x = 1 *",
+        ] {
+            let result = validate_input(input);
+            assert!(
+                matches!(
+                    result,
+                    ValidationResult::Incomplete {
+                        prompt_hint: "incomplete"
+                    }
+                ),
+                "{input:?} should be incomplete, got {result:?}"
+            );
+        }
+
+        // `|?` is not a pipeline operator and `+=` is not an assignment: the
+        // parser knows these characters cannot start the missing text, so they
+        // are definite errors rather than continuations.
+        for input in ["items |?", "let x += "] {
+            assert!(
+                matches!(validate_input(input), ValidationResult::Invalid { .. }),
+                "{input:?} should be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_stray_closers_are_invalid() {
+        for input in ["}", ")", "]"] {
+            assert!(
+                matches!(validate_input(input), ValidationResult::Invalid { .. }),
+                "{input:?} should be invalid"
+            );
+        }
         assert!(matches!(
-            validate_input("ls |"),
-            ValidationResult::Incomplete {
-                prompt_hint: "pipe"
-            }
-        ));
-        assert!(matches!(
-            validate_input("echo a &&"),
-            ValidationResult::Incomplete { prompt_hint: "and" }
-        ));
-        assert!(matches!(
-            validate_input("echo a ||"),
-            ValidationResult::Incomplete { prompt_hint: "or" }
-        ));
-        assert!(matches!(
-            validate_input("echo a \\"),
-            ValidationResult::Incomplete {
-                prompt_hint: "backslash"
-            }
-        ));
-        assert!(matches!(
-            validate_input("items |>"),
-            ValidationResult::Incomplete {
-                prompt_hint: "pipe"
-            }
-        ));
-        assert!(matches!(
-            validate_input("let x = 1 +"),
-            ValidationResult::Incomplete {
-                prompt_hint: "operator"
-            }
-        ));
-        assert!(matches!(
-            validate_input("let x += "),
-            ValidationResult::Incomplete {
-                prompt_hint: "operator"
-            }
+            validate_input("let x = |"),
+            ValidationResult::Invalid { .. }
         ));
     }
 

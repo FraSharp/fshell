@@ -25,6 +25,24 @@ pub enum ParseError {
         span: SourceSpan,
     },
 
+    /// The input ended inside a construct that a continuation can complete.
+    ///
+    /// Unlike [`ParseError::UnexpectedEof`], this carries the construct's name
+    /// so the editor can tell the user what it is waiting for, and so
+    /// [`crate::validate_input`] can classify completeness without scanning the
+    /// text a second time.
+    #[error("{message}")]
+    #[diagnostic(
+        code = "FSH-PARSE-003",
+        help("The input ends inside an open construct. Add the missing closing text.")
+    )]
+    Incomplete {
+        construct: &'static str,
+        message: String,
+        #[label("input ended here")]
+        span: SourceSpan,
+    },
+
     #[error("Expected character '{expected}', found '{found}'")]
     #[diagnostic(
         code = "FSH-PARSE-004",
@@ -67,6 +85,7 @@ impl ParseError {
     pub fn span(&self) -> SourceSpan {
         match self {
             ParseError::UnexpectedEof { span }
+            | ParseError::Incomplete { span, .. }
             | ParseError::ExpectedChar { span, .. }
             | ParseError::ExpectedToken { span, .. }
             | ParseError::SyntaxError { span, .. } => *span,
@@ -163,7 +182,9 @@ impl DiagnosticExt for ParseError {
 
     fn code_enum(&self) -> Option<crate::diagnostic::ErrorCode> {
         match self {
-            ParseError::UnexpectedEof { .. } => Some(crate::diagnostic::ErrorCode::UnexpectedEof),
+            ParseError::UnexpectedEof { .. } | ParseError::Incomplete { .. } => {
+                Some(crate::diagnostic::ErrorCode::UnexpectedEof)
+            }
             ParseError::ExpectedChar { .. } => Some(crate::diagnostic::ErrorCode::ExpectedChar),
             ParseError::ExpectedToken { .. } => Some(crate::diagnostic::ErrorCode::ExpectedToken),
             ParseError::SyntaxError { .. } => Some(crate::diagnostic::ErrorCode::SyntaxError),

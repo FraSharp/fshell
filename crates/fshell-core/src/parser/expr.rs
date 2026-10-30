@@ -916,13 +916,31 @@ impl Parser {
                 '"' => {
                     had_quoted_segment = true;
                     flush_literal(&mut parts, &mut literal, &mut literal_quote);
-                    let quoted = self.parse_string_literal()?;
-                    match quoted {
-                        Expr::String(quoted_parts) => parts.extend(quoted_parts),
-                        other => parts.push(StringPart::Expr {
-                            expr: Box::new(other),
-                            quote: QuoteKind::Double,
-                        }),
+                    if self.pos + 2 < self.input.len()
+                        && self.input[self.pos + 1] == '"'
+                        && self.input[self.pos + 2] == '"'
+                    {
+                        let quoted = self.parse_triple_quoted_string()?;
+                        match quoted {
+                            Expr::MultiLineString {
+                                parts: quoted_parts,
+                            } => {
+                                parts.extend(quoted_parts);
+                            }
+                            other => parts.push(StringPart::Expr {
+                                expr: Box::new(other),
+                                quote: QuoteKind::Double,
+                            }),
+                        }
+                    } else {
+                        let quoted = self.parse_string_literal()?;
+                        match quoted {
+                            Expr::String(quoted_parts) => parts.extend(quoted_parts),
+                            other => parts.push(StringPart::Expr {
+                                expr: Box::new(other),
+                                quote: QuoteKind::Double,
+                            }),
+                        }
                     }
                 }
                 '\'' => {
@@ -930,6 +948,25 @@ impl Parser {
                     // the literal-coercion pass below must not retype it (single
                     // quotes are raw strings, exactly like double quotes).
                     had_quoted_segment = true;
+                    if self.pos + 2 < self.input.len()
+                        && self.input[self.pos + 1] == '\''
+                        && self.input[self.pos + 2] == '\''
+                    {
+                        flush_literal(&mut parts, &mut literal, &mut literal_quote);
+                        let quoted = self.parse_triple_single_quoted_string()?;
+                        match quoted {
+                            Expr::MultiLineString {
+                                parts: quoted_parts,
+                            } => {
+                                parts.extend(quoted_parts);
+                            }
+                            other => parts.push(StringPart::Expr {
+                                expr: Box::new(other),
+                                quote: QuoteKind::Single,
+                            }),
+                        }
+                        continue;
+                    }
                     self.next_char();
                     let mut quoted = String::new();
                     loop {
@@ -937,7 +974,10 @@ impl Parser {
                             Some('\'') => break,
                             Some(ch) => quoted.push(ch),
                             None => {
-                                return Err(ParseError::UnexpectedEof {
+                                return Err(ParseError::Incomplete {
+                                    construct: "squote",
+                                    message: "Unterminated single-quoted string literal"
+                                        .to_string(),
                                     span: self.current_span(),
                                 });
                             }
@@ -1360,7 +1400,8 @@ impl Parser {
                     })?);
                 }
                 if !closed {
-                    return Err(ParseError::SyntaxError {
+                    return Err(ParseError::Incomplete {
+                        construct: "squote",
                         message: "Unterminated single-quoted string literal".to_string(),
                         span: self.current_span(),
                     });
@@ -1700,8 +1741,10 @@ impl Parser {
         loop {
             match self.next_char() {
                 None => {
-                    return Err(ParseError::UnexpectedEof {
-                        span: self.span_from(start),
+                    return Err(ParseError::Incomplete {
+                        construct: "quoted string",
+                        message: "Unterminated backquote substitution".to_string(),
+                        span: self.current_span(),
                     });
                 }
                 Some('`') => break,
@@ -1712,8 +1755,10 @@ impl Parser {
                         body.push(c);
                     }
                     None => {
-                        return Err(ParseError::UnexpectedEof {
-                            span: self.span_from(start),
+                        return Err(ParseError::Incomplete {
+                            construct: "quoted string",
+                            message: "Unterminated backquote substitution".to_string(),
+                            span: self.current_span(),
                         });
                     }
                 },
@@ -2160,7 +2205,8 @@ impl Parser {
         loop {
             match self.peek() {
                 None => {
-                    return Err(ParseError::SyntaxError {
+                    return Err(ParseError::Incomplete {
+                        construct: "dquote",
                         message: "Unterminated string literal".to_string(),
                         span: self.current_span(),
                     });
@@ -2292,7 +2338,8 @@ impl Parser {
         loop {
             match self.peek() {
                 None => {
-                    return Err(ParseError::SyntaxError {
+                    return Err(ParseError::Incomplete {
+                        construct: "triple_dquote",
                         message: "Unterminated triple-quoted string".to_string(),
                         span: self.current_span(),
                     });
@@ -2336,7 +2383,8 @@ impl Parser {
         loop {
             match self.peek() {
                 None => {
-                    return Err(ParseError::SyntaxError {
+                    return Err(ParseError::Incomplete {
+                        construct: "quoted string",
                         message: "Unterminated raw string literal".to_string(),
                         span: self.current_span(),
                     });
@@ -2368,7 +2416,8 @@ impl Parser {
         loop {
             match self.peek() {
                 None => {
-                    return Err(ParseError::SyntaxError {
+                    return Err(ParseError::Incomplete {
+                        construct: "triple_squote",
                         message: "Unterminated triple-single-quoted string".to_string(),
                         span: self.current_span(),
                     });
@@ -2424,7 +2473,8 @@ impl Parser {
                     self.next_char();
                 }
                 None => {
-                    return Err(ParseError::SyntaxError {
+                    return Err(ParseError::Incomplete {
+                        construct: "quoted string",
                         message: "Unterminated ANSI-C quoted string".to_string(),
                         span: self.current_span(),
                     });
@@ -2460,7 +2510,9 @@ impl Parser {
                             Some('\'') => break,
                             Some(c) => delimiter.push(c),
                             None => {
-                                return Err(ParseError::UnexpectedEof {
+                                return Err(ParseError::Incomplete {
+                                    construct: "heredoc",
+                                    message: "Unterminated here-document delimiter".to_string(),
                                     span: self.current_span(),
                                 });
                             }
@@ -2478,7 +2530,9 @@ impl Parser {
                             }
                             Some(c) => delimiter.push(c),
                             None => {
-                                return Err(ParseError::UnexpectedEof {
+                                return Err(ParseError::Incomplete {
+                                    construct: "heredoc",
+                                    message: "Unterminated here-document delimiter".to_string(),
                                     span: self.current_span(),
                                 });
                             }
@@ -2491,7 +2545,9 @@ impl Parser {
                     match self.next_char() {
                         Some(c) => delimiter.push(c),
                         None => {
-                            return Err(ParseError::UnexpectedEof {
+                            return Err(ParseError::Incomplete {
+                                construct: "heredoc",
+                                message: "Unterminated here-document delimiter".to_string(),
                                 span: self.current_span(),
                             });
                         }
@@ -2584,7 +2640,9 @@ impl Parser {
             }
         }
         if !found_delimiter {
-            return Err(ParseError::UnexpectedEof {
+            return Err(ParseError::Incomplete {
+                construct: "heredoc",
+                message: "Unterminated here-document".to_string(),
                 span: self.current_span(),
             });
         }

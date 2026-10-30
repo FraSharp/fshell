@@ -267,12 +267,7 @@ fn check_pipeline(pipeline: &Pipeline, _source: &str, diagnostics: &mut Vec<Lint
 
 /// Extract a span from a ParseError.
 fn parse_error_span(err: &ParseError) -> SourceSpan {
-    match err {
-        ParseError::UnexpectedEof { span }
-        | ParseError::ExpectedChar { span, .. }
-        | ParseError::ExpectedToken { span, .. }
-        | ParseError::SyntaxError { span, .. } => *span,
-    }
+    err.span()
 }
 
 /// Convert a byte offset in source text to a 1-based (line, column) pair.
