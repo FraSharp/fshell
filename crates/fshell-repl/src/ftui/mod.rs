@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
+pub(crate) mod accept;
 pub mod agent;
 pub mod ansi;
 pub mod buffer;
@@ -2231,77 +2232,45 @@ pub async fn run_ftui_repl(
                                 match widgets::execute_widget(widget_name, &mut ctx) {
                                     widgets::WidgetAction::AcceptLine => {
                                         help_visible = false;
-                                        text_buf.commit_transaction();
-                                        let command_line = text_buf.text();
-                                        let trimmed = command_line.trim().to_string();
-                                        if !trimmed.is_empty() {
-                                            let validation =
-                                                fshell_engine::frontend::classify_input(
-                                                    &command_line,
-                                                );
-                                            let is_last_line = {
-                                                let chars = text_buf.chars();
-                                                let cursor = text_buf.cursor();
-                                                !chars.iter().skip(cursor).any(|&c| c == '\n')
-                                            };
-                                            match validation {
-                                                fshell_engine::frontend::InputClass::Incomplete {
-                                                    ..
-                                                } => {
-                                                    history_index = None;
-                                                    let indent = fshell_core::compute_indent_depth(
-                                                        &command_line,
-                                                    );
-                                                    text_buf.insert_char('\n');
-                                                    for _ in 0..(indent * 4) {
-                                                        text_buf.insert_char(' ');
-                                                    }
-                                                    in_continuation = true;
-                                                    redraw = true;
-                                                    continue;
-                                                }
-                                                _ if !is_last_line
-                                                    && command_line.contains('\n') =>
-                                                {
-                                                    history_index = None;
-                                                    let indent =
-                                                        fshell_core::compute_indent_depth_at(
-                                                            &command_line,
-                                                            Some(text_buf.cursor()),
-                                                        );
-                                                    text_buf.insert_char('\n');
-                                                    for _ in 0..(indent * 2) {
-                                                        text_buf.insert_char(' ');
-                                                    }
-                                                    in_continuation = true;
-                                                    redraw = true;
-                                                    continue;
-                                                }
-                                                _ => {
-                                                    in_continuation = false;
-                                                    command_to_execute = Some(trimmed);
-                                                    break 'input_loop;
-                                                }
+                                        match accept::accept_line(
+                                            &mut text_buf,
+                                            &mut in_continuation,
+                                        ) {
+                                            accept::AcceptOutcome::Execute(command) => {
+                                                command_to_execute = Some(command);
+                                                break 'input_loop;
                                             }
-                                        } else if !in_continuation {
-                                            prompt_mgr.refresh_snapshot(&current_dir);
-                                            let final_ansi = prompt_mgr.render_prompt_final_ansi();
-                                            if commit_surface_lines(&mut terminal, &[final_ansi])
+                                            accept::AcceptOutcome::Continue
+                                            | accept::AcceptOutcome::ClearContinuation => {
+                                                history_index = None;
+                                                redraw = true;
+                                                continue;
+                                            }
+                                            accept::AcceptOutcome::EmptySubmit => {
+                                                prompt_mgr.refresh_snapshot(&current_dir);
+                                                let final_ansi =
+                                                    prompt_mgr.render_prompt_final_ansi();
+                                                if commit_surface_lines(
+                                                    &mut terminal,
+                                                    &[final_ansi],
+                                                )
                                                 .is_err()
-                                            {
-                                                break 'repl_loop;
+                                                {
+                                                    break 'repl_loop;
+                                                }
+                                                // This fshell-owned commit ends in CRLF,
+                                                // so the next inline surface starts at
+                                                // the known zero column.
+                                                origin_column = Some(0);
+                                                break 'input_loop;
                                             }
-                                            // This fshell-owned commit ends in CRLF,
-                                            // so the next inline surface starts at
-                                            // the known zero column.
-                                            origin_column = Some(0);
-                                            break 'input_loop;
-                                        } else {
-                                            in_continuation = false;
-                                            text_buf.clear();
-                                            redraw = true;
-                                            continue;
                                         }
+                                    }
+                                    widgets::WidgetAction::SoftNewline => {
+                                        history_index = None;
+                                        in_continuation = true;
+                                        redraw = true;
+                                        continue;
                                     }
                                     widgets::WidgetAction::EditInExternalEditor => {
                                         let editor = std::env::var("EDITOR")
@@ -2788,104 +2757,42 @@ pub async fn run_ftui_repl(
                                 || key.modifiers.contains(Modifiers::SHIFT)
                                 || key.modifiers.contains(Modifiers::CONTROL) =>
                         {
-                            // Soft newline: insert newline directly into buffer with auto-indentation at cursor
+                            // Soft newline. Shift/Ctrl+Enter are normally bound
+                            // to the widget; these modifiers also cover terminals
+                            // that report a plain Enter with a modifier.
                             history_index = None;
-                            let indent = fshell_core::compute_indent_depth_at(
-                                &text_buf.text(),
-                                Some(text_buf.cursor()),
-                            );
-                            text_buf.insert_char('\n');
-                            for _ in 0..(indent * 2) {
-                                text_buf.insert_char(' ');
-                            }
+                            accept::insert_newline_and_indent(&mut text_buf);
                             comp_mgr.clear();
-                            redraw = true;
-                        }
-                        Key::Character('j') if key.modifiers.contains(Modifiers::CONTROL) => {
-                            // Ctrl+J is standard LineFeed (soft newline) in terminal emulators
-                            history_index = None;
-                            let indent = fshell_core::compute_indent_depth_at(
-                                &text_buf.text(),
-                                Some(text_buf.cursor()),
-                            );
-                            text_buf.insert_char('\n');
-                            for _ in 0..(indent * 2) {
-                                text_buf.insert_char(' ');
-                            }
-                            comp_mgr.clear();
+                            in_continuation = true;
                             redraw = true;
                         }
                         Key::Enter => {
                             help_visible = false;
-                            text_buf.commit_transaction();
-                            let command_line = text_buf.text();
-                            let trimmed = command_line.trim().to_string();
-                            if !trimmed.is_empty() {
-                                let validation =
-                                    fshell_engine::frontend::classify_input(&command_line);
-                                let is_last_line = {
-                                    let chars = text_buf.chars();
-                                    let cursor = text_buf.cursor();
-                                    !chars.iter().skip(cursor).any(|&c| c == '\n')
-                                };
-                                match validation {
-                                    fshell_engine::frontend::InputClass::Incomplete { .. } => {
-                                        // Incomplete multi-line input — insert newline with auto-indentation and remain in editor
-                                        history_index = None;
-                                        let indent = fshell_core::compute_indent_depth_at(
-                                            &command_line,
-                                            Some(text_buf.cursor()),
-                                        );
-                                        text_buf.insert_char('\n');
-                                        for _ in 0..(indent * 2) {
-                                            text_buf.insert_char(' ');
-                                        }
-                                        in_continuation = true;
-                                        redraw = true;
-                                        continue;
-                                    }
-                                    _ if !is_last_line && command_line.contains('\n') => {
-                                        // Inside a multi-line buffer and not on the last line: split the line at cursor
-                                        history_index = None;
-                                        let indent = fshell_core::compute_indent_depth_at(
-                                            &command_line,
-                                            Some(text_buf.cursor()),
-                                        );
-                                        text_buf.insert_char('\n');
-                                        for _ in 0..(indent * 2) {
-                                            text_buf.insert_char(' ');
-                                        }
-                                        in_continuation = true;
-                                        redraw = true;
-                                        continue;
-                                    }
-                                    _ => {
-                                        // Complete statement or definitive parse error — execute full buffer
-                                        in_continuation = false;
-                                        command_to_execute = Some(trimmed);
-                                    }
+                            match accept::accept_line(&mut text_buf, &mut in_continuation) {
+                                accept::AcceptOutcome::Execute(command) => {
+                                    command_to_execute = Some(command);
+                                    break 'input_loop;
                                 }
-                            } else if !in_continuation {
-                                // Empty line (not continuation): commit the visible
-                                // prompt, then anchor the next editor at the live
-                                // cursor without querying its absolute position.
-                                prompt_mgr.refresh_snapshot(&current_dir);
-                                let final_ansi = prompt_mgr.render_prompt_final_ansi();
-                                if commit_surface_lines(&mut terminal, &[final_ansi]).is_err() {
-                                    break 'repl_loop;
+                                accept::AcceptOutcome::Continue
+                                | accept::AcceptOutcome::ClearContinuation => {
+                                    history_index = None;
+                                    redraw = true;
+                                    continue;
                                 }
-                                // The fshell-owned commit always ends in CRLF.
-                                origin_column = Some(0);
-                                text_buf.clear();
-                            } else {
-                                // Empty line on continuation — present it
-                                // This cancels continuation
-                                in_continuation = false;
-                                text_buf.clear();
-                                redraw = true;
-                                continue;
+                                accept::AcceptOutcome::EmptySubmit => {
+                                    // Commit the visible prompt, then anchor the
+                                    // next editor at the live cursor without
+                                    // querying its absolute position.
+                                    prompt_mgr.refresh_snapshot(&current_dir);
+                                    let final_ansi = prompt_mgr.render_prompt_final_ansi();
+                                    if commit_surface_lines(&mut terminal, &[final_ansi]).is_err() {
+                                        break 'repl_loop;
+                                    }
+                                    // The fshell-owned commit always ends in CRLF.
+                                    origin_column = Some(0);
+                                    break 'input_loop;
+                                }
                             }
-                            break 'input_loop;
                         }
                         Key::Character('d')
                             if key.modifiers.contains(Modifiers::CONTROL)

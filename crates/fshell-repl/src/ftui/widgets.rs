@@ -16,6 +16,8 @@ pub enum WidgetAction {
     Continue,
     Redraw,
     AcceptLine,
+    /// A newline was inserted; the editor stays open in continuation.
+    SoftNewline,
     Abort,
     Exit,
     EditInExternalEditor,
@@ -538,13 +540,9 @@ pub fn execute_widget(widget_name: &str, ctx: &mut WidgetContext<'_>) -> WidgetA
         // --- Line Execution & Control ---
         "accept-line" => WidgetAction::AcceptLine,
         "newline-and-indent" => {
-            let indent = fshell_core::compute_indent_depth(&ctx.text_buf.text());
-            ctx.text_buf.insert_char('\n');
-            for _ in 0..(indent * 4) {
-                ctx.text_buf.insert_char(' ');
-            }
+            super::accept::insert_newline_and_indent(ctx.text_buf);
             ctx.comp_mgr.clear();
-            WidgetAction::Redraw
+            WidgetAction::SoftNewline
         }
         "edit-command-line" => WidgetAction::EditInExternalEditor,
 

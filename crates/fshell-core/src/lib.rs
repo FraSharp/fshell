@@ -41,9 +41,7 @@ pub use parser::{ParseError, Parser};
 pub use prompt_config::{ColorSpec, PromptConfig, SegmentConfig, SegmentType, SeparatorStyle};
 pub use shell_error::ShellError;
 pub use val::{EdgeData, FxIndexMap, GraphStorage, NodeData, NodeId, ResourceHandle, Val};
-pub use validator::{
-    ValidationResult, compute_indent_depth, compute_indent_depth_at, validate_input,
-};
+pub use validator::{ValidationResult, compute_indent_depth_at, validate_input};
 
 /// Initialize core module.
 pub fn init() {}

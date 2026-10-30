@@ -382,11 +382,6 @@ pub fn validate_input(input: &str) -> ValidationResult {
     }
 }
 
-/// Compute open brace indentation depth for entire input.
-pub fn compute_indent_depth(input: &str) -> usize {
-    compute_indent_depth_at(input, None)
-}
-
 /// Compute open brace indentation depth up to a specific character index.
 pub fn compute_indent_depth_at(input: &str, up_to_char: Option<usize>) -> usize {
     let lex = scan_delimiters(input, up_to_char);
@@ -916,9 +911,15 @@ mod tests {
 
     #[test]
     fn test_compute_indent_depth() {
-        assert_eq!(compute_indent_depth("fn foo() {"), 1);
-        assert_eq!(compute_indent_depth("fn foo() {\n    if true {"), 2);
-        assert_eq!(compute_indent_depth("fn foo() {\n    if true {}\n}"), 0);
+        assert_eq!(compute_indent_depth_at("fn foo() {", None), 1);
+        assert_eq!(
+            compute_indent_depth_at("fn foo() {\n    if true {", None),
+            2
+        );
+        assert_eq!(
+            compute_indent_depth_at("fn foo() {\n    if true {}\n}", None),
+            0
+        );
         assert_eq!(
             compute_indent_depth_at(
                 "fn foo() {\n    if true {\n        echo 1\n    }\n}",
