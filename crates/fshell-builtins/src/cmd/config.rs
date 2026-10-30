@@ -1538,7 +1538,7 @@ pub fn format_expr(expr: &fshell_core::Expr) -> String {
         fshell_core::Expr::ArithmeticExpansion(e) => format!("$(({}))", format_expr(e)),
         fshell_core::Expr::AnsiCQuote(s) => format!("$'{}'", s.replace('\'', "\\'")),
         fshell_core::Expr::RawMultiLineString(s) => format!("'''{}'''", s),
-        fshell_core::Expr::MultiLineString { parts, dedent: _ } => {
+        fshell_core::Expr::MultiLineString { parts } => {
             let mut s = String::new();
             s.push_str("\"\"\"");
             for part in parts {

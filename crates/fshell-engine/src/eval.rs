@@ -597,7 +597,7 @@ fn try_eval_sync_inner(expr: &Expr, env: &Env) -> Option<Result<Val, EngineError
         }
         Expr::AnsiCQuote(s) => Some(Ok(Val::String(parse_ansi_c_quote(s)))),
         Expr::RawMultiLineString(s) => Some(Ok(Val::String(s.clone()))),
-        Expr::MultiLineString { parts, .. } => {
+        Expr::MultiLineString { parts } => {
             let res = interp_string!(parts, env, eval_sync_val);
             Some(Ok(Val::String(res)))
         }
@@ -1398,7 +1398,7 @@ pub fn eval_expr_flow<'a>(
 
             Expr::AnsiCQuote(s) => Ok(ExprOutcome::Value(Val::String(parse_ansi_c_quote(s)))),
             Expr::RawMultiLineString(s) => Ok(ExprOutcome::Value(Val::String(s.clone()))),
-            Expr::MultiLineString { parts, .. } => {
+            Expr::MultiLineString { parts } => {
                 let res = interp_string!(parts, env, eval_async_flow);
                 Ok(ExprOutcome::Value(Val::String(res)))
             }

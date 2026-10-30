@@ -317,7 +317,7 @@ heredocs stream multi-line text into a command or stage:
 cat <<EOF > config.toml
 [server]
 host = "127.0.0.1"
-port = {port}
+port = $port
 EOF
 
 # raw heredoc (no interpolation)
@@ -331,6 +331,11 @@ cat <<-EOF
 	indented line 2
 EOF
 ```
+
+The body is passed through verbatim apart from the documented transformation:
+indentation and the trailing newline are preserved, quoting controls expansion
+only, and `<<-` strips leading tabs from every line regardless of quoting. This
+matches POSIX shells byte for byte.
 
 ### here-strings (`<<<`)
 

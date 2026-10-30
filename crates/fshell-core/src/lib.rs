@@ -26,9 +26,9 @@ pub mod val;
 pub mod validator;
 
 pub use ast::{
-    BinOp, DedentMode, Expr, HashMode, LiteralPattern, MAX_HASH_XOF_OUTPUT_BYTES, MatchArm,
-    MatchPattern, OnHandler, Param, ParamModifier, Pipeline, PipelineStage, ProcessSubstDirection,
-    QuoteKind, SerializationFormat, Stmt, StringPart, TimeUnit, TypeConstraint,
+    BinOp, Expr, HashMode, LiteralPattern, MAX_HASH_XOF_OUTPUT_BYTES, MatchArm, MatchPattern,
+    OnHandler, Param, ParamModifier, Pipeline, PipelineStage, ProcessSubstDirection, QuoteKind,
+    SerializationFormat, Stmt, StringPart, TimeUnit, TypeConstraint,
 };
 pub use completion::{CommandCompletion, DynamicProvider, FlagCompletion, SubcmdCompletion};
 pub use diagnostic::{DiagnosticExt, ErrorCode, FshDiag, ShellDiagnostic, StderrStream};

@@ -273,6 +273,9 @@ EOF
 - `<<EOF`: multi-line string with `$` interpolation.
 - `<<'EOF'`: raw multi-line string (no interpolation).
 - `<<-EOF`: strips leading tab characters from each line.
+- the body is data: indentation and the trailing newline are preserved exactly.
+  quoting changes expansion only; `<<-` strips tabs whether the delimiter is
+  quoted or not.
 - the delimiter is one word after quote removal — `E.O.F`, `E"O"F` and `E\OF` all name `E.O.F`, and any quoted part suppresses interpolation. its terminator line must be exactly that word; only `<<-` ignores leading tabs.
 
 > [!NOTE]

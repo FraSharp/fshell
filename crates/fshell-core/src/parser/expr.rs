@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Francesco Duca <f.duca00@gmail.com>
 
-use super::{dedent, parse_ansi_escapes, parse_string_parts, trim_block_tail};
+use super::{dedent, parse_ansi_escapes, parse_string_parts, strip_leading_tabs, trim_block_tail};
 use crate::ast::*;
 use crate::{ParseError, Parser};
 
@@ -2315,12 +2315,9 @@ impl Parser {
             }
         }
 
-        let dedented = dedent(&content, DedentMode::All);
+        let dedented = dedent(&content);
         let parts = parse_string_parts(&dedented, self.current_span())?;
-        Ok(Expr::MultiLineString {
-            parts,
-            dedent: DedentMode::All,
-        })
+        Ok(Expr::MultiLineString { parts })
     }
 
     /// Parse a raw string literal body. The current character is the opening
@@ -2393,13 +2390,12 @@ impl Parser {
                 }
             }
         }
-        let dedented = dedent(&content, DedentMode::All);
+        let dedented = dedent(&content);
         Ok(Expr::MultiLineString {
             parts: vec![StringPart::Lit {
                 text: dedented,
                 quote: QuoteKind::Single,
             }],
-            dedent: DedentMode::All,
         })
     }
 
@@ -2588,23 +2584,19 @@ impl Parser {
                 span: self.current_span(),
             });
         }
-        let dedent_mode = if quoted {
-            DedentMode::None
-        } else if strip_tabs {
-            DedentMode::LeadingTabs
+        // The body is data: it keeps its indentation and its trailing
+        // newline. Only `<<-` transforms it, and it does so whether the
+        // delimiter is quoted or not; quoting decides expansion alone.
+        let body = if strip_tabs {
+            strip_leading_tabs(&content)
         } else {
-            DedentMode::All
+            content
         };
         if quoted {
-            let dedented = dedent(&content, dedent_mode);
-            Ok(Expr::RawMultiLineString(dedented))
+            Ok(Expr::RawMultiLineString(body))
         } else {
-            let dedented = dedent(&content, dedent_mode);
-            let parts = parse_string_parts(&dedented, self.current_span())?;
-            Ok(Expr::MultiLineString {
-                parts,
-                dedent: dedent_mode,
-            })
+            let parts = parse_string_parts(&body, self.current_span())?;
+            Ok(Expr::MultiLineString { parts })
         }
     }
 

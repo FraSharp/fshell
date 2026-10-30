@@ -302,35 +302,40 @@ fn strip_leading_chars(line: &str, count: usize) -> &str {
 }
 
 /// Strip common leading whitespace from all non-empty lines.
-fn dedent(s: &str, mode: DedentMode) -> String {
-    match mode {
-        DedentMode::None => s.to_string(),
-        DedentMode::All => {
-            let lines: Vec<&str> = s.lines().collect();
-            let min_indent = lines
-                .iter()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| leading_whitespace_chars(l))
-                .min()
-                .unwrap_or(0);
-            lines
-                .iter()
-                .map(|l| {
-                    if leading_whitespace_chars(l) >= min_indent {
-                        strip_leading_chars(l, min_indent)
-                    } else {
-                        l
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        DedentMode::LeadingTabs => s
-            .lines()
-            .map(|l| l.trim_start_matches('\t'))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    }
+///
+/// Used by triple-quoted strings, whose documented contract is to dedent the
+/// block. Here-documents do not pass through this function: their bodies are
+/// data and keep their bytes.
+fn dedent(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let min_indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| leading_whitespace_chars(l))
+        .min()
+        .unwrap_or(0);
+    lines
+        .iter()
+        .map(|l| {
+            if leading_whitespace_chars(l) >= min_indent {
+                strip_leading_chars(l, min_indent)
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Strip every leading tab from each line, keeping line endings and the final
+/// newline exactly as they are.
+///
+/// `<<-` strips leading tabs whatever the delimiter quoting is: quoting decides
+/// whether the body is expanded, never how its indentation is treated.
+pub(crate) fn strip_leading_tabs(s: &str) -> String {
+    s.split_inclusive('\n')
+        .map(|line| line.trim_start_matches('\t'))
+        .collect()
 }
 
 /// Parse the interpolation markers of a raw string body into `StringPart`s.
@@ -1714,29 +1719,36 @@ mod tests {
     #[test]
     fn test_dedent_basic() {
         let input = "    hello\n    world";
-        let result = dedent(input, DedentMode::All);
+        let result = dedent(input);
         assert_eq!(result, "hello\nworld");
     }
 
     #[test]
     fn test_dedent_no_dedent() {
         let input = "hello\nworld";
-        let result = dedent(input, DedentMode::All);
+        let result = dedent(input);
         assert_eq!(result, "hello\nworld");
     }
 
     #[test]
     fn test_dedent_empty_lines() {
         let input = "    hello\n\n    world";
-        let result = dedent(input, DedentMode::All);
+        let result = dedent(input);
         assert_eq!(result, "hello\n\nworld");
     }
 
     #[test]
-    fn test_dedent_leading_tabs() {
-        let input = "\thello\n\tworld";
-        let result = dedent(input, DedentMode::LeadingTabs);
-        assert_eq!(result, "hello\nworld");
+    fn test_strip_leading_tabs_keeps_line_endings() {
+        let input = "\t\thello\n\t  world\n";
+        let result = strip_leading_tabs(input);
+        assert_eq!(result, "hello\n  world\n");
+    }
+
+    #[test]
+    fn test_strip_leading_tabs_only_at_line_start() {
+        let input = "  \tindented\n\ttabbed\n";
+        let result = strip_leading_tabs(input);
+        assert_eq!(result, "  \tindented\ntabbed\n");
     }
 
     #[test]
@@ -1744,21 +1756,21 @@ mod tests {
         // U+3000 is three bytes but one character. A byte-based indent would
         // slice at byte 1 and panic; the indent is a character count.
         let input = "\u{3000}hello\n world";
-        let result = dedent(input, DedentMode::All);
+        let result = dedent(input);
         assert_eq!(result, "hello\nworld");
     }
 
     #[test]
     fn test_dedent_unicode_content_after_ascii_indent() {
         let input = "    héllo\n    wörld";
-        let result = dedent(input, DedentMode::All);
+        let result = dedent(input);
         assert_eq!(result, "héllo\nwörld");
     }
 
     #[test]
     fn test_dedent_keeps_short_whitespace_only_lines() {
         let input = "    hello\n \n    world";
-        let result = dedent(input, DedentMode::All);
+        let result = dedent(input);
         assert_eq!(result, "hello\n \nworld");
     }
 
@@ -1890,6 +1902,48 @@ mod tests {
             .parse_statements()
             .unwrap();
         assert_eq!(stmts.len(), 1);
+        assert_eq!(heredoc_body(&stmts[0]).as_deref(), Some("hello\n"));
+    }
+
+    #[test]
+    fn test_heredoc_tab_strip_ignores_delimiter_quoting() {
+        for src in [
+            "cat <<-EOF\n\t\thello\n\t  world\n\tEOF\n",
+            "cat <<-'EOF'\n\t\thello\n\t  world\n\tEOF\n",
+            "cat <<-\"EOF\"\n\t\thello\n\t  world\n\tEOF\n",
+        ] {
+            let stmts = Parser::new(src).parse_statements().unwrap();
+            assert_eq!(
+                heredoc_body(&stmts[0]).as_deref(),
+                Some("hello\n  world\n"),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_heredoc_body_preserves_indentation_and_trailing_newline() {
+        let src = "cat <<EOF\n    hello\n      world\nEOF\n";
+        let stmts = Parser::new(src).parse_statements().unwrap();
+        assert_eq!(
+            heredoc_body(&stmts[0]).as_deref(),
+            Some("    hello\n      world\n")
+        );
+    }
+
+    #[test]
+    fn test_heredoc_quoting_controls_expansion_not_indentation() {
+        let plain = Parser::new("cat <<EOF\n    hello\nEOF\n")
+            .parse_statements()
+            .unwrap();
+        let quoted = Parser::new("cat <<'EOF'\n    hello\nEOF\n")
+            .parse_statements()
+            .unwrap();
+        assert_eq!(
+            heredoc_body(&plain[0]).as_deref(),
+            heredoc_body(&quoted[0]).as_deref()
+        );
+        assert_eq!(heredoc_body(&plain[0]).as_deref(), Some("    hello\n"));
     }
 
     /// The pipeline of a statement parsed as a bare command.
@@ -1937,8 +1991,8 @@ mod tests {
             .parse_statements()
             .unwrap();
         assert_eq!(stmts.len(), 2);
-        assert_eq!(heredoc_body(&stmts[0]).as_deref(), Some("one"));
-        assert_eq!(heredoc_body(&stmts[1]).as_deref(), Some("two"));
+        assert_eq!(heredoc_body(&stmts[0]).as_deref(), Some("one\n"));
+        assert_eq!(heredoc_body(&stmts[1]).as_deref(), Some("two\n"));
     }
 
     #[test]
@@ -1950,14 +2004,14 @@ mod tests {
         let Stmt::And(lhs, rhs) = stmts[0].unpack() else {
             panic!("expected an and-chain, got {:?}", stmts[0]);
         };
-        assert_eq!(heredoc_body(lhs).as_deref(), Some("one"));
-        assert_eq!(heredoc_body(rhs).as_deref(), Some("two"));
+        assert_eq!(heredoc_body(lhs).as_deref(), Some("one\n"));
+        assert_eq!(heredoc_body(rhs).as_deref(), Some("two\n"));
     }
 
     #[test]
     fn test_heredoc_body_may_start_with_a_blank_line() {
         let stmts = Parser::new("cat <<A\n\nx\nA\n").parse_statements().unwrap();
-        assert_eq!(heredoc_body(&stmts[0]).as_deref(), Some("\nx"));
+        assert_eq!(heredoc_body(&stmts[0]).as_deref(), Some("\nx\n"));
     }
 
     #[test]
@@ -1975,7 +2029,7 @@ mod tests {
         let Expr::If { then_body, .. } = expr.unpack() else {
             panic!("expected an if expression, got {expr:?}");
         };
-        assert_eq!(heredoc_body(&then_body[0]).as_deref(), Some("hello"));
+        assert_eq!(heredoc_body(&then_body[0]).as_deref(), Some("hello\n"));
     }
 
     #[test]
@@ -2029,7 +2083,7 @@ mod tests {
                     .unwrap()[0]
             )
             .as_deref(),
-            Some("body")
+            Some("body\n")
         );
     }
 

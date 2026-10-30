@@ -47,12 +47,13 @@ pub enum Expr {
     ArithmeticExpansion(Box<Expr>),
     /// ANSI-C quoted string: $'hello\nworld' — escape sequences interpreted, no interpolation.
     AnsiCQuote(String),
-    /// Raw multi-line string (''' or heredoc with quoted delimiter) — no interpolation, no dedent.
+    /// Raw multi-line string (''' or heredoc with quoted delimiter) — no
+    /// interpolation, no escaping.
     RawMultiLineString(String),
-    /// Multi-line string with dedent and optional interpolation.
+    /// Multi-line string with interpolation. Indentation was resolved while
+    /// parsing; the stored parts are the final text.
     MultiLineString {
         parts: Vec<StringPart>,
-        dedent: DedentMode,
     },
     If {
         condition: Box<Expr>,
@@ -471,17 +472,6 @@ pub enum LiteralPattern {
 pub struct MatchArm {
     pub pattern: MatchPattern,
     pub body: Vec<Stmt>,
-}
-
-/// How to handle leading whitespace in multi-line strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum DedentMode {
-    /// No dedenting — preserve all whitespace.
-    None,
-    /// Strip common leading whitespace from all lines.
-    All,
-    /// Strip leading tabs only.
-    LeadingTabs,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

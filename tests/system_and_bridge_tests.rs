@@ -516,7 +516,7 @@ async fn test_heredoc_integration() {
     let stmts = parser.parse_statements().unwrap();
     eval_stmt(&stmts[0], &env, false).await.unwrap();
     let val = env.vars.read().get("data").cloned();
-    assert_eq!(val, Some(Val::String("hello world".to_string())));
+    assert_eq!(val, Some(Val::String("hello world\n".to_string())));
 }
 
 #[tokio::test]
