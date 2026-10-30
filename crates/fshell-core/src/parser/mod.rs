@@ -284,6 +284,23 @@ fn trim_block_tail(content: &mut String) {
     }
 }
 
+/// Number of leading whitespace characters in `line`.
+fn leading_whitespace_chars(line: &str) -> usize {
+    line.chars().take_while(|c| c.is_whitespace()).count()
+}
+
+/// Drop the first `count` characters of `line`.
+///
+/// The indent is measured in characters so a uniformly-indented body may mix
+/// whitespace of different byte widths (spaces, tabs, `U+3000`, ...) without
+/// slicing through a multi-byte character.
+fn strip_leading_chars(line: &str, count: usize) -> &str {
+    match line.char_indices().nth(count) {
+        Some((index, _)) => &line[index..],
+        None => "",
+    }
+}
+
 /// Strip common leading whitespace from all non-empty lines.
 fn dedent(s: &str, mode: DedentMode) -> String {
     match mode {
@@ -293,14 +310,14 @@ fn dedent(s: &str, mode: DedentMode) -> String {
             let min_indent = lines
                 .iter()
                 .filter(|l| !l.trim().is_empty())
-                .map(|l| l.len() - l.trim_start().len())
+                .map(|l| leading_whitespace_chars(l))
                 .min()
                 .unwrap_or(0);
             lines
                 .iter()
                 .map(|l| {
-                    if l.len() >= min_indent {
-                        &l[min_indent..]
+                    if leading_whitespace_chars(l) >= min_indent {
+                        strip_leading_chars(l, min_indent)
                     } else {
                         l
                     }
@@ -1720,6 +1737,29 @@ mod tests {
         let input = "\thello\n\tworld";
         let result = dedent(input, DedentMode::LeadingTabs);
         assert_eq!(result, "hello\nworld");
+    }
+
+    #[test]
+    fn test_dedent_mixed_width_whitespace_does_not_split_characters() {
+        // U+3000 is three bytes but one character. A byte-based indent would
+        // slice at byte 1 and panic; the indent is a character count.
+        let input = "\u{3000}hello\n world";
+        let result = dedent(input, DedentMode::All);
+        assert_eq!(result, "hello\nworld");
+    }
+
+    #[test]
+    fn test_dedent_unicode_content_after_ascii_indent() {
+        let input = "    héllo\n    wörld";
+        let result = dedent(input, DedentMode::All);
+        assert_eq!(result, "héllo\nwörld");
+    }
+
+    #[test]
+    fn test_dedent_keeps_short_whitespace_only_lines() {
+        let input = "    hello\n \n    world";
+        let result = dedent(input, DedentMode::All);
+        assert_eq!(result, "hello\n \nworld");
     }
 
     #[test]
