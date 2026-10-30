@@ -289,6 +289,7 @@ pub async fn run_ftui_repl(
 
     let mut exit_repl = false;
     let mut in_continuation = false;
+    let mut continuation_hint: Option<&'static str> = None;
 
     let mut temp_input = String::new();
     let mut history_index: Option<usize> = None;
@@ -444,6 +445,18 @@ pub async fn run_ftui_repl(
                 } else {
                     fshell_core::validate_input(&display_text)
                 };
+                // What the shell is still waiting for, shown in the footer. The
+                // native scan is authoritative while it has something to say;
+                // the stored hint covers input the unified classifier placed in
+                // the POSIX engine's continuation state.
+                let active_hint = match &validation {
+                    fshell_core::ValidationResult::Complete => {
+                        continuation_hint = None;
+                        None
+                    }
+                    fshell_core::ValidationResult::Incomplete { prompt_hint } => Some(*prompt_hint),
+                    fshell_core::ValidationResult::Invalid { .. } => continuation_hint,
+                };
 
                 // B2: dynamic viewport height — only uses the space actually needed
                 let multi_line_count = if display_text.contains('\n') {
@@ -573,7 +586,7 @@ pub async fn run_ftui_repl(
                     };
 
                     // Calculate logical cursor layout coordinate
-                    let prompt_left = prompt_mgr.render_prompt_left(false);
+                    let prompt_left = prompt_mgr.render_prompt_left();
                     let prompt_len = prompt_left.width() as u16;
 
                     // Highlight natively in ratatui style — avoids the double
@@ -863,15 +876,19 @@ pub async fn run_ftui_repl(
                                     Span::styled("⌥⏎ newline", theme.status.muted.to_style());
                                 let hint_submit =
                                     Span::styled("⏎ submit", theme.status.muted.to_style());
-                                let footer_line = Line::from(vec![
-                                    footer_branch,
-                                    coord_span,
-                                    dot_span.clone(),
-                                    hint_newline,
-                                    dot_span,
-                                    hint_submit,
-                                ]);
-                                text_lines.push(footer_line);
+                                let mut footer_spans =
+                                    vec![footer_branch, coord_span, dot_span.clone()];
+                                if let Some(hint) = active_hint {
+                                    footer_spans.push(Span::styled(
+                                        accept::continuation_label(hint),
+                                        theme.status.info.to_style_bold(),
+                                    ));
+                                    footer_spans.push(dot_span.clone());
+                                }
+                                footer_spans.push(hint_newline);
+                                footer_spans.push(dot_span);
+                                footer_spans.push(hint_submit);
+                                text_lines.push(Line::from(footer_spans));
 
                                 f.render_widget(
                                     Paragraph::new(Text::from(text_lines)),
@@ -2237,16 +2254,24 @@ pub async fn run_ftui_repl(
                                             &mut in_continuation,
                                         ) {
                                             accept::AcceptOutcome::Execute(command) => {
+                                                continuation_hint = None;
                                                 command_to_execute = Some(command);
                                                 break 'input_loop;
                                             }
-                                            accept::AcceptOutcome::Continue
-                                            | accept::AcceptOutcome::ClearContinuation => {
+                                            accept::AcceptOutcome::Continue { hint } => {
                                                 history_index = None;
+                                                continuation_hint = Some(hint);
+                                                redraw = true;
+                                                continue;
+                                            }
+                                            accept::AcceptOutcome::ClearContinuation => {
+                                                history_index = None;
+                                                continuation_hint = None;
                                                 redraw = true;
                                                 continue;
                                             }
                                             accept::AcceptOutcome::EmptySubmit => {
+                                                continuation_hint = None;
                                                 prompt_mgr.refresh_snapshot(&current_dir);
                                                 let final_ansi =
                                                     prompt_mgr.render_prompt_final_ansi();
@@ -2269,6 +2294,7 @@ pub async fn run_ftui_repl(
                                     widgets::WidgetAction::SoftNewline => {
                                         history_index = None;
                                         in_continuation = true;
+                                        continuation_hint = Some("line");
                                         redraw = true;
                                         continue;
                                     }
@@ -2304,6 +2330,7 @@ pub async fn run_ftui_repl(
                                         history_index = None;
                                         if in_continuation {
                                             in_continuation = false;
+                                            continuation_hint = None;
                                             text_buf.clear();
                                             redraw = true;
                                             continue;
@@ -2326,6 +2353,7 @@ pub async fn run_ftui_repl(
                                             let trimmed = command_line.trim().to_string();
                                             if !trimmed.is_empty() {
                                                 in_continuation = false;
+                                                continuation_hint = None;
                                                 command_to_execute = Some(trimmed);
                                                 break 'input_loop;
                                             }
@@ -2350,6 +2378,7 @@ pub async fn run_ftui_repl(
                                     let trimmed = command_line.trim().to_string();
                                     if !trimmed.is_empty() {
                                         in_continuation = false;
+                                        continuation_hint = None;
                                         command_to_execute = Some(trimmed);
                                         break 'input_loop;
                                     }
@@ -2764,22 +2793,31 @@ pub async fn run_ftui_repl(
                             accept::insert_newline_and_indent(&mut text_buf);
                             comp_mgr.clear();
                             in_continuation = true;
+                            continuation_hint = Some("line");
                             redraw = true;
                         }
                         Key::Enter => {
                             help_visible = false;
                             match accept::accept_line(&mut text_buf, &mut in_continuation) {
                                 accept::AcceptOutcome::Execute(command) => {
+                                    continuation_hint = None;
                                     command_to_execute = Some(command);
                                     break 'input_loop;
                                 }
-                                accept::AcceptOutcome::Continue
-                                | accept::AcceptOutcome::ClearContinuation => {
+                                accept::AcceptOutcome::Continue { hint } => {
                                     history_index = None;
+                                    continuation_hint = Some(hint);
+                                    redraw = true;
+                                    continue;
+                                }
+                                accept::AcceptOutcome::ClearContinuation => {
+                                    history_index = None;
+                                    continuation_hint = None;
                                     redraw = true;
                                     continue;
                                 }
                                 accept::AcceptOutcome::EmptySubmit => {
+                                    continuation_hint = None;
                                     // Commit the visible prompt, then anchor the
                                     // next editor at the live cursor without
                                     // querying its absolute position.
@@ -2821,6 +2859,7 @@ pub async fn run_ftui_repl(
                             } else {
                                 // Empty line in continuation: cancel
                                 in_continuation = false;
+                                continuation_hint = None;
                                 text_buf.clear();
                                 redraw = true;
                                 continue;
@@ -2841,6 +2880,7 @@ pub async fn run_ftui_repl(
                             if in_continuation {
                                 // Cancel multi-line input on Ctrl+C
                                 in_continuation = false;
+                                continuation_hint = None;
                                 text_buf.clear();
                                 redraw = true;
                                 continue;

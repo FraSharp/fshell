@@ -5,8 +5,7 @@ use crate::cpu_dbg;
 use crate::{PromptSnapshot, refresh_prompt_snapshot, render_prompt_template};
 use fshell_core::lock::Mutex;
 use fshell_engine::Env;
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -510,14 +509,7 @@ impl PromptManager {
         text.split('\n').next().unwrap_or(text)
     }
 
-    pub fn render_prompt_left(&self, continuation: bool) -> Line<'static> {
-        if continuation {
-            return Line::from(vec![Span::styled(
-                "> ",
-                Style::default().fg(Color::DarkGray),
-            )]);
-        }
-
+    pub fn render_prompt_left(&self) -> Line<'static> {
         Line::from(ansi_to_spans(Self::first_line(&self.resolve_left_text())))
     }
 
@@ -566,6 +558,7 @@ impl PromptManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Style;
 
     #[test]
     fn test_ansi_to_spans_simple() {
@@ -706,7 +699,7 @@ mod tests {
         }
         let mgr = super::PromptManager::new(env.clone());
         let line_text: String = mgr
-            .render_prompt_left(false)
+            .render_prompt_left()
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -719,7 +712,7 @@ mod tests {
         }
         let mgr = super::PromptManager::new(env);
         let line_text: String = mgr
-            .render_prompt_left(false)
+            .render_prompt_left()
             .spans
             .iter()
             .map(|s| s.content.as_ref())

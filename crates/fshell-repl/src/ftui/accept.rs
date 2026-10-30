@@ -19,12 +19,36 @@ pub(crate) const INDENT_WIDTH: usize = 4;
 pub(crate) enum AcceptOutcome {
     /// Run this command and leave the editor.
     Execute(String),
-    /// A newline was inserted; stay in the editor.
-    Continue,
+    /// A newline was inserted; stay in the editor. The hint names what the
+    /// shell is waiting for so the editor can show it.
+    Continue { hint: &'static str },
     /// The buffer was cleared because a blank line cancelled a continuation.
     ClearContinuation,
     /// The line was empty: commit the prompt and start a fresh one.
     EmptySubmit,
+}
+
+/// Human-readable name for a continuation hint.
+pub(crate) fn continuation_label(hint: &str) -> &str {
+    match hint {
+        "heredoc" => "heredoc",
+        "dquote" | "squote" | "triple_dquote" | "triple_squote" | "quoted string" => {
+            "quoted string"
+        }
+        "brace" => "open brace",
+        "paren" => "open paren",
+        "bracket" => "open bracket",
+        "posix" => "posix shell",
+        "pipe" => "pipeline",
+        "and" => "and-chain",
+        "or" => "or-chain",
+        "backslash" => "line continuation",
+        "operator" => "expression",
+        "keyword" => "keyword",
+        "line" => "new line",
+        "incomplete" => "incomplete",
+        other => other,
+    }
 }
 
 /// Insert a newline at the cursor and indent to the current block depth.
@@ -62,17 +86,17 @@ pub(crate) fn accept_line(text_buf: &mut TextBuffer, in_continuation: &mut bool)
 
     match classify_input(&command_line) {
         // Incomplete input continues. This is the only place that decides it.
-        InputClass::Incomplete { .. } => {
+        InputClass::Incomplete { hint } => {
             insert_newline_and_indent(text_buf);
             *in_continuation = true;
-            AcceptOutcome::Continue
+            AcceptOutcome::Continue { hint }
         }
         // Inside a multi-line buffer, Enter on an earlier line splits the line
         // at the cursor instead of submitting the whole buffer.
         _ if !is_last_line && command_line.contains('\n') => {
             insert_newline_and_indent(text_buf);
             *in_continuation = true;
-            AcceptOutcome::Continue
+            AcceptOutcome::Continue { hint: "line" }
         }
         // Complete or definitively invalid: submit it so the diagnostic is
         // shown against the user's text.
@@ -100,7 +124,7 @@ mod tests {
 
         let outcome = accept_line(&mut buf, &mut in_continuation);
 
-        assert_eq!(outcome, AcceptOutcome::Continue);
+        assert_eq!(outcome, AcceptOutcome::Continue { hint: "brace" });
         assert!(in_continuation);
         assert_eq!(buf.text(), "if true {\n    ");
     }
@@ -112,7 +136,7 @@ mod tests {
 
         let outcome = accept_line(&mut buf, &mut in_continuation);
 
-        assert_eq!(outcome, AcceptOutcome::Continue);
+        assert_eq!(outcome, AcceptOutcome::Continue { hint: "heredoc" });
         assert_eq!(buf.text(), "cat <<EOF\n");
     }
 
@@ -123,8 +147,21 @@ mod tests {
 
         let outcome = accept_line(&mut buf, &mut in_continuation);
 
-        assert_eq!(outcome, AcceptOutcome::Continue);
+        assert_eq!(
+            outcome,
+            AcceptOutcome::Continue {
+                hint: "triple_dquote"
+            }
+        );
         assert_eq!(buf.text(), "let q = \"\"\"\n");
+    }
+
+    #[test]
+    fn continuation_hints_have_readable_labels() {
+        assert_eq!(continuation_label("heredoc"), "heredoc");
+        assert_eq!(continuation_label("triple_dquote"), "quoted string");
+        assert_eq!(continuation_label("brace"), "open brace");
+        assert_eq!(continuation_label("posix"), "posix shell");
     }
 
     #[test]
@@ -147,7 +184,7 @@ mod tests {
 
         let outcome = accept_line(&mut buf, &mut in_continuation);
 
-        assert_eq!(outcome, AcceptOutcome::Continue);
+        assert_eq!(outcome, AcceptOutcome::Continue { hint: "line" });
         assert_eq!(buf.text(), "echo\n one\necho two");
         assert!(in_continuation);
     }
