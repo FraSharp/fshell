@@ -216,7 +216,7 @@ a few conventions worth knowing:
 - declarations can pin types: `let port: Int = 8080`, or a structural constraint like `let cfg: { host: String, port: Int, .. } = ...`. a value that does not match fails the declaration; untyped bindings infer as before.
 - `match` arms are blocks separated by newlines, not commas.
 - `catch |err| { ... }` gives you the structured diagnostic.
-- heredocs (`<<EOF`) expand `$var`, `$(...)` and `$((...))`; a bare `{...}` stays literal so JSON, SQL and config content is not mangled. use a double-quoted string when you want `{expr}` interpolation.
+- heredocs (`<<EOF`) expand `$var`, `$(...)` and `$((...))`; a bare `{...}` stays literal so JSON, SQL and config content is not mangled. use a double-quoted string when you want `{expr}` interpolation. the body is otherwise verbatim — indentation and the trailing newline are preserved — and `<<-` strips leading tabs from every line, quoted delimiter or not.
 - `10KB` is 10000 bytes, `10KiB` is 10240.
 
 ---

@@ -755,7 +755,7 @@ still open: what a *structured* value interpolates to. `"$map"` currently yields
 
 ## posix blocks & interop
 
-fshell integrates a polyglot posix engine (`fshell-posix`). scripts can mix fsh constructs with raw posix code seamlessly.
+fshell integrates a polyglot posix engine (`fshell-posix`). native fsh is the host language: POSIX code runs through `sh { ... }`, `source --bash`, `--posix`, or a POSIX shebang. auto-detection never reinterprets input that contains a native-only construct (`let`, `fn`, `match`, `sh { ... }`, …), even where a POSIX parser would accept the same words as command names.
 
 ### inline blocks (`sh { ... }`)
 

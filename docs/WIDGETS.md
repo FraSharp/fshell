@@ -101,12 +101,25 @@ widgets are named actions dispatched by key chords or macros (`bind <key> <widge
 
 | widget name | default chord | description |
 |---|---|---|
-| `accept-line` | <kbd>Enter</kbd> | validate syntax and execute command |
-| `newline-and-indent` | <kbd>Ctrl+J</kbd>, <kbd>Shift+Enter</kbd> | insert newline with auto-indentation |
+| `accept-line` | <kbd>Enter</kbd> | validate syntax; continue while incomplete, otherwise execute |
+| `newline-and-indent` | <kbd>Shift+Enter</kbd>, <kbd>Ctrl+Enter</kbd> | insert newline with auto-indentation |
 | `abort` / `interrupt` | <kbd>Ctrl+C</kbd> | cancel current edit buffer or terminate foreground job |
 | `clear-screen` | <kbd>Ctrl+L</kbd> | clear terminal screen and redraw prompt |
 | `edit-command-line` | <kbd>Alt+E</kbd> (Vi: `v`) | open current buffer in `$EDITOR` / `$VISUAL` |
 | `toggle-help` | <kbd>F1</kbd> | display context-sensitive help popup for current command |
+
+a buffer that ends inside a construct continues on <kbd>Enter</kbd>: heredocs,
+quoted strings, open braces/parens/brackets and POSIX blocks all keep the editor
+open, and the footer names what is pending (`heredoc`, `quoted string`, `open
+brace`, `posix shell`, …). <kbd>Alt+Enter</kbd> also inserts a soft newline on
+terminals that report the modifier. <kbd>Ctrl+J</kbd> is a line feed and submits
+the buffer, exactly as it does in bash and zsh.
+
+pasted text is inserted verbatim and never executed: bracketed paste keeps a
+multi-line script in one buffer, a trailing newline does not run it, and the
+script executes only when you press <kbd>Enter</kbd>. A heredoc, a block or a
+POSIX loop pasted as a script runs as one submission, and history recalls the
+whole entry. CRLF clipboard line endings are normalized to LF.
 
 ---
 

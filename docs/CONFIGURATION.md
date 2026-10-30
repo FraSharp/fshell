@@ -150,10 +150,6 @@ segments support powerline glyphs and color styling:
 ### sample configuration
 
 ```toml
-[prompt]
-transient = true
-multiline = false
-
 [[left]]
 type = "Pwd"
 fg = "#ffffff"
