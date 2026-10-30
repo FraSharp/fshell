@@ -98,11 +98,12 @@ pub(crate) fn accept_line(text_buf: &mut TextBuffer, in_continuation: &mut bool)
             *in_continuation = true;
             AcceptOutcome::Continue { hint: "line" }
         }
-        // Complete or definitively invalid: submit it so the diagnostic is
-        // shown against the user's text.
+        // Complete or definitively invalid: submit the buffer as written so the
+        // diagnostic and the logged command point at the user's own text. The
+        // whitespace-only case was handled above.
         _ => {
             *in_continuation = false;
-            AcceptOutcome::Execute(command_line.trim().to_string())
+            AcceptOutcome::Execute(command_line)
         }
     }
 }
@@ -174,6 +175,17 @@ mod tests {
             AcceptOutcome::Execute("echo hi".to_string())
         );
         assert!(!in_continuation);
+    }
+
+    #[test]
+    fn submitted_text_is_preserved_verbatim() {
+        let mut buf = buffer("  echo hi  ");
+        let mut in_continuation = false;
+
+        assert_eq!(
+            accept_line(&mut buf, &mut in_continuation),
+            AcceptOutcome::Execute("  echo hi  ".to_string())
+        );
     }
 
     #[test]
