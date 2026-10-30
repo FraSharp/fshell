@@ -1017,11 +1017,19 @@ pub async fn run_repl_with_env(env: Env, resume_option: Option<String>) {
     env.register_alias("ll", "ls -la");
 
     // Non-interactive batch mode: if stdin or stdout is not a TTY (e.g. piped or redirected)
-    let is_interactive = !fshell_engine::is_test_mode()
-        && fshell_terminal::is_stdin_tty()
-        && fshell_engine::is_stdout_a_tty();
+    let stdin_is_tty = fshell_terminal::is_stdin_tty();
+    let stdout_is_tty = fshell_engine::is_stdout_a_tty();
+    let is_interactive = !fshell_engine::is_test_mode() && stdin_is_tty && stdout_is_tty;
 
     if !is_interactive {
+        // Redirecting only stdout is the one case where the user is sitting at
+        // a terminal but no prompt can be drawn. Say so instead of appearing
+        // to hang until Ctrl-D.
+        if stdin_is_tty && !stdout_is_tty && !fshell_engine::is_test_mode() {
+            eprintln!(
+                "fsh: stdout is not a terminal; reading commands from stdin until EOF (Ctrl-D)"
+            );
+        }
         use std::io::Read;
         let mut input = String::new();
         if std::io::stdin().read_to_string(&mut input).is_ok() && !input.trim().is_empty() {
