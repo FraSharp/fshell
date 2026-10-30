@@ -40,22 +40,65 @@ pub enum InputClass {
 /// Decide whether `input` is complete, incomplete, or invalid, consulting both
 /// engines.
 ///
-/// The native parser wins when it accepts. When it reports a definite error we
-/// ask the POSIX classifier: if POSIX accepts, the input is runnable; if POSIX
-/// is itself unterminated, it is a continuation. When the native parser only
-/// reports "incomplete", we keep prompting (native has priority for its own
-/// syntax), which avoids turning native typos into POSIX commands.
+/// The native parser wins when it accepts. When it reports a definite error,
+/// the input is only offered to POSIX if it carries no native-only construct:
+/// `let x = 1` is a native declaration even though a POSIX parser can read it
+/// as a command named `let`. When POSIX is merely unterminated, the editor
+/// keeps prompting only if the input opens with a POSIX construct; a native
+/// error such as a stray `}` must not become an endless continuation just
+/// because brush reports it as an unterminated program.
 pub fn classify_input(input: &str) -> InputClass {
-    match fshell_core::validate_input(input) {
+    let inspection = fshell_core::inspect_input(input);
+    match inspection.result {
         ValidationResult::Complete => InputClass::Complete,
         ValidationResult::Incomplete { prompt_hint } => {
             InputClass::Incomplete { hint: prompt_hint }
         }
-        ValidationResult::Invalid { message, .. } => match crate::classify_posix(input) {
-            Some(PosixSyntax::Complete) => InputClass::Complete,
-            Some(PosixSyntax::Incomplete) => InputClass::Incomplete { hint: "posix" },
-            _ => InputClass::Invalid { message },
-        },
+        ValidationResult::Invalid { message, .. } => {
+            if inspection.native_intent {
+                return InputClass::Invalid { message };
+            }
+            match crate::classify_posix(input) {
+                Some(PosixSyntax::Complete) => InputClass::Complete,
+                Some(PosixSyntax::Incomplete) if starts_with_posix_construct(input) => {
+                    InputClass::Incomplete { hint: "posix" }
+                }
+                _ => InputClass::Invalid { message },
+            }
+        }
+    }
+}
+
+/// Whether the first meaningful line opens with a construct only POSIX owns.
+///
+/// This is consulted only for *incomplete* input: a complete POSIX script is
+/// accepted by the POSIX classifier on its own. Leading comments and plain
+/// assignments are skipped so a script that starts with `X=1` can still
+/// continue into its first loop or conditional.
+fn starts_with_posix_construct(input: &str) -> bool {
+    let line = input
+        .lines()
+        .map(str::trim_start)
+        .find(|line| !line.is_empty() && !line.starts_with('#') && !is_posix_assignment_line(line))
+        .unwrap_or("");
+    let word = line
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | '{' | '&' | '|'))
+        .find(|word| !word.is_empty())
+        .unwrap_or("");
+    matches!(
+        word,
+        "if" | "for" | "while" | "until" | "case" | "function" | "select"
+    )
+}
+
+/// A leading `NAME=value` assignment, which POSIX allows before a command.
+fn is_posix_assignment_line(line: &str) -> bool {
+    let word = line.split_whitespace().next().unwrap_or("");
+    match word.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        None => false,
     }
 }
 
@@ -129,38 +172,12 @@ pub async fn run_posix(input: &str, env: &Env) -> Result<Flow, EngineError> {
     Ok(Flow::Normal)
 }
 
-/// First whitespace/separator-delimited word of the input, lowercased.
-fn first_word(input: &str) -> String {
-    input
-        .trim_start()
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | '{' | '&' | '|'))
-        .find(|w| !w.is_empty())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-}
-
-/// Whether the input opens with a keyword that exists only in fsh-native syntax.
-///
-/// For these, a parse error is a genuine native error and must not be
-/// reinterpreted as POSIX — otherwise a native typo like `let x = | invalid`
-/// would silently run as a shell command. Keywords shared with POSIX
-/// (`if`, `for`, `while`, …) are deliberately absent so real POSIX scripts
-/// still fall back.
-fn starts_with_native_keyword(input: &str) -> bool {
-    matches!(
-        first_word(input).as_str(),
-        "let" | "local" | "fn" | "match" | "try" | "catch" | "with" | "unsafe" | "caps"
-    )
-}
-
 /// Fall back to POSIX when the mode allows it and the input is valid POSIX.
 ///
-/// Returns `None` when the caller should surface its own (native) error.
+/// Returns `None` when the caller should surface its own (native) error. The
+/// caller has already refused the fallback for input with native intent.
 pub async fn try_posix_fallback(input: &str, env: &Env) -> Result<Option<Flow>, EngineError> {
     if env.options.read().interp_mode == InterpMode::Native {
-        return Ok(None);
-    }
-    if starts_with_native_keyword(input) {
         return Ok(None);
     }
     if crate::posix_handler().is_none() {
@@ -178,38 +195,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn first_word_skips_separators() {
-        assert_eq!(first_word("  cd /tmp && ls"), "cd");
-        assert_eq!(first_word("(echo a); (echo b)"), "echo");
-        assert_eq!(first_word("P=$!; echo x"), "p=$!");
-        assert_eq!(first_word(""), "");
+    fn posix_construct_detection_skips_comments_and_assignments() {
+        for input in [
+            "for i in 1 2; do",
+            "if true; then",
+            "case x in",
+            "# setup\nfor i in 1 2; do",
+            "X=1\nfor i in 1 2; do",
+        ] {
+            assert!(
+                starts_with_posix_construct(input),
+                "should be a POSIX continuation: {input:?}"
+            );
+        }
+        for input in ["}", "let x = 1", "echo hi", "sh script.sh", "done"] {
+            assert!(
+                !starts_with_posix_construct(input),
+                "should not be a POSIX continuation: {input:?}"
+            );
+        }
     }
 
     #[test]
-    fn native_only_keywords_do_not_fall_back() {
+    fn native_intent_is_never_reinterpreted_as_posix() {
+        // A POSIX parser can read `let`/`fn` as command names, but the input
+        // began in native syntax; the classifier must report the native error.
         for input in [
             "let x = | invalid",
-            "match x { }",
-            "try { } catch { }",
-            "with caps(fs) { }",
+            "fn foo )",
+            "# setup\nlet x = 1\nfor i in 1 2; do",
         ] {
             assert!(
-                starts_with_native_keyword(input),
+                matches!(classify_input(input), InputClass::Invalid { .. }),
                 "should stay native: {input:?}"
             );
         }
     }
 
     #[test]
-    fn posix_shared_keywords_may_fall_back() {
-        for input in [
-            "for f in a b; do echo $f; done",
-            "if true; then echo; fi",
-            "echo hi",
-        ] {
+    fn definite_native_errors_are_not_posix_continuations() {
+        for input in ["}", "let x = |", "items |?"] {
             assert!(
-                !starts_with_native_keyword(input),
-                "should be eligible for POSIX: {input:?}"
+                matches!(classify_input(input), InputClass::Invalid { .. }),
+                "should be invalid, not a continuation: {input:?}"
             );
         }
     }

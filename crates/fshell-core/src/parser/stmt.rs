@@ -397,6 +397,7 @@ impl Parser {
 
     fn parse_statement_inner(&mut self) -> Result<Stmt, ParseError> {
         self.skip_whitespace();
+        self.note_native_construct();
         let start = self.pos;
         if self.peek() == Some('#') {
             self.next_char(); // Consume '#'
@@ -433,6 +434,38 @@ impl Parser {
             stmt: Box::new(stmt),
             span,
         })
+    }
+
+    /// Record a native-only keyword at the start of the statement being parsed.
+    ///
+    /// The router must not hand input that began in fsh to the POSIX engine
+    /// merely because POSIX can read the same words as command names. `sh`
+    /// counts only when it opens a native block (`sh { ... }`), never for the
+    /// ordinary `sh script.sh` command.
+    fn note_native_construct(&mut self) {
+        let mut p = self.pos;
+        while p < self.input.len() && self.input[p].is_whitespace() {
+            p += 1;
+        }
+        let start = p;
+        while p < self.input.len() && (self.input[p].is_alphanumeric() || self.input[p] == '_') {
+            p += 1;
+        }
+        let word: String = self.input[start..p].iter().collect();
+        let native = match word.as_str() {
+            "let" | "local" | "fn" | "match" | "try" | "catch" | "with" | "caps" | "unsafe" => true,
+            "sh" => {
+                let mut q = p;
+                while q < self.input.len() && self.input[q].is_whitespace() {
+                    q += 1;
+                }
+                q < self.input.len() && self.input[q] == '{'
+            }
+            _ => false,
+        };
+        if native {
+            self.saw_native_construct = true;
+        }
     }
 
     pub(crate) fn parse_statement_body(&mut self) -> Result<Stmt, ParseError> {

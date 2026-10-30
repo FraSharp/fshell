@@ -3794,6 +3794,13 @@ async fn run_script_inner(input: &str, env: &Env) -> Result<Flow, EngineError> {
     let stmts = match parser.parse_statements() {
         Ok(s) => s,
         Err(e) => {
+            // A native-only construct anywhere in the input means this is not
+            // a POSIX script, even where a POSIX parser accepts the same words
+            // (`let`, a `sh { ... }` block). Surface the native error instead of
+            // silently reinterpreting the script.
+            if parser.saw_native_construct() {
+                return Err(e.into());
+            }
             // Native parsing failed before anything executed: safe to hand the
             // whole input to POSIX if it is valid there.
             if let Some(flow) = crate::frontend::try_posix_fallback(input, env).await? {

@@ -128,6 +128,10 @@ pub struct Parser {
     /// Bodies read so far, in header order. They are attached to their stages
     /// once the whole input is parsed, when the AST is available to walk.
     heredoc_bodies: Vec<Expr>,
+    /// Whether a native-only construct was consumed while parsing. A failed
+    /// parse with this set is a native error, not an invitation to reinterpret
+    /// the whole input as POSIX.
+    saw_native_construct: bool,
 }
 
 /// A `<<DELIM` / `<<-DELIM` header whose body has not been read yet.

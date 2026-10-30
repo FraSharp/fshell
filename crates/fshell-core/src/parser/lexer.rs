@@ -27,7 +27,18 @@ impl Parser {
             recursion_depth: std::cell::Cell::new(0),
             pending_heredocs: Vec::new(),
             heredoc_bodies: Vec::new(),
+            saw_native_construct: false,
         }
+    }
+
+    /// Whether parsing consumed a construct that only the native grammar owns.
+    ///
+    /// The engine router uses this to keep a failed native parse from being
+    /// reinterpreted as POSIX: `let x = 1` and a later POSIX loop is a native
+    /// script with a POSIX-only construct in it, not a POSIX script whose
+    /// `let` happens to be a command.
+    pub fn saw_native_construct(&self) -> bool {
+        self.saw_native_construct
     }
 
     pub(crate) fn peek(&self) -> Option<char> {

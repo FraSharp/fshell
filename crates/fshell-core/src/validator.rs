@@ -15,20 +15,42 @@ pub enum ValidationResult {
     Invalid { message: String, span: SourceSpan },
 }
 
-/// Validates whether the given input text is complete, incomplete, or invalid.
+/// One parser pass over an input buffer: completeness plus routing intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputInspection {
+    pub result: ValidationResult,
+    /// The parser consumed a construct only the native grammar owns (`let`,
+    /// `fn`, `sh { ... }`, ...). Such input must never be reinterpreted as
+    /// POSIX just because a POSIX parser accepts the same words.
+    pub native_intent: bool,
+}
+
+/// Inspect a buffer once for both completeness and routing intent.
+pub fn inspect_input(input: &str) -> InputInspection {
+    if input.trim().is_empty() {
+        return InputInspection {
+            result: ValidationResult::Complete,
+            native_intent: false,
+        };
+    }
+    let mut parser = Parser::new(input);
+    let result = match parser.parse_statements() {
+        Ok(_) => ValidationResult::Complete,
+        Err(error) => classify_parse_error(input, error),
+    };
+    InputInspection {
+        result,
+        native_intent: parser.saw_native_construct(),
+    }
+}
+
 /// Validates whether the given input text is complete, incomplete, or invalid.
 ///
 /// The parser is the single authority: a successful parse is complete, and an
 /// error caused by the input ending inside an open construct is incomplete. No
 /// second scanner re-lexes the text to guess what the parser already knows.
 pub fn validate_input(input: &str) -> ValidationResult {
-    if input.trim().is_empty() {
-        return ValidationResult::Complete;
-    }
-    match Parser::new(input).parse_statements() {
-        Ok(_) => ValidationResult::Complete,
-        Err(error) => classify_parse_error(input, error),
-    }
+    inspect_input(input).result
 }
 
 fn classify_parse_error(input: &str, error: ParseError) -> ValidationResult {
@@ -288,6 +310,21 @@ fn scan_delimiters(input: &str, up_to_char: Option<usize>) -> DelimiterScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_native_intent_is_independent_of_comments() {
+        // A leading comment must not hide a later native declaration.
+        let inspection = inspect_input("# note\nlet x = 1\nfor i in 1 2; do");
+        assert!(inspection.native_intent);
+
+        let inspection = inspect_input("echo hi\nfor i in 1 2; do");
+        assert!(!inspection.native_intent);
+
+        // `sh { ... }` is native syntax; `sh script.sh` is an ordinary command.
+        assert!(inspect_input("sh { echo let }").native_intent);
+        assert!(!inspect_input("sh script.sh").native_intent);
+        assert!(!inspect_input("echo let").native_intent);
+    }
 
     #[test]
     fn test_validate_complete_commands() {

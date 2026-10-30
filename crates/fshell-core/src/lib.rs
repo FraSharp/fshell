@@ -41,7 +41,9 @@ pub use parser::{HeredocDelimiter, ParseError, Parser, scan_heredoc_delimiter};
 pub use prompt_config::{ColorSpec, PromptConfig, SegmentConfig, SegmentType, SeparatorStyle};
 pub use shell_error::ShellError;
 pub use val::{EdgeData, FxIndexMap, GraphStorage, NodeData, NodeId, ResourceHandle, Val};
-pub use validator::{ValidationResult, compute_indent_depth_at, validate_input};
+pub use validator::{
+    InputInspection, ValidationResult, compute_indent_depth_at, inspect_input, validate_input,
+};
 
 /// Initialize core module.
 pub fn init() {}

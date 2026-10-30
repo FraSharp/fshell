@@ -3,7 +3,46 @@
 
 mod common;
 
-use common::FshCmd;
+use common::{FshCmd, setup_test_env};
+
+#[test]
+fn classification_is_consistent_across_engines() {
+    // `setup_test_env` installs the POSIX engine hooks, so classification sees
+    // both frontends the way the interactive editor does.
+    let _env = setup_test_env();
+    use fshell_engine::frontend::{InputClass, classify_input};
+
+    assert!(matches!(
+        classify_input("for i in 1 2; do"),
+        InputClass::Incomplete { hint: "posix" }
+    ));
+    assert_eq!(
+        classify_input("for i in 1 2; do echo $i; done"),
+        InputClass::Complete
+    );
+    assert!(matches!(classify_input("}"), InputClass::Invalid { .. }));
+    assert!(matches!(
+        classify_input("let x = |"),
+        InputClass::Invalid { .. }
+    ));
+    assert!(matches!(
+        classify_input("# setup\nlet x = 1\nfor i in 1 2; do"),
+        InputClass::Invalid { .. }
+    ));
+}
+
+#[test]
+fn mixed_native_posix_script_is_not_reinterpreted() {
+    // The leading comment used to hide `let` from the first-word guard, so the
+    // whole script ran through POSIX as `let: command not found`.
+    let out = FshCmd::new()
+        .cmd("# setup\nlet x = 41\nfor i in 1 2; do echo $i; done\necho x=$x")
+        .run()
+        .unwrap();
+    out.assert_failure();
+    out.assert_stdout_not_contains("1");
+    out.assert_stderr_contains("FSH-PARSE");
+}
 
 #[test]
 fn bare_assignment_declares_like_bash() {
