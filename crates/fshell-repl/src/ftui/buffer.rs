@@ -25,13 +25,6 @@ pub struct TextBuffer {
     edits_since_commit: usize,
     /// Timestamp of the last edit — used for idle-based auto-commit.
     last_edit_time: std::time::Instant,
-    // Track indices of auto-inserted closers for skip-over on matching character typed.
-    // Indexed by the character position in `chars`.
-    // Only contains entries that were genuinely auto-inserted by insert_char/insert_str,
-    // NOT pairs that were manually typed or restored from undo/redo.
-    auto_inserted_closers: Vec<usize>,
-    // Track which opener each auto-inserted closer belongs to.
-    auto_inserted_pairs: Vec<(usize, usize)>,
     // Selection range: (anchor, head) where anchor <= head
     selection: Option<(usize, usize)>,
 }
@@ -52,8 +45,6 @@ impl TextBuffer {
             current_transaction: Vec::new(),
             edits_since_commit: 0,
             last_edit_time: std::time::Instant::now(),
-            auto_inserted_closers: Vec::new(),
-            auto_inserted_pairs: Vec::new(),
             selection: None,
         }
     }
@@ -126,11 +117,6 @@ impl TextBuffer {
         self.current_transaction.push(insert_op);
 
         self.commit_transaction();
-        // Do NOT rebuild auto-close state here — auto-inserted markers should only
-        // track what was genuinely auto-inserted, not pairs that exist in the buffer.
-        // The skip-over feature works by tracking at insert time, not by scanning.
-        self.auto_inserted_closers.clear();
-        self.auto_inserted_pairs.clear();
     }
 
     pub fn prev_grapheme_boundary(&self, char_idx: usize) -> usize {
@@ -255,8 +241,6 @@ impl TextBuffer {
         self.redo_stack.clear();
         self.current_transaction.clear();
         self.edits_since_commit = 0;
-        self.auto_inserted_closers.clear();
-        self.auto_inserted_pairs.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -529,181 +513,54 @@ impl TextBuffer {
         // Position cursor after the closing character
         self.cursor = lo + wrapped_len;
         self.selection = None;
-
-        // Track the closer for skip-over if auto-close pair
-        if matches!(
-            (open, close),
-            ('(', ')') | ('[', ']') | ('{', '}') | ('"', '"') | ('\'', '\'') | ('`', '`')
-        ) {
-            let closer_idx = lo + wrapped_len - 1;
-            let opener_idx = lo;
-            let delta = wrapped_len.saturating_sub(selected.chars().count());
-            // Don't shift existing auto-inserted pairs since the entire operation
-            // replaced a range starting at `lo`.
-            for pair in self.auto_inserted_pairs.iter_mut() {
-                if pair.0 >= lo {
-                    pair.0 = pair.0.saturating_add(delta);
-                }
-                if pair.1 >= lo {
-                    pair.1 = pair.1.saturating_add(delta);
-                }
-            }
-            for idx in self.auto_inserted_closers.iter_mut() {
-                if *idx >= lo {
-                    *idx = idx.saturating_add(delta);
-                }
-            }
-            self.auto_inserted_closers.push(closer_idx);
-            self.auto_inserted_pairs.push((opener_idx, closer_idx));
-        }
     }
 
+    /// Insert exactly one character at the cursor.
+    ///
+    /// Typing never manufactures text the user did not type. In particular it
+    /// does not auto-insert closing brackets or quotes: in a shell line those
+    /// characters are data as often as syntax (`awk '{print $1}'`, `echo {`,
+    /// a triple-quoted `"""` opener), and a synthetic closer changes both what
+    /// the user sees and what the validator considers complete. A multi-line
+    /// construct continues when Enter finds the buffer incomplete.
     pub fn insert_char(&mut self, c: char) {
-        // Selection handling
-        // If the user types a bracket/quote while text is selected, wrap the selection.
-        // If they type any other character, replace the selection.
-        let is_closer = matches!(c, ')' | ']' | '}' | '"' | '\'' | '`');
         let is_opener = matches!(c, '(' | '[' | '{' | '"' | '\'' | '`');
-
-        if self.has_selection() && is_opener {
-            let close = match c {
-                '(' => ')',
-                '[' => ']',
-                '{' => '}',
-                '"' => '"',
-                '\'' => '\'',
-                '`' => '`',
-                _ => unreachable!(),
-            };
-            self.wrap_selection(c, close);
-            self.maybe_auto_commit();
-            return;
-        } else if self.has_selection() && !is_closer {
+        if self.has_selection() {
+            if is_opener {
+                let close = match c {
+                    '(' => ')',
+                    '[' => ']',
+                    '{' => '}',
+                    '"' => '"',
+                    '\'' => '\'',
+                    '`' => '`',
+                    _ => unreachable!(),
+                };
+                self.wrap_selection(c, close);
+                self.maybe_auto_commit();
+                return;
+            }
             self.delete_selection();
         }
-        // If selection is active and user types a closer ()), we just delete the
-        // selection and insert the closer — for ', ", ` we let the normal flow handle it.
 
-        // Smart skip-over logic
-        // If cursor is on a genuinely auto-inserted closer and the user types the
-        // matching character, just advance past it.
-        if self.cursor < self.chars.len()
-            && self.chars[self.cursor] == c
-            && self.auto_inserted_closers.contains(&self.cursor)
-            && is_closer
-        {
-            self.auto_inserted_closers.retain(|&idx| idx != self.cursor);
-            self.auto_inserted_pairs
-                .retain(|&(_, closer)| closer != self.cursor);
-            self.cursor += 1;
-            return;
-        }
-
-        let cursor_before = self.cursor;
-
-        // Apply normal insertion
         let op = EditOp::Insert {
-            pos: cursor_before,
+            pos: self.cursor,
             text: c.to_string(),
         };
         self.apply_op(op.clone());
         self.current_transaction.push(op);
 
-        // Auto-close logic
-        // Only auto-close if there's NO selection (we already handled that above)
-        let closer = match c {
-            '(' => Some(')'),
-            '[' => Some(']'),
-            '{' => Some('}'),
-            '"' => Some('"'),
-            '\'' => Some('\''),
-            '`' => Some('`'),
-            _ => None,
-        };
-
-        if let Some(cl) = closer {
-            let next_char = self.chars.get(self.cursor);
-            let should_autoclose = match c {
-                '\'' | '"' | '`' => next_char.is_none_or(|nc| !nc.is_alphanumeric()),
-                _ => true,
-            };
-
-            if should_autoclose {
-                let close_op = EditOp::Insert {
-                    pos: self.cursor,
-                    text: cl.to_string(),
-                };
-                self.apply_op(close_op.clone());
-                self.current_transaction.push(close_op);
-
-                let closer_idx = cursor_before + 1;
-                let opener_idx = cursor_before;
-
-                // Shift existing auto-inserted closer indices right by 2
-                for idx in self.auto_inserted_closers.iter_mut() {
-                    if *idx >= cursor_before {
-                        *idx += 2;
-                    }
-                }
-                for (opener, closer) in self.auto_inserted_pairs.iter_mut() {
-                    if *opener >= cursor_before {
-                        *opener += 2;
-                    }
-                    if *closer >= cursor_before {
-                        *closer += 2;
-                    }
-                }
-                self.auto_inserted_closers.push(closer_idx);
-                self.auto_inserted_pairs.push((opener_idx, closer_idx));
-                // Cursor stays inside: between opener and closer
-                self.cursor = cursor_before + 1;
-            } else {
-                // Shift indices right by 1
-                for idx in self.auto_inserted_closers.iter_mut() {
-                    if *idx >= cursor_before {
-                        *idx += 1;
-                    }
-                }
-                for (opener, closer) in self.auto_inserted_pairs.iter_mut() {
-                    if *opener >= cursor_before {
-                        *opener += 1;
-                    }
-                    if *closer >= cursor_before {
-                        *closer += 1;
-                    }
-                }
-            }
-        } else {
-            // Shift indices right by 1
-            for idx in self.auto_inserted_closers.iter_mut() {
-                if *idx >= cursor_before {
-                    *idx += 1;
-                }
-            }
-            for (opener, closer) in self.auto_inserted_pairs.iter_mut() {
-                if *opener >= cursor_before {
-                    *opener += 1;
-                }
-                if *closer >= cursor_before {
-                    *closer += 1;
-                }
-            }
-        }
-
         self.maybe_auto_commit();
     }
 
-    /// Insert `s` at the cursor verbatim, without auto-closing brackets or
-    /// quotes.
+    /// Insert `s` at the cursor verbatim.
     ///
     /// This path is used for pasted text and programmatic insertion (clipboard,
-    /// completion, history recall) — content that is already complete. Auto
-    /// pairing is a *typing* affordance; applying it here corrupts shell input,
-    /// which is full of `[`, `(`, `'` and `"` characters inside strings and
-    /// patterns that a bare bracket counter cannot understand. The old
-    /// "close the net-unclosed delimiters" heuristic was not quote-aware, so
-    /// pasting `sed 's/\x1b\[[0-9;]*m//g'` (two `[`, one `]` inside a quoted
-    /// string) appended a stray `]` to the command and silently broke it.
+    /// completion, history recall) — content that is already complete. A
+    /// bracket/quote counter must not reinterpret it: shell input is full of
+    /// `[`, `(`, `'` and `"` inside strings and patterns, and the old
+    /// "close the net-unclosed delimiters" heuristic appended a stray `]` to
+    /// `sed 's/\x1b\[[0-9;]*m//g'` and silently broke it.
     pub fn insert_str(&mut self, s: &str) {
         if s.is_empty() {
             return;
@@ -729,25 +586,6 @@ impl TextBuffer {
 
         let cursor_before = self.cursor;
         let del_start = self.prev_grapheme_boundary(cursor_before);
-        let count = cursor_before - del_start;
-
-        let left_char = self.chars[cursor_before - 1];
-        let right_char = self.chars.get(cursor_before).copied();
-        let is_matching_closer = count == 1
-            && matches!(
-                (left_char, right_char),
-                ('(', Some(')'))
-                    | ('[', Some(']'))
-                    | ('{', Some('}'))
-                    | ('"', Some('"'))
-                    | ('\'', Some('\''))
-                    | ('`', Some('`'))
-            );
-
-        // Only smart-delete the pair if the closer was genuinely auto-inserted.
-        let should_delete_pair =
-            is_matching_closer && self.auto_inserted_closers.contains(&cursor_before);
-
         let deleted_text: String = self.chars[del_start..cursor_before].iter().collect();
         let op = EditOp::Delete {
             pos: del_start,
@@ -755,57 +593,6 @@ impl TextBuffer {
         };
         self.apply_op(op.clone());
         self.current_transaction.push(op);
-
-        if should_delete_pair {
-            let right_del = EditOp::Delete {
-                pos: del_start,
-                text: right_char.expect("matching closer exists").to_string(),
-            };
-            self.apply_op(right_del.clone());
-            self.current_transaction.push(right_del);
-
-            self.auto_inserted_closers
-                .retain(|&idx| idx != cursor_before && idx != cursor_before - 1);
-
-            for idx in self.auto_inserted_closers.iter_mut() {
-                if *idx > cursor_before {
-                    *idx = idx.saturating_sub(2);
-                }
-            }
-
-            self.auto_inserted_pairs
-                .retain(|&(opener, closer)| opener != cursor_before - 1 && closer != cursor_before);
-            for (opener, closer) in self.auto_inserted_pairs.iter_mut() {
-                if *opener > cursor_before {
-                    *opener = opener.saturating_sub(2);
-                }
-                if *closer > cursor_before {
-                    *closer = closer.saturating_sub(2);
-                }
-            }
-        } else {
-            self.auto_inserted_closers
-                .retain(|&idx| idx < del_start || idx >= cursor_before);
-
-            for idx in self.auto_inserted_closers.iter_mut() {
-                if *idx >= cursor_before {
-                    *idx = idx.saturating_sub(count);
-                }
-            }
-
-            self.auto_inserted_pairs.retain(|&(opener, closer)| {
-                (opener < del_start || opener >= cursor_before)
-                    && (closer < del_start || closer >= cursor_before)
-            });
-            for (opener, closer) in self.auto_inserted_pairs.iter_mut() {
-                if *opener >= cursor_before {
-                    *opener = opener.saturating_sub(count);
-                }
-                if *closer >= cursor_before {
-                    *closer = closer.saturating_sub(count);
-                }
-            }
-        }
 
         self.maybe_auto_commit();
     }
@@ -815,37 +602,13 @@ impl TextBuffer {
             return;
         }
         let del_end = self.next_grapheme_boundary(self.cursor);
-        let count = del_end - self.cursor;
-        let deleted_pos = self.cursor;
-        let deleted_text: String = self.chars[deleted_pos..del_end].iter().collect();
+        let deleted_text: String = self.chars[self.cursor..del_end].iter().collect();
         let op = EditOp::Delete {
-            pos: deleted_pos,
+            pos: self.cursor,
             text: deleted_text,
         };
         self.apply_op(op.clone());
         self.current_transaction.push(op);
-
-        self.auto_inserted_closers
-            .retain(|&idx| idx < deleted_pos || idx >= del_end);
-
-        for idx in self.auto_inserted_closers.iter_mut() {
-            if *idx >= del_end {
-                *idx = idx.saturating_sub(count);
-            }
-        }
-
-        self.auto_inserted_pairs.retain(|&(opener, closer)| {
-            (opener < deleted_pos || opener >= del_end)
-                && (closer < deleted_pos || closer >= del_end)
-        });
-        for (opener, closer) in self.auto_inserted_pairs.iter_mut() {
-            if *opener >= del_end {
-                *opener = opener.saturating_sub(count);
-            }
-            if *closer >= del_end {
-                *closer = closer.saturating_sub(count);
-            }
-        }
 
         self.maybe_auto_commit();
     }
@@ -868,27 +631,6 @@ impl TextBuffer {
             };
             self.apply_op(op.clone());
             self.current_transaction.push(op);
-
-            self.auto_inserted_closers
-                .retain(|&idx| idx < target_cursor || idx >= cursor_before);
-            for idx in self.auto_inserted_closers.iter_mut() {
-                if *idx >= cursor_before {
-                    *idx = idx.saturating_sub(delete_len);
-                }
-            }
-
-            self.auto_inserted_pairs.retain(|&(opener, closer)| {
-                (opener < target_cursor || opener >= cursor_before)
-                    && (closer < target_cursor || closer >= cursor_before)
-            });
-            for (opener, closer) in self.auto_inserted_pairs.iter_mut() {
-                if *opener >= cursor_before {
-                    *opener = opener.saturating_sub(delete_len);
-                }
-                if *closer >= cursor_before {
-                    *closer = closer.saturating_sub(delete_len);
-                }
-            }
         }
 
         self.maybe_auto_commit();
@@ -919,46 +661,6 @@ impl TextBuffer {
                 redo_tx.push(inverse);
             }
             self.redo_stack.push(redo_tx);
-            // Re-derive auto-insert tracking from the resulting buffer so
-            // untouched pairs survive undo (long-term fix for R9: previously
-            // cleared unconditionally, breaking skip-over for valid pairs).
-            self.rebuild_auto_inserted_state();
-        }
-    }
-
-    /// Rebuild `auto_inserted_closers/pairs` from the current buffer content.
-    /// Pairs are those where an opener is immediately followed by its closer
-    /// and both were plausibly auto-inserted. We conservatively rebuild only
-    /// adjacent bracket/quote pairs that are balanced in the buffer — this
-    /// preserves skip-over for untouched pairs while not resurrecting stale
-    /// tracking for pairs whose opener was actually edited.
-    fn rebuild_auto_inserted_state(&mut self) {
-        self.auto_inserted_closers.clear();
-        self.auto_inserted_pairs.clear();
-        // Scan for adjacent matching pairs "()", "[]", "{}", '""', "''", "``".
-        // Only adjacent pairs can be genuine auto-inserts from `insert_char`.
-        let n = self.chars.len();
-        let mut i = 0;
-        while i + 1 < n {
-            let a = self.chars[i];
-            let b = self.chars[i + 1];
-            let is_pair = matches!(
-                (a, b),
-                ('(', ')') | ('[', ']') | ('{', '}') | ('"', '"') | ('\'', '\'') | ('`', '`')
-            );
-            if is_pair {
-                // Only track if there is at least one such pair — heuristic:
-                // any adjacent empty pair whose closer would have been auto-
-                // inserted is safe to re-track for skip-over purposes. This
-                // does not affect correctness of pair-delete: delete_left
-                // still checks that the closer is in the set, and an adjacent
-                // empty pair is exactly the skip-over case.
-                self.auto_inserted_closers.push(i + 1);
-                self.auto_inserted_pairs.push((i, i + 1));
-                i += 2;
-            } else {
-                i += 1;
-            }
         }
     }
 
@@ -974,7 +676,6 @@ impl TextBuffer {
                 undo_tx.push(inverse);
             }
             self.undo_stack.push(undo_tx);
-            self.rebuild_auto_inserted_state();
         }
     }
 
@@ -1021,7 +722,6 @@ mod tests {
         // old bracket counter append a stray `]` to the pasted command.
         buf.insert_str("sed 's/\\x1b\\[[0-9;]*m//g' file");
         assert_eq!(buf.text(), "sed 's/\\x1b\\[[0-9;]*m//g' file");
-        assert!(buf.auto_inserted_closers.is_empty());
 
         let mut buf = TextBuffer::new();
         buf.insert_str("for f in a b; do echo $f; done\n");
@@ -1029,58 +729,51 @@ mod tests {
     }
 
     #[test]
-    fn test_autoclose_and_skipover() {
+    fn test_typing_inserts_exactly_one_character() {
         let mut buf = TextBuffer::new();
-        buf.insert_char('(');
-        assert_eq!(buf.text(), "()");
-        assert_eq!(buf.cursor(), 1);
-        assert_eq!(buf.auto_inserted_closers, vec![1]);
-
-        buf.insert_char('x');
-        assert_eq!(buf.text(), "(x)");
-        assert_eq!(buf.cursor(), 2);
-        assert_eq!(buf.auto_inserted_closers, vec![2]);
-
-        // Type ')' -> should skip over it
-        buf.insert_char(')');
-        assert_eq!(buf.text(), "(x)");
-        assert_eq!(buf.cursor(), 3);
-        assert!(buf.auto_inserted_closers.is_empty());
+        for c in ['(', '[', '{', '"', '\'', '`'] {
+            buf.insert_char(c);
+        }
+        assert_eq!(buf.text(), "([{\"'`");
+        assert_eq!(buf.cursor(), 6);
     }
 
     #[test]
-    fn test_autoclose_backspace_pair() {
+    fn test_typing_three_quotes_keeps_three_quotes() {
+        let mut buf = TextBuffer::new();
+        for c in ['"', '"', '"'] {
+            buf.insert_char(c);
+        }
+        assert_eq!(buf.text(), "\"\"\"");
+        assert_eq!(buf.cursor(), 3);
+    }
+
+    #[test]
+    fn test_backspace_deletes_exactly_one_character() {
         let mut buf = TextBuffer::new();
         buf.insert_char('(');
+        buf.insert_char(')');
         assert_eq!(buf.text(), "()");
+
+        buf.delete_left();
+        assert_eq!(buf.text(), "(");
         buf.delete_left();
         assert_eq!(buf.text(), "");
-        assert_eq!(buf.cursor(), 0);
-        assert!(buf.auto_inserted_closers.is_empty());
     }
 
     #[test]
-    fn test_manually_typed_pair_not_deleted() {
+    fn test_typing_a_closer_replaces_the_selection() {
         let mut buf = TextBuffer::new();
-        // Manually type '(' then ')' — no auto-insert
-        push_char_raw(&mut buf, '(');
-        push_char_raw(&mut buf, ')');
-        assert_eq!(buf.text(), "()");
-        // Both characters are in the buffer, but since they were manually typed,
-        // the closer should NOT be in auto_inserted_closers.
-        assert!(buf.auto_inserted_closers.is_empty());
+        buf.insert_str("hello");
+        buf.set_cursor(0);
+        buf.start_selection();
+        buf.set_cursor(5);
+        buf.extend_selection();
 
-        // Backspace should only delete the opener, not the pair
-        buf.set_cursor(1);
-        buf.delete_left();
+        buf.insert_char(')');
         assert_eq!(buf.text(), ")");
-        assert_eq!(buf.cursor(), 0);
-    }
-
-    // Helper to insert a char without auto-close and without commit tracking
-    fn push_char_raw(buf: &mut TextBuffer, c: char) {
-        buf.chars.insert(buf.cursor, c);
-        buf.cursor += 1;
+        assert_eq!(buf.cursor(), 1);
+        assert!(!buf.has_selection());
     }
 
     #[test]
