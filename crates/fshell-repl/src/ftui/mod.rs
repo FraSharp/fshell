@@ -290,6 +290,9 @@ pub async fn run_ftui_repl(
     let mut exit_repl = false;
     let mut in_continuation = false;
     let mut continuation_hint: Option<&'static str> = None;
+    // Repaints happen for cursor blink and resize as well as edits; parsing the
+    // buffer on each one is wasted work. The revision changes on every edit.
+    let mut cached_validation: Option<(u64, fshell_core::ValidationResult)> = None;
 
     let mut temp_input = String::new();
     let mut history_index: Option<usize> = None;
@@ -439,11 +442,21 @@ pub async fn run_ftui_repl(
                     serde_json::Map::new(),
                 );
                 let display_text = text_buf.text();
+                let revision = text_buf.revision();
 
-                let validation = if display_text.trim().is_empty() {
-                    fshell_core::ValidationResult::Complete
-                } else {
-                    fshell_core::validate_input(&display_text)
+                let validation = match cached_validation.as_ref() {
+                    Some((cached_revision, validation)) if *cached_revision == revision => {
+                        validation.clone()
+                    }
+                    _ => {
+                        let validation = if display_text.trim().is_empty() {
+                            fshell_core::ValidationResult::Complete
+                        } else {
+                            fshell_core::validate_input(&display_text)
+                        };
+                        cached_validation = Some((revision, validation.clone()));
+                        validation
+                    }
                 };
                 // What the shell is still waiting for, shown in the footer. The
                 // native scan is authoritative while it has something to say;

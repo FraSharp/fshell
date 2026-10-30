@@ -27,6 +27,9 @@ pub struct TextBuffer {
     last_edit_time: std::time::Instant,
     // Selection range: (anchor, head) where anchor <= head
     selection: Option<(usize, usize)>,
+    /// Monotonic edit counter. Text-derived work (validation) is cached by
+    /// revision so a repaint that changed nothing does not reparse the buffer.
+    revision: u64,
 }
 
 impl Default for TextBuffer {
@@ -70,7 +73,13 @@ impl TextBuffer {
             edits_since_commit: 0,
             last_edit_time: std::time::Instant::now(),
             selection: None,
+            revision: 0,
         }
+    }
+
+    /// Monotonic counter bumped by every buffer edit.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn text(&self) -> String {
@@ -703,6 +712,7 @@ impl TextBuffer {
     }
 
     fn apply_op(&mut self, op: EditOp) {
+        self.revision = self.revision.wrapping_add(1);
         match op {
             EditOp::Insert { pos, text } => {
                 let text_chars: Vec<char> = text.chars().collect();
@@ -749,6 +759,23 @@ mod tests {
         let mut buf = TextBuffer::new();
         buf.insert_str("for f in a b; do echo $f; done\n");
         assert_eq!(buf.text(), "for f in a b; do echo $f; done\n");
+    }
+
+    #[test]
+    fn test_revision_tracks_every_edit() {
+        let mut buf = TextBuffer::new();
+        let initial = buf.revision();
+        buf.insert_char('a');
+        let after_char = buf.revision();
+        assert!(after_char > initial);
+        buf.insert_str("bc");
+        let after_str = buf.revision();
+        assert!(after_str > after_char);
+        buf.delete_left();
+        let after_delete = buf.revision();
+        assert!(after_delete > after_str);
+        buf.clear();
+        assert!(buf.revision() > after_delete);
     }
 
     #[test]
