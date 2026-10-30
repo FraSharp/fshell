@@ -1475,6 +1475,36 @@ mod tests {
     }
 
     #[test]
+    fn test_posix_control_flow_points_at_sh_blocks() {
+        for (src, keyword) in [
+            ("if true; then echo hi; fi", "if"),
+            ("for i in 1 2; do echo $i; done", "for"),
+            ("while true; do echo hi; done", "while"),
+        ] {
+            let err = Parser::new(src).parse_statements().unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains(keyword), "{src:?}: {message}");
+            assert!(message.contains("sh { ... }"), "{src:?}: {message}");
+        }
+        // The native shape still parses.
+        assert!(
+            Parser::new("if true { echo hi }")
+                .parse_statements()
+                .is_ok()
+        );
+        assert!(
+            Parser::new("for i in [1, 2] { echo $i }")
+                .parse_statements()
+                .is_ok()
+        );
+        assert!(
+            Parser::new("while true { break }")
+                .parse_statements()
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn test_standalone_dash_heredoc_is_command_redirect() {
         // `cmd - <<EOF` is command `cmd` with a `-` argument and a heredoc stdin
         // redirect, not a subtraction with the heredoc body as right operand.

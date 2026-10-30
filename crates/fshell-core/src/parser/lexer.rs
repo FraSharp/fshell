@@ -41,6 +41,49 @@ impl Parser {
         self.saw_native_construct
     }
 
+    /// Whether the rest of the current line contains the POSIX `do` keyword
+    /// before any native block opener.
+    ///
+    /// A POSIX `for` list (`for i in 1 2; do …`) is not a native iterable, so
+    /// the iterable parser fails before the `{` check. This lookahead lets the
+    /// loop parser name the POSIX shape instead of reporting a malformed list.
+    pub(crate) fn line_has_posix_do(&self, from: usize) -> bool {
+        let mut p = from;
+        while p < self.input.len() && !matches!(self.input[p], '\n' | '\r') {
+            if self.input[p] == '{' {
+                return false;
+            }
+            p += 1;
+        }
+        let line: String = self.input[from..p].iter().collect();
+        line.split(|c: char| c.is_whitespace() || c == ';')
+            .any(|word| word == "do")
+    }
+
+    /// Whether the cursor sits on a POSIX control-flow continuation
+    /// (`; then`, `; do`, or the bare keyword) rather than a native block.
+    ///
+    /// The native `if`/`for`/`while` parsers expect `{` here. Recognizing the
+    /// POSIX shape lets them say how to wrap the block instead of reporting a
+    /// bare missing brace.
+    pub(crate) fn at_posix_continuation(&self, keyword: &str) -> bool {
+        let mut p = self.pos;
+        while p < self.input.len() && self.input[p].is_whitespace() {
+            p += 1;
+        }
+        if p < self.input.len() && self.input[p] == ';' {
+            p += 1;
+            while p < self.input.len() && self.input[p].is_whitespace() {
+                p += 1;
+            }
+        }
+        let end = p + keyword.chars().count();
+        if end > self.input.len() || !self.input[p..end].iter().copied().eq(keyword.chars()) {
+            return false;
+        }
+        end == self.input.len() || !(self.input[end].is_alphanumeric() || self.input[end] == '_')
+    }
+
     pub(crate) fn peek(&self) -> Option<char> {
         if self.pos < self.input.len() {
             Some(self.input[self.pos])

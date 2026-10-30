@@ -42,6 +42,7 @@ fn mixed_native_posix_script_is_not_reinterpreted() {
     out.assert_failure();
     out.assert_stdout_not_contains("1");
     out.assert_stderr_contains("FSH-PARSE");
+    out.assert_stderr_contains("sh { ... }");
 }
 
 #[test]

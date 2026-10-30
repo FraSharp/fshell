@@ -849,6 +849,12 @@ impl Parser {
             self.cmd_arg_mode = saved_arg;
             self.redirect_mode = saved_redirect;
             self.skip_whitespace();
+            if self.at_posix_continuation("do") {
+                return Err(ParseError::SyntaxError {
+                    message: "POSIX `while ...; do ... done` is not native syntax; use `while cond { ... }` or wrap the loop in `sh { ... }`".to_string(),
+                    span: self.current_span(),
+                });
+            }
             self.expect('{')?;
             let body = self.parse_block_statements()?;
             Ok(Stmt::While { condition, body })
@@ -863,8 +869,26 @@ impl Parser {
                     span: self.current_span(),
                 });
             }
-            let iter = self.parse_expr_with_pipeline_bool(false)?;
+            let iter_start = self.pos;
+            let iter = match self.parse_expr_with_pipeline_bool(false) {
+                Ok(iter) => iter,
+                Err(err) => {
+                    if self.line_has_posix_do(iter_start) {
+                        return Err(ParseError::SyntaxError {
+                            message: "POSIX `for ...; do ... done` is not native syntax; use `for x in values { ... }` or wrap the loop in `sh { ... }`".to_string(),
+                            span: err.span(),
+                        });
+                    }
+                    return Err(err);
+                }
+            };
             self.skip_whitespace();
+            if self.at_posix_continuation("do") || self.line_has_posix_do(iter_start) {
+                return Err(ParseError::SyntaxError {
+                    message: "POSIX `for ...; do ... done` is not native syntax; use `for x in values { ... }` or wrap the loop in `sh { ... }`".to_string(),
+                    span: self.current_span(),
+                });
+            }
             self.expect('{')?;
             let body = self.parse_block_statements()?;
             Ok(Stmt::For { var, iter, body })

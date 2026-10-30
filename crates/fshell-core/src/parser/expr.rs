@@ -2166,6 +2166,12 @@ impl Parser {
         self.cmd_arg_mode = saved_arg;
         self.redirect_mode = saved_redirect;
         self.skip_whitespace();
+        if self.at_posix_continuation("then") {
+            return Err(ParseError::SyntaxError {
+                message: "POSIX `if ...; then` is not native syntax; use `if cond { ... }` or wrap the shell block in `sh { ... }`".to_string(),
+                span: self.current_span(),
+            });
+        }
         // Parse then body (required block)
         self.expect('{')?;
         let then_body = self.parse_block_statements()?;
